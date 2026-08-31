@@ -1,0 +1,42 @@
+# Deployment compose file for the customised image.
+#
+#   cp .env.example .env   # then fill in SQL_DSN
+#   docker compose up -d
+#
+# Kept out of the repository root so that merging upstream changes never
+# conflicts with the upstream docker-compose.yml.
+version: '3.4'
+
+services:
+  new-api:
+    image: ghcr.io/henfailsf2/new-api-custom:${NEW_API_TAG:-latest}
+    container_name: new-api-alpha-us
+    restart: always
+    command: --log-dir /app/logs
+    ports:
+      - "3009:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=${SQL_DSN}
+      - REDIS_CONN_STRING=redis://redis
+      - TZ=Asia/Shanghai
+      - BATCH_UPDATE_ENABLED=true
+      - BATCH_UPDATE_INTERVAL=30
+      - STREAMING_TIMEOUT=1800000
+      - SYNC_FREQUENCY=30
+      - USER_CONTENT_REQUEST_TIMEOUT=60
+      - SQL_MAX_OPEN_CONNS=10000
+      - GLOBAL_API_RATE_LIMIT=18000
+      - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:latest
+    container_name: redis-alpha-us
+    restart: always
+
+volumes:
+  mysql_data:
