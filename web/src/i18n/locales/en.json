@@ -5537,6 +5537,15 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Pricing and fees": "Pricing and fees",
+    "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.": "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.",
+    "Minimum top-up amount": "Minimum top-up amount",
+    "Charge Waffo fees to the buyer": "Charge Waffo fees to the buyer",
+    "The buyer is charged an amount that leaves your net payout equal to the listed price.": "The buyer is charged an amount that leaves your net payout equal to the listed price.",
+    "Fee rate": "Fee rate",
+    "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.",
+    "Fixed fee per transaction": "Fixed fee per transaction",
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Flat part of the Waffo fee, in the settlement currency of this gateway."
   }
 }

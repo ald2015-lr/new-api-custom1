@@ -5537,6 +5537,15 @@
     "Zero retention": "Без хранения данных",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Pricing and fees": "Цены и комиссии",
+    "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.": "Минимальная сумма пополнения и то, добавляется ли комиссия Waffo к указанной цене вместо вычета из вашей выплаты.",
+    "Minimum top-up amount": "Минимальная сумма пополнения",
+    "Charge Waffo fees to the buyer": "Переложить комиссию Waffo на покупателя",
+    "The buyer is charged an amount that leaves your net payout equal to the listed price.": "С покупателя взимается сумма, при которой ваша чистая выплата равна указанной цене.",
+    "Fee rate": "Ставка комиссии",
+    "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Процентная часть комиссии Waffo, например 0.039 для 3,9%.",
+    "Fixed fee per transaction": "Фиксированная комиссия за транзакцию",
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Фиксированная часть комиссии Waffo в валюте расчётов этого шлюза."
   }
 }

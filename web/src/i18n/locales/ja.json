@@ -5537,6 +5537,15 @@
     "Zero retention": "データ保持なし",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V 4",
-    "Zoom": "ズーム"
+    "Zoom": "ズーム",
+    "Pricing and fees": "価格と手数料",
+    "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.": "最低チャージ額と、Waffo の取引手数料を受取額から差し引くのではなく表示価格に上乗せするかどうか。",
+    "Minimum top-up amount": "最低チャージ額",
+    "Charge Waffo fees to the buyer": "Waffo 手数料を購入者に転嫁する",
+    "The buyer is charged an amount that leaves your net payout equal to the listed price.": "手数料控除後の受取額が表示価格と一致するように、購入者へ上乗せした金額を請求します。",
+    "Fee rate": "手数料率",
+    "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Waffo 手数料の料率部分。3.9% の場合は 0.039。",
+    "Fixed fee per transaction": "1 件あたりの固定手数料",
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手数料の固定部分。このゲートウェイの決済通貨で指定します。"
   }
 }

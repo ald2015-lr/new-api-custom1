@@ -124,6 +124,9 @@ func InitOptionMap() {
 	common.OptionMap["WaffoPancakeReturnURL"] = setting.WaffoPancakeReturnURL
 	common.OptionMap["WaffoPancakeUnitPrice"] = strconv.FormatFloat(setting.WaffoPancakeUnitPrice, 'f', -1, 64)
 	common.OptionMap["WaffoPancakeMinTopUp"] = strconv.Itoa(setting.WaffoPancakeMinTopUp)
+	common.OptionMap["WaffoPancakeFeePassThrough"] = strconv.FormatBool(setting.WaffoPancakeFeePassThrough)
+	common.OptionMap["WaffoPancakeFeeRate"] = strconv.FormatFloat(setting.WaffoPancakeFeeRate, 'f', -1, 64)
+	common.OptionMap["WaffoPancakeFeeFixed"] = strconv.FormatFloat(setting.WaffoPancakeFeeFixed, 'f', -1, 64)
 	common.OptionMap["WaffoPancakeStoreID"] = setting.WaffoPancakeStoreID
 	common.OptionMap["WaffoPancakeProductID"] = setting.WaffoPancakeProductID
 	common.OptionMap["TopupGroupRatio"] = common.TopupGroupRatio2JSONString()
@@ -519,6 +522,12 @@ func updateOptionMap(key string, value string) (err error) {
 		setting.WaffoPancakeUnitPrice, _ = strconv.ParseFloat(value, 64)
 	case "WaffoPancakeMinTopUp":
 		setting.WaffoPancakeMinTopUp, _ = strconv.Atoi(value)
+	case "WaffoPancakeFeePassThrough":
+		setting.WaffoPancakeFeePassThrough = value == "true"
+	case "WaffoPancakeFeeRate":
+		setting.WaffoPancakeFeeRate, _ = strconv.ParseFloat(value, 64)
+	case "WaffoPancakeFeeFixed":
+		setting.WaffoPancakeFeeFixed, _ = strconv.ParseFloat(value, 64)
 	case "TopupGroupRatio":
 		err = common.UpdateTopupGroupRatioByJSONString(value)
 	case "GitHubClientId":

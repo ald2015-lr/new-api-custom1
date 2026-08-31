@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 
+import { SettingsSwitchField } from '../components/settings-form-layout'
 import { removeTrailingSlash } from './utils'
 import {
   type CatalogStore,
@@ -46,6 +47,15 @@ export type WaffoPancakeSettingsValues = {
   WaffoPancakeMerchantID: string
   WaffoPancakePrivateKey: string
   WaffoPancakeReturnURL: string
+}
+
+// Pricing / fee options. Unlike the credential + binding fields above these
+// are plain options persisted through the generic /api/option/ endpoint.
+export type WaffoPancakePricingValues = {
+  WaffoPancakeMinTopUp: number
+  WaffoPancakeFeePassThrough: boolean
+  WaffoPancakeFeeRate: number
+  WaffoPancakeFeeFixed: number
 }
 
 export interface WaffoPancakeBinding {
@@ -63,6 +73,11 @@ interface Props {
   selectedBinding: WaffoPancakeBinding
   savedBinding: WaffoPancakeBinding
   onSelectedBindingChange: (value: SetStateAction<WaffoPancakeBinding>) => void
+  pricingValues: WaffoPancakePricingValues
+  onPricingValueChange: <K extends keyof WaffoPancakePricingValues>(
+    key: K,
+    value: WaffoPancakePricingValues[K]
+  ) => void
 }
 
 const PANCAKE_DASHBOARD_URL = 'https://pancake.waffo.ai/merchant/dashboard'
@@ -77,6 +92,8 @@ export function WaffoPancakeSettingsSection({
   selectedBinding,
   savedBinding,
   onSelectedBindingChange,
+  pricingValues,
+  onPricingValueChange,
 }: Props) {
   const { t } = useTranslation()
 
@@ -615,6 +632,88 @@ export function WaffoPancakeSettingsSection({
                 ) : null}
               </div>
             ) : null}
+          </div>
+        </div>
+
+        <div className='space-y-4 pt-2 lg:col-span-2'>
+          <div>
+            <h4 className='font-medium'>{t('Pricing and fees')}</h4>
+            <p className='text-muted-foreground text-xs'>
+              {t(
+                'Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.'
+              )}
+            </p>
+          </div>
+
+          <div className='grid gap-4 sm:grid-cols-2'>
+            <div className='grid gap-1.5'>
+              <Label>{t('Minimum top-up amount')}</Label>
+              <Input
+                type='number'
+                min={1}
+                step={1}
+                value={pricingValues.WaffoPancakeMinTopUp}
+                onChange={(event) =>
+                  onPricingValueChange(
+                    'WaffoPancakeMinTopUp',
+                    Number(event.target.value) || 0
+                  )
+                }
+              />
+            </div>
+
+            <SettingsSwitchField
+              checked={pricingValues.WaffoPancakeFeePassThrough}
+              onCheckedChange={(value) =>
+                onPricingValueChange('WaffoPancakeFeePassThrough', value)
+              }
+              label={t('Charge Waffo fees to the buyer')}
+              description={t(
+                'The buyer is charged an amount that leaves your net payout equal to the listed price.'
+              )}
+              className='py-0'
+            />
+
+            <div className='grid gap-1.5'>
+              <Label>{t('Fee rate')}</Label>
+              <Input
+                type='number'
+                min={0}
+                max={1}
+                step={0.001}
+                value={pricingValues.WaffoPancakeFeeRate}
+                onChange={(event) =>
+                  onPricingValueChange(
+                    'WaffoPancakeFeeRate',
+                    Number(event.target.value) || 0
+                  )
+                }
+              />
+              <p className='text-muted-foreground text-xs'>
+                {t('Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.')}
+              </p>
+            </div>
+
+            <div className='grid gap-1.5'>
+              <Label>{t('Fixed fee per transaction')}</Label>
+              <Input
+                type='number'
+                min={0}
+                step={0.01}
+                value={pricingValues.WaffoPancakeFeeFixed}
+                onChange={(event) =>
+                  onPricingValueChange(
+                    'WaffoPancakeFeeFixed',
+                    Number(event.target.value) || 0
+                  )
+                }
+              />
+              <p className='text-muted-foreground text-xs'>
+                {t(
+                  'Flat part of the Waffo fee, in the settlement currency of this gateway.'
+                )}
+              </p>
+            </div>
           </div>
         </div>
       </div>

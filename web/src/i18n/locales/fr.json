@@ -5537,6 +5537,15 @@
     "Zero retention": "Aucune rétention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Pricing and fees": "Tarification et frais",
+    "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.": "Montant minimum de recharge, et si les frais de transaction Waffo sont ajoutés au prix affiché au lieu d'être déduits de votre versement.",
+    "Minimum top-up amount": "Montant minimum de recharge",
+    "Charge Waffo fees to the buyer": "Facturer les frais Waffo à l'acheteur",
+    "The buyer is charged an amount that leaves your net payout equal to the listed price.": "L'acheteur paie un montant tel que votre versement net soit égal au prix affiché.",
+    "Fee rate": "Taux de commission",
+    "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Part en pourcentage des frais Waffo, par exemple 0,039 pour 3,9 %.",
+    "Fixed fee per transaction": "Frais fixes par transaction",
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Part fixe des frais Waffo, dans la devise de règlement de cette passerelle."
   }
 }

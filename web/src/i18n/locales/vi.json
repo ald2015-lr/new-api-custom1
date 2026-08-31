@@ -5537,6 +5537,15 @@
     "Zero retention": "Không lưu dữ liệu",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Pricing and fees": "Giá và phí",
+    "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.": "Số tiền nạp tối thiểu và liệu phí giao dịch Waffo được cộng thêm vào giá niêm yết thay vì trừ vào khoản thanh toán của bạn.",
+    "Minimum top-up amount": "Số tiền nạp tối thiểu",
+    "Charge Waffo fees to the buyer": "Tính phí Waffo cho người mua",
+    "The buyer is charged an amount that leaves your net payout equal to the listed price.": "Người mua bị tính một khoản sao cho khoản thanh toán ròng của bạn bằng giá niêm yết.",
+    "Fee rate": "Tỷ lệ phí",
+    "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Phần trăm của phí Waffo, ví dụ 0.039 cho 3,9%.",
+    "Fixed fee per transaction": "Phí cố định mỗi giao dịch",
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Phần cố định của phí Waffo, theo đơn vị tiền tệ thanh toán của cổng này."
   }
 }

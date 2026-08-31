@@ -153,6 +153,11 @@ const BILLING_SECTIONS = [
           CreemWebhookSecret: settings.CreemWebhookSecret,
           CreemTestMode: settings.CreemTestMode,
           CreemProducts: settings.CreemProducts,
+          WaffoPancakeMinTopUp: settings.WaffoPancakeMinTopUp ?? 50,
+          WaffoPancakeFeePassThrough:
+            settings.WaffoPancakeFeePassThrough ?? true,
+          WaffoPancakeFeeRate: settings.WaffoPancakeFeeRate ?? 0.039,
+          WaffoPancakeFeeFixed: settings.WaffoPancakeFeeFixed ?? 3.6,
         }}
         waffoDefaultValues={{
           WaffoEnabled: settings.WaffoEnabled ?? false,

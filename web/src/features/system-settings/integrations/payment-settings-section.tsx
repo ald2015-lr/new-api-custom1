@@ -72,6 +72,7 @@ import { saveWaffoPancakeConfig } from './waffo-pancake-api'
 import {
   WaffoPancakeSettingsSection,
   type WaffoPancakeBinding,
+  type WaffoPancakePricingValues,
   type WaffoPancakeSettingsValues,
 } from './waffo-pancake-settings-section'
 import {
@@ -176,6 +177,10 @@ const paymentSchema = z.object({
   WaffoPancakeMerchantID: z.string(),
   WaffoPancakePrivateKey: z.string(),
   WaffoPancakeReturnURL: z.string(),
+  WaffoPancakeMinTopUp: z.coerce.number().min(1),
+  WaffoPancakeFeePassThrough: z.boolean(),
+  WaffoPancakeFeeRate: z.coerce.number().min(0).max(1),
+  WaffoPancakeFeeFixed: z.coerce.number().min(0),
 })
 
 type PaymentFormValues = z.infer<typeof paymentSchema>
@@ -404,6 +409,19 @@ export function PaymentSettingsSection({
     [setPaymentValue]
   )
 
+  const setWaffoPancakePricingValue = React.useCallback(
+    <K extends keyof WaffoPancakePricingValues>(
+      key: K,
+      value: WaffoPancakePricingValues[K]
+    ) => {
+      setPaymentValue(
+        key as keyof PaymentFormValues,
+        value as PaymentFormValues[keyof PaymentFormValues]
+      )
+    },
+    [setPaymentValue]
+  )
+
   React.useEffect(() => {
     const parsedDefaults = JSON.parse(defaultsSignature) as PaymentFormValues
     initialRef.current = parsedDefaults
@@ -457,6 +475,10 @@ export function PaymentSettingsSection({
       WaffoPancakeReturnURL: removeTrailingSlash(
         values.WaffoPancakeReturnURL.trim()
       ),
+      WaffoPancakeMinTopUp: values.WaffoPancakeMinTopUp,
+      WaffoPancakeFeePassThrough: values.WaffoPancakeFeePassThrough,
+      WaffoPancakeFeeRate: values.WaffoPancakeFeeRate,
+      WaffoPancakeFeeFixed: values.WaffoPancakeFeeFixed,
     }
 
     const initial = {
@@ -504,6 +526,10 @@ export function PaymentSettingsSection({
       WaffoPancakeReturnURL: removeTrailingSlash(
         initialRef.current.WaffoPancakeReturnURL.trim()
       ),
+      WaffoPancakeMinTopUp: initialRef.current.WaffoPancakeMinTopUp,
+      WaffoPancakeFeePassThrough: initialRef.current.WaffoPancakeFeePassThrough,
+      WaffoPancakeFeeRate: initialRef.current.WaffoPancakeFeeRate,
+      WaffoPancakeFeeFixed: initialRef.current.WaffoPancakeFeeFixed,
     }
 
     const updates: Array<{ key: string; value: string | number | boolean }> = []
@@ -701,6 +727,37 @@ export function PaymentSettingsSection({
       updates.push({ key: 'WaffoPayMethods', value: sanitized.WaffoPayMethods })
     }
 
+    if (sanitized.WaffoPancakeMinTopUp !== initial.WaffoPancakeMinTopUp) {
+      updates.push({
+        key: 'WaffoPancakeMinTopUp',
+        value: sanitized.WaffoPancakeMinTopUp,
+      })
+    }
+
+    if (
+      sanitized.WaffoPancakeFeePassThrough !==
+      initial.WaffoPancakeFeePassThrough
+    ) {
+      updates.push({
+        key: 'WaffoPancakeFeePassThrough',
+        value: sanitized.WaffoPancakeFeePassThrough,
+      })
+    }
+
+    if (sanitized.WaffoPancakeFeeRate !== initial.WaffoPancakeFeeRate) {
+      updates.push({
+        key: 'WaffoPancakeFeeRate',
+        value: sanitized.WaffoPancakeFeeRate,
+      })
+    }
+
+    if (sanitized.WaffoPancakeFeeFixed !== initial.WaffoPancakeFeeFixed) {
+      updates.push({
+        key: 'WaffoPancakeFeeFixed',
+        value: sanitized.WaffoPancakeFeeFixed,
+      })
+    }
+
     const hasWaffoPancakeChanges =
       sanitized.WaffoPancakeMerchantID !== initial.WaffoPancakeMerchantID ||
       sanitized.WaffoPancakePrivateKey.length > 0 ||
@@ -794,6 +851,13 @@ export function PaymentSettingsSection({
     WaffoPancakeMerchantID: currentFormValues.WaffoPancakeMerchantID,
     WaffoPancakePrivateKey: currentFormValues.WaffoPancakePrivateKey,
     WaffoPancakeReturnURL: currentFormValues.WaffoPancakeReturnURL,
+  }
+
+  const waffoPancakePricingValues: WaffoPancakePricingValues = {
+    WaffoPancakeMinTopUp: currentFormValues.WaffoPancakeMinTopUp,
+    WaffoPancakeFeePassThrough: currentFormValues.WaffoPancakeFeePassThrough,
+    WaffoPancakeFeeRate: currentFormValues.WaffoPancakeFeeRate,
+    WaffoPancakeFeeFixed: currentFormValues.WaffoPancakeFeeFixed,
   }
 
   return (
@@ -1615,6 +1679,8 @@ export function PaymentSettingsSection({
                 selectedBinding={waffoPancakeSelection}
                 savedBinding={waffoPancakeSavedBinding}
                 onSelectedBindingChange={setWaffoPancakeSelection}
+                pricingValues={waffoPancakePricingValues}
+                onPricingValueChange={setWaffoPancakePricingValue}
               />
             </TabsContent>
 

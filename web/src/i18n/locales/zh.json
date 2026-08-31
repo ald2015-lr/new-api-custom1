@@ -5537,6 +5537,15 @@
     "Zero retention": "零数据保留",
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "Pricing and fees": "计价与手续费",
+    "Minimum top-up amount, and whether Waffo transaction fees are added on top of the listed price instead of being deducted from your payout.": "最低充值数量，以及 Waffo 交易手续费是加收在标价之上，还是从你的收款中扣除。",
+    "Minimum top-up amount": "最低充值数量",
+    "Charge Waffo fees to the buyer": "手续费转嫁给用户",
+    "The buyer is charged an amount that leaves your net payout equal to the listed price.": "向用户收取上浮后的金额，使扣除手续费后的净收入等于标价。",
+    "Fee rate": "费率",
+    "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Waffo 手续费的百分比部分，例如 3.9% 填 0.039。",
+    "Fixed fee per transaction": "每笔固定手续费",
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手续费的固定部分，按本网关的结算币种计。"
   }
 }
