@@ -114,7 +114,7 @@ func CreateWaffoPancakeCheckoutSession(ctx context.Context, params *WaffoPancake
 	sdkParams := pancake.AuthenticatedCheckoutParams{
 		CreateCheckoutSessionParams: pancake.CreateCheckoutSessionParams{
 			ProductID:               params.ProductID,
-			Currency:                "USD",
+			Currency:                "CNY",
 			BuyerEmail:              optionalString(params.BuyerEmail),
 			ExpiresInSeconds:        params.ExpiresInSeconds,
 			OrderMerchantExternalID: optionalString(params.OrderMerchantExternalID),
@@ -272,7 +272,7 @@ func CreateWaffoPancakePrimaryStore(ctx context.Context, merchantID, privateKey 
 }
 
 // CreateWaffoPancakeProductForPlan mints (and publishes) a Pancake
-// OnetimeProduct priced at `amount` USD, used as a subscription plan's
+// OnetimeProduct priced at `amount` CNY, used as a subscription plan's
 // SubscriptionPlan.WaffoPancakeProductId.
 //
 // OnetimeProduct (not SubscriptionProduct) because new-api has no renewal-
@@ -299,7 +299,7 @@ func CreateWaffoPancakeProductForPlan(ctx context.Context, merchantID, privateKe
 		StoreID: storeID,
 		Name:    name,
 		Prices: pancake.Prices{
-			"USD": {
+			"CNY": {
 				Amount:      amount,
 				TaxCategory: pancake.TaxCategory("saas"),
 			},
@@ -332,7 +332,7 @@ func CreateWaffoPancakePrimaryProduct(ctx context.Context, merchantID, privateKe
 		StoreID: storeID,
 		Name:    defaultWaffoPancakeProductName,
 		Prices: pancake.Prices{
-			"USD": {
+			"CNY": {
 				Amount:      "1.00", // overridden at checkout via PriceSnapshot
 				TaxCategory: pancake.TaxCategory("saas"),
 			},

@@ -74,7 +74,17 @@ func getWaffoPancakePayMoney(amount int64, group string) float64 {
 		Mul(decimal.NewFromFloat(topupGroupRatio)).
 		Mul(decimal.NewFromFloat(discount))
 
-	return payMoney.InexactFloat64()
+	// 反推应收金额 C，使 C - C*rate - fixed = payMoney
+	if setting.WaffoPancakeFeePassThrough {
+		denominator := decimal.NewFromInt(1).Sub(decimal.NewFromFloat(setting.WaffoPancakeFeeRate))
+		if denominator.IsPositive() {
+			payMoney = payMoney.
+				Add(decimal.NewFromFloat(setting.WaffoPancakeFeeFixed)).
+				Div(denominator)
+		}
+	}
+
+	return payMoney.Round(2).InexactFloat64()
 }
 
 func normalizeWaffoPancakeTopUpAmount(amount int64) int64 {
