@@ -5546,6 +5546,11 @@
     "Fee rate": "手数料率",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Waffo 手数料の料率部分。3.9% の場合は 0.039。",
     "Fixed fee per transaction": "1 件あたりの固定手数料",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手数料の固定部分。このゲートウェイの決済通貨で指定します。"
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手数料の固定部分。このゲートウェイの決済通貨で指定します。",
+    "Failed to load part of the page": "ページの一部の読み込みに失敗しました",
+    "A new version may have been deployed. Please reload the page.": "新しいバージョンがデプロイされた可能性があります。ページを再読み込みしてください。",
+    "Reload page": "ページを再読み込み",
+    "A new version is available. Reload to update.": "新しいバージョンが利用可能です。再読み込みして更新してください。",
+    "Reload": "再読み込み"
   }
 }

@@ -5546,6 +5546,11 @@
     "Fee rate": "費率",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Waffo 手續費的百分比部分，例如 3.9% 填 0.039。",
     "Fixed fee per transaction": "每筆固定手續費",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手續費的固定部分，按本閘道的結算幣別計。"
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手續費的固定部分，按本閘道的結算幣別計。",
+    "Failed to load part of the page": "頁面部分內容載入失敗",
+    "A new version may have been deployed. Please reload the page.": "可能已部署新版本，請重新載入頁面。",
+    "Reload page": "重新載入頁面",
+    "A new version is available. Reload to update.": "有新版本可用，請重新載入以更新。",
+    "Reload": "重新載入"
   }
 }

@@ -69,6 +69,7 @@ export class AuthRotationError extends Error {
 const authClient = axios.create({
   baseURL: '',
   withCredentials: true,
+  timeout: 30000,
   headers: {
     'Cache-Control': 'no-store',
   },

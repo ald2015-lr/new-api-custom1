@@ -5546,6 +5546,11 @@
     "Fee rate": "Tỷ lệ phí",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Phần trăm của phí Waffo, ví dụ 0.039 cho 3,9%.",
     "Fixed fee per transaction": "Phí cố định mỗi giao dịch",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Phần cố định của phí Waffo, theo đơn vị tiền tệ thanh toán của cổng này."
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Phần cố định của phí Waffo, theo đơn vị tiền tệ thanh toán của cổng này.",
+    "Failed to load part of the page": "Không thể tải một phần của trang",
+    "A new version may have been deployed. Please reload the page.": "Có thể phiên bản mới đã được triển khai. Vui lòng tải lại trang.",
+    "Reload page": "Tải lại trang",
+    "A new version is available. Reload to update.": "Đã có phiên bản mới. Tải lại để cập nhật.",
+    "Reload": "Tải lại"
   }
 }

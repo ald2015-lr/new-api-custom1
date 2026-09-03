@@ -168,3 +168,13 @@ export function installBuildMetadata(): void {
 export function getBuildRevision(): string {
   return computeBuildRevision()
 }
+
+/**
+ * Raw version stamped into the bundle at build time
+ * (`VITE_REACT_APP_VERSION`), or an empty string for an unstamped build.
+ * Compared against the server's `X-New-Api-Version` header to detect a
+ * bundle that predates the running server.
+ */
+export function getClientBuildVersion(): string {
+  return readEnvRevision() ?? ''
+}

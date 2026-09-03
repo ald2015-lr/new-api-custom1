@@ -26,6 +26,7 @@ import {
   refreshAuthentication,
 } from '@/lib/auth-session'
 import { getServerErrorMessageKey } from '@/lib/server-error-message'
+import { checkServerVersionHeader } from '@/lib/stale-bundle'
 import { useAuthStore } from '@/stores/auth-store'
 
 declare module 'axios' {
@@ -44,6 +45,7 @@ export type ApiRequestConfig = AxiosRequestConfig
 export const api = axios.create({
   baseURL: '',
   withCredentials: true,
+  timeout: 30000,
   headers: {
     'Cache-Control': 'no-store',
   },
@@ -79,6 +81,8 @@ function redirectToSignIn(): void {
 
 api.interceptors.response.use(
   (response) => {
+    checkServerVersionHeader(response.headers)
+
     if (response.config.acceptAuthRotation && response.data?.success === true) {
       applyAuthRotation(response.data.data)
     }
@@ -98,6 +102,8 @@ api.interceptors.response.use(
     return response
   },
   async (error) => {
+    checkServerVersionHeader(error?.response?.headers)
+
     const config = error?.config as ApiRequestConfig | undefined
     const skipErrorHandler = config?.skipErrorHandler
     const status = error?.response?.status

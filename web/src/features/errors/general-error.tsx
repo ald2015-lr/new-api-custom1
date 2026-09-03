@@ -16,18 +16,27 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useNavigate, useRouter } from '@tanstack/react-router'
+import {
+  useNavigate,
+  useRouter,
+  type ErrorComponentProps,
+} from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
+import {
+  isChunkLoadError,
+  reloadOnceForChunkError,
+} from '@/lib/chunk-load-error'
 import { cn } from '@/lib/utils'
 
 const FEEDBACK_URL = 'https://github.com/QuantumNous/new-api/issues'
 
-type GeneralErrorProps = React.HTMLAttributes<HTMLDivElement> & {
-  minimal?: boolean
-  error?: unknown
-}
+type GeneralErrorProps = React.HTMLAttributes<HTMLDivElement> &
+  Partial<ErrorComponentProps<unknown>> & {
+    minimal?: boolean
+  }
 
 function getHttpStatus(error: unknown): number | undefined {
   if (typeof error !== 'object' || error === null) return undefined
@@ -45,19 +54,37 @@ export function GeneralError({
   const { t } = useTranslation()
   const navigate = useNavigate()
   const { history } = useRouter()
+  const [reloading, setReloading] = useState(false)
   const status = getHttpStatus(error)
   const isRateLimited = status === 429
-  const title = isRateLimited
-    ? t('Too many requests')
-    : `${t('Oops! Something went wrong')} ${`:')`}`
-  const description = isRateLimited
-    ? t('Please wait a moment before trying again.')
-    : t('Please try again later.')
+  const isChunkError = isChunkLoadError(error)
+
+  useEffect(() => {
+    if (!isChunkError) return
+    if (reloadOnceForChunkError(error)) setReloading(true)
+  }, [error, isChunkError])
+
+  if (reloading) return null
+
+  let title: string
+  let description: string
+  if (isRateLimited) {
+    title = t('Too many requests')
+    description = t('Please wait a moment before trying again.')
+  } else if (isChunkError) {
+    title = t('Failed to load part of the page')
+    description = t(
+      'A new version may have been deployed. Please reload the page.'
+    )
+  } else {
+    title = `${t('Oops! Something went wrong')} :')`
+    description = t('Please try again later.')
+  }
 
   return (
     <div className={cn('h-svh w-full', className)}>
       <div className='m-auto flex h-full w-full flex-col items-center justify-center gap-2'>
-        {!minimal && (
+        {!minimal && !isChunkError && (
           <h1 className='text-[7rem] leading-tight font-bold'>
             {status ?? 500}
           </h1>
@@ -75,6 +102,9 @@ export function GeneralError({
           <div className='mt-6 flex flex-wrap justify-center gap-4'>
             <Button variant='outline' onClick={() => history.go(-1)}>
               {t('Go Back')}
+            </Button>
+            <Button variant='outline' onClick={() => window.location.reload()}>
+              {t('Reload page')}
             </Button>
             <Button
               variant='outline'

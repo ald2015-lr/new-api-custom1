@@ -5546,6 +5546,11 @@
     "Fee rate": "Taux de commission",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Part en pourcentage des frais Waffo, par exemple 0,039 pour 3,9 %.",
     "Fixed fee per transaction": "Frais fixes par transaction",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Part fixe des frais Waffo, dans la devise de règlement de cette passerelle."
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Part fixe des frais Waffo, dans la devise de règlement de cette passerelle.",
+    "Failed to load part of the page": "Échec du chargement d'une partie de la page",
+    "A new version may have been deployed. Please reload the page.": "Une nouvelle version a peut-être été déployée. Veuillez recharger la page.",
+    "Reload page": "Recharger la page",
+    "A new version is available. Reload to update.": "Une nouvelle version est disponible. Rechargez pour mettre à jour.",
+    "Reload": "Recharger"
   }
 }

@@ -5546,6 +5546,11 @@
     "Fee rate": "费率",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Waffo 手续费的百分比部分，例如 3.9% 填 0.039。",
     "Fixed fee per transaction": "每笔固定手续费",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手续费的固定部分，按本网关的结算币种计。"
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Waffo 手续费的固定部分，按本网关的结算币种计。",
+    "Failed to load part of the page": "页面部分内容加载失败",
+    "A new version may have been deployed. Please reload the page.": "可能已部署新版本，请刷新页面。",
+    "Reload page": "刷新页面",
+    "A new version is available. Reload to update.": "有新版本可用，刷新以更新。",
+    "Reload": "刷新"
   }
 }

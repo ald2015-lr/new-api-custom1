@@ -5546,6 +5546,11 @@
     "Fee rate": "Fee rate",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.",
     "Fixed fee per transaction": "Fixed fee per transaction",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Flat part of the Waffo fee, in the settlement currency of this gateway."
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Flat part of the Waffo fee, in the settlement currency of this gateway.",
+    "Failed to load part of the page": "Failed to load part of the page",
+    "A new version may have been deployed. Please reload the page.": "A new version may have been deployed. Please reload the page.",
+    "Reload page": "Reload page",
+    "A new version is available. Reload to update.": "A new version is available. Reload to update.",
+    "Reload": "Reload"
   }
 }

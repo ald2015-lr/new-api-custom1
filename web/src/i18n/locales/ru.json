@@ -5546,6 +5546,11 @@
     "Fee rate": "Ставка комиссии",
     "Percentage part of the Waffo fee, e.g. 0.039 for 3.9%.": "Процентная часть комиссии Waffo, например 0.039 для 3,9%.",
     "Fixed fee per transaction": "Фиксированная комиссия за транзакцию",
-    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Фиксированная часть комиссии Waffo в валюте расчётов этого шлюза."
+    "Flat part of the Waffo fee, in the settlement currency of this gateway.": "Фиксированная часть комиссии Waffo в валюте расчётов этого шлюза.",
+    "Failed to load part of the page": "Не удалось загрузить часть страницы",
+    "A new version may have been deployed. Please reload the page.": "Возможно, была развёрнута новая версия. Пожалуйста, перезагрузите страницу.",
+    "Reload page": "Перезагрузить страницу",
+    "A new version is available. Reload to update.": "Доступна новая версия. Перезагрузите страницу, чтобы обновить.",
+    "Reload": "Перезагрузить"
   }
 }
