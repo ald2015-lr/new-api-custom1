@@ -61,15 +61,11 @@ declare global {
 }
 
 function readEnvRevision(): string | undefined {
-  try {
-    const env = (
-      import.meta as unknown as { env?: Record<string, string | undefined> }
-    ).env
-    const raw = env?.VITE_REACT_APP_VERSION
-    if (typeof raw === 'string' && raw.length > 0) return raw
-  } catch {
-    // import.meta may be unavailable in some test environments.
-  }
+  // Must stay a literal member expression: the bundler only substitutes
+  // `import.meta.env.VITE_REACT_APP_VERSION` verbatim, an indirect lookup
+  // compiles to undefined.
+  const raw = import.meta.env.VITE_REACT_APP_VERSION
+  if (typeof raw === 'string' && raw.length > 0) return raw
   return undefined
 }
 

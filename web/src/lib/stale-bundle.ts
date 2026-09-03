@@ -41,6 +41,12 @@ const NOTICE_TOAST_ID = 'newapi-stale-bundle'
 // blocked site data) still sees the notice at most once per server version.
 const notifiedVersions = new Set<string>()
 
+// The first mismatching response can arrive before the root route has mounted
+// the <Toaster>; a toast raised then is silently dropped. Hold the version
+// until the app reports that the toaster is ready.
+let toasterReady = false
+let pendingServerVersion: string | null = null
+
 export function isStaleBundle(
   serverVersion: string | null | undefined,
   clientVersion: string | null | undefined
@@ -62,6 +68,10 @@ export function notifyStaleBundleOnce(serverVersion: string): void {
   if (typeof window === 'undefined' || notifiedVersions.has(serverVersion)) {
     return
   }
+  if (!toasterReady) {
+    pendingServerVersion = serverVersion
+    return
+  }
   notifiedVersions.add(serverVersion)
 
   const key = NOTICE_STORAGE_KEY_PREFIX + serverVersion
@@ -80,6 +90,17 @@ export function notifyStaleBundleOnce(serverVersion: string): void {
       onClick: () => window.location.reload(),
     },
   })
+}
+
+/**
+ * Called once the <Toaster> is mounted. Releases a notice that was raised
+ * before the app could display it.
+ */
+export function flushPendingStaleBundleNotice(): void {
+  toasterReady = true
+  const pending = pendingServerVersion
+  pendingServerVersion = null
+  if (pending) notifyStaleBundleOnce(pending)
 }
 
 /**

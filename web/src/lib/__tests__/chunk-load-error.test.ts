@@ -113,25 +113,39 @@ describe('reloadOnceForChunkError', () => {
 
     expect(result).toBe(true)
     expect(reload).toHaveBeenCalledTimes(1)
-    expect(Number(window.sessionStorage.getItem(RELOAD_KEY))).toBeGreaterThan(0)
+    expect(window.sessionStorage.getItem(RELOAD_KEY)).not.toBeNull()
   })
 
-  test('second failure of the same chunk within 60 seconds returns false and does not reload', () => {
+  test('second failure of the same chunk returns false and does not reload, even minutes later', () => {
+    vi.useFakeTimers()
     reloadOnceForChunkError(rspackChunkLoadError())
     reload.mockClear()
+    // Longer than rspack's 120 s script timeout, so a stalled asset that
+    // keeps timing out can never produce a reload loop.
+    vi.advanceTimersByTime(10 * 60 * 1000)
 
-    const result = reloadOnceForChunkError(rspackChunkLoadError())
+    const timedOut = rspackChunkLoadError()
+    Object.assign(timedOut, { type: 'timeout' })
+    const result = reloadOnceForChunkError(timedOut)
 
     expect(result).toBe(false)
     expect(reload).not.toHaveBeenCalled()
+    vi.useRealTimers()
   })
 
-  test('failure of a chunk whose last reload attempt is older than 60 seconds reloads again', () => {
-    window.sessionStorage.setItem(RELOAD_KEY, String(Date.now() - 61_000))
+  test('a chunk with a different URL after a redeploy gets its own reload', () => {
+    reloadOnceForChunkError(rspackChunkLoadError())
+    reload.mockClear()
 
-    const result = reloadOnceForChunkError(rspackChunkLoadError())
+    const redeployed = new Error(
+      'Loading chunk 42 failed.\n(missing: http://localhost/static/js/async/42.newhash.js)'
+    )
+    redeployed.name = 'ChunkLoadError'
+    Object.assign(redeployed, {
+      request: 'http://localhost/static/js/async/42.newhash.js',
+    })
 
-    expect(result).toBe(true)
+    expect(reloadOnceForChunkError(redeployed)).toBe(true)
     expect(reload).toHaveBeenCalledTimes(1)
   })
 

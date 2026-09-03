@@ -45,7 +45,6 @@ export type ApiRequestConfig = AxiosRequestConfig
 export const api = axios.create({
   baseURL: '',
   withCredentials: true,
-  timeout: 30000,
   headers: {
     'Cache-Control': 'no-store',
   },

@@ -88,6 +88,11 @@ export async function ensureLocale(lng: string): Promise<void> {
       true,
       true
     )
+    // When the bundle arrives for the language that is already active
+    // (first render), re-run changeLanguage so i18next recomputes
+    // resolvedLanguage and notifies react-i18next; otherwise number and
+    // date formatting keep using the fallback locale.
+    if (i18n.language === lng) await i18n.changeLanguage(lng)
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error(

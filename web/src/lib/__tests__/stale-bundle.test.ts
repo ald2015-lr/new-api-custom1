@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import {
   checkServerVersionHeader,
+  flushPendingStaleBundleNotice,
   isStaleBundle,
   notifyStaleBundleOnce,
 } from '../stale-bundle'
@@ -92,10 +93,33 @@ describe('isStaleBundle', () => {
   })
 })
 
+// Runs first: the module starts with the toaster not yet mounted.
+describe('notice raised before the Toaster is mounted', () => {
+  afterEach(() => {
+    window.sessionStorage.clear()
+  })
+
+  test('is held back and shown exactly once when the app reports the toaster ready', () => {
+    notifyStaleBundleOnce('custom-early-1')
+    expect(toast).not.toHaveBeenCalled()
+
+    flushPendingStaleBundleNotice()
+    expect(toast).toHaveBeenCalledTimes(1)
+    expect(toast.mock.calls[0]?.[0]).toBe(
+      'A new version is available. Reload to update.'
+    )
+
+    flushPendingStaleBundleNotice()
+    notifyStaleBundleOnce('custom-early-1')
+    expect(toast).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('notifyStaleBundleOnce', () => {
   const reload = vi.fn()
 
   beforeEach(() => {
+    flushPendingStaleBundleNotice()
     vi.stubGlobal('location', { ...window.location, reload })
     window.sessionStorage.clear()
   })
@@ -159,6 +183,8 @@ describe('notifyStaleBundleOnce', () => {
 
 describe('checkServerVersionHeader', () => {
   beforeEach(() => {
+    flushPendingStaleBundleNotice()
+
     window.sessionStorage.clear()
   })
 

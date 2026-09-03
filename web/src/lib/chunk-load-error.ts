@@ -35,7 +35,6 @@ const CHUNK_LOAD_MESSAGE_PREFIXES = [
 ] as const
 
 const RELOAD_STORAGE_KEY_PREFIX = 'newapi:chunk-reload:'
-const RELOAD_COOLDOWN_MS = 60_000
 
 export function isChunkLoadError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
@@ -49,10 +48,12 @@ export function isChunkLoadError(error: unknown): boolean {
 }
 
 /**
- * Reload the document once for a failed chunk. A second failure of the same
- * chunk within the cooldown window returns `false` so a permanently missing
- * asset never turns into a reload loop. Storage errors (private mode,
- * disabled site data) also return `false` for the same reason.
+ * Reload the document once per failed chunk for the lifetime of the tab.
+ * The identity is the content-hashed chunk URL, so a genuine redeploy (new
+ * URL) still gets its reload, while a permanently missing or stalled asset
+ * can never turn into a reload loop no matter how long the failure takes to
+ * surface (rspack reports a hung script only after 120 s). Storage errors
+ * (private mode, disabled site data) also return `false` for the same reason.
  */
 export function reloadOnceForChunkError(error: unknown): boolean {
   if (!isChunkLoadError(error) || typeof window === 'undefined') return false
@@ -66,11 +67,8 @@ export function reloadOnceForChunkError(error: unknown): boolean {
   const key = RELOAD_STORAGE_KEY_PREFIX + identity
 
   try {
-    const previous = Number(window.sessionStorage.getItem(key))
-    if (previous > 0 && Date.now() - previous < RELOAD_COOLDOWN_MS) {
-      return false
-    }
-    window.sessionStorage.setItem(key, String(Date.now()))
+    if (window.sessionStorage.getItem(key)) return false
+    window.sessionStorage.setItem(key, '1')
   } catch {
     return false
   }

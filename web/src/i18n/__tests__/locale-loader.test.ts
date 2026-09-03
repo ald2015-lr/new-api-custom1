@@ -85,6 +85,22 @@ describe('ensureLocale', () => {
     expect(consoleError).toHaveBeenCalledTimes(1)
   })
 
+  test('registering the bundle of the already active language updates resolvedLanguage', async () => {
+    // Bootstrap path: the detector picked `fr` before its bundle existed, so
+    // i18next resolved to the fallback. Loading the bundle must re-resolve,
+    // otherwise number/date formatting keeps using the fallback locale.
+    await i18n.changeLanguage('fr')
+    expect(i18n.language).toBe('fr')
+    expect(i18n.resolvedLanguage).not.toBe('fr')
+
+    await ensureLocale('fr')
+
+    expect(i18n.resolvedLanguage).toBe('fr')
+    expect(i18n.t('Change language')).not.toBe('Change language')
+
+    await i18n.changeLanguage('en')
+  })
+
   test('is a no-op for a language without a lazy bundle', async () => {
     const addResourceBundle = vi.spyOn(i18n, 'addResourceBundle')
 

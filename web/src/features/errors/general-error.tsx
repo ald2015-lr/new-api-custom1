@@ -21,7 +21,7 @@ import {
   useRouter,
   type ErrorComponentProps,
 } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -59,7 +59,9 @@ export function GeneralError({
   const isRateLimited = status === 429
   const isChunkError = isChunkLoadError(error)
 
-  useEffect(() => {
+  // Layout effect: the state update is flushed before paint, so a page that
+  // is about to reload never flashes the error UI first.
+  useLayoutEffect(() => {
     if (!isChunkError) return
     if (reloadOnceForChunkError(error)) setReloading(true)
   }, [error, isChunkError])

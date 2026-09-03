@@ -56,6 +56,10 @@ export default defineConfig(({ envMode }) => {
       entry: {
         index: './src/main.tsx',
       },
+      // loadEnv only reads VITE_* vars; without this they never reach
+      // import.meta.env in the bundle (VITE_REACT_APP_VERSION is compared
+      // against the server's X-New-Api-Version header at runtime).
+      define: env.publicVars,
     },
     resolve: {
       alias: {
