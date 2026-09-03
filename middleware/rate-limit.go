@@ -140,6 +140,8 @@ func writeRateLimited(c *gin.Context, retryAfterSeconds int64) {
 	if retryAfterSeconds > 0 {
 		c.Header("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
 	}
+	// Never let an upstream Cache() header make a 429 cacheable.
+	c.Header("Cache-Control", "no-store")
 	c.Status(http.StatusTooManyRequests)
 	c.Abort()
 }
@@ -158,10 +160,29 @@ func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gi
 }
 
 func GlobalWebRateLimit() func(c *gin.Context) {
-	if common.GlobalWebRateLimitEnable {
+	if !common.GlobalWebRateLimitEnable {
+		return defNext
+	}
+	if !common.RedisEnabled {
 		return rateLimitFactory(common.GlobalWebRateLimitNum, common.GlobalWebRateLimitDuration, "GW")
 	}
-	return defNext
+	return func(c *gin.Context) {
+		allowed, _, ttlSeconds, err := redisFixedWindowTake(
+			c.Request.Context(),
+			redisIPRateLimitKey("GW", c.ClientIP()),
+			common.GlobalWebRateLimitNum,
+			common.GlobalWebRateLimitDuration,
+		)
+		if err != nil {
+			// A Redis hiccup must not turn every dashboard page load into an
+			// error page: the web tier fails open, API limiters stay closed.
+			logger.LogError(c.Request.Context(), fmt.Sprintf("rate limit check failed (mark=GW): %v", err))
+			return
+		}
+		if !allowed {
+			writeRateLimited(c, ttlSeconds)
+		}
+	}
 }
 
 func GlobalAPIRateLimit() func(c *gin.Context) {

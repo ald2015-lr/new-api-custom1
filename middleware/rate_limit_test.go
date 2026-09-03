@@ -64,6 +64,7 @@ func TestRedisIPRateLimiterThresholdTTLAndNamespace(t *testing.T) {
 	limitedResponse := performRateLimitRequest(router, "/limited", remoteAddr)
 	assert.Equal(t, http.StatusTooManyRequests, limitedResponse.Code)
 	assert.Equal(t, "37", limitedResponse.Header().Get("Retry-After"))
+	assert.Equal(t, "no-store", limitedResponse.Header().Get("Cache-Control"))
 
 	key := redisIPRateLimitKey("TEST", "192.0.2.10")
 	count, err := redisServer.Get(key)
@@ -222,4 +223,63 @@ func TestRedisFailurePolicies(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, userResponse.Code)
 	assert.Empty(t, userResponse.Body.String())
 	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", "192.0.2.62:12345").Code)
+}
+
+func useGlobalWebRateLimit(t *testing.T, maxRequestNum int, duration int64) {
+	t.Helper()
+
+	previousEnable := common.GlobalWebRateLimitEnable
+	previousNum := common.GlobalWebRateLimitNum
+	previousDuration := common.GlobalWebRateLimitDuration
+	common.GlobalWebRateLimitEnable = true
+	common.GlobalWebRateLimitNum = maxRequestNum
+	common.GlobalWebRateLimitDuration = duration
+	t.Cleanup(func() {
+		common.GlobalWebRateLimitEnable = previousEnable
+		common.GlobalWebRateLimitNum = previousNum
+		common.GlobalWebRateLimitDuration = previousDuration
+	})
+}
+
+func TestGlobalWebRateLimitUsesRedisWindowWithGWMark(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redisServer, _ := useRateLimitMiniRedis(t)
+	useGlobalWebRateLimit(t, 1, 45)
+
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	router.GET("/page", GlobalWebRateLimit(), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	remoteAddr := "192.0.2.70:12345"
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/page", remoteAddr).Code)
+	limitedResponse := performRateLimitRequest(router, "/page", remoteAddr)
+	assert.Equal(t, http.StatusTooManyRequests, limitedResponse.Code)
+	assert.Equal(t, "45", limitedResponse.Header().Get("Retry-After"))
+	assert.Equal(t, "no-store", limitedResponse.Header().Get("Cache-Control"))
+
+	count, err := redisServer.Get(redisIPRateLimitKey("GW", "192.0.2.70"))
+	require.NoError(t, err)
+	assert.Equal(t, "2", count)
+}
+
+// The web tier fails open when Redis is unavailable: a Redis restart must not
+// turn every dashboard page load into an error page. API limiters keep the
+// fail-closed policy asserted by TestRedisFailurePolicies.
+func TestGlobalWebRateLimitFailsOpenOnRedisError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, redisClient := useRateLimitMiniRedis(t)
+	require.NoError(t, redisClient.Close())
+	useGlobalWebRateLimit(t, 1, 30)
+
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	router.GET("/page", GlobalWebRateLimit(), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	remoteAddr := "192.0.2.71:12345"
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/page", remoteAddr).Code)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/page", remoteAddr).Code)
 }

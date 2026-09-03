@@ -29,6 +29,13 @@ services:
       - USER_CONTENT_REQUEST_TIMEOUT=60
       - SQL_MAX_OPEN_CONNS=10000
       - GLOBAL_API_RATE_LIMIT=18000
+      # 前面有 CDN / 反向代理时必须填它的回源网段，否则所有用户会被算成同一个 IP
+      # 共用一个限流桶。默认只信任回环和内网段（10/8、172.16/12、192.168/16）。
+      # - TRUSTED_PROXIES=<CDN 或反代的回源网段，逗号分隔>
+      # 页面（index.html）与 API 兜底的每 IP 限流，静态资源已不再计数；
+      # 若边缘层已有限流，可以直接 GLOBAL_WEB_RATE_LIMIT_ENABLE=false。
+      # - GLOBAL_WEB_RATE_LIMIT=3000
+      # - GLOBAL_WEB_RATE_LIMIT_DURATION=180
       - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     depends_on:
       - redis

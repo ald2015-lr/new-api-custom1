@@ -13,24 +13,48 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const defaultWebDistPath = "web/dist"
+
 // WebAssets holds the embedded dashboard frontend assets.
 type WebAssets struct {
 	BuildFS   embed.FS
 	IndexPage []byte
+	// DistPath is the directory inside BuildFS that holds the built
+	// frontend; it defaults to web/dist and only tests override it.
+	DistPath string
 }
 
 func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.HandlerFunc) {
-	frontendFS := common.EmbedFolder(assets.BuildFS, "web/dist")
+	distPath := assets.DistPath
+	if distPath == "" {
+		distPath = defaultWebDistPath
+	}
+	frontendFS := common.EmbedFolder(assets.BuildFS, distPath)
 
 	router.NoRoute(
 		pluginDispatcher,
 		middleware.RouteTag("web"),
 		gzip.Gzip(gzip.DefaultCompression),
-		middleware.GlobalWebRateLimit(),
 		middleware.Cache(),
 		static.Serve("/", frontendFS),
+		// Embedded files were served (and the chain aborted) above, so only
+		// the SPA HTML fallback and 404s count against GLOBAL_WEB_RATE_LIMIT.
+		// A cold load needs a dozen hashed chunks; counting them made the
+		// per-IP budget run out mid-navigation and the 429 on a route chunk
+		// surfaced as the dashboard's generic error page.
+		middleware.GlobalWebRateLimit(),
 		func(c *gin.Context) {
-			if strings.HasPrefix(c.Request.RequestURI, "/v1") || strings.HasPrefix(c.Request.RequestURI, "/api") || strings.HasPrefix(c.Request.RequestURI, "/assets") {
+			requestPath := c.Request.URL.Path
+			if strings.HasPrefix(requestPath, "/static/") {
+				// A hashed chunk that no longer exists (a tab left open across
+				// a deploy) must fail the import loudly instead of handing
+				// index.html to a <script> tag.
+				c.Header("Cache-Control", "no-store")
+				c.String(http.StatusNotFound, "404 page not found")
+				return
+			}
+			if strings.HasPrefix(requestPath, "/v1") || strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/assets") {
+				c.Header("Cache-Control", "no-store")
 				controller.RelayNotFound(c)
 				return
 			}
