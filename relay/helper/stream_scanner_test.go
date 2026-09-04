@@ -197,6 +197,24 @@ func TestStreamScannerHandler_SkipsNonDataLines(t *testing.T) {
 	assert.Equal(t, int64(100), count.Load())
 }
 
+// A bare "[DONE]" line (no "data:" prefix) is a legitimate terminator from
+// some upstreams. It must end the stream cleanly instead of being sliced
+// into "]" and handed to the adaptor as a chunk.
+func TestStreamScannerHandler_BareDoneLineEndsStream(t *testing.T) {
+	t.Parallel()
+
+	body := "data: {\"first\":true}\n[DONE]\ndata: {\"after\":true}\n"
+	c, resp, info := setupStreamTest(t, strings.NewReader(body))
+
+	var chunks []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		chunks = append(chunks, data)
+	})
+
+	assert.Equal(t, []string{"{\"first\":true}"}, chunks)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+}
+
 func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {
 	t.Parallel()
 

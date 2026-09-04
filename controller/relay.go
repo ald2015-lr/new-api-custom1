@@ -95,6 +95,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError != nil {
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() {
+				// The status line and part of the body already reached the
+				// client (a stream that failed mid-way). c.JSON would glue a
+				// bare JSON object onto the SSE stream, which clients report
+				// as a parse error in the middle of the answer.
+				if strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+					helper.WriteStreamError(c, relayFormat, newAPIError)
+				}
+				return
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
@@ -332,6 +342,13 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
 	if openaiErr == nil {
+		return false
+	}
+	// Once bytes reached the client a retry would append a second, complete
+	// answer to the same body: the user sees the model restart from its
+	// reasoning. WebSocket relays are excluded because the upgrade itself
+	// marks the writer as written.
+	if c != nil && c.Writer != nil && !c.IsWebsocket() && c.Writer.Written() {
 		return false
 	}
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {

@@ -38,64 +38,39 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 		return helper.ObjectData(c, lastStreamResponse)
 	}
 
-	hasThinkingContent := false
-	hasContent := false
-	var thinkingContent strings.Builder
-	for _, choice := range lastStreamResponse.Choices {
-		if len(choice.Delta.GetReasoningContent()) > 0 {
-			hasThinkingContent = true
-			thinkingContent.WriteString(choice.Delta.GetReasoningContent())
-		}
-		if len(choice.Delta.GetContentString()) > 0 {
-			hasContent = true
-		}
-	}
-
-	// Handle think to content conversion
-	if info.ThinkingContentInfo.IsFirstThinkingContent {
-		if hasThinkingContent {
-			response := lastStreamResponse.Copy()
-			for i := range response.Choices {
-				// send `think` tag with thinking content
-				response.Choices[i].Delta.SetContentString("<think>\n" + thinkingContent.String())
-				response.Choices[i].Delta.ReasoningContent = nil
-				response.Choices[i].Delta.Reasoning = nil
+	// Rewrite reasoning_content into <think> tags inside content. The tag
+	// state lives on the request so the block is opened once, closed when
+	// answer text starts, and re-opened if the model thinks again later
+	// (interleaved thinking); a delta carrying both fields keeps both.
+	state := &info.ThinkingContentInfo
+	for i := range lastStreamResponse.Choices {
+		delta := &lastStreamResponse.Choices[i].Delta
+		reasoning := delta.GetReasoningContent()
+		text := delta.GetContentString()
+		var out strings.Builder
+		if reasoning != "" {
+			if !state.HasSentThinkingContent {
+				out.WriteString("<think>\n")
+			} else if state.SendLastThinkingContent {
+				out.WriteString("\n<think>\n")
 			}
-			info.ThinkingContentInfo.IsFirstThinkingContent = false
-			info.ThinkingContentInfo.HasSentThinkingContent = true
-			return helper.ObjectData(c, response)
+			state.HasSentThinkingContent = true
+			state.IsFirstThinkingContent = false
+			state.SendLastThinkingContent = false
+			out.WriteString(reasoning)
 		}
-	}
-
-	if lastStreamResponse.Choices == nil || len(lastStreamResponse.Choices) == 0 {
-		return helper.ObjectData(c, lastStreamResponse)
-	}
-
-	// Process each choice
-	for i, choice := range lastStreamResponse.Choices {
-		// Handle transition from thinking to content
-		// only send `</think>` tag when previous thinking content has been sent
-		if hasContent && !info.ThinkingContentInfo.SendLastThinkingContent && info.ThinkingContentInfo.HasSentThinkingContent {
-			response := lastStreamResponse.Copy()
-			for j := range response.Choices {
-				response.Choices[j].Delta.SetContentString("\n</think>\n")
-				response.Choices[j].Delta.ReasoningContent = nil
-				response.Choices[j].Delta.Reasoning = nil
+		if text != "" {
+			if state.HasSentThinkingContent && !state.SendLastThinkingContent {
+				out.WriteString("\n</think>\n")
+				state.SendLastThinkingContent = true
 			}
-			info.ThinkingContentInfo.SendLastThinkingContent = true
-			helper.ObjectData(c, response)
+			out.WriteString(text)
 		}
-
-		// Convert reasoning content to regular content if any
-		if len(choice.Delta.GetReasoningContent()) > 0 {
-			lastStreamResponse.Choices[i].Delta.SetContentString(choice.Delta.GetReasoningContent())
-			lastStreamResponse.Choices[i].Delta.ReasoningContent = nil
-			lastStreamResponse.Choices[i].Delta.Reasoning = nil
-		} else if !hasThinkingContent && !hasContent {
-			// flush thinking content
-			lastStreamResponse.Choices[i].Delta.ReasoningContent = nil
-			lastStreamResponse.Choices[i].Delta.Reasoning = nil
+		if reasoning != "" || text != "" {
+			delta.SetContentString(out.String())
 		}
+		delta.ReasoningContent = nil
+		delta.Reasoning = nil
 	}
 
 	return helper.ObjectData(c, lastStreamResponse)

@@ -251,14 +251,17 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			data := scanner.Text()
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
-			if len(data) < 6 {
+			if !strings.HasPrefix(data, "data:") {
+				// Some upstreams terminate with a bare "[DONE]" line; it must
+				// not be sliced like a data: field and handed to the adaptor.
+				if strings.TrimSpace(data) == "[DONE]" {
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+					logger.LogDebug(c, "received bare [DONE], stopping scanner")
+					return
+				}
 				continue
 			}
-			if data[:5] != "data:" && data[:6] != "[DONE]" {
-				continue
-			}
-			data = data[5:]
-			data = strings.TrimSpace(data)
+			data = strings.TrimSpace(data[5:])
 			if data == "" {
 				continue
 			}

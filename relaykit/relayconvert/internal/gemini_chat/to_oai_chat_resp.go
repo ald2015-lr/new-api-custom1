@@ -112,6 +112,7 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 				appended++
 			}
 			var toolCalls []dto.ToolCallResponse
+			var thought strings.Builder
 			for _, part := range candidate.Content.Parts {
 				if part.InlineData != nil {
 					if strings.HasPrefix(part.InlineData.MimeType, "image") {
@@ -135,7 +136,10 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 						toolCalls = append(toolCalls, *call)
 					}
 				} else if part.Thought {
-					choice.Message.ReasoningContent = &part.Text
+					if thought.Len() > 0 {
+						thought.WriteByte('\n')
+					}
+					thought.WriteString(part.Text)
 				} else {
 					if part.ExecutableCode != nil {
 						writeSep()
@@ -158,6 +162,10 @@ func ResponseGeminiChat2OpenAI(id string, created int64, response *dto.GeminiCha
 			if len(toolCalls) > 0 {
 				choice.Message.SetToolCalls(toolCalls)
 				isToolCall = true
+			}
+			if thought.Len() > 0 {
+				reasoning := thought.String()
+				choice.Message.ReasoningContent = &reasoning
 			}
 			choice.Message.SetStringContent(content.String())
 		}
@@ -211,8 +219,18 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 			}
 			appended++
 		}
+		// Gemini routinely puts a thought part and an answer part in the
+		// same chunk; they must land in reasoning_content and content
+		// respectively instead of the whole chunk being labelled by one flag.
+		var thought strings.Builder
+		thoughtAppended := 0
+		writeThoughtSep := func() {
+			if thoughtAppended > 0 {
+				thought.WriteByte('\n')
+			}
+			thoughtAppended++
+		}
 		isTools := false
-		isThought := false
 		if candidate.FinishReason != nil {
 			switch *candidate.FinishReason {
 			case "STOP":
@@ -242,9 +260,8 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 					choice.Delta.ToolCalls = append(choice.Delta.ToolCalls, *call)
 				}
 			} else if part.Thought {
-				isThought = true
-				writeSep()
-				content.WriteString(part.Text)
+				writeThoughtSep()
+				thought.WriteString(part.Text)
 			} else {
 				if part.ExecutableCode != nil {
 					writeSep()
@@ -264,8 +281,11 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 				}
 			}
 		}
-		if isThought {
-			choice.Delta.SetReasoningContent(content.String())
+		if thought.Len() > 0 {
+			choice.Delta.SetReasoningContent(thought.String())
+			if content.Len() > 0 {
+				choice.Delta.SetContentString(content.String())
+			}
 		} else {
 			choice.Delta.SetContentString(content.String())
 		}
