@@ -9,7 +9,7 @@ version: '3.4'
 
 services:
   new-api:
-    image: ghcr.io/henfailsf2/new-api-custom:${NEW_API_TAG:-latest}
+    image: ghcr.io/ald2015-lr/new-api-custom1:${NEW_API_TAG:-latest}
     container_name: new-api-alpha-us
     restart: always
     command: --log-dir /app/logs

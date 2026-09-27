@@ -5,14 +5,16 @@
 镜像由 `.github/workflows/docker-ghcr.yml` 自动构建并发布到 GitHub Container Registry：
 
 ```
-ghcr.io/henfailsf2/new-api-custom:latest      # 跟随最新一次成功构建
-ghcr.io/henfailsf2/new-api-custom:<短 SHA>     # 锁定某次构建，例如 82a7684
+ghcr.io/ald2015-lr/new-api-custom1:latest      # 跟随最新一次成功构建
+ghcr.io/ald2015-lr/new-api-custom1:<短 SHA>     # 锁定某次构建，例如 82a7684
 ```
+
+仓库 2026-09-27 从 `henfailsf2/new-api-custom` 迁到 `ald2015-lr/new-api-custom1`，镜像地址随之改变，旧地址不再更新。
 
 多架构 `linux/amd64` + `linux/arm64`。包是公开的，拉取不需要登录。若日后把包改成私有，服务器上需要先登录（PAT 权限 `read:packages`）：
 
 ```bash
-echo "<你的 PAT>" | docker login ghcr.io -u henfailsf2 --password-stdin
+echo "<你的 PAT>" | docker login ghcr.io -u ald2015-lr --password-stdin
 ```
 
 ---
@@ -23,9 +25,8 @@ echo "<你的 PAT>" | docker login ghcr.io -u henfailsf2 --password-stdin
 
 ```bash
 # 1. 拉代码（只需要 deploy 目录里的两个文件，也可以手动 scp 过去）
-git clone -b claude/new-api-waffo-pancake-custom-bvh3x8 \
-  https://github.com/henfailsf2/new-api-custom.git
-cd new-api-custom/deploy
+git clone https://github.com/ald2015-lr/new-api-custom1.git
+cd new-api-custom1/deploy
 
 # 2. 配置数据库连接
 cp .env.example .env
@@ -116,7 +117,7 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
 git fetch upstream --tags
 
-git checkout claude/new-api-waffo-pancake-custom-bvh3x8
+git checkout main
 git merge v1.0.0-rc.41        # 换成上游最新的 release tag，不要用 upstream/main
 ```
 
@@ -154,10 +155,10 @@ cd web && bun install && bun run typecheck && bunx vitest run
 推上去后自动触发构建：
 
 ```bash
-git push origin claude/new-api-waffo-pancake-custom-bvh3x8
+git push origin main
 ```
 
-在 [Actions 页面](https://github.com/henfailsf2/new-api-custom/actions) 等构建完成（约 7 分钟），然后在服务器上更新：
+在 [Actions 页面](https://github.com/ald2015-lr/new-api-custom1/actions) 等构建完成（约 7 分钟），然后在服务器上更新：
 
 ```bash
 cd deploy
@@ -181,7 +182,7 @@ sed -i 's/^NEW_API_TAG=.*/NEW_API_TAG=<上一个短 SHA>/' .env
 docker compose up -d
 ```
 
-历史 tag 在 [Packages 页面](https://github.com/users/henfailsf2/packages/container/package/new-api-custom) 能查到。
+历史 tag 在 [Packages 页面](https://github.com/users/ald2015-lr/packages/container/package/new-api-custom1) 能查到。
 
 ### 回滚到官方镜像
 
