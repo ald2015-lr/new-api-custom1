@@ -35,6 +35,7 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 		pluginDispatcher,
 		middleware.RouteTag("web"),
 		gzip.Gzip(gzip.DefaultCompression),
+		middleware.AccessTokenAudit(),
 		middleware.Cache(),
 		static.Serve("/", frontendFS),
 		// Embedded files were served (and the chain aborted) above, so only

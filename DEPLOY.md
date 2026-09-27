@@ -110,14 +110,14 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 
 ## 三、合并上游更新并重新构建
 
-上游发新版时：
+当前基线：`v1.0.0-rc.40`（2026-09-27 从 rc.30 合并上来，175 个上游提交）。上游发新版时：
 
 ```bash
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
 git fetch upstream --tags
 
 git checkout claude/new-api-waffo-pancake-custom-bvh3x8
-git merge v1.0.0-rc.31        # 换成上游最新的 release tag，不要用 upstream/main
+git merge v1.0.0-rc.41        # 换成上游最新的 release tag，不要用 upstream/main
 ```
 
 冲突大概率出现在这几个文件（就是定制改动所在的位置）：
@@ -129,7 +129,16 @@ git merge v1.0.0-rc.31        # 换成上游最新的 release tag，不要用 up
 | `controller/topup_waffo_pancake.go` | `getWaffoPancakePayMoney` 里的反推逻辑 |
 | `model/option.go` | 三个手续费键的注册与解析 |
 | `web/src/features/system-settings/integrations/*` | 「计价与手续费」UI |
-| `web/src/i18n/locales/*.json` | 9 条新文案 |
+| `web/src/i18n/locales/*.json` | 14 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
+| `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go` | 静态资源不限流、缺失 chunk 返回 404、immutable 缓存（见第六节） |
+| `service/relay_error.go`（rc.40 前在 `controller/relay.go`） | `DecideRelayRetry` 开头的"已向客户端输出就不再重试"守卫 |
+| `controller/relay.go` | defer 里流已开始时改走 `helper.WriteStreamError` |
+| `relay/helper/stream_scanner.go`、`stream_error.go`、`common.go` | 裸 `[DONE]`、流内错误事件、写超时续期 |
+| `relay/channel/openai/relay-openai.go` | `thinking_to_content` 交错思考 |
+| `relaykit/.../gemini_chat/to_oai_chat_resp.go` | thought 与正文分字段 |
+| `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
+
+rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
 解冲突的原则：**保留定制改动，接受上游其他部分**。解完必须验证：
 
@@ -193,7 +202,7 @@ docker run -d --name new-api-alpha-us --restart always \
 回滚的两个注意点：
 
 1. **定制功能会全部失效**——官方镜像结算币种是 USD、最低充值数量读数据库（你后台设过就是那个值）、没有手续费转嫁。已经产生的订单和用户余额不受影响。
-2. **数据库 schema 不会自动回退**。当前定制版基于 `v1.0.0-rc.30`，和官方 `latest` 是同一个上游版本，schema 一致，回滚没问题。但如果你已经合并过更新的上游版本再回滚到旧官方镜像，新增的列/索引会留在库里——通常是加法式变更，旧版本能正常跑；万一起不来，用切换前的 `mysqldump` 恢复。
+2. **数据库 schema 不会自动回退**。当前定制版基于 `v1.0.0-rc.40`。rc.40 启动时会做一次 `options` 表主键修复、新建审计日志/账号安全/请求策略等多张表并给若干列改类型；回滚到 rc.40 之前的镜像时这些新表和列会留在库里——通常是加法式变更，旧版本能正常跑；万一起不来，用切换前的 `mysqldump` 恢复。
 
 ---
 

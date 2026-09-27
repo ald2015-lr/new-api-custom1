@@ -76,7 +76,7 @@ func TestWebRouterAPIMissesAreJSON404WithoutCache(t *testing.T) {
 	for _, path := range []string{"/api/nope", "/v1/nope", "/assets/old.js"} {
 		response := performWebRequest(engine, path, "192.0.2.12:1234", nil)
 		assert.Equal(t, http.StatusNotFound, response.Code, path)
-		assert.Equal(t, "no-store", response.Header().Get("Cache-Control"), path)
+		assert.Contains(t, response.Header().Get("Cache-Control"), "no-store", path)
 		assert.Contains(t, response.Header().Get("Content-Type"), "application/json", path)
 	}
 }
