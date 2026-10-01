@@ -111,14 +111,14 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 
 ## 三、合并上游更新并重新构建
 
-当前基线：`v1.0.0-rc.40`（2026-09-27 从 rc.30 合并上来，175 个上游提交）。上游发新版时：
+当前基线：`v1.0.0-rc.41`（2026-10-01 从 rc.40 合并上来；rc.40 是 2026-09-27 从 rc.30 合并的）。上游发新版时：
 
 ```bash
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
 git fetch upstream --tags
 
 git checkout main
-git merge v1.0.0-rc.41        # 换成上游最新的 release tag，不要用 upstream/main
+git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 upstream/main
 ```
 
 冲突大概率出现在这几个文件（就是定制改动所在的位置）：
@@ -140,6 +140,8 @@ git merge v1.0.0-rc.41        # 换成上游最新的 release tag，不要用 up
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
+
+rc.40 → rc.41 是无冲突合并，上表定制点全部原样保留。
 
 解冲突的原则：**保留定制改动，接受上游其他部分**。解完必须验证：
 
@@ -203,7 +205,7 @@ docker run -d --name new-api-alpha-us --restart always \
 回滚的两个注意点：
 
 1. **定制功能会全部失效**——官方镜像结算币种是 USD、最低充值数量读数据库（你后台设过就是那个值）、没有手续费转嫁。已经产生的订单和用户余额不受影响。
-2. **数据库 schema 不会自动回退**。当前定制版基于 `v1.0.0-rc.40`。rc.40 启动时会做一次 `options` 表主键修复、新建审计日志/账号安全/请求策略等多张表并给若干列改类型；回滚到 rc.40 之前的镜像时这些新表和列会留在库里——通常是加法式变更，旧版本能正常跑；万一起不来，用切换前的 `mysqldump` 恢复。
+2. **数据库 schema 不会自动回退**。当前定制版基于 `v1.0.0-rc.41`。rc.41 启动时新建 `user_access_tokens` 表，并在 `options` 表写入一行 `LegacyAccessTokenRetireAt`（见第五节）；rc.40 启动时会做一次 `options` 表主键修复、新建审计日志/账号安全/请求策略等多张表并给若干列改类型；回滚到 rc.40 之前的镜像时这些新表和列会留在库里——通常是加法式变更，旧版本能正常跑；万一起不来，用切换前的 `mysqldump` 恢复。
 
 ---
 
@@ -217,6 +219,7 @@ docker run -d --name new-api-alpha-us --restart always \
 | 支付金额不对 | 后台看「计价与手续费」四个值；反推公式是 `实付 = (标价 + 固定费) / (1 - 费率)`，50 元档应为 55.78 |
 | 前端页面白屏 | 强刷清缓存；仍然白屏看 `docker compose logs`，可能是构建时前端产物没打进去 |
 | 用户看到大大的「500」错误页，刷新就好 | 见下一节。那个 500 是前端兜底页的固定文案，不代表后端返回了 500 |
+| 升级 rc.41 约 30 天后，调管理接口的脚本报 `legacy access token has been retired` | rc.41 引入新的个人访问令牌（`nap_` 开头，后台左侧「安全」页的「访问令牌」里创建），旧的「系统访问令牌」从 rc.41 第一次启动起 30 天后停用，截止时间记在 `options` 表 `LegacyAccessTokenRetireAt`（服务端管理，后台改不了）。到「安全」→「访问令牌」新建一个换上即可。**只影响调 `/api/...` 管理接口的令牌；用户调模型用的 `sk-` 令牌完全不受影响** |
 
 ---
 
