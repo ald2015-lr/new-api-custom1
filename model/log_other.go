@@ -12,6 +12,8 @@ const (
 	logOtherAdminInfoKey = "admin_info"
 	logOtherRootInfoKey  = "root_info"
 	logOtherAuditInfoKey = "audit_info"
+
+	logOtherResponseModelKey = "response_model"
 )
 
 // legacySensitiveLogOtherKeys are historical top-level fields that must never
@@ -246,6 +248,12 @@ func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
 				delete(values, logOtherRootInfoKey)
 				changed = true
 			}
+		}
+	}
+	if !common.LogResponseModelEnabled {
+		if _, exists := values[logOtherResponseModelKey]; exists {
+			delete(values, logOtherResponseModelKey)
+			changed = true
 		}
 	}
 

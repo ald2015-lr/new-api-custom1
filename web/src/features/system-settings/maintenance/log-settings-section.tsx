@@ -80,17 +80,19 @@ import {
 } from '../components/settings-form-layout'
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
+import { useResetForm } from '../hooks/use-reset-form'
 import { useUpdateOption } from '../hooks/use-update-option'
 import type { LogCleanupTask } from '../types'
 
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
+  LogResponseModelEnabled: z.boolean(),
 })
 
 type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 
 type LogSettingsSectionProps = {
-  defaultEnabled: boolean
+  defaultValues: LogSettingsFormValues
 }
 
 type ServerLogInfo = {
@@ -144,16 +146,12 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
   return task?.status === 'pending' || task?.status === 'running'
 }
 
-export function LogSettingsSection({
-  defaultEnabled,
-}: LogSettingsSectionProps) {
+export function LogSettingsSection({ defaultValues }: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
-    defaultValues: {
-      LogConsumeEnabled: defaultEnabled,
-    },
+    defaultValues,
   })
 
   const [purgeDate, setPurgeDate] = useState<Date | undefined>(() =>
@@ -179,9 +177,7 @@ export function LogSettingsSection({
     }
   }, [])
 
-  useEffect(() => {
-    form.reset({ LogConsumeEnabled: defaultEnabled })
-  }, [defaultEnabled, form])
+  useResetForm(form, defaultValues)
 
   useEffect(() => {
     fetchServerLogInfo()
@@ -263,11 +259,10 @@ export function LogSettingsSection({
   }, [logCleanupActive, logCleanupTaskId, t])
 
   const onSubmit = async (values: LogSettingsFormValues) => {
-    if (values.LogConsumeEnabled === defaultEnabled) return
-    await updateOption.mutateAsync({
-      key: 'LogConsumeEnabled',
-      value: values.LogConsumeEnabled,
-    })
+    for (const key of Object.keys(values) as (keyof LogSettingsFormValues)[]) {
+      if (values[key] === defaultValues[key]) continue
+      await updateOption.mutateAsync({ key, value: values[key] })
+    }
   }
 
   const handleRequestCleanLogs = () => {
@@ -359,6 +354,31 @@ export function LogSettingsSection({
                   <FormDescription>
                     {t(
                       'Track per-request consumption to power usage analytics. Keeping this on increases database writes.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+                <FormMessage />
+              </SettingsSwitchItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name='LogResponseModelEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>
+                    {t('Show response model in usage logs')}
+                  </FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Show the model name returned by the upstream when it differs from the requested model. Applies to all users, including administrators; the data is still recorded while hidden.'
                     )}
                   </FormDescription>
                 </SettingsSwitchContent>

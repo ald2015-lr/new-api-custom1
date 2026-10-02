@@ -128,15 +128,16 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `service/waffo_pancake.go` | 三处 `USD` → `CNY` |
 | `setting/payment_waffo_pancake.go` | `MinTopUp = 50`，三个手续费变量 |
 | `controller/topup_waffo_pancake.go` | `getWaffoPancakePayMoney` 里的反推逻辑 |
-| `model/option.go` | 三个手续费键的注册与解析 |
+| `model/option.go` | 三个手续费键、`LogResponseModelEnabled` 的注册与解析 |
 | `web/src/features/system-settings/integrations/*` | 「计价与手续费」UI |
-| `web/src/i18n/locales/*.json` | 14 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
+| `web/src/i18n/locales/*.json` | 16 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
 | `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go` | 静态资源不限流、缺失 chunk 返回 404、immutable 缓存（见第六节） |
 | `service/relay_error.go`（rc.40 前在 `controller/relay.go`） | `DecideRelayRetry` 开头的"已向客户端输出就不再重试"守卫 |
 | `controller/relay.go` | defer 里流已开始时改走 `helper.WriteStreamError` |
 | `relay/helper/stream_scanner.go`、`stream_error.go`、`common.go` | 裸 `[DONE]`、流内错误事件、写超时续期 |
 | `relay/channel/openai/relay-openai.go` | `thinking_to_content` 交错思考 |
 | `relaykit/.../gemini_chat/to_oai_chat_resp.go` | thought 与正文分字段 |
+| `common/constants.go`、`model/log_other.go`、`web/src/features/system-settings/maintenance/log-settings-section.tsx` | 「在使用日志中显示响应模型」开关（默认关；关闭时日志接口不返回 `response_model`，黄色「响应模型」标记对所有人隐藏） |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。

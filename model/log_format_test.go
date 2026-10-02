@@ -242,3 +242,39 @@ func TestLogFormattingPreservesLargeIntegerLexemes(t *testing.T) {
 		assert.Equal(t, unprivileged, adminLogs[0].Other)
 	})
 }
+
+func TestResponseModelVisibilityFollowsOption(t *testing.T) {
+	original := common.LogResponseModelEnabled
+	t.Cleanup(func() { common.LogResponseModelEnabled = original })
+
+	other := common.MapToJsonStr(map[string]any{
+		"model_price": 0.02,
+		"response_model": map[string]any{
+			"requested_model": "gemini-3.8-flash-128",
+			"upstream_model":  "gemini-3.8-flash-128",
+			"returned_model":  "gemini-3.8-flash",
+		},
+	})
+	formatters := map[string]func([]*Log){
+		"user":  func(logs []*Log) { formatUserLogs(logs, 0) },
+		"admin": FormatAdminLogs,
+		"root":  FormatRootLogs,
+	}
+
+	for _, enabled := range []bool{false, true} {
+		common.LogResponseModelEnabled = enabled
+		for role, format := range formatters {
+			logs := []*Log{{Other: other}}
+			format(logs)
+
+			parsed, err := common.StrToMap(logs[0].Other)
+			require.NoError(t, err, role)
+			assert.Contains(t, parsed, "model_price", role)
+			if enabled {
+				assert.Contains(t, parsed, "response_model", role)
+			} else {
+				assert.NotContains(t, parsed, "response_model", role)
+			}
+		}
+	}
+}

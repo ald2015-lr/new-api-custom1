@@ -93,6 +93,10 @@ var MemoryCacheEnabled bool
 
 var LogConsumeEnabled = true
 
+// LogResponseModelEnabled exposes the upstream-declared response model in
+// usage-log APIs. The observation is always recorded; this only gates display.
+var LogResponseModelEnabled = false
+
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
 
