@@ -238,7 +238,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 		}
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "no active subscription") || strings.Contains(errMsg, "subscription quota insufficient") {
-			return types.NewErrorWithStatusCode(fmt.Errorf("订阅额度不足或未配置订阅: %s", errMsg), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+			return types.NewErrorWithStatusCode(fmt.Errorf("订阅额度不足或未配置订阅: %w", err), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
 		return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 	}
@@ -470,7 +470,15 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 				if allowOverflow {
 					return tryWallet()
 				}
-				return nil, apiErr
+				// Report the subscription cause without preConsume's generic "或未配置订阅" prefix.
+				subscriptionErr := errors.Unwrap(apiErr.Err)
+				if subscriptionErr == nil {
+					subscriptionErr = apiErr
+				}
+				return nil, types.NewErrorWithStatusCode(
+					fmt.Errorf("订阅额度不足，且当前订阅套餐不允许额度用尽后使用钱包余额: %s", subscriptionErr.Error()),
+					types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
+					types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 			}
 			return nil, apiErr
 		}

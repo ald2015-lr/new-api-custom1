@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -198,4 +199,139 @@ func TestAdminResetPlanSubscriptionsNoMatchSucceeds(t *testing.T) {
 	assert.Zero(t, result.ResetCount)
 	assert.Zero(t, result.UserCount)
 	assert.Empty(t, result.AffectedUserIds)
+}
+
+func setSubscriptionWalletOverflowSnapshotNull(t *testing.T, id int) {
+	t.Helper()
+	require.NoError(t, DB.Model(&UserSubscription{}).Where("id = ?", id).Update("allow_wallet_overflow", nil).Error)
+	require.Nil(t, getSubscriptionWalletOverflowSnapshot(t, id))
+}
+
+func getSubscriptionWalletOverflowSnapshot(t *testing.T, id int) *bool {
+	t.Helper()
+	var row struct {
+		AllowWalletOverflow *bool
+	}
+	require.NoError(t, DB.Model(&UserSubscription{}).Select("allow_wallet_overflow").Where("id = ?", id).Scan(&row).Error)
+	return row.AllowWalletOverflow
+}
+
+// Rows created before allow_wallet_overflow existed hold NULL. Consumption and reset
+// writes must leave the column untouched instead of persisting the bool zero value,
+// which would silently turn legacy subscriptions strict.
+func TestSubscriptionWritesKeepLegacyNullWalletOverflowSnapshot(t *testing.T) {
+	truncateTables(t)
+
+	now := GetDBTimestamp()
+	plan := &SubscriptionPlan{
+		Id:                  9701,
+		Title:               "Legacy",
+		PriceAmount:         10,
+		DurationUnit:        SubscriptionDurationMonth,
+		DurationValue:       1,
+		TotalAmount:         1000,
+		QuotaResetPeriod:    SubscriptionResetDaily,
+		AllowWalletOverflow: common.GetPointer(true),
+	}
+	seedSubscriptionResetPlan(t, plan)
+	InvalidateSubscriptionPlanCache(plan.Id)
+	t.Cleanup(func() { InvalidateSubscriptionPlanCache(plan.Id) })
+
+	end := now + 30*24*3600
+	// 9702 has no reset schedule yet, so pre-consume first initialises it and then consumes.
+	seedSubscriptionResetSub(t, &UserSubscription{Id: 9702, UserId: 701, PlanId: plan.Id, AmountTotal: 1000, AmountUsed: 100, StartTime: now, EndTime: end, Status: "active"})
+	// 9703 is due for the periodic reset.
+	seedSubscriptionResetSub(t, &UserSubscription{Id: 9703, UserId: 702, PlanId: plan.Id, AmountTotal: 1000, AmountUsed: 400, StartTime: now - 3*86400, EndTime: end, Status: "active", LastResetTime: now - 2*86400, NextResetTime: now - 10})
+	// 9704 is reset by an administrator.
+	seedSubscriptionResetSub(t, &UserSubscription{Id: 9704, UserId: 703, PlanId: plan.Id, AmountTotal: 1000, AmountUsed: 500, StartTime: now, EndTime: end, Status: "active", LastResetTime: now, NextResetTime: now + 86400})
+	for _, id := range []int{9702, 9703, 9704} {
+		setSubscriptionWalletOverflowSnapshotNull(t, id)
+	}
+
+	result, err := PreConsumeUserSubscription("req-legacy-null", 701, "gpt-test", 0, 200)
+	require.NoError(t, err)
+	assert.Equal(t, 9702, result.UserSubscriptionId)
+	sub := getSubscriptionResetSub(t, 9702)
+	assert.EqualValues(t, 300, sub.AmountUsed)
+	assert.Positive(t, sub.NextResetTime)
+	assert.Nil(t, getSubscriptionWalletOverflowSnapshot(t, 9702))
+
+	require.NoError(t, PostConsumeUserSubscriptionDelta(9702, 50))
+	assert.EqualValues(t, 350, getSubscriptionResetSub(t, 9702).AmountUsed)
+	assert.Nil(t, getSubscriptionWalletOverflowSnapshot(t, 9702))
+
+	resetCount, err := ResetDueSubscriptions(10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, resetCount)
+	assert.Zero(t, getSubscriptionResetSub(t, 9703).AmountUsed)
+	assert.Nil(t, getSubscriptionWalletOverflowSnapshot(t, 9703))
+
+	_, err = AdminResetUserSubscriptionsByPlan(703, plan.Id, true)
+	require.NoError(t, err)
+	assert.Zero(t, getSubscriptionResetSub(t, 9704).AmountUsed)
+	assert.Nil(t, getSubscriptionWalletOverflowSnapshot(t, 9704))
+}
+
+func TestUserActiveSubscriptionsAllowWalletOverflowFollowsLivePlan(t *testing.T) {
+	truncateTables(t)
+
+	now := GetDBTimestamp()
+	strict := common.GetPointer(false)
+	allowed := common.GetPointer(true)
+	cases := []struct {
+		name          string
+		planExists    bool
+		planSetting   *bool // nil stores NULL on the plan row
+		snapshot      *bool // nil stores NULL on the subscription row
+		inactiveOnly  bool
+		expectAllowed bool
+	}{
+		{name: "plan allows over strict snapshot", planExists: true, planSetting: allowed, snapshot: strict, expectAllowed: true},
+		{name: "plan unset over strict snapshot", planExists: true, planSetting: nil, snapshot: strict, expectAllowed: true},
+		{name: "plan disallows over permissive snapshot", planExists: true, planSetting: strict, snapshot: allowed, expectAllowed: false},
+		{name: "plan missing with NULL snapshot", snapshot: nil, expectAllowed: true},
+		{name: "plan missing with strict snapshot", snapshot: strict, expectAllowed: false},
+		{name: "only inactive strict subscriptions", planExists: true, planSetting: strict, snapshot: strict, inactiveOnly: true, expectAllowed: true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userId := 710 + i
+			planId := 9710 + i
+			subId := 9720 + i
+			if tc.planExists {
+				seedSubscriptionResetPlan(t, &SubscriptionPlan{Id: planId, Title: tc.name, DurationUnit: SubscriptionDurationMonth, DurationValue: 1, AllowWalletOverflow: tc.planSetting})
+				InvalidateSubscriptionPlanCache(planId)
+				t.Cleanup(func() { InvalidateSubscriptionPlanCache(planId) })
+			}
+			sub := &UserSubscription{Id: subId, UserId: userId, PlanId: planId, AmountTotal: 1000, StartTime: now - 60, EndTime: now + 86400, Status: "active", AllowWalletOverflow: tc.snapshot != nil && *tc.snapshot}
+			if tc.inactiveOnly {
+				sub.Status = "cancelled"
+			}
+			seedSubscriptionResetSub(t, sub)
+			if tc.snapshot == nil {
+				setSubscriptionWalletOverflowSnapshotNull(t, subId)
+			}
+
+			got, err := UserActiveSubscriptionsAllowWalletOverflow(userId)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectAllowed, got)
+		})
+	}
+
+	// An admin switching the plan to strict applies on the next request, even when the
+	// plan is still held in the plan cache.
+	userId, planId := 790, 9790
+	seedSubscriptionResetPlan(t, &SubscriptionPlan{Id: planId, Title: "Toggle", DurationUnit: SubscriptionDurationMonth, DurationValue: 1, AllowWalletOverflow: allowed})
+	InvalidateSubscriptionPlanCache(planId)
+	t.Cleanup(func() { InvalidateSubscriptionPlanCache(planId) })
+	seedSubscriptionResetSub(t, &UserSubscription{Id: 9791, UserId: userId, PlanId: planId, AmountTotal: 1000, StartTime: now - 60, EndTime: now + 86400, Status: "active", AllowWalletOverflow: true})
+	_, err := GetSubscriptionPlanById(planId)
+	require.NoError(t, err)
+	got, err := UserActiveSubscriptionsAllowWalletOverflow(userId)
+	require.NoError(t, err)
+	assert.True(t, got)
+	require.NoError(t, DB.Model(&SubscriptionPlan{}).Where("id = ?", planId).Update("allow_wallet_overflow", false).Error)
+	got, err = UserActiveSubscriptionsAllowWalletOverflow(userId)
+	require.NoError(t, err)
+	assert.False(t, got)
 }

@@ -273,7 +273,9 @@ type UserSubscription struct {
 	// Downgrade target group on expiry (snapshot from plan; empty = revert to PrevUserGroup)
 	DowngradeGroup string `json:"downgrade_group" gorm:"type:varchar(64);default:''"`
 
-	// Whether wallet fallback is allowed after this subscription's quota is exhausted (snapshot from plan)
+	// Whether wallet fallback is allowed after this subscription's quota is exhausted (snapshot from plan).
+	// Rows created before this column existed hold NULL; wallet fallback decisions follow the live
+	// plan and only use this snapshot when the plan is gone (see UserActiveSubscriptionsAllowWalletOverflow).
 	AllowWalletOverflow bool `json:"allow_wallet_overflow"`
 
 	CreatedAt int64 `json:"created_at" gorm:"bigint"`
@@ -290,6 +292,14 @@ func (s *UserSubscription) BeforeCreate(tx *gorm.DB) error {
 func (s *UserSubscription) BeforeUpdate(tx *gorm.DB) error {
 	s.UpdatedAt = common.GetTimestamp()
 	return nil
+}
+
+// saveUserSubscriptionColumnsTx persists only the given columns of sub (plus updated_at).
+// Never save a UserSubscription as a full row: legacy rows created before
+// allow_wallet_overflow existed hold NULL there, and a full-row save would overwrite it
+// with the bool zero value, silently making those subscriptions strict.
+func saveUserSubscriptionColumnsTx(tx *gorm.DB, sub *UserSubscription, columns ...string) error {
+	return tx.Model(sub).Select(append(columns, "updated_at")).Updates(sub).Error
 }
 
 type SubscriptionSummary struct {
@@ -877,21 +887,58 @@ func HasActiveUserSubscription(userId int) (bool, error) {
 }
 
 // UserActiveSubscriptionsAllowWalletOverflow returns whether wallet balance may be used
-// after the user's subscription quota is exhausted. A single active subscription that
-// disallows wallet overflow (allow_wallet_overflow = false) blocks the fallback.
+// after the user's subscription quota is exhausted. An active subscription blocks the
+// fallback only when its plan currently has allow_wallet_overflow explicitly false; an
+// unset plan value means allowed, matching SubscriptionPlan.NormalizeDefaults.
+//
+// Unlike upstream, this deliberately follows the live plan instead of the per-subscription
+// snapshot, so admin edits apply to existing subscriptions and legacy NULL snapshots that
+// older full-row saves turned into false no longer block the fallback. Plans are read from
+// the database rather than the plan cache so a toggle applies on the next request. The
+// snapshot (NULL = allowed) is only consulted when the plan row no longer exists.
 func UserActiveSubscriptionsAllowWalletOverflow(userId int) (bool, error) {
 	if userId <= 0 {
 		return false, errors.New("invalid userId")
 	}
 	now := common.GetTimestamp()
-	var strictCount int64
+	var subs []struct {
+		Id                  int
+		PlanId              int
+		AllowWalletOverflow *bool
+	}
 	if err := DB.Model(&UserSubscription{}).
-		Where("user_id = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
-			userId, "active", now, false).
-		Count(&strictCount).Error; err != nil {
+		Select("id", "plan_id", "allow_wallet_overflow").
+		Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
+		Find(&subs).Error; err != nil {
 		return false, err
 	}
-	return strictCount == 0, nil
+	if len(subs) == 0 {
+		return true, nil
+	}
+	planIds := make([]int, 0, len(subs))
+	for _, sub := range subs {
+		planIds = append(planIds, sub.PlanId)
+	}
+	var plans []SubscriptionPlan
+	if err := DB.Select("id", "allow_wallet_overflow").
+		Where("id IN ?", planIds).
+		Find(&plans).Error; err != nil {
+		return false, err
+	}
+	planSettings := make(map[int]*bool, len(plans))
+	for _, plan := range plans {
+		planSettings[plan.Id] = plan.AllowWalletOverflow
+	}
+	for _, sub := range subs {
+		allow, planExists := planSettings[sub.PlanId]
+		if !planExists {
+			allow = sub.AllowWalletOverflow
+		}
+		if allow != nil && !*allow {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // GetAllUserSubscriptions returns all subscriptions (active and expired) for a user.
@@ -1014,6 +1061,7 @@ func resetUserSubscriptionTx(tx *gorm.DB, sub *UserSubscription, plan *Subscript
 		return errors.New("invalid reset args")
 	}
 	sub.AmountUsed = 0
+	columns := []string{"amount_used"}
 	if advanceResetTime {
 		nextReset := calcNextResetTime(time.Unix(now, 0), plan, sub.EndTime)
 		sub.NextResetTime = nextReset
@@ -1022,8 +1070,9 @@ func resetUserSubscriptionTx(tx *gorm.DB, sub *UserSubscription, plan *Subscript
 		} else {
 			sub.LastResetTime = 0
 		}
+		columns = append(columns, "last_reset_time", "next_reset_time")
 	}
-	return tx.Save(sub).Error
+	return saveUserSubscriptionColumnsTx(tx, sub, columns...)
 }
 
 func buildSubscriptionResetResult(plan *SubscriptionPlan, subs []UserSubscription, advanceResetTime bool) *SubscriptionResetResult {
@@ -1284,14 +1333,14 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 		if sub.NextResetTime == 0 && next > 0 {
 			sub.NextResetTime = next
 			sub.LastResetTime = base.Unix()
-			return tx.Save(sub).Error
+			return saveUserSubscriptionColumnsTx(tx, sub, "last_reset_time", "next_reset_time")
 		}
 		return nil
 	}
 	sub.AmountUsed = 0
 	sub.LastResetTime = base.Unix()
 	sub.NextResetTime = next
-	return tx.Save(sub).Error
+	return saveUserSubscriptionColumnsTx(tx, sub, "amount_used", "last_reset_time", "next_reset_time")
 }
 
 // PreConsumeUserSubscription pre-consumes from any active subscription total quota.
@@ -1380,7 +1429,7 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 				return err
 			}
 			sub.AmountUsed += amount
-			if err := tx.Save(&sub).Error; err != nil {
+			if err := saveUserSubscriptionColumnsTx(tx, &sub, "amount_used"); err != nil {
 				return err
 			}
 			returnValue.UserSubscriptionId = sub.Id
@@ -1526,6 +1575,6 @@ func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error
 			return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
 		}
 		sub.AmountUsed = newUsed
-		return tx.Save(&sub).Error
+		return saveUserSubscriptionColumnsTx(tx, &sub, "amount_used")
 	})
 }
