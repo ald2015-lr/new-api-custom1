@@ -66,10 +66,13 @@ function quotaLimit(
   return {
     channel_id: CHANNEL_ID,
     limit_quota: 5_000_000,
+    limit_count: 0,
     daily_reset: false,
     message: '',
     used_quota: 1_000_000,
     current_used: 1_000_000,
+    used_count: 0,
+    current_used_count: 0,
     exhausted: false,
     period_start: 0,
     updated_at: 1,
@@ -186,13 +189,16 @@ describe('channel quota limit dialog', () => {
     expect(put.mock.calls[0][0]).toBe(`/api/channel/${CHANNEL_ID}/quota_limit`)
     expect(put.mock.calls[0][1]).toEqual({
       limit_quota: 10_000_000,
+      limit_count: 0,
       daily_reset: true,
       message: 'Group quota is used up',
     })
   })
 
-  test('sends limit_quota 0 to remove the limit when the amount is set to 0', async () => {
-    mockQuotaLimits([quotaLimit({ daily_reset: true, message: 'custom' })])
+  test('sends limit_quota 0 and limit_count 0 to remove the limit when both are set to 0', async () => {
+    mockQuotaLimits([
+      quotaLimit({ limit_count: 100, daily_reset: true, message: 'custom' }),
+    ])
     const put = vi
       .spyOn(api, 'put')
       .mockResolvedValue({ data: { success: true, data: null } })
@@ -202,14 +208,60 @@ describe('channel quota limit dialog', () => {
     const input = await findLimitInput()
     await user.clear(input)
     await user.type(input, '0')
+    const countInput = screen.getByLabelText('Request limit')
+    expect(countInput).toHaveValue(100)
+    await user.clear(countInput)
+    await user.type(countInput, '0')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
     expect(put.mock.calls[0][1]).toEqual({
       limit_quota: 0,
+      limit_count: 0,
       daily_reset: true,
       message: 'custom',
     })
+  })
+
+  test('sends the request count limit while keeping the unedited quota limit', async () => {
+    mockQuotaLimits([quotaLimit()])
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true, data: quotaLimit() } })
+    const user = userEvent.setup()
+    const onOpenChange = renderDialog()
+
+    await findLimitInput()
+    const countInput = screen.getByLabelText('Request limit')
+    expect(countInput).toHaveValue(null)
+    await user.type(countInput, '500')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
+    expect(put.mock.calls[0][1]).toEqual({
+      limit_quota: 5_000_000,
+      limit_count: 500,
+      daily_reset: false,
+      message: '',
+    })
+  })
+
+  test('marks a fractional request limit invalid and does not save it', async () => {
+    mockQuotaLimits([])
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    renderDialog()
+
+    await findLimitInput()
+    const countInput = screen.getByLabelText('Request limit')
+    await user.type(countInput, '1.5')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(countInput).toHaveAttribute('aria-invalid', 'true')
+    )
+    expect(screen.getByText('Must be a whole number')).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
   })
 
   test('marks a negative amount invalid and does not save it', async () => {
@@ -261,6 +313,23 @@ describe('channel table cells', () => {
     expect(within(status).getByText('Enabled')).toBeInTheDocument()
   })
 
+  test('adds a limit reached badge when only the request count limit is exhausted', async () => {
+    mockQuotaLimits([
+      quotaLimit({
+        limit_quota: 0,
+        current_used: 0,
+        limit_count: 10,
+        current_used_count: 10,
+        exhausted: true,
+      }),
+    ])
+
+    renderChannelCells(['status'])
+
+    const status = screen.getByTestId('cell-status')
+    expect(await within(status).findByText('Limit Reached')).toBeInTheDocument()
+  })
+
   test('keeps only the status badge while the quota limit is not exhausted', async () => {
     mockQuotaLimits([quotaLimit()])
 
@@ -284,5 +353,24 @@ describe('channel table cells', () => {
       await within(balance).findByText('Limit ¥14 / ¥70')
     ).toBeInTheDocument()
     expect(within(balance).getByText('Daily')).toBeInTheDocument()
+  })
+
+  test('shows only the request count line when just a count limit is set', async () => {
+    mockQuotaLimits([
+      quotaLimit({
+        limit_quota: 0,
+        current_used: 0,
+        limit_count: 1000,
+        current_used_count: 250,
+      }),
+    ])
+
+    renderChannelCells(['balance'])
+
+    const balance = screen.getByTestId('cell-balance')
+    expect(
+      await within(balance).findByText('Requests 250 / 1,000')
+    ).toBeInTheDocument()
+    expect(within(balance).queryByText(/^Limit /)).not.toBeInTheDocument()
   })
 })

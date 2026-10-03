@@ -11,18 +11,20 @@ import (
 	"gorm.io/gorm"
 )
 
-// ChannelQuotaLimit caps how much quota a channel may consume, optionally per
-// calendar day (server local time). A channel whose usage reached its limit is
-// skipped by channel selection; when a group has nothing else left, callers get
-// Message (or the default text).
+// ChannelQuotaLimit caps how much quota and/or how many billed requests a
+// channel may consume, optionally per calendar day (server local time). A
+// channel that reached either limit is skipped by channel selection; when a
+// group has nothing else left, callers get Message (or the default text).
 type ChannelQuotaLimit struct {
 	ChannelId  int    `json:"channel_id" gorm:"primaryKey;autoIncrement:false"`
 	LimitQuota int64  `json:"limit_quota" gorm:"type:bigint;not null;default:0"`
+	LimitCount int64  `json:"limit_count" gorm:"type:bigint;not null;default:0"`
 	DailyReset bool   `json:"daily_reset"`
 	Message    string `json:"message" gorm:"type:varchar(255);not null;default:''"`
 	// UsedQuota counts usage since PeriodStart when DailyReset is on, and since
 	// the limit was created (or last reset) otherwise.
 	UsedQuota   int64 `json:"used_quota" gorm:"type:bigint;not null;default:0"`
+	UsedCount   int64 `json:"used_count" gorm:"type:bigint;not null;default:0"`
 	PeriodStart int64 `json:"period_start" gorm:"type:bigint;not null;default:0"`
 	UpdatedAt   int64 `json:"updated_at" gorm:"type:bigint;not null;default:0"`
 }
@@ -58,9 +60,18 @@ func (l ChannelQuotaLimit) CurrentUsed(now time.Time) int64 {
 	return l.UsedQuota
 }
 
-// Exhausted reports whether the channel has reached its limit at now.
+// CurrentUsedCount returns the billed requests that count against the limit at now.
+func (l ChannelQuotaLimit) CurrentUsedCount(now time.Time) int64 {
+	if l.DailyReset && l.PeriodStart < channelQuotaPeriodStart(now) {
+		return 0
+	}
+	return l.UsedCount
+}
+
+// Exhausted reports whether the channel has reached either limit at now.
 func (l ChannelQuotaLimit) Exhausted(now time.Time) bool {
-	return l.LimitQuota > 0 && l.CurrentUsed(now) >= l.LimitQuota
+	return (l.LimitQuota > 0 && l.CurrentUsed(now) >= l.LimitQuota) ||
+		(l.LimitCount > 0 && l.CurrentUsedCount(now) >= l.LimitCount)
 }
 
 // The selection hot path reads an immutable snapshot that is replaced on every
@@ -156,9 +167,9 @@ func dropQuotaExhaustedChannels(ids []int) ([]int, *ChannelQuotaExhaustedError) 
 }
 
 // AddChannelQuotaLimitUsage records consumed (or refunded, when negative)
-// quota against the channel's limit, if it has one.
-func AddChannelQuotaLimitUsage(channelId int, quota int) {
-	if quota == 0 || channelId <= 0 {
+// quota and billed requests against the channel's limit, if it has one.
+func AddChannelQuotaLimitUsage(channelId int, quota int, requests int) {
+	if (quota == 0 && requests == 0) || channelId <= 0 {
 		return
 	}
 	if _, limited := channelQuotaLimits()[channelId]; !limited {
@@ -174,13 +185,16 @@ func AddChannelQuotaLimitUsage(channelId int, quota int) {
 		}
 		if row.DailyReset && row.PeriodStart < periodStart {
 			row.UsedQuota = 0
+			row.UsedCount = 0
 			row.PeriodStart = periodStart
 		}
 		row.UsedQuota = max(row.UsedQuota+int64(quota), 0)
+		row.UsedCount = max(row.UsedCount+int64(requests), 0)
 		row.UpdatedAt = now.Unix()
 		updated = row
 		return tx.Model(&ChannelQuotaLimit{}).Where("channel_id = ?", channelId).Updates(map[string]any{
 			"used_quota":   row.UsedQuota,
+			"used_count":   row.UsedCount,
 			"period_start": row.PeriodStart,
 			"updated_at":   row.UpdatedAt,
 		}).Error
@@ -203,10 +217,11 @@ func GetChannelQuotaLimits() ([]ChannelQuotaLimit, error) {
 	return rows, err
 }
 
-// SetChannelQuotaLimit creates or updates a channel's limit, keeping its usage.
-// A limitQuota of 0 removes the limit and returns nil.
-func SetChannelQuotaLimit(channelId int, limitQuota int64, dailyReset bool, message string) (*ChannelQuotaLimit, error) {
-	if limitQuota <= 0 {
+// SetChannelQuotaLimit creates or updates a channel's limits, keeping its usage.
+// With both limits at 0 the limit is removed and nil is returned.
+func SetChannelQuotaLimit(channelId int, limitQuota int64, limitCount int64, dailyReset bool, message string) (*ChannelQuotaLimit, error) {
+	limitQuota, limitCount = max(limitQuota, 0), max(limitCount, 0)
+	if limitQuota == 0 && limitCount == 0 {
 		if err := DB.Where("channel_id = ?", channelId).Delete(&ChannelQuotaLimit{}).Error; err != nil {
 			return nil, err
 		}
@@ -222,16 +237,17 @@ func SetChannelQuotaLimit(channelId int, limitQuota int64, dailyReset bool, mess
 		}
 		if len(rows) == 0 {
 			saved = ChannelQuotaLimit{
-				ChannelId: channelId, LimitQuota: limitQuota, DailyReset: dailyReset, Message: message,
+				ChannelId: channelId, LimitQuota: limitQuota, LimitCount: limitCount, DailyReset: dailyReset, Message: message,
 				PeriodStart: channelQuotaPeriodStart(now), UpdatedAt: now.Unix(),
 			}
 			return tx.Create(&saved).Error
 		}
 		row := rows[0]
-		row.LimitQuota, row.DailyReset, row.Message, row.UpdatedAt = limitQuota, dailyReset, message, now.Unix()
+		row.LimitQuota, row.LimitCount, row.DailyReset, row.Message, row.UpdatedAt = limitQuota, limitCount, dailyReset, message, now.Unix()
 		saved = row
 		return tx.Model(&ChannelQuotaLimit{}).Where("channel_id = ?", channelId).Updates(map[string]any{
 			"limit_quota": row.LimitQuota,
+			"limit_count": row.LimitCount,
 			"daily_reset": row.DailyReset,
 			"message":     row.Message,
 			"updated_at":  row.UpdatedAt,
@@ -244,7 +260,7 @@ func SetChannelQuotaLimit(channelId int, limitQuota int64, dailyReset bool, mess
 	return &saved, nil
 }
 
-// ResetChannelQuotaLimitUsage sets the channel's counted usage back to zero.
+// ResetChannelQuotaLimitUsage sets the channel's counted usage and requests back to zero.
 func ResetChannelQuotaLimitUsage(channelId int) (*ChannelQuotaLimit, error) {
 	now := time.Now()
 	var saved ChannelQuotaLimit
@@ -252,9 +268,10 @@ func ResetChannelQuotaLimitUsage(channelId int) (*ChannelQuotaLimit, error) {
 		if err := lockForUpdate(tx).Where("channel_id = ?", channelId).First(&saved).Error; err != nil {
 			return err
 		}
-		saved.UsedQuota, saved.PeriodStart, saved.UpdatedAt = 0, channelQuotaPeriodStart(now), now.Unix()
+		saved.UsedQuota, saved.UsedCount, saved.PeriodStart, saved.UpdatedAt = 0, 0, channelQuotaPeriodStart(now), now.Unix()
 		return tx.Model(&ChannelQuotaLimit{}).Where("channel_id = ?", channelId).Updates(map[string]any{
 			"used_quota":   saved.UsedQuota,
+			"used_count":   saved.UsedCount,
 			"period_start": saved.PeriodStart,
 			"updated_at":   saved.UpdatedAt,
 		}).Error

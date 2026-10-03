@@ -37,12 +37,12 @@ func TestChannelQuotaLimitSkipsExhaustedChannelsAndReportsCustomMessage(t *testi
 	model.InitChannelCache()
 	t.Cleanup(func() {
 		for _, id := range []int{2201, 2202, 2203} {
-			_, _ = model.SetChannelQuotaLimit(id, 0, false, "")
+			_, _ = model.SetChannelQuotaLimit(id, 0, 0, false, "")
 		}
 	})
 
 	// Usage is counted at settlement; 600 + 600 reaches the 1000 limit.
-	_, err := model.SetChannelQuotaLimit(2201, 1000, false, "")
+	_, err := model.SetChannelQuotaLimit(2201, 1000, 0, false, "")
 	require.NoError(t, err)
 	model.UpdateChannelUsedQuota(2201, 600)
 	exhausted, _ := model.ChannelQuotaExhaustion(2201)
@@ -59,7 +59,7 @@ func TestChannelQuotaLimitSkipsExhaustedChannelsAndReportsCustomMessage(t *testi
 	}
 
 	// Once every channel of the group is exhausted the custom message is returned.
-	_, err = model.SetChannelQuotaLimit(2202, 100, false, "该分组已达限额，请切换为其它分组")
+	_, err = model.SetChannelQuotaLimit(2202, 100, 0, false, "该分组已达限额，请切换为其它分组")
 	require.NoError(t, err)
 	model.UpdateChannelUsedQuota(2202, 100)
 	ctx, param := newChannelQuotaSelectContext(t, "default")
@@ -76,7 +76,7 @@ func TestChannelQuotaLimitSkipsExhaustedChannelsAndReportsCustomMessage(t *testi
 	require.Nil(t, selectErr)
 	assert.Equal(t, 2203, channel.Id)
 	assert.Equal(t, "vip", group)
-	_, err = model.SetChannelQuotaLimit(2203, 50, true, "")
+	_, err = model.SetChannelQuotaLimit(2203, 50, 0, true, "")
 	require.NoError(t, err)
 	model.UpdateChannelUsedQuota(2203, 80)
 	ctx, param = newChannelQuotaSelectContext(t, "auto")
@@ -97,7 +97,7 @@ func TestChannelQuotaLimitSkipsExhaustedChannelsAndReportsCustomMessage(t *testi
 	model.UpdateChannelUsedQuota(2201, -300)
 	exhausted, _ = model.ChannelQuotaExhaustion(2201)
 	assert.False(t, exhausted)
-	_, err = model.SetChannelQuotaLimit(2202, 0, false, "")
+	_, err = model.SetChannelQuotaLimit(2202, 0, 0, false, "")
 	require.NoError(t, err)
 	exhausted, _ = model.ChannelQuotaExhaustion(2202)
 	assert.False(t, exhausted)
@@ -109,8 +109,8 @@ func TestChannelQuotaLimitDailyResetAndManualReset(t *testing.T) {
 	createChannelSelectAutoGroupsChannel(t, db, 2301, "default", "quota-limit-model")
 	createChannelSelectAutoGroupsChannel(t, db, 2302, "default", "quota-limit-model")
 	t.Cleanup(func() {
-		_, _ = model.SetChannelQuotaLimit(2301, 0, false, "")
-		_, _ = model.SetChannelQuotaLimit(2302, 0, false, "")
+		_, _ = model.SetChannelQuotaLimit(2301, 0, 0, false, "")
+		_, _ = model.SetChannelQuotaLimit(2302, 0, 0, false, "")
 	})
 
 	now := time.Now()
@@ -122,7 +122,7 @@ func TestChannelQuotaLimitDailyResetAndManualReset(t *testing.T) {
 	total.DailyReset = false
 	assert.True(t, total.Exhausted(now), "without daily reset usage keeps counting")
 
-	_, err := model.SetChannelQuotaLimit(2301, 1000, true, "")
+	_, err := model.SetChannelQuotaLimit(2301, 1000, 0, true, "")
 	require.NoError(t, err)
 	model.UpdateChannelUsedQuota(2301, 1000)
 	exhausted, _ := model.ChannelQuotaExhaustion(2301)
@@ -137,7 +137,7 @@ func TestChannelQuotaLimitDailyResetAndManualReset(t *testing.T) {
 	exhausted, _ = model.ChannelQuotaExhaustion(2301)
 	assert.False(t, exhausted)
 
-	_, err = model.SetChannelQuotaLimit(2302, 100, false, "")
+	_, err = model.SetChannelQuotaLimit(2302, 100, 0, false, "")
 	require.NoError(t, err)
 	model.UpdateChannelUsedQuota(2302, 150)
 	exhausted, _ = model.ChannelQuotaExhaustion(2302)
@@ -147,4 +147,45 @@ func TestChannelQuotaLimitDailyResetAndManualReset(t *testing.T) {
 	assert.Zero(t, reset.UsedQuota)
 	exhausted, _ = model.ChannelQuotaExhaustion(2302)
 	assert.False(t, exhausted)
+}
+
+func TestChannelQuotaLimitByRequestCount(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	require.NoError(t, db.AutoMigrate(&model.ChannelQuotaLimit{}))
+	createChannelSelectAutoGroupsChannel(t, db, 2401, "default", "quota-limit-model")
+	t.Cleanup(func() { _, _ = model.SetChannelQuotaLimit(2401, 0, 0, false, "") })
+
+	// Only a request limit: two billed requests exhaust it, whatever they cost.
+	limit, err := model.SetChannelQuotaLimit(2401, 0, 2, false, "次数已用完")
+	require.NoError(t, err)
+	require.NotNil(t, limit, "a request-only limit is kept")
+	model.UpdateChannelUsedQuotaForRequest(2401, 10)
+	model.UpdateChannelUsedQuota(2401, 500) // a settlement adjustment is not a request
+	exhausted, _ := model.ChannelQuotaExhaustion(2401)
+	assert.False(t, exhausted)
+	model.UpdateChannelUsedQuotaForRequest(2401, 0) // zero-cost requests still count
+	exhausted, message := model.ChannelQuotaExhaustion(2401)
+	require.True(t, exhausted)
+	assert.Equal(t, "次数已用完", message)
+
+	// A refunded request gives its count back.
+	model.UpdateChannelUsedQuotaForRequestRefund(2401, -10)
+	exhausted, _ = model.ChannelQuotaExhaustion(2401)
+	assert.False(t, exhausted)
+
+	// Both limits: whichever is reached first stops the channel.
+	_, err = model.SetChannelQuotaLimit(2401, 400, 100, true, "")
+	require.NoError(t, err)
+	exhausted, _ = model.ChannelQuotaExhaustion(2401)
+	assert.True(t, exhausted, "500 quota already used reaches the 400 quota limit")
+
+	// Daily reset and manual reset clear the request count too.
+	now := time.Now()
+	stale := model.ChannelQuotaLimit{LimitCount: 1, UsedCount: 5, DailyReset: true, PeriodStart: now.Add(-24 * time.Hour).Unix()}
+	assert.Zero(t, stale.CurrentUsedCount(now))
+	assert.False(t, stale.Exhausted(now))
+	reset, err := model.ResetChannelQuotaLimitUsage(2401)
+	require.NoError(t, err)
+	assert.Zero(t, reset.UsedCount)
+	assert.Zero(t, reset.UsedQuota)
 }

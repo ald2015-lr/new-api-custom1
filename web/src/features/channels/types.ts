@@ -227,15 +227,24 @@ export interface CopyChannelResponse {
 // Channel Quota Limit Types
 // ============================================================================
 
-/** Quota cap for one channel. Quota values are raw quota units. */
+/**
+ * Quota and request-count caps for one channel. Quota values are raw quota
+ * units; a 0 limit means that dimension is not capped.
+ */
 export interface ChannelQuotaLimit {
   channel_id: number
   limit_quota: number
+  /** Maximum number of billed requests; 0 means no count limit. */
+  limit_count: number
   daily_reset: boolean
   message: string
   used_quota: number
   /** Usage counted against the limit; already accounts for the daily reset. */
   current_used: number
+  used_count: number
+  /** Requests counted against the limit; already accounts for the daily reset. */
+  current_used_count: number
+  /** True when either the quota or the request-count limit is reached. */
   exhausted: boolean
   period_start: number
   updated_at: number
@@ -254,8 +263,10 @@ export interface ChannelQuotaLimitResponse {
 }
 
 export interface UpdateChannelQuotaLimitParams {
-  /** 0 removes the limit. */
+  /** 0 together with limit_count 0 removes the limit. */
   limit_quota: number
+  /** Non-negative integer; 0 means no count limit. */
+  limit_count: number
   daily_reset: boolean
   /** Empty uses the default exhausted message. */
   message: string

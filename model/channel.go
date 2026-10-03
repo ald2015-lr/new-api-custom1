@@ -904,7 +904,26 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {
-	AddChannelQuotaLimitUsage(id, quota)
+	updateChannelUsage(id, quota, 0)
+}
+
+// UpdateChannelUsedQuotaForRequest records the quota of one billed request and
+// counts the request against the channel's request limit.
+func UpdateChannelUsedQuotaForRequest(id int, quota int) {
+	updateChannelUsage(id, quota, 1)
+}
+
+// UpdateChannelUsedQuotaForRequestRefund reverses a billed request (quota is
+// the refunded amount, usually negative) including its request count.
+func UpdateChannelUsedQuotaForRequestRefund(id int, quota int) {
+	updateChannelUsage(id, quota, -1)
+}
+
+func updateChannelUsage(id int, quota int, requests int) {
+	AddChannelQuotaLimitUsage(id, quota, requests)
+	if quota == 0 {
+		return
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeChannelUsedQuota, id, quota)
 		return

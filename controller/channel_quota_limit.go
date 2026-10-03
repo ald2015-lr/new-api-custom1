@@ -17,8 +17,9 @@ import (
 
 type channelQuotaLimitResponse struct {
 	model.ChannelQuotaLimit
-	CurrentUsed int64 `json:"current_used"`
-	Exhausted   bool  `json:"exhausted"`
+	CurrentUsed      int64 `json:"current_used"`
+	CurrentUsedCount int64 `json:"current_used_count"`
+	Exhausted        bool  `json:"exhausted"`
 }
 
 func newChannelQuotaLimitResponse(limit *model.ChannelQuotaLimit, now time.Time) *channelQuotaLimitResponse {
@@ -28,6 +29,7 @@ func newChannelQuotaLimitResponse(limit *model.ChannelQuotaLimit, now time.Time)
 	return &channelQuotaLimitResponse{
 		ChannelQuotaLimit: *limit,
 		CurrentUsed:       limit.CurrentUsed(now),
+		CurrentUsedCount:  limit.CurrentUsedCount(now),
 		Exhausted:         limit.Exhausted(now),
 	}
 }
@@ -49,6 +51,7 @@ func GetChannelQuotaLimits(c *gin.Context) {
 
 type updateChannelQuotaLimitRequest struct {
 	LimitQuota int64  `json:"limit_quota"`
+	LimitCount int64  `json:"limit_count"`
 	DailyReset bool   `json:"daily_reset"`
 	Message    string `json:"message"`
 }
@@ -66,8 +69,8 @@ func channelQuotaLimitChannelId(c *gin.Context) (int, bool) {
 	return id, true
 }
 
-// UpdateChannelQuotaLimit sets, changes or (with limit_quota 0) removes a
-// channel's quota limit. Usage counted so far is kept.
+// UpdateChannelQuotaLimit sets, changes or (with limit_quota and limit_count
+// both 0) removes a channel's limits. Usage counted so far is kept.
 func UpdateChannelQuotaLimit(c *gin.Context) {
 	id, ok := channelQuotaLimitChannelId(c)
 	if !ok {
@@ -83,11 +86,15 @@ func UpdateChannelQuotaLimit(c *gin.Context) {
 		common.ApiErrorMsg(c, "限额必须是 0 到最大额度之间的数")
 		return
 	}
+	if req.LimitCount < 0 || req.LimitCount > int64(common.MaxWalletQuota) {
+		common.ApiErrorMsg(c, "次数限额必须是不小于 0 的整数")
+		return
+	}
 	if utf8.RuneCountInString(req.Message) > model.ChannelQuotaMessageMaxLength {
 		common.ApiErrorMsg(c, fmt.Sprintf("自定义报错不能超过 %d 个字符", model.ChannelQuotaMessageMaxLength))
 		return
 	}
-	limit, err := model.SetChannelQuotaLimit(id, req.LimitQuota, req.DailyReset, req.Message)
+	limit, err := model.SetChannelQuotaLimit(id, req.LimitQuota, req.LimitCount, req.DailyReset, req.Message)
 	if err != nil {
 		common.ApiError(c, err)
 		return

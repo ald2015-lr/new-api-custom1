@@ -52,7 +52,7 @@ import {
   formatQuotaWithCurrency,
   getCurrencyLabel,
 } from '@/lib/currency'
-import { formatTimestampToDate } from '@/lib/format'
+import { formatNumber, formatTimestampToDate } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 import { cn, truncateText } from '@/lib/utils'
@@ -606,20 +606,34 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       {quotaLimit && (
         <div
           className={cn(
-            'mt-1 flex items-center gap-1 text-xs whitespace-nowrap tabular-nums',
+            'mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs tabular-nums',
             quotaLimit.exhausted ? 'text-warning' : 'text-muted-foreground'
           )}
         >
-          <span>
-            {t('Limit {{used}} / {{limit}}', {
-              used: sensitiveVisible
-                ? formatQuotaInline(quotaLimit.current_used)
-                : SENSITIVE_MASK,
-              limit: sensitiveVisible
-                ? formatQuotaInline(quotaLimit.limit_quota)
-                : SENSITIVE_MASK,
-            })}
-          </span>
+          {quotaLimit.limit_quota > 0 && (
+            <span className='whitespace-nowrap'>
+              {t('Limit {{used}} / {{limit}}', {
+                used: sensitiveVisible
+                  ? formatQuotaInline(quotaLimit.current_used)
+                  : SENSITIVE_MASK,
+                limit: sensitiveVisible
+                  ? formatQuotaInline(quotaLimit.limit_quota)
+                  : SENSITIVE_MASK,
+              })}
+            </span>
+          )}
+          {quotaLimit.limit_count > 0 && (
+            <span className='whitespace-nowrap'>
+              {t('Requests {{used}} / {{limit}}', {
+                used: sensitiveVisible
+                  ? formatNumber(quotaLimit.current_used_count, locale)
+                  : SENSITIVE_MASK,
+                limit: sensitiveVisible
+                  ? formatNumber(quotaLimit.limit_count, locale)
+                  : SENSITIVE_MASK,
+              })}
+            </span>
+          )}
           {quotaLimit.daily_reset && (
             <StatusBadge
               label={t('Daily')}

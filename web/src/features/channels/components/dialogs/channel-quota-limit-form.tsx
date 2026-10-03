@@ -79,31 +79,59 @@ export function ChannelQuotaLimitForm(props: ChannelQuotaLimitFormProps) {
         className='space-y-4'
         noValidate
       >
-        <FormField
-          control={form.control}
-          name='limit_amount'
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>
-                {t('Usage limit ({{currency}})', { currency: currencyLabel })}
-              </FormLabel>
-              <FormControl>
-                <Input
-                  {...field}
-                  type='number'
-                  inputMode='decimal'
-                  min={0}
-                  step={getEditableQuotaStep()}
-                  placeholder={t('Unlimited')}
-                />
-              </FormControl>
-              <FormDescription>
-                {t('Leave empty or enter 0 to remove the limit')}
-              </FormDescription>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        <div className='grid items-start gap-4 sm:grid-cols-2'>
+          <FormField
+            control={form.control}
+            name='limit_amount'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>
+                  {t('Usage limit ({{currency}})', { currency: currencyLabel })}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    {...field}
+                    type='number'
+                    inputMode='decimal'
+                    min={0}
+                    step={getEditableQuotaStep()}
+                    placeholder={t('Unlimited')}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t('Leave empty or enter 0 to remove the limit')}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='limit_count'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Request limit')}</FormLabel>
+                <FormControl>
+                  <Input
+                    {...field}
+                    type='number'
+                    inputMode='numeric'
+                    min={0}
+                    step={1}
+                    placeholder={t('Unlimited')}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Maximum number of billed requests; 0 or empty = no limit. The channel stops when either limit is reached.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
 
         <FormField
           control={form.control}

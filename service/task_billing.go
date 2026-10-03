@@ -89,7 +89,7 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		Other:     other,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
-	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)
+	model.UpdateChannelUsedQuotaForRequest(info.ChannelId, info.PriceData.Quota)
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +282,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 
 	// 3. 回减预扣时累计的用户和渠道用量，请求次数保持不变
 	model.UpdateUserUsedQuota(task.UserId, -quota)
-	model.UpdateChannelUsedQuota(task.ChannelId, -quota)
+	model.UpdateChannelUsedQuotaForRequestRefund(task.ChannelId, -quota)
 
 	// 4. 记录日志
 	other := taskBillingOther(task)

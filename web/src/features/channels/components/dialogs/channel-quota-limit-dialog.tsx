@@ -28,7 +28,9 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatQuotaWithCurrency } from '@/lib/currency'
+import { formatNumber } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
@@ -53,7 +55,8 @@ const QUOTA_DISPLAY_OPTIONS = {
 } as const
 
 export function ChannelQuotaLimitDialog(props: ChannelQuotaLimitDialogProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const queryClient = useQueryClient()
   const quotaLimits = useChannelQuotaLimits()
   const limit = quotaLimits.data?.get(props.channel.id)
@@ -69,7 +72,7 @@ export function ChannelQuotaLimitDialog(props: ChannelQuotaLimitDialogProps) {
     },
     onSuccess: async (payload) => {
       toast.success(
-        payload.limit_quota > 0
+        payload.limit_quota > 0 || payload.limit_count > 0
           ? t('Quota limit saved')
           : t('Quota limit removed')
       )
@@ -165,17 +168,27 @@ export function ChannelQuotaLimitDialog(props: ChannelQuotaLimitDialogProps) {
                 {t('Current usage')}
               </div>
               <div className='flex flex-wrap items-center gap-2 text-sm font-medium tabular-nums'>
-                <span>
-                  {formatQuotaWithCurrency(
-                    limit.current_used,
-                    QUOTA_DISPLAY_OPTIONS
-                  )}{' '}
-                  /{' '}
-                  {formatQuotaWithCurrency(
-                    limit.limit_quota,
-                    QUOTA_DISPLAY_OPTIONS
-                  )}
-                </span>
+                {limit.limit_quota > 0 && (
+                  <span>
+                    {formatQuotaWithCurrency(
+                      limit.current_used,
+                      QUOTA_DISPLAY_OPTIONS
+                    )}{' '}
+                    /{' '}
+                    {formatQuotaWithCurrency(
+                      limit.limit_quota,
+                      QUOTA_DISPLAY_OPTIONS
+                    )}
+                  </span>
+                )}
+                {limit.limit_count > 0 && (
+                  <span>
+                    {t('Requests {{used}} / {{limit}}', {
+                      used: formatNumber(limit.current_used_count, locale),
+                      limit: formatNumber(limit.limit_count, locale),
+                    })}
+                  </span>
+                )}
                 {limit.exhausted && (
                   <StatusBadge
                     label={t('Limit Reached')}
