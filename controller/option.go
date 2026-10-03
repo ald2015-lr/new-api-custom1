@@ -329,6 +329,16 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case operation_setting.GroupAccessRulesOptionKey:
+		// Resolve whitelist usernames to ids before storing; enforcement uses ids only.
+		option.Value, err = model.NormalizeGroupAccessRulesInput(option.Value.(string))
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": err.Error(),
+			})
+			return
+		}
 	case "ImageRatio":
 		err = ratio_setting.UpdateImageRatioByJSONString(option.Value.(string))
 		if err != nil {

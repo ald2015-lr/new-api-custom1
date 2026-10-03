@@ -7,14 +7,19 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
@@ -509,4 +514,63 @@ func TestApplyWebSocketSubprotocolAuthorizationReadsRepeatedHeaders(t *testing.T
 
 	assert.True(t, applyWebSocketSubprotocolAuthorization(header))
 	assert.Equal(t, "Bearer sk-later-field", header.Get("Authorization"))
+}
+
+func TestTokenAuthEnforcesGroupAccessGate(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	gin.SetMode(gin.TestMode)
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	previousRedis, previousMaster, previousSQLite := common.RedisEnabled, common.IsMasterNode, common.SQLitePath
+	previousRules := operation_setting.GroupAccessRulesJSON()
+	previousUsableGroups := setting.UserUsableGroups2JSONString()
+	previousGroupRatios := ratio_setting.GroupRatio2JSONString()
+	// InitDB also initializes the dialect-specific column names used by token lookup.
+	t.Setenv("SQL_DSN", "")
+	t.Setenv("LOG_SQL_DSN", "")
+	common.RedisEnabled, common.IsMasterNode = false, false
+	common.SQLitePath = filepath.Join(t.TempDir(), "group-access.db")
+	require.NoError(t, model.InitDB())
+	db := model.DB
+	model.LOG_DB = db
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.SetDatabaseTypes(previousType, previousLogType)
+		common.RedisEnabled, common.IsMasterNode, common.SQLitePath = previousRedis, previousMaster, previousSQLite
+		operation_setting.LoadGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, previousRules)
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsableGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroupRatios))
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
+	})
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.TopUp{}, &model.Redemption{}))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","svip":"SVIP"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"svip":2}`))
+	operation_setting.LoadGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, `[{"group":"svip","min_topup":50,"users":[]}]`)
+
+	user := &model.User{Username: "group-access-user", Password: "password-placeholder", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "group-access-aff"}
+	require.NoError(t, db.Create(user).Error)
+	token := &model.Token{UserId: user.Id, Key: "groupaccesstokenkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, Group: "svip"}
+	require.NoError(t, db.Create(token).Error)
+	model.InvalidateUserTopupTotalCache(user.Id)
+	router := gin.New()
+	router.GET("/v1/group-access", TokenAuth(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	denied := middlewareBearerRequest(router, "/v1/group-access", "sk-"+token.Key)
+	assert.Equal(t, http.StatusForbidden, denied.Code)
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, common.Unmarshal(denied.Body.Bytes(), &payload))
+	assert.Equal(t, "access_denied", payload.Error.Code)
+	assert.Contains(t, payload.Error.Message, "Group svip requires a cumulative top-up of at least 50 (current: 0)")
+
+	require.NoError(t, db.Create(&model.TopUp{UserId: user.Id, Amount: 50, TradeNo: "group-access-paid", PaymentMethod: "alipay", Status: common.TopUpStatusSuccess}).Error)
+	model.InvalidateUserTopupTotalCache(user.Id)
+	assert.Equal(t, http.StatusNoContent, middlewareBearerRequest(router, "/v1/group-access", "sk-"+token.Key).Code)
 }

@@ -614,6 +614,8 @@ func TokenAuth() func(c *gin.Context) {
 		}
 
 		userCache.WriteContext(c)
+		groupAccessSubject := service.GroupAccessSubject{UserId: userCache.Id, Role: userCache.Role, Group: userCache.Group}
+		common.SetContextKey(c, constant.ContextKeyGroupAccessSubject, groupAccessSubject)
 
 		userGroup := userCache.Group
 		tokenGroup := token.Group
@@ -629,6 +631,9 @@ func TokenAuth() func(c *gin.Context) {
 					abortWithOpenAiMessage(c, http.StatusForbidden, fmt.Sprintf("分组 %s 已被弃用", tokenGroup))
 					return
 				}
+			}
+			if tokenGroup != "auto" && abortIfGroupAccessDenied(c, groupAccessSubject, tokenGroup) {
+				return
 			}
 			userGroup = tokenGroup
 		}

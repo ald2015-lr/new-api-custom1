@@ -27,9 +27,16 @@ func GetUserGroups(c *gin.Context) {
 	usableGroups := make(map[string]map[string]any)
 	userGroup := ""
 	userId := c.GetInt("id")
-	userGroup, _ = model.GetUserGroup(userId, false)
+	if userId > 0 {
+		userGroup, _ = model.GetUserGroup(userId, false)
+	}
 	userUsableGroups := service.GetUserUsableGroups(userGroup)
+	// Recharge-gated groups the caller cannot use yet are listed separately.
+	locked := service.GetLockedUsableGroups(c, service.GroupAccessSubjectFromContext(c, userGroup), userUsableGroups)
 	for groupName, _ := range ratio_setting.GetGroupRatioCopy() {
+		if _, ok := locked[groupName]; ok {
+			continue
+		}
 		// UserUsableGroups contains the groups that the user can use
 		if desc, ok := userUsableGroups[groupName]; ok {
 			usableGroups[groupName] = map[string]any{
@@ -48,5 +55,6 @@ func GetUserGroups(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    usableGroups,
+		"locked":  locked,
 	})
 }

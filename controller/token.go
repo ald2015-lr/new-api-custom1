@@ -127,6 +127,29 @@ func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) boo
 	return true
 }
 
+// rejectInaccessibleTokenGroup writes an error and returns true when the
+// token's explicit group is recharge-gated and unavailable to the caller.
+func rejectInaccessibleTokenGroup(c *gin.Context, group string) bool {
+	if _, _, gated := operation_setting.GetGroupAccessGate(group, 0); !gated {
+		return false
+	}
+	userGroup, err := getTokenRequestUserGroup(c)
+	if err != nil {
+		common.ApiError(c, err)
+		return true
+	}
+	denial, err := service.CheckGroupAccess(c, service.GroupAccessSubjectFromContext(c, userGroup), group)
+	if denial == nil {
+		return false
+	}
+	if err != nil {
+		common.ApiError(c, err)
+		return true
+	}
+	common.ApiErrorMsg(c, denial.Message(c))
+	return true
+}
+
 func GetAllTokens(c *gin.Context) {
 	userId := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
@@ -180,7 +203,7 @@ func GetTokenAutoGroups(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, gin.H{
-		"groups":    service.GetUserAutoGroup(userGroup),
+		"groups":    service.FilterGroupsByAccess(c, service.GroupAccessSubjectFromContext(c, userGroup), service.GetUserAutoGroup(userGroup)),
 		"max_count": setting.GetMaxTokenAutoGroups(),
 	})
 }
@@ -315,6 +338,9 @@ func AddToken(c *gin.Context) {
 		})
 		return
 	}
+	if rejectInaccessibleTokenGroup(c, token.Group) {
+		return
+	}
 	if token.Group == "auto" {
 		if !setTokenAutoGroups(c, &token, request.AutoGroups.Groups) {
 			return
@@ -429,6 +455,9 @@ func UpdateToken(c *gin.Context) {
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
 	} else {
+		if rejectInaccessibleTokenGroup(c, token.Group) {
+			return
+		}
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
 		cleanToken.ExpiredTime = token.ExpiredTime

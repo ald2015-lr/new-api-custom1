@@ -287,6 +287,10 @@ distributor.no_available_channel_task_plugin: "No available channel for model {{
 distributor.invalid_midjourney_request: "Invalid Midjourney request: {{.Error}}"
 distributor.invalid_request_parse_model: "Invalid request, unable to parse model"
 
+# Recharge-gated group messages
+group_access.topup_required: "Group {{.Group}} requires a cumulative top-up of at least {{.Required}} (current: {{.Current}})"
+group_access.whitelist_only: "Group {{.Group}} is restricted to specific users"
+
 # Custom OAuth provider messages
 custom_oauth.not_found: "Custom OAuth provider not found"
 custom_oauth.slug_empty: "Slug cannot be empty"
