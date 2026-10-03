@@ -25,12 +25,13 @@ import { LanguageSwitcher } from '@/components/language-switcher'
 import { NotificationPopover } from '@/components/notification-popover'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { ThemeSwitch } from '@/components/theme-switch'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SystemUpdateAction } from '@/features/system-update/system-update-action'
 import { useNotifications } from '@/hooks/use-notifications'
 import { useSystemConfig } from '@/hooks/use-system-config'
 import { useTopNavLinks } from '@/hooks/use-top-nav-links'
+import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -96,8 +97,15 @@ export function PublicHeader(props: PublicHeaderProps) {
 
   const user = auth.user
   const isAuthenticated = !!user
+  // Matches SystemUpdateAction, which adds a size-8 version button for admins.
+  const isAdmin = (user?.role ?? 0) >= ROLE.ADMIN
   const displaySiteName = customSiteName || systemName
   const links = dynamicLinks.length > 0 ? dynamicLinks : navLinks
+  const pricingLink = links.find(
+    (link) => link.href === '/pricing' && !link.external
+  )
+  const isPricingActive =
+    pathname === '/pricing' || pathname.startsWith('/pricing/')
 
   let logoContent: ReactNode = (
     <HeaderLogo
@@ -214,17 +222,30 @@ export function PublicHeader(props: PublicHeaderProps) {
                 : 'h-16 px-2'
             )}
           >
-            {/* Logo */}
-            <div className='@container/system-brand flex min-w-0 flex-1 items-center gap-1 lg:min-w-36'>
+            {/* Logo. When the mobile actions need room the Model Square
+                shortcut shrinks instead: the minimum widths keep the logo and
+                the admin version button whole, and the site name hides rather
+                than being cut to an unreadable sliver. */}
+            <div
+              className={cn(
+                '@container/system-brand flex min-w-7 flex-1 items-center gap-1 lg:min-w-36',
+                isAdmin && 'min-w-16'
+              )}
+            >
               <Link
                 to={homeUrl}
-                className='group flex min-w-0 items-center gap-2.5'
+                className='group flex min-w-7 items-center gap-2.5'
               >
                 <div className='flex size-7 shrink-0 items-center justify-center transition-all duration-300 group-hover:scale-105'>
                   {logoContent}
                 </div>
                 <span
-                  className='max-w-48 truncate text-sm font-semibold tracking-tight'
+                  className={cn(
+                    'hidden max-w-48 truncate text-sm font-semibold tracking-tight',
+                    isAdmin
+                      ? '@min-[7rem]/system-brand:block'
+                      : '@min-[4.5rem]/system-brand:block'
+                  )}
                   title={displaySiteName}
                 >
                   {loading ? (
@@ -311,7 +332,30 @@ export function PublicHeader(props: PublicHeaderProps) {
             </div>
 
             {/* Mobile: compact actions + hamburger */}
-            <div className='flex shrink-0 items-center gap-2 lg:hidden'>
+            <div className='flex min-w-0 items-center gap-1 min-[360px]:gap-2 lg:hidden'>
+              {pricingLink && (
+                <Link
+                  to={pricingLink.href}
+                  title={t(pricingLink.title)}
+                  disabled={pricingLink.disabled}
+                  aria-current={isPricingActive ? 'page' : undefined}
+                  data-testid='public-header-mobile-pricing'
+                  onClick={(event) =>
+                    handleNavLinkClick(event, pricingLink, true)
+                  }
+                  className={cn(
+                    buttonVariants({ variant: 'outline', size: 'sm' }),
+                    // Unlike the other actions it may shrink (and ellipsize)
+                    // when the row runs out of room, e.g. on larger theme
+                    // scales.
+                    'h-8 max-w-25 min-w-0 shrink px-2 text-xs min-[400px]:max-w-32 md:max-w-48',
+                    isPricingActive && 'bg-muted text-foreground dark:bg-muted',
+                    pricingLink.disabled && 'pointer-events-none opacity-50'
+                  )}
+                >
+                  <span className='truncate'>{t(pricingLink.title)}</span>
+                </Link>
+              )}
               {showThemeSwitch && <ThemeSwitch />}
               {showAuthButtons && !loading && isAuthenticated && (
                 <ProfileDropdown />
