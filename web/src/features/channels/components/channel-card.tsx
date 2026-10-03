@@ -24,6 +24,7 @@ import { GroupBadge } from '@/components/group-badge'
 import { StatusBadgeTypeContext } from '@/components/status-badge'
 
 import { CHANNEL_STATUS } from '../constants'
+import { useChannelQuotaLimit } from '../hooks/use-channel-quota-limits'
 import { isTagAggregateRow, parseGroupsList } from '../lib'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
@@ -49,6 +50,7 @@ function ChannelCardComponent({
   const { t } = useTranslation()
   const { sensitiveVisible } = useChannels()
   const isTagRow = isTagAggregateRow(row.original)
+  const quotaLimit = useChannelQuotaLimit(row.original.id)
   const cells = row.getAllCells()
 
   const renderCell = (id: string) => {
@@ -77,8 +79,11 @@ function ChannelCardComponent({
   // In card view the enable/disable state is already conveyed by the inline
   // power toggle, so the plain "Enabled"/"Disabled" badge is redundant. Keep
   // only the informative states (e.g. auto-disabled, unknown) and tag rows.
+  // A reached quota limit is informative too: the channel is skipped even
+  // though it is enabled.
   const showStatusBadge =
     isTagRow ||
+    Boolean(quotaLimit?.exhausted) ||
     (row.original.status !== CHANNEL_STATUS.ENABLED &&
       row.original.status !== CHANNEL_STATUS.MANUAL_DISABLED)
 

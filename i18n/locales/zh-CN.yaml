@@ -291,6 +291,7 @@ distributor.invalid_request_parse_model: "无效的请求，无法解析模型"
 # 分组充值门槛消息
 group_access.topup_required: "分组 {{.Group}} 需要累计充值满 {{.Required}} 才能使用（当前累计 {{.Current}}）"
 group_access.whitelist_only: "分组 {{.Group}} 仅限指定用户使用"
+channel_quota.exhausted: "该分组已达限额，请切换为其它分组"
 
 # Custom OAuth provider messages
 custom_oauth.not_found: "自定义 OAuth 提供商不存在"

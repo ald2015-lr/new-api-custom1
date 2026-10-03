@@ -55,7 +55,7 @@ import {
 import { formatTimestampToDate } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
-import { truncateText } from '@/lib/utils'
+import { cn, truncateText } from '@/lib/utils'
 
 import { getCodexUsage, updateChannelBalance } from '../api'
 import {
@@ -65,6 +65,7 @@ import {
   CHANNEL_TYPE_SGLANG,
   MODEL_FETCHABLE_TYPES,
 } from '../constants'
+import { useChannelQuotaLimit } from '../hooks/use-channel-quota-limits'
 import {
   formatRelativeTime,
   formatResponseTime,
@@ -333,6 +334,32 @@ const MAX_INLINE_BALANCE_CHARS = 8
 const SENSITIVE_MASK = '••••'
 
 /**
+ * Keeps the channel status badge and adds a warning badge once the channel's
+ * quota limit is exhausted (channel selection then skips it).
+ */
+function ChannelStatusWithQuotaLimit(props: {
+  channelId: number
+  children: React.ReactNode
+}) {
+  const { t } = useTranslation()
+  const quotaLimit = useChannelQuotaLimit(props.channelId)
+  if (!quotaLimit?.exhausted) {
+    return props.children
+  }
+  return (
+    <div className='flex flex-wrap items-center gap-1'>
+      {props.children}
+      <StatusBadge
+        label={t('Limit Reached')}
+        variant='warning'
+        size='sm'
+        copyable={false}
+      />
+    </div>
+  )
+}
+
+/**
  * Balance cell component with click to update
  */
 export function BalanceCell({ channel }: { channel: Channel }) {
@@ -343,6 +370,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const isTagRow = isTagAggregateRow(channel)
   const balance = channel.balance || 0
   const usedQuota = channel.used_quota || 0
+  const quotaLimit = useChannelQuotaLimit(channel.id)
   const [isUpdating, setIsUpdating] = useState(false)
   const [rawBalanceResponse, setRawBalanceResponse] = useState<string | null>(
     null
@@ -363,27 +391,33 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     showSymbol: layout !== 'card',
   } as const
   // Precise values are kept for the tooltip; long values are shown compactly inline.
-  const usedFull = withSuffix(
-    formatQuotaWithCurrency(usedQuota, {
-      digitsLarge: 2,
-      digitsSmall: 4,
-      abbreviate: true,
-      showSymbol: layout !== 'card',
-    })
-  )
+  const formatQuotaFull = (quota: number) =>
+    withSuffix(
+      formatQuotaWithCurrency(quota, {
+        digitsLarge: 2,
+        digitsSmall: 4,
+        abbreviate: true,
+        showSymbol: layout !== 'card',
+      })
+    )
+  const formatQuotaInline = (quota: number) => {
+    const full = formatQuotaFull(quota)
+    if (full.length <= MAX_INLINE_BALANCE_CHARS) {
+      return full
+    }
+    return withSuffix(
+      formatQuotaWithCurrency(quota, {
+        compact: true,
+        locale,
+        showSymbol: layout !== 'card',
+      })
+    )
+  }
+  const usedFull = formatQuotaFull(usedQuota)
   const remainingFull = withSuffix(
     formatCurrencyFromUSD(balance, balanceFormatOptions)
   )
-  const usedDisplay =
-    usedFull.length > MAX_INLINE_BALANCE_CHARS
-      ? withSuffix(
-          formatQuotaWithCurrency(usedQuota, {
-            compact: true,
-            locale,
-            showSymbol: layout !== 'card',
-          })
-        )
-      : usedFull
+  const usedDisplay = formatQuotaInline(usedQuota)
   const remainingDisplay =
     remainingFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
@@ -569,6 +603,34 @@ export function BalanceCell({ channel }: { channel: Channel }) {
           </TooltipContent>
         </Tooltip>
       </div>
+      {quotaLimit && (
+        <div
+          className={cn(
+            'mt-1 flex items-center gap-1 text-xs whitespace-nowrap tabular-nums',
+            quotaLimit.exhausted ? 'text-warning' : 'text-muted-foreground'
+          )}
+        >
+          <span>
+            {t('Limit {{used}} / {{limit}}', {
+              used: sensitiveVisible
+                ? formatQuotaInline(quotaLimit.current_used)
+                : SENSITIVE_MASK,
+              limit: sensitiveVisible
+                ? formatQuotaInline(quotaLimit.limit_quota)
+                : SENSITIVE_MASK,
+            })}
+          </span>
+          {quotaLimit.daily_reset && (
+            <StatusBadge
+              label={t('Daily')}
+              variant='info'
+              size='sm'
+              copyable={false}
+              className='h-4 px-1 text-xs'
+            />
+          )}
+        </div>
+      )}
 
       <CodexUsageDialog
         open={codexUsageOpen}
@@ -1010,43 +1072,47 @@ export function useChannelsColumns(
 
             if (statusReason || statusTime) {
               return (
-                <TooltipProvider delay={100}>
-                  <Tooltip>
-                    <TooltipTrigger render={<span />}>
-                      <StatusBadge
-                        label={label}
-                        variant={config.variant}
-                        size='sm'
-                        copyable={false}
-                      />
-                    </TooltipTrigger>
-                    <TooltipContent side='top' className='max-w-xs'>
-                      <div className='space-y-1 text-xs'>
-                        {statusReason && (
-                          <div className='wrap-anywhere'>
-                            {t('Reason:')} {statusReason}
-                          </div>
-                        )}
-                        {statusTime && (
-                          <div>
-                            {t('Time:')} {statusTime}
-                          </div>
-                        )}
-                      </div>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <ChannelStatusWithQuotaLimit channelId={channel.id}>
+                  <TooltipProvider delay={100}>
+                    <Tooltip>
+                      <TooltipTrigger render={<span />}>
+                        <StatusBadge
+                          label={label}
+                          variant={config.variant}
+                          size='sm'
+                          copyable={false}
+                        />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <div className='space-y-1 text-xs'>
+                          {statusReason && (
+                            <div className='wrap-anywhere'>
+                              {t('Reason:')} {statusReason}
+                            </div>
+                          )}
+                          {statusTime && (
+                            <div>
+                              {t('Time:')} {statusTime}
+                            </div>
+                          )}
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </ChannelStatusWithQuotaLimit>
               )
             }
           }
 
           return (
-            <StatusBadge
-              label={label}
-              variant={config.variant}
-              size='sm'
-              copyable={false}
-            />
+            <ChannelStatusWithQuotaLimit channelId={channel.id}>
+              <StatusBadge
+                label={label}
+                variant={config.variant}
+                size='sm'
+                copyable={false}
+              />
+            </ChannelStatusWithQuotaLimit>
           )
         },
         filterFn: (row, id, value) => {

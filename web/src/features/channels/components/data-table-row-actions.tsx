@@ -33,6 +33,7 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  Wallet,
 } from 'lucide-react'
 import { useContext, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -135,6 +136,11 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const handleCopy = () => {
     setCurrentRow(channel)
     setOpen('copy-channel')
+  }
+
+  const handleQuotaLimit = () => {
+    setCurrentRow(channel)
+    setOpen('quota-limit')
   }
 
   const handleManageKeys = () => {
@@ -317,6 +323,14 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
               </DropdownMenuShortcut>
             </DropdownMenuItem>
           )}
+
+          {/* Quota Limit */}
+          <DropdownMenuItem onClick={handleQuotaLimit}>
+            {t('Quota limit')}
+            <DropdownMenuShortcut>
+              <Wallet size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
 
           <DropdownMenuSeparator />
 

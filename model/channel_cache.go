@@ -130,14 +130,23 @@ func GetRandomSatisfiedChannel(
 
 	// First, try to find channels with the exact model name.
 	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
+	channels, quotaExhausted := dropQuotaExhaustedChannels(channels)
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.RoutingMatchModelName(model)
 		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		var normalizedExhausted *ChannelQuotaExhaustedError
+		channels, normalizedExhausted = dropQuotaExhaustedChannels(channels)
+		if quotaExhausted == nil {
+			quotaExhausted = normalizedExhausted
+		}
 	}
 
 	if len(channels) == 0 {
+		if quotaExhausted != nil {
+			return nil, quotaExhausted
+		}
 		return nil, nil
 	}
 

@@ -224,6 +224,44 @@ export interface CopyChannelResponse {
 }
 
 // ============================================================================
+// Channel Quota Limit Types
+// ============================================================================
+
+/** Quota cap for one channel. Quota values are raw quota units. */
+export interface ChannelQuotaLimit {
+  channel_id: number
+  limit_quota: number
+  daily_reset: boolean
+  message: string
+  used_quota: number
+  /** Usage counted against the limit; already accounts for the daily reset. */
+  current_used: number
+  exhausted: boolean
+  period_start: number
+  updated_at: number
+}
+
+export interface ChannelQuotaLimitsResponse {
+  success: boolean
+  message?: string
+  data?: ChannelQuotaLimit[]
+}
+
+export interface ChannelQuotaLimitResponse {
+  success: boolean
+  message?: string
+  data?: ChannelQuotaLimit | null
+}
+
+export interface UpdateChannelQuotaLimitParams {
+  /** 0 removes the limit. */
+  limit_quota: number
+  daily_reset: boolean
+  /** Empty uses the default exhausted message. */
+  message: string
+}
+
+// ============================================================================
 // Multi-Key Management Types
 // ============================================================================
 

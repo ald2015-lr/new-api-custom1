@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type {
   ColumnFiltersState,
@@ -25,7 +25,7 @@ import type {
   Row,
 } from '@tanstack/react-table'
 import { Eye, EyeOff, RefreshCw } from 'lucide-react'
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -53,6 +53,10 @@ import {
   CHANNEL_STATUS,
   CHANNEL_STATUS_OPTIONS,
 } from '../constants'
+import {
+  CHANNEL_QUOTA_LIMITS_QUERY_KEY,
+  useChannelQuotaLimits,
+} from '../hooks/use-channel-quota-limits'
 import {
   channelsQueryKeys,
   aggregateChannelsByTag,
@@ -221,7 +225,7 @@ export function ChannelsTable() {
 
   // Fetch channels data
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
-  const { data, isLoading, isFetching, refetch } = useQuery({
+  const { data, dataUpdatedAt, isLoading, isFetching, refetch } = useQuery({
     queryKey: channelsQueryKeys.list({
       keyword: globalFilter,
       model: modelFilter,
@@ -294,6 +298,25 @@ export function ChannelsTable() {
     },
     placeholderData: (previousData) => previousData,
   })
+
+  // Quota limits are loaded once for all rows and refreshed whenever the
+  // channel list itself is refetched (refresh button, mutations, paging).
+  useChannelQuotaLimits()
+  const queryClient = useQueryClient()
+  const lastListUpdateRef = useRef(0)
+  useEffect(() => {
+    if (!dataUpdatedAt) {
+      return
+    }
+    const previousUpdate = lastListUpdateRef.current
+    lastListUpdateRef.current = dataUpdatedAt
+    if (previousUpdate === 0 || previousUpdate === dataUpdatedAt) {
+      return
+    }
+    void queryClient.invalidateQueries({
+      queryKey: CHANNEL_QUOTA_LIMITS_QUERY_KEY,
+    })
+  }, [dataUpdatedAt, queryClient])
 
   // Apply tag aggregation if tag mode is enabled
   const channels = useMemo(() => {

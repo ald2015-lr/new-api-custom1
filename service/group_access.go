@@ -188,6 +188,9 @@ func CheckPinnedChannelAccess(c *gin.Context, channel *model.Channel) (*GroupAcc
 // PinnedChannelAccessMessage returns the localized reason a pinned follow-up is
 // refused, or "" when it may proceed. A failed check is refused (fail closed).
 func PinnedChannelAccessMessage(c *gin.Context, channel *model.Channel) string {
+	if exhausted, message := model.ChannelQuotaExhaustion(channel.Id); exhausted {
+		return ChannelQuotaExhaustedMessage(c, &model.ChannelQuotaExhaustedError{Message: message})
+	}
 	denial, err := CheckPinnedChannelAccess(c, channel)
 	if denial == nil {
 		return ""

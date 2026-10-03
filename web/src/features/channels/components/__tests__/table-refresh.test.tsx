@@ -152,3 +152,14 @@ it('refetches the channel list with the current filters and marks Refresh busy w
   release()
   await waitFor(() => expect(refresh).toHaveAttribute('aria-busy', 'false'))
 })
+
+it('refetches channel quota limits once each time the channel list is refreshed', async () => {
+  const get = await renderChannelsPage(() => Promise.resolve())
+  const quotaLimitCalls = () =>
+    get.mock.calls.filter(([url]) => url === '/api/channel/quota_limits')
+  await waitFor(() => expect(quotaLimitCalls()).toHaveLength(1))
+
+  await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+
+  await waitFor(() => expect(quotaLimitCalls()).toHaveLength(2))
+})

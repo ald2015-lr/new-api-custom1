@@ -352,4 +352,7 @@ const (
 const (
 	MsgGroupAccessTopupRequired = "group_access.topup_required"
 	MsgGroupAccessWhitelistOnly = "group_access.whitelist_only"
+
+	// Channel quota limit
+	MsgChannelQuotaExhausted = "channel_quota.exhausted"
 )

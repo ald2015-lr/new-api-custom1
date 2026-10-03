@@ -28,6 +28,8 @@ import type {
   Channel,
   ChannelBalanceResponse,
   ChannelOpsResponse,
+  ChannelQuotaLimitResponse,
+  ChannelQuotaLimitsResponse,
   ChannelTestResponse,
   CopyChannelParams,
   CopyChannelResponse,
@@ -40,6 +42,7 @@ import type {
   SearchChannelsParams,
   SearchChannelsResponse,
   TagOperationParams,
+  UpdateChannelQuotaLimitParams,
 } from './types'
 
 const channelActionConfig = (
@@ -402,6 +405,47 @@ export async function resetCodexUsage(
     `/api/channel/${channelId}/codex/usage/reset`,
     {},
     channelActionConfig({ disableDuplicate: true })
+  )
+  return res.data
+}
+
+// ============================================================================
+// Channel Quota Limits
+// ============================================================================
+
+/**
+ * List every configured channel quota limit
+ */
+export async function getChannelQuotaLimits(): Promise<ChannelQuotaLimitsResponse> {
+  const res = await api.get('/api/channel/quota_limits')
+  return res.data
+}
+
+/**
+ * Create, update or remove (limit_quota 0) a channel quota limit
+ */
+export async function updateChannelQuotaLimit(
+  channelId: number,
+  data: UpdateChannelQuotaLimitParams
+): Promise<ChannelQuotaLimitResponse> {
+  const res = await api.put(
+    `/api/channel/${channelId}/quota_limit`,
+    data,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/**
+ * Reset the usage counted against a channel quota limit to 0
+ */
+export async function resetChannelQuotaLimitUsage(
+  channelId: number
+): Promise<ChannelQuotaLimitResponse> {
+  const res = await api.post(
+    `/api/channel/${channelId}/quota_limit/reset`,
+    {},
+    channelActionConfig()
   )
   return res.data
 }

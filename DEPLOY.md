@@ -144,6 +144,7 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `web/src/components/layout/components/public-header.tsx` | 手机端首页顶栏直接显示「模型广场」和公告铃铛；平板横屏后不再锁死页面滚动 |
 | `model/topup.go` | 管理员补单：Creem 订单按额度原样入账（上游会放大 50 万倍）；重复补单不再给用户 0 记日志 |
 | `middleware/task_plugin.go`、`relay/relay_task.go`、`relay/mjproxy_handler.go` | 基于旧任务的续作/放大请求也受分组准入限制 |
+| 新文件 `model/channel_quota_limit.go`、`controller/channel_quota_limit.go`，以及 `model/{main,channel,channel_cache,ability}.go`、`service/channel_select.go`、`controller/relay.go`、`router/channel-router.go`、`i18n/` 里的小钩子；前端 `web/src/features/channels/*` | 渠道限额（见第十节）；新增 `channel_quota_limits` 表 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
@@ -351,4 +352,29 @@ WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TI
 ```
 
 `sub_flag = 0` 而 `plan_flag` 是 1 或 NULL，就是被上游 bug 误改的订阅，升级后自动恢复。`plan_flag = 0` 说明套餐本身关掉了回退钱包，到后台「订阅套餐」里打开「额度用尽后允许使用钱包余额」即可。
+
+---
+
+## 十、渠道限额（渠道用到多少就停用，可每天重置）
+
+**在哪设置：** 渠道管理 → 渠道那一行的操作菜单 →「额度限制」。可以设置：
+
+| 项 | 说明 |
+|---|---|
+| 限额 | 这个渠道最多能消耗多少额度（和「已使用」列同一个单位，例如 $1000）。填 0 = 不限 |
+| 每日重置 | 打开后按天计算：每天 0 点（容器时区，compose 里是 `TZ=Asia/Shanghai`）用量清零，第二天又能用到限额 |
+| 自定义报错 | 分组里的渠道都达到限额时返回给调用方的提示，留空时默认是「该分组已达限额，请切换为其它分组」 |
+
+弹窗里能看到当前用量，也可以点「重置用量」手动清零。渠道列表的状态列会显示「已达上限」，「已使用/剩余」列下面会显示「限额 已用 / 上限」（开了每日重置还会带「每天」标记）。
+
+**达到限额后会怎样：**
+- 这个渠道不再被选中，同分组的其它渠道照常使用（优先级低的渠道会顶上）；
+- 分组里所有渠道都达到限额时，调用返回 HTTP 429，`code` 为 `channel_quota_exhausted`，`message` 为你设置的自定义报错；
+- 令牌用 `auto` 分组时会自动换到下一个分组，全部分组都用不了才报错；
+- 基于旧任务的续作/放大请求，如果原渠道已达限额，也会返回这个报错。
+
+**注意：**
+- 用量按每次请求**结算后的实际扣费**累计（退款会减回去），所以并发很高时可能略超限额（最后几个同时进行的请求会全部完成）；
+- 只统计**设置限额之后**的用量；「已使用」列里的历史总用量不受影响；
+- 多节点部署时，其它节点最多 10 秒后看到最新用量。
 

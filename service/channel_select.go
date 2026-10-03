@@ -135,6 +135,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 		}
 
+		var autoQuotaErr *model.ChannelQuotaExhaustedError
 		for i := startGroupIndex; i < len(autoGroups); i++ {
 			autoGroup := autoGroups[i]
 			// Calculate priorityRetry for current group
@@ -147,13 +148,19 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(
+			var groupErr error
+			channel, groupErr = model.GetRandomSatisfiedChannel(
 				autoGroup,
 				param.ModelName,
 				priorityRetry,
 				filters,
 			)
 			if channel == nil {
+				// Remember a quota-limit refusal so it is reported if no later group has a channel.
+				var quotaErr *model.ChannelQuotaExhaustedError
+				if errors.As(groupErr, &quotaErr) && autoQuotaErr == nil {
+					autoQuotaErr = quotaErr
+				}
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
 				logger.LogDebug(param.Ctx, "No available channel in group %s for model %s at priorityRetry %d, trying next group", autoGroup, param.ModelName, priorityRetry)
@@ -188,6 +195,9 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i)
 			}
 			break
+		}
+		if channel == nil && autoQuotaErr != nil {
+			return nil, selectGroup, autoQuotaErr
 		}
 	} else {
 		channel, err = model.GetRandomSatisfiedChannel(
@@ -296,6 +306,9 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		if channel.Status != common.ChannelStatusEnabled {
 			return nil, "", pinnedChannelUnavailable(pin, http.StatusForbidden, i18n.MsgDistributorChannelDisabled)
 		}
+		if exhausted, message := model.ChannelQuotaExhaustion(channel.Id); exhausted {
+			return nil, "", channelQuotaExhaustedSelectError(&model.ChannelQuotaExhaustedError{Message: message})
+		}
 		if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
 			return nil, "", &ChannelSelectError{
 				StatusCode: http.StatusBadRequest, Code: types.ErrorCode(kind), MessageID: i18n.MsgDistributorNoAvailableChannel,
@@ -314,7 +327,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			affinityUsable := false
 			preferred, err := model.CacheGetChannel(preferredChannelID)
 			affinitySatisfied := false
-			if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled {
+			if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled && !channelQuotaExhausted(preferred.Id) {
 				affinitySatisfied, _ = model.ChannelSatisfiesFilters(preferred, modelName, constraints.Filters)
 			}
 			if affinitySatisfied {
@@ -349,6 +362,10 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 	if channel == nil {
 		var err error
 		channel, selectGroup, err = CacheGetRandomSatisfiedChannel(retry)
+		var quotaErr *model.ChannelQuotaExhaustedError
+		if errors.As(err, &quotaErr) {
+			return nil, selectGroup, channelQuotaExhaustedSelectError(quotaErr)
+		}
 		if err != nil {
 			showGroup := usingGroup
 			if usingGroup == "auto" {
@@ -374,6 +391,35 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		}
 	}
 	return channel, selectGroup, nil
+}
+
+func channelQuotaExhausted(channelId int) bool {
+	exhausted, _ := model.ChannelQuotaExhaustion(channelId)
+	return exhausted
+}
+
+// channelQuotaExhaustedSelectError reports a group whose channels all reached
+// their quota limit, with the operator's custom message when one is set.
+func channelQuotaExhaustedSelectError(err *model.ChannelQuotaExhaustedError) *ChannelSelectError {
+	selectErr := &ChannelSelectError{StatusCode: http.StatusTooManyRequests, Code: ChannelQuotaExhaustedErrorCode}
+	if err.Message != "" {
+		selectErr.Message = err.Message
+	} else {
+		selectErr.MessageID = i18n.MsgChannelQuotaExhausted
+	}
+	return selectErr
+}
+
+// ChannelQuotaExhaustedErrorCode is the error code returned when every channel
+// left for a request reached its quota limit.
+const ChannelQuotaExhaustedErrorCode types.ErrorCode = "channel_quota_exhausted"
+
+// ChannelQuotaExhaustedMessage localizes a quota-limit refusal.
+func ChannelQuotaExhaustedMessage(c *gin.Context, err *model.ChannelQuotaExhaustedError) string {
+	if err.Message != "" {
+		return err.Message
+	}
+	return i18n.T(c, i18n.MsgChannelQuotaExhausted)
 }
 
 // Origin-task pins report a fixed code so task polling can tell a retired

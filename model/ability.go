@@ -117,6 +117,10 @@ func GetChannel(
 		return nil, err
 	}
 	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	abilities, quotaExhausted := dropQuotaExhaustedAbilities(abilities)
+	if quotaExhausted != nil {
+		return nil, quotaExhausted
+	}
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
