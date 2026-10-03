@@ -39,7 +39,12 @@ import {
 } from '../constants'
 import { hasTaskUsageSchema } from '../lib/dynamic-price'
 import { parseTags } from '../lib/filters'
-import type { PricingModel, PricingVendor } from '../types'
+import type {
+  GroupAccessRequirement,
+  PricingModel,
+  PricingVendor,
+} from '../types'
+import { GroupAccessBadge } from './group-access-badge'
 
 type FilterOption = {
   value: string
@@ -47,6 +52,7 @@ type FilterOption = {
   count?: number
   suffix?: string
   icon?: ReactNode
+  badge?: ReactNode
 }
 
 type FilterSectionProps = {
@@ -70,6 +76,7 @@ export interface PricingSidebarProps {
   vendors: PricingVendor[]
   groups: string[]
   groupRatios?: Record<string, number>
+  groupAccess?: Record<string, GroupAccessRequirement>
   tags: string[]
   models: PricingModel[]
   hasActiveFilters: boolean
@@ -104,6 +111,7 @@ function FilterChip(props: {
         <span className='shrink-0'>{props.option.icon}</span>
       )}
       <span className='truncate'>{props.option.label}</span>
+      {props.option.badge}
       {(props.option.suffix || props.option.count != null) && (
         <span
           className={cn(
@@ -210,6 +218,12 @@ export const PricingSidebar = memo(function PricingSidebar(
       value: group,
       label: group,
       suffix: formatGroupRatio(props.groupRatios?.[group]),
+      badge: (
+        <GroupAccessBadge
+          requirement={props.groupAccess?.[group]}
+          className='h-auto px-0 text-xs'
+        />
+      ),
     })),
   ]
 

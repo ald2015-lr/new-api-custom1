@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { ArrowRight01Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
+import { Lock } from 'lucide-react'
 import { Reorder } from 'motion/react'
 import { useMemo, type ComponentProps } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -30,8 +31,10 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from '@/components/ui/empty'
+import { toIntlLocale } from '@/i18n/languages'
 import { cn } from '@/lib/utils'
 
+import { getApiKeyGroupLockReason, type ApiKeyGroupLock } from '../lib'
 import {
   ApiKeyGroupCombobox,
   type ApiKeyGroupOption,
@@ -43,6 +46,11 @@ type AutoGroupOrderEditorProps = Omit<ComponentProps<'div'>, 'onChange'> & {
   mode: 'inherit' | 'custom'
   options: ApiKeyGroupOption[]
   globalOptions: ApiKeyGroupOption[]
+  /**
+   * Recharge-gated groups. Stored entries for them stay listed with the lock
+   * reason, but they are never offered as new candidates.
+   */
+  lockedOptions?: ApiKeyGroupOption[]
   maxCount: number
   onChange: (value: { groups: string[]; mode: 'inherit' | 'custom' }) => void
   'data-slot'?: string
@@ -50,7 +58,8 @@ type AutoGroupOrderEditorProps = Omit<ComponentProps<'div'>, 'onChange'> & {
 }
 
 export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const maxCount =
     Number.isInteger(props.maxCount) && props.maxCount > 0 ? props.maxCount : 5
   const isInheriting = props.mode === 'inherit'
@@ -62,6 +71,16 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
           option.value !== 'auto' && !props.value.includes(option.value)
       ),
     [props.options, props.value]
+  )
+  const locksByGroup = useMemo(
+    () =>
+      new Map(
+        (props.lockedOptions ?? []).flatMap(
+          (option): Array<[string, ApiKeyGroupLock]> =>
+            option.locked ? [[option.value, option.locked]] : []
+        )
+      ),
+    [props.lockedOptions]
   )
 
   const handleAdd = (group: string) => {
@@ -216,16 +235,31 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
           onReorder={(groups) => props.onChange({ groups, mode: 'custom' })}
           className='flex flex-col gap-2'
         >
-          {props.value.map((group, index) => (
-            <AutoGroupOrderItem
-              key={group}
-              group={group}
-              index={index}
-              count={props.value.length}
-              onMove={handleMove}
-              onRemove={handleRemove}
-            />
-          ))}
+          {props.value.map((group, index) => {
+            const lock = locksByGroup.get(group)
+            return (
+              <AutoGroupOrderItem
+                key={group}
+                group={group}
+                index={index}
+                count={props.value.length}
+                onMove={handleMove}
+                onRemove={handleRemove}
+              >
+                {lock && (
+                  <span className='text-muted-foreground flex min-w-0 items-center gap-1 text-xs'>
+                    <Lock
+                      aria-hidden='true'
+                      className='text-warning size-3.5 shrink-0'
+                    />
+                    <span className='min-w-0'>
+                      {getApiKeyGroupLockReason(t, lock, locale)}
+                    </span>
+                  </span>
+                )}
+              </AutoGroupOrderItem>
+            )
+          })}
         </Reorder.Group>
       )}
     </div>

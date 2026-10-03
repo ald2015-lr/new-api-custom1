@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, test } from 'vitest'
 
+import type { ApiKey } from '../../types'
+
 const { createInstance } = await import('i18next')
 const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { QueryClient, QueryClientProvider } =
@@ -37,6 +39,7 @@ type ApiMethod = (url: string, data?: unknown) => Promise<{ data: unknown }>
 type MockableApi = {
   get: ApiMethod
   post: ApiMethod
+  put: ApiMethod
 }
 type RenderedDrawer = {
   queryClient: InstanceType<typeof QueryClient>
@@ -45,6 +48,7 @@ type RenderedDrawer = {
 const apiClient = api as unknown as MockableApi
 const originalGet = apiClient.get
 const originalPost = apiClient.post
+const originalPut = apiClient.put
 let renderedDrawer: RenderedDrawer | null = null
 
 function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
@@ -84,7 +88,66 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
   }
 }
 
-async function renderCreateDrawer(): Promise<void> {
+function installUpdateFixture(
+  updatedPayloads: Array<Record<string, unknown>>
+): void {
+  apiClient.put = async (url, data) => {
+    expect(url).toBe('/api/token/')
+    updatedPayloads.push(data as Record<string, unknown>)
+    return { data: { success: true, data: {} } }
+  }
+}
+
+function buildExistingKey(overrides: Partial<ApiKey>): ApiKey {
+  return {
+    id: 7,
+    name: 'legacy',
+    key: 'sk-legacy',
+    status: 1,
+    remain_quota: 0,
+    used_quota: 0,
+    unlimited_quota: true,
+    expired_time: -1,
+    created_time: 0,
+    accessed_time: 0,
+    group: 'default',
+    auto_groups: null,
+    cross_group_retry: false,
+    model_limits_enabled: false,
+    model_limits: '',
+    allow_ips: '',
+    ...overrides,
+  }
+}
+
+const DEFAULT_USER_GROUPS = {
+  success: true,
+  data: {
+    auto: { desc: 'Automatic routing', ratio: 'auto' },
+    default: { desc: 'Standard access', ratio: 1 },
+    vip: { desc: 'Priority access', ratio: 2 },
+  },
+}
+
+const USER_GROUPS_WITH_LOCKED = {
+  ...DEFAULT_USER_GROUPS,
+  locked: {
+    svip: {
+      desc: 'Gated access',
+      ratio: 0.8,
+      min_topup: 50,
+      current_topup: 20,
+      whitelist_only: false,
+    },
+  },
+}
+
+async function renderDrawer(
+  options: {
+    userGroups?: Record<string, unknown>
+    currentRow?: ApiKey
+  } = {}
+): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -101,16 +164,16 @@ async function renderCreateDrawer(): Promise<void> {
   )
   queryClient.setQueryData(
     ['user-groups'],
-    {
-      success: true,
-      data: {
-        auto: { desc: 'Automatic routing', ratio: 'auto' },
-        default: { desc: 'Standard access', ratio: 1 },
-        vip: { desc: 'Priority access', ratio: 2 },
-      },
-    },
+    options.userGroups ?? DEFAULT_USER_GROUPS,
     { updatedAt: freshAt }
   )
+  if (options.currentRow) {
+    queryClient.setQueryData(
+      ['api-key', options.currentRow.id],
+      { success: true, data: options.currentRow },
+      { updatedAt: freshAt }
+    )
+  }
   queryClient.setQueryData(
     ['token-auto-groups'],
     {
@@ -125,7 +188,11 @@ async function renderCreateDrawer(): Promise<void> {
     <QueryClientProvider client={queryClient}>
       <I18nextProvider i18n={i18n}>
         <ApiKeysProvider>
-          <ApiKeysMutateDrawer open onOpenChange={() => undefined} />
+          <ApiKeysMutateDrawer
+            open
+            onOpenChange={() => undefined}
+            currentRow={options.currentRow}
+          />
         </ApiKeysProvider>
       </I18nextProvider>
     </QueryClientProvider>
@@ -196,6 +263,7 @@ function selectComboboxOption(
 afterEach(() => {
   apiClient.get = originalGet
   apiClient.post = originalPost
+  apiClient.put = originalPut
   localStorage.clear()
   if (renderedDrawer) {
     renderedDrawer.queryClient.clear()
@@ -207,7 +275,7 @@ describe('API keys mutate drawer Auto group integration', () => {
   test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     const groupTrigger = getControlByLabel('Group')
     expect(groupTrigger.textContent?.includes('auto')).toBe(true)
@@ -240,7 +308,7 @@ describe('API keys mutate drawer Auto group integration', () => {
   test('preserves an unsaved custom order and mode after Auto to ordinary to Auto changes', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     const autoOrderControl = getControlByLabel('Auto group order')
     const addGroupTrigger = autoOrderControl.querySelector<HTMLButtonElement>(
@@ -276,5 +344,112 @@ describe('API keys mutate drawer Auto group integration', () => {
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
+  })
+})
+
+describe('API keys mutate drawer recharge-gated groups', () => {
+  test('leaves a locked group out of the Auto group order candidates', async () => {
+    installApiFixtures([])
+    await renderDrawer({ userGroups: USER_GROUPS_WITH_LOCKED })
+    const addGroupTrigger = getControlByLabel(
+      'Auto group order'
+    ).querySelector<HTMLButtonElement>('button[role="combobox"]')
+    if (!addGroupTrigger) {
+      throw new Error('Expected Auto group order combobox')
+    }
+
+    fireEvent.click(addGroupTrigger)
+
+    const candidates = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="command-item"]'),
+    ].map((item) => item.textContent ?? '')
+    expect(candidates.some((text) => text.includes('Priority access'))).toBe(
+      true
+    )
+    expect(candidates.some((text) => text.includes('Gated access'))).toBe(false)
+  })
+
+  test('keeps the locked group of an existing key selected with a warning', async () => {
+    installApiFixtures([])
+    await renderDrawer({
+      userGroups: USER_GROUPS_WITH_LOCKED,
+      currentRow: buildExistingKey({ group: 'svip' }),
+    })
+
+    const groupTrigger = getControlByLabel('Group')
+
+    expect(groupTrigger).toHaveTextContent('svip')
+    expect(groupTrigger).toHaveTextContent(
+      'Requires cumulative top-up of 50 (current 20)'
+    )
+    expect(
+      screen.getByText(
+        'Requests with this API key fail until you meet the group requirement. Choose another group to keep using it.'
+      )
+    ).toBeInTheDocument()
+  })
+
+  test('keeps a locked group in the custom Auto order when an existing key is renamed', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([])
+    installUpdateFixture(updatedPayloads)
+    await renderDrawer({
+      userGroups: USER_GROUPS_WITH_LOCKED,
+      currentRow: buildExistingKey({
+        group: 'auto',
+        auto_groups: ['svip', 'default'],
+        cross_group_retry: true,
+      }),
+    })
+
+    changeInput(getControlByLabel('Name'), 'renamed')
+    fireEvent.click(findButton('Save changes', true))
+
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+    expect(updatedPayloads[0]?.auto_groups).toEqual(['svip', 'default'])
+  })
+
+  test('saves a rename when the custom Auto order holds only a locked group', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([])
+    installUpdateFixture(updatedPayloads)
+    await renderDrawer({
+      userGroups: USER_GROUPS_WITH_LOCKED,
+      currentRow: buildExistingKey({
+        group: 'auto',
+        auto_groups: ['svip'],
+        cross_group_retry: true,
+      }),
+    })
+
+    changeInput(getControlByLabel('Name'), 'renamed')
+    fireEvent.click(findButton('Save changes', true))
+
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+    expect(updatedPayloads[0]?.auto_groups).toEqual(['svip'])
+  })
+
+  test('shows the lock reason on a locked entry of the custom Auto order', async () => {
+    installApiFixtures([])
+    await renderDrawer({
+      userGroups: USER_GROUPS_WITH_LOCKED,
+      currentRow: buildExistingKey({
+        group: 'auto',
+        auto_groups: ['svip', 'default'],
+        cross_group_retry: true,
+      }),
+    })
+
+    const lockedEntry = screen
+      .getByRole('button', { name: 'Remove svip' })
+      .closest('li')
+    const usableEntry = screen
+      .getByRole('button', { name: 'Remove default' })
+      .closest('li')
+
+    expect(lockedEntry).toHaveTextContent(
+      'Requires cumulative top-up of 50 (current 20)'
+    )
+    expect(usableEntry).not.toHaveTextContent('Requires cumulative top-up')
   })
 })

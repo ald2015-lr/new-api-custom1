@@ -121,6 +121,13 @@ export type ModelCapability =
   | 'caching'
   | 'embeddings'
 
+/** Public requirement of a recharge-gated group. */
+export type GroupAccessRequirement = {
+  /** Cumulative top-up required, in top-up units. 0 with whitelist_only. */
+  min_topup: number
+  whitelist_only: boolean
+}
+
 export type PricingData = {
   success: boolean
   message?: string
@@ -130,6 +137,8 @@ export type PricingData = {
   usable_group: Record<string, { desc: string; ratio: number }>
   supported_endpoint: Record<string, string>
   auto_groups: string[]
+  /** Every recharge-gated group; absent on older backends. */
+  group_access?: Record<string, GroupAccessRequirement>
 }
 
 export type TokenUnit = 'M' | 'K'

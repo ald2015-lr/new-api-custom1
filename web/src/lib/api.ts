@@ -57,10 +57,22 @@ export async function getUserModels(): Promise<{
   return res.data
 }
 
+/** A recharge-gated group the current user cannot use yet. */
+export type LockedUserGroup = {
+  desc: string
+  ratio: number
+  /** Cumulative top-up required, in top-up units. 0 with whitelist_only. */
+  min_topup: number
+  current_topup: number
+  whitelist_only: boolean
+}
+
 export async function getUserGroups(): Promise<{
   success: boolean
   message?: string
   data?: Record<string, { desc: string; ratio: number | string }>
+  /** Absent when the backend predates recharge-gated groups. */
+  locked?: Record<string, LockedUserGroup>
 }> {
   const res = await api.get('/api/user/self/groups')
   return res.data

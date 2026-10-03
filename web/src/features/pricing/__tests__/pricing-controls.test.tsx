@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { PricingSidebar } from '../components/pricing-sidebar'
+import { PricingTable } from '../components/pricing-table'
 import {
   PricingToolbar,
   type PricingToolbarProps,
@@ -61,6 +62,54 @@ function toolbarProps(): PricingToolbarProps {
 }
 
 describe('pricing controls', () => {
+  it('marks recharge-gated group filters with their access requirement', () => {
+    const props = toolbarProps()
+
+    render(
+      <PricingSidebar
+        {...props}
+        groups={['default', 'premium', 'partner']}
+        groupAccess={{
+          premium: { min_topup: 50, whitelist_only: false },
+          partner: { min_topup: 0, whitelist_only: true },
+        }}
+      />
+    )
+
+    expect(
+      screen.getByRole('button', { name: /^premium\s*Top-up ≥ 50\s*x3$/ })
+    ).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: /^partner\s*Restricted$/ })
+    ).toBeVisible()
+    expect(screen.getByRole('button', { name: /^default\s*x1$/ })).toBeVisible()
+  })
+
+  it('marks recharge-gated groups in the table view Groups column', () => {
+    const model: PricingModel = {
+      id: 1,
+      model_name: 'gated-model',
+      quota_type: 0,
+      model_ratio: 1,
+      completion_ratio: 1,
+      enable_groups: ['premium', 'partner'],
+    }
+
+    render(
+      <PricingTable
+        models={[model]}
+        groupAccess={{
+          premium: { min_topup: 50, whitelist_only: false },
+          partner: { min_topup: 0, whitelist_only: true },
+        }}
+      />
+    )
+
+    const row = screen.getByRole('row', { name: /gated-model/ })
+    expect(within(row).getByText('Top-up ≥ 50')).toBeVisible()
+    expect(within(row).getByText('Restricted')).toBeVisible()
+  })
+
   it('counts each model once per filter and updates counts when the catalog changes', () => {
     const props = toolbarProps()
     const base: PricingModel = {

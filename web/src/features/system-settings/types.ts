@@ -306,6 +306,8 @@ export type BillingSettings = {
   MaxTokenAutoGroups: number
   DefaultUseAutoGroup: boolean
   'group_ratio_setting.group_special_usable_group': string
+  'group_access_setting.rules': string
+  'group_access_setting.count_redemption': boolean
   PayAddress: string
   EpayId: string
   EpayKey: string

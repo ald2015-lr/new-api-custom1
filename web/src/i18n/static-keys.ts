@@ -896,4 +896,9 @@ export const STATIC_I18N_KEYS = [
   'Verification method',
   'Admin permissions updated',
   'Provider ID',
+  // Group access settings: save label and rule form validation messages.
+  'Save group access',
+  'The auto group cannot be gated',
+  'Must be 1,000,000,000 or less',
+  'User IDs must be positive integers',
 ] as const

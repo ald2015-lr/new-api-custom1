@@ -23,6 +23,9 @@ import { useStatus } from '@/hooks/use-status'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getPricing } from '../api'
+import type { GroupAccessRequirement } from '../types'
+
+const EMPTY_GROUP_ACCESS: Record<string, GroupAccessRequirement> = {}
 
 export function usePricingData(enabled = true) {
   const { status } = useStatus()
@@ -71,6 +74,7 @@ export function usePricingData(enabled = true) {
     usableGroup: data?.usable_group ?? {},
     endpointMap: data?.supported_endpoint ?? {},
     autoGroups: data?.auto_groups ?? [],
+    groupAccess: data?.group_access ?? EMPTY_GROUP_ACCESS,
     isLoading,
     error,
     refetch,
