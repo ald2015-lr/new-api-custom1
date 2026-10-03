@@ -54,6 +54,13 @@ const (
 	ContextKeyUsingGroup  ContextKey = "group"
 	ContextKeyUserName    ContextKey = "username"
 
+	// ContextKeyGroupAccessSubject stores the requester (user id, role, user
+	// group) checked against recharge-gated groups; set by TokenAuth.
+	ContextKeyGroupAccessSubject ContextKey = "group_access_subject"
+	// ContextKeyGroupAccessTopupTotal memoizes the requester's cumulative
+	// top-up within one request.
+	ContextKeyGroupAccessTopupTotal ContextKey = "group_access_topup_total"
+
 	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
 
 	ContextKeySystemPromptOverride ContextKey = "system_prompt_override"

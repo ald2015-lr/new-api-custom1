@@ -92,6 +92,9 @@ func Distribute() func(c *gin.Context) {
 							abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
 							return
 						}
+						if playgroundRequest.Group != "auto" && abortIfGroupAccessDenied(c, service.GroupAccessSubjectFromContext(c, usingGroup), playgroundRequest.Group) {
+							return
+						}
 						common.SetContextKey(c, constant.ContextKeyUsingGroup, playgroundRequest.Group)
 					}
 				}

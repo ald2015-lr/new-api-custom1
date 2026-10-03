@@ -347,3 +347,9 @@ const (
 	MsgCustomOAuthBindingNotFound   = "custom_oauth.binding_not_found"
 	MsgCustomOAuthProviderIdInvalid = "custom_oauth.provider_id_field_invalid"
 )
+
+// Recharge-gated group messages
+const (
+	MsgGroupAccessTopupRequired = "group_access.topup_required"
+	MsgGroupAccessWhitelistOnly = "group_access.whitelist_only"
+)

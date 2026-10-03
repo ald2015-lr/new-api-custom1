@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -69,4 +70,25 @@ func TestGetRequestAutoGroupsDoesNotFallBackAfterPermissionChange(t *testing.T) 
 	groups := GetRequestAutoGroups(ctx, "default")
 
 	assert.Empty(t, groups)
+}
+
+func TestGetRequestAutoGroupsDropsGatedGroupsBeforeApplyingLimit(t *testing.T) {
+	configureRequestAutoGroupsTest(t)
+	previousRules := operation_setting.GroupAccessRulesJSON()
+	rules := `[{"group":"vip","min_topup":0,"users":[{"id":7,"username":"listed"}]}]`
+	require.NoError(t, operation_setting.ValidateGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, rules))
+	operation_setting.LoadGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, rules)
+	t.Cleanup(func() {
+		operation_setting.LoadGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, previousRules)
+	})
+
+	ctx := newRequestAutoGroupsContext()
+	common.SetContextKey(ctx, constant.ContextKeyGroupAccessSubject, GroupAccessSubject{UserId: 8, Group: "default"})
+	assert.Equal(t, []string{"default", "svip"}, GetRequestAutoGroups(ctx, "default"))
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default", "svip"})
+	assert.Equal(t, []string{"default", "svip"}, GetRequestAutoGroups(ctx, "default"))
+
+	listed := newRequestAutoGroupsContext()
+	common.SetContextKey(listed, constant.ContextKeyGroupAccessSubject, GroupAccessSubject{UserId: 7, Group: "default"})
+	assert.Equal(t, []string{"vip", "default", "svip"}, GetRequestAutoGroups(listed, "default"))
 }

@@ -94,16 +94,19 @@ func FilterUserTokenAutoGroups(userGroup string, groups []string) []string {
 // GetRequestAutoGroups resolves the ordered Auto groups for the current token.
 // The absence of the context value means that the token inherits the complete
 // global Auto list; a present (even empty) value is an explicit token snapshot.
+// Recharge-gated groups the requester cannot use are dropped before the
+// per-token limit applies.
 func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
+	subject := GroupAccessSubjectFromContext(c, userGroup)
 	value, ok := common.GetContextKey(c, constant.ContextKeyTokenAutoGroups)
 	if !ok {
-		return GetUserAutoGroup(userGroup)
+		return FilterGroupsByAccess(c, subject, GetUserAutoGroup(userGroup))
 	}
 	groups, ok := value.([]string)
 	if !ok {
 		return []string{}
 	}
-	return FilterUserTokenAutoGroups(userGroup, groups)
+	return FilterUserTokenAutoGroups(userGroup, FilterGroupsByAccess(c, subject, groups))
 }
 
 // GetGroupsEnabledModels 按 groups 顺序获取各分组启用的模型并去重
