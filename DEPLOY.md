@@ -111,7 +111,7 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 
 ## 三、合并上游更新并重新构建
 
-当前基线：`v1.0.0-rc.41`（2026-10-01 从 rc.40 合并上来；rc.40 是 2026-09-27 从 rc.30 合并的）。上游发新版时：
+当前基线：`v1.0.0-rc.41` + 上游 `main` 到 `1a4166d8e` 的 7 个修复提交（2026-10-03 合并；当时没有比 rc.41 更新的正式版）。rc.41 是 2026-10-01 从 rc.40 合并的，rc.40 是 2026-09-27 从 rc.30 合并的。上游发新版时：
 
 ```bash
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
@@ -130,7 +130,7 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `controller/topup_waffo_pancake.go` | `getWaffoPancakePayMoney` 里的反推逻辑 |
 | `model/option.go` | 三个手续费键、`LogResponseModelEnabled` 的注册与解析 |
 | `web/src/features/system-settings/integrations/*` | 「计价与手续费」UI |
-| `web/src/i18n/locales/*.json` | 16 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
+| `web/src/i18n/locales/*.json` | 46 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
 | `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go` | 静态资源不限流、缺失 chunk 返回 404、immutable 缓存（见第六节） |
 | `service/relay_error.go`（rc.40 前在 `controller/relay.go`） | `DecideRelayRetry` 开头的"已向客户端输出就不再重试"守卫 |
 | `controller/relay.go` | defer 里流已开始时改走 `helper.WriteStreamError` |
@@ -138,11 +138,17 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `relay/channel/openai/relay-openai.go` | `thinking_to_content` 交错思考 |
 | `relaykit/.../gemini_chat/to_oai_chat_resp.go` | thought 与正文分字段 |
 | `common/constants.go`、`model/log_other.go`、`web/src/features/system-settings/maintenance/log-settings-section.tsx` | 「在使用日志中显示响应模型」开关（默认关；关闭时日志接口不返回 `response_model`，黄色「响应模型」标记对所有人隐藏） |
+| `model/subscription.go`、`service/billing_session.go` | 订阅优先回退钱包：`user_subscriptions` 只按列更新（不再整行 `Save`），「是否允许回退钱包」看套餐当前设置而不是购买时的快照（见第九节） |
+| 新文件 `setting/operation_setting/group_access_setting.go`、`model/group_access.go`、`service/group_access.go`、`middleware/group_access.go`，以及 `middleware/auth.go`、`middleware/distributor.go`、`service/group.go`、`controller/{group,pricing,token,option}.go`、`model/{option,user_cache}.go`、`constant/context_key.go`、`i18n/` 里的小钩子 | 分组充值门槛 + 白名单（见第八节） |
+| `web/src/features/system-settings/billing/group-access-*`、`features/keys/*`、`features/pricing/*` | 分组充值门槛的后台设置页、令牌分组锁定显示、模型广场门槛标记 |
+| `web/src/components/layout/components/public-header.tsx` | 手机端首页顶栏直接显示「模型广场」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
-rc.40 → rc.41 是无冲突合并，上表定制点全部原样保留。
+rc.40 → rc.41、rc.41 → upstream main（1a4166d8e）都是无冲突合并，上表定制点全部原样保留。
+
+注意上游这 7 个提交里有一条：Waffo Pancake 的支付回调现在会校验 Store ID，后台「Waffo Pancake」设置里的 Store ID 必须已填写且和商户后台一致，否则订单回调会被拒绝、充值不到账。
 
 解冲突的原则：**保留定制改动，接受上游其他部分**。解完必须验证：
 
@@ -284,4 +290,60 @@ docker compose logs new-api 2>&1 | grep -E 'relay error:|stream ended: reason='
 如果 `重试：` 仍然频繁出现（针对还没输出内容的请求，这是正常重试），说明某个渠道经常在建连阶段就失败，去后台看渠道的错误日志。
 
 **仍然属于上游/模型行为、网关不负责的：** Claude 4 的交错思考（thinking → text → thinking 是模型真实输出）；模型自身的复读/死循环；上游返回 `finish_reason: length`（`max_tokens` 不够）。这类情况修复后仍会原样透传。
+
+---
+
+## 八、分组充值门槛（只有累计充值够的用户才能用某个分组）
+
+**在哪设置：** 系统设置 → 计费 →「分组准入」。每条规则包括三项：
+
+| 字段 | 含义 |
+|---|---|
+| 分组 | 要限制的分组（下拉选择，不能选 `auto`） |
+| 累计充值门槛 | 和充值页输入的「充值数量」同一个单位（例如「最低充值 50」的那个 50）。填 `0` 表示**只有白名单里的用户能用** |
+| 白名单用户 | 每行一个，或用逗号、空格分隔。纯数字按**用户 ID** 处理，其它按**用户名**处理；用户名本身是数字时在前面加 `@`（`@123` 表示用户名 123）。保存时服务器把用户名换成 ID，之后**只按 ID 判断**（用户改名不影响，别人改成同名也冒充不了） |
+
+另有一个开关「兑换码计入充值」（默认开）：用户兑换过的兑换码按额度折算后计入累计充值。卡密是靠卖的就保持开启；如果兑换码多是免费发放的，可以关掉，再把需要的人加白名单。
+
+**谁能用被限制的分组（满足任一即可）：**
+1. 管理员和超级管理员；
+2. 用户自己的分组就是这个分组（你在用户管理里把他设成这个分组，或订阅套餐把他升级到了这个分组）；
+3. 在这条规则的白名单里；
+4. 累计充值 ≥ 门槛。
+
+**累计充值怎么算：** `top_ups` 表里所有**成功**订单的充值数量之和（Creem 订单按额度折算；订阅套餐的购买记录不算），加上（开关开启时）用过的兑换码额度。`top_ups` 表不受「清理历史日志」影响，清日志不会让用户的累计充值清零。**后台手动给用户加的额度不算**：线下收款、手动加额度的用户请加白名单。
+
+**用户那边看到什么：**
+- 创建/编辑令牌时，不满足条件的分组显示为灰色锁定，并写明原因（例如「需累计充值 50（当前 30）」）；
+- 模型广场里被限制的分组带「累计充值 ≥ 50」或「受限」（仅白名单）标记，价格照常展示；
+- 已有令牌绑定在被限制的分组上、但用户不满足条件时，调用返回 HTTP 403：`分组 svip 需要累计充值满 50 才能使用（当前累计 30）`。**开启规则前想清楚这一点。**
+- 令牌选 `auto`（自动分组）时，不满足条件的分组会被自动跳过。
+
+**生效时间：** 规则保存后本机立即生效，多节点部署下其它节点最多 60 秒（`SYNC_FREQUENCY`）。用户刚充值后累计金额立即刷新；极少数并发情况下最多延迟 2 分钟（`USER_TOPUP_TOTAL_CACHE_TTL`，默认 120 秒）。
+
+---
+
+## 九、「优先订阅」用完订阅额度不走钱包：定制版做了什么
+
+**现象：** 扣费偏好为「优先订阅」的用户，订阅额度不够时报 `订阅额度不足或未配置订阅: subscription quota insufficient, need=5000`，而不是改扣钱包。
+
+**根因（上游 bug）：** 套餐的「额度用尽后允许使用钱包余额」会在购买时复制到用户订阅上（`user_subscriptions.allow_wallet_overflow`）。这一列是 rc.12 才加的，老订阅在加列时是 NULL（等于允许）。但上游每次扣订阅额度都是整行保存，Go 把 NULL 读成 `false` 再写回去，**老订阅第一次被使用就被改成了「不允许回退钱包」**；只要用户还有一个这样的有效订阅（试用套餐有效期到 3025 年），就永远不会再回退钱包。另外，后台修改套餐的这个开关，也不会影响已经买了的人。
+
+**定制版的修复：**
+1. 扣减、重置订阅额度时只更新变动的列，不再把 NULL 改成 0；
+2. 判断能否回退钱包时看**套餐当前的设置**（开着就允许），而不是购买时的快照；只有套餐已被删除时才看快照。所以你在后台改套餐开关，立即对所有已购用户生效；
+3. 如果套餐确实关掉了「额度用尽后允许使用钱包余额」，用户会看到更明确的提示：`订阅额度不足，且当前订阅套餐不允许额度用尽后使用钱包余额`。
+
+升级后无需改数据，之前被误改成 0 的订阅会自动恢复回退钱包（只要它的套餐开关是开着的，默认就是开着）。
+
+**想在升级前先确认某个用户的情况（MySQL）：**
+
+```sql
+SELECT us.id, sp.title, us.amount_total - us.amount_used AS remain,
+       us.allow_wallet_overflow AS sub_flag, sp.allow_wallet_overflow AS plan_flag
+FROM user_subscriptions us LEFT JOIN subscription_plans sp ON sp.id = us.plan_id
+WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TIMESTAMP();
+```
+
+`sub_flag = 0` 而 `plan_flag` 是 1 或 NULL，就是被上游 bug 误改的订阅，升级后自动恢复。`plan_flag = 0` 说明套餐本身关掉了回退钱包，到后台「订阅套餐」里打开「额度用尽后允许使用钱包余额」即可。
 

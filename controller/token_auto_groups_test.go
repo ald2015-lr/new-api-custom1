@@ -8,8 +8,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -231,4 +233,61 @@ func TestGetTokenAutoGroupsReturnsFullFilteredGlobalOrderAndLimit(t *testing.T) 
 	require.NoError(t, common.Unmarshal(response.Data, &data))
 	assert.Equal(t, []string{"vip", "default"}, data.Groups)
 	assert.Equal(t, 1, data.MaxCount)
+}
+
+func TestGroupAccessGateInTokenAndGroupEndpoints(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	configureTokenAutoGroupsTest(t, "5", `["default","vip"]`)
+	user := setupTokenAutoGroupsControllerTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.TopUp{}, &model.Redemption{}))
+	originalRules := operation_setting.GroupAccessRulesJSON()
+	t.Cleanup(func() {
+		operation_setting.LoadGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, originalRules)
+		model.InvalidateUserTopupTotalCache(user.Id)
+	})
+	operation_setting.LoadGroupAccessOption(operation_setting.GroupAccessRulesOptionKey, `[{"group":"vip","min_topup":50,"users":[]}]`)
+	model.InvalidateUserTopupTotalCache(user.Id)
+	addTopup := func(tradeNo string, amount int64) {
+		require.NoError(t, model.DB.Create(&model.TopUp{
+			UserId: user.Id, Amount: amount, Money: float64(amount), TradeNo: tradeNo,
+			PaymentMethod: "alipay", Status: common.TopUpStatusSuccess,
+		}).Error)
+		model.InvalidateUserTopupTotalCache(user.Id)
+	}
+	addTopup("gate-1", 30)
+	vipTokenRequest := func(name string) map[string]any {
+		return map[string]any{"name": name, "expired_time": -1, "remain_quota": 0, "unlimited_quota": true, "group": "vip"}
+	}
+
+	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", vipTokenRequest("gated-vip"), user.Id)
+	AddToken(ctx)
+	response := decodeAPIResponse(t, recorder)
+	require.False(t, response.Success)
+	assert.Contains(t, response.Message, "vip")
+
+	ctx, recorder = newTokenAutoGroupsAuthenticatedContext(t, http.MethodGet, "/api/user/self/groups", nil, user.Id)
+	GetUserGroups(ctx)
+	var groups struct {
+		Success bool           `json:"success"`
+		Data    map[string]any `json:"data"`
+		Locked  map[string]struct {
+			MinTopup      float64 `json:"min_topup"`
+			CurrentTopup  float64 `json:"current_topup"`
+			WhitelistOnly bool    `json:"whitelist_only"`
+		} `json:"locked"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &groups))
+	require.True(t, groups.Success)
+	assert.Contains(t, groups.Data, "default")
+	assert.NotContains(t, groups.Data, "vip", "a locked group must not be offered as selectable")
+	require.Contains(t, groups.Locked, "vip")
+	assert.Equal(t, 50.0, groups.Locked["vip"].MinTopup)
+	assert.Equal(t, 30.0, groups.Locked["vip"].CurrentTopup)
+	assert.False(t, groups.Locked["vip"].WhitelistOnly)
+
+	addTopup("gate-2", 20)
+	ctx, recorder = newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", vipTokenRequest("qualified-vip"), user.Id)
+	AddToken(ctx)
+	response = decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
 }

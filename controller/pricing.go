@@ -65,6 +65,13 @@ func GetPricing(c *gin.Context) {
 		}
 	}
 
+	// Only describe gates of groups the caller can see; their own group is never gated.
+	groupAccess := operation_setting.GetGroupAccessRequirements()
+	maps.DeleteFunc(groupAccess, func(g string, _ operation_setting.GroupAccessRequirement) bool {
+		_, visible := usableGroup[g]
+		return !visible || g == group
+	})
+
 	c.JSON(200, gin.H{
 		"success":            true,
 		"data":               pricing,
@@ -73,7 +80,7 @@ func GetPricing(c *gin.Context) {
 		"usable_group":       usableGroup,
 		"supported_endpoint": model.GetSupportedEndpointMap(),
 		"auto_groups":        service.GetUserAutoGroup(group),
-		"group_access":       operation_setting.GetGroupAccessRequirements(),
+		"group_access":       groupAccess,
 		"pricing_version":    "a42d372ccf0b5dd13ecf71203521f9d2",
 	})
 }
