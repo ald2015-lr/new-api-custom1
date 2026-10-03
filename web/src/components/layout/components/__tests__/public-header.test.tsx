@@ -27,7 +27,16 @@ import {
 } from '@tanstack/react-router'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 
 import { SYSTEM_UPDATE_QUERY_KEY } from '@/features/system-update/use-system-update'
 import { api } from '@/lib/api'
@@ -224,5 +233,81 @@ describe('mobile Model Square shortcut', () => {
     const link = await screen.findByTestId(MOBILE_PRICING_TEST_ID)
 
     expect(link.getAttribute('aria-current')).toBe(expected)
+  })
+})
+
+function mockDesktopViewport() {
+  const original = window.matchMedia
+  vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+    ...original(query),
+    matches: query === '(min-width: 1024px)',
+  }))
+}
+
+describe('announcements bell', () => {
+  // The popover's scroll area measures animations, which jsdom lacks.
+  const originalGetAnimations = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'getAnimations'
+  )
+  beforeAll(() => {
+    Object.defineProperty(HTMLElement.prototype, 'getAnimations', {
+      configurable: true,
+      value: () => [],
+    })
+  })
+  afterAll(() => {
+    if (originalGetAnimations) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        'getAnimations',
+        originalGetAnimations
+      )
+      return
+    }
+    Reflect.deleteProperty(HTMLElement.prototype, 'getAnimations')
+  })
+
+  it('on a narrow screen the bell sits in the mobile actions row and opens the notice', async () => {
+    vi.mocked(api.get).mockImplementation(async (url) => {
+      if (url === '/api/notice') {
+        return { data: { success: true, data: 'Maintenance tonight' } }
+      }
+      throw new Error(`Unexpected GET ${url}`)
+    })
+    const user = userEvent.setup()
+    await renderHeader({})
+
+    const bells = await screen.findAllByRole('button', {
+      name: 'Notifications',
+    })
+    expect(bells).toHaveLength(1)
+    const menuButton = screen.getByRole('button', {
+      name: 'Toggle navigation menu',
+    })
+    expect(menuButton.parentElement).toContainElement(bells[0])
+
+    await user.click(bells[0])
+
+    expect(await screen.findByText('Maintenance tonight')).toBeVisible()
+  })
+
+  it('on a wide screen only the desktop bell is mounted and the menu never locks scrolling', async () => {
+    mockDesktopViewport()
+    const user = userEvent.setup()
+    await renderHeader({})
+
+    const bells = await screen.findAllByRole('button', {
+      name: 'Notifications',
+    })
+    expect(bells).toHaveLength(1)
+    const menuButton = screen.getByRole('button', {
+      name: 'Toggle navigation menu',
+    })
+    expect(menuButton.parentElement).not.toContainElement(bells[0])
+
+    await user.click(menuButton)
+
+    expect(document.body.style.overflow).toBe('')
   })
 })

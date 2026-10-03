@@ -101,3 +101,66 @@ func TestNewBillingSessionSubscriptionFirstWalletOverflowFollowsPlan(t *testing.
 		})
 	}
 }
+
+// Settling more than the subscription has left charges the subscription up to its
+// total and, when the plan allows wallet overflow, the rest to the wallet. Before,
+// the whole settlement failed and the overage was never charged.
+func TestSubscriptionSettleOverageGoesToWalletWhenPlanAllows(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const (
+		walletQuota = 1_000_000
+		subTotal    = int64(1_000_000)
+		subUsed     = int64(997_000) // 3000 left
+		preConsume  = 2000
+		actual      = 5000
+	)
+	cases := []struct {
+		name        string
+		planAllows  bool
+		wantWallet  int
+		wantOverage int64
+	}{
+		{name: "plan allows wallet overflow", planAllows: true, wantWallet: walletQuota - 2000, wantOverage: 2000},
+		{name: "plan disallows wallet overflow", planAllows: false, wantWallet: walletQuota},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			userId, planId, subId := 840+i, 850+i, 860+i
+			seedUser(t, userId, walletQuota)
+			require.NoError(t, model.DB.Create(&model.SubscriptionPlan{
+				Id: planId, Title: "Monthly", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1,
+				TotalAmount: subTotal, AllowWalletOverflow: common.GetPointer(tc.planAllows),
+			}).Error)
+			model.InvalidateSubscriptionPlanCache(planId)
+			t.Cleanup(func() { model.InvalidateSubscriptionPlanCache(planId) })
+			require.NoError(t, model.DB.Create(&model.UserSubscription{
+				Id: subId, UserId: userId, PlanId: planId, AmountTotal: subTotal, AmountUsed: subUsed,
+				StartTime: time.Now().Unix(), EndTime: time.Now().Add(24 * time.Hour).Unix(), Status: "active",
+				AllowWalletOverflow: tc.planAllows,
+			}).Error)
+
+			relayInfo := &relaycommon.RelayInfo{
+				UserId:          userId,
+				RequestId:       fmt.Sprintf("req-settle-overage-%d", i),
+				IsPlayground:    true,
+				ForcePreConsume: true,
+				OriginModelName: "gpt-test",
+				UserSetting:     dto.UserSetting{BillingPreference: "subscription_first"},
+			}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			session, apiErr := NewBillingSession(ctx, relayInfo, preConsume)
+			require.Nil(t, apiErr)
+			require.Equal(t, BillingSourceSubscription, relayInfo.BillingSource)
+
+			require.NoError(t, session.Settle(actual))
+
+			assert.Equal(t, subTotal, getSubscriptionUsed(t, subId), "subscription is used up to its total")
+			assert.Equal(t, tc.wantWallet, getUserQuota(t, userId))
+			assert.Equal(t, int64(1000), relayInfo.SubscriptionPostDelta, "only the part the subscription could cover")
+			assert.Equal(t, tc.wantOverage, relayInfo.SubscriptionWalletOverflow)
+			assert.False(t, session.NeedsRefund(), "a settled session must not be refunded")
+		})
+	}
+}

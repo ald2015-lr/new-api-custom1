@@ -1090,6 +1090,9 @@ func applyOriginTaskIntent(c *gin.Context, intent map[string]any, meta pluginrun
 	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled {
 		return &originTaskIntentError{Code: "origin_task_channel_disabled", Message: "origin task channel is disabled", StatusCode: http.StatusBadRequest}
 	}
+	if message := service.PinnedChannelAccessMessage(c, channel); message != "" {
+		return &originTaskIntentError{Code: "origin_task_group_access_denied", Message: message, StatusCode: http.StatusForbidden}
+	}
 	service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
 		ChannelId: channel.Id,
 		Source:    dto.PinSourceOriginTask,

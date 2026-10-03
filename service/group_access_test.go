@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -188,4 +189,42 @@ func TestLoadGroupAccessRulesKeepsPreviousSnapshotOnInvalidValue(t *testing.T) {
 
 	assert.Equal(t, valid, operation_setting.GroupAccessRulesJSON())
 	assert.Equal(t, map[string]operation_setting.GroupAccessRequirement{"svip": {MinTopup: 10}}, operation_setting.GetGroupAccessRequirements())
+}
+
+func TestCheckPinnedChannelAccess(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := setupGroupAccessTest(t, `[{"group":"svip","min_topup":50,"users":[]},{"group":"vvip","min_topup":0,"users":[]}]`)
+	seedGroupAccessTopUp(t, db, 2, 10, "alipay", common.TopUpStatusSuccess)
+	seedGroupAccessTopUp(t, db, 4, 60, "alipay", common.TopUpStatusSuccess)
+
+	cases := []struct {
+		name         string
+		userId       int
+		channelGroup string
+		allowed      bool
+	}{
+		{name: "only gated groups, not qualified", userId: 2, channelGroup: "svip,vvip", allowed: false},
+		{name: "a gated group the user qualifies for", userId: 4, channelGroup: "svip,vvip", allowed: true},
+		{name: "channel also serves an open group", userId: 2, channelGroup: "default,svip", allowed: true},
+		{name: "channel without groups", userId: 2, channelGroup: "", allowed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newGroupAccessContext()
+			common.SetContextKey(ctx, constant.ContextKeyGroupAccessSubject, GroupAccessSubject{UserId: tc.userId, Role: common.RoleCommonUser, Group: "default"})
+			channel := &model.Channel{Id: 9, Group: tc.channelGroup}
+
+			denial, err := CheckPinnedChannelAccess(ctx, channel)
+			require.NoError(t, err)
+			message := PinnedChannelAccessMessage(ctx, channel)
+			if tc.allowed {
+				assert.Nil(t, denial)
+				assert.Empty(t, message)
+				return
+			}
+			require.NotNil(t, denial)
+			assert.Equal(t, "svip", denial.Group)
+			assert.Contains(t, message, "svip")
+		})
+	}
 }

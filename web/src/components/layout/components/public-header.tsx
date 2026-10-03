@@ -28,6 +28,7 @@ import { ThemeSwitch } from '@/components/theme-switch'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SystemUpdateAction } from '@/features/system-update/system-update-action'
+import { useMediaQuery } from '@/hooks/use-media-query'
 import { useNotifications } from '@/hooks/use-notifications'
 import { useSystemConfig } from '@/hooks/use-system-config'
 import { useTopNavLinks } from '@/hooks/use-top-nav-links'
@@ -92,6 +93,21 @@ export function PublicHeader(props: PublicHeaderProps) {
   } = useSystemConfig()
   const dynamicLinks = useTopNavLinks()
   const notifications = useNotifications()
+  // Only one bell is mounted (desktop nav or mobile actions) so the shared
+  // popover state never opens a second, hidden instance.
+  const isDesktopHeader = useMediaQuery('(min-width: 1024px)')
+  const notificationPopover = (
+    <NotificationPopover
+      open={notifications.popoverOpen}
+      onOpenChange={notifications.setPopoverOpen}
+      unreadCount={notifications.unreadCount}
+      activeTab={notifications.activeTab}
+      onTabChange={notifications.setActiveTab}
+      notice={notifications.notice}
+      announcements={notifications.announcements}
+      loading={notifications.loading}
+    />
+  )
   const routerState = useRouterState()
   const pathname = routerState.location.pathname
 
@@ -137,12 +153,15 @@ export function PublicHeader(props: PublicHeaderProps) {
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
+  // The overlay is CSS-hidden from lg up, so do not keep the page locked after
+  // e.g. rotating a tablet with the menu open.
+  const mobileOverlayVisible = mobileOpen && !isDesktopHeader
   useEffect(() => {
-    document.body.style.overflow = mobileOpen ? 'hidden' : ''
+    document.body.style.overflow = mobileOverlayVisible ? 'hidden' : ''
     return () => {
       document.body.style.overflow = ''
     }
-  }, [mobileOpen])
+  }, [mobileOverlayVisible])
 
   useEffect(() => {
     if (!authPromptTarget) return
@@ -310,18 +329,7 @@ export function PublicHeader(props: PublicHeaderProps) {
 
               {showLanguageSwitcher && <LanguageSwitcher />}
               {showThemeSwitch && <ThemeSwitch />}
-              {showNotifications && (
-                <NotificationPopover
-                  open={notifications.popoverOpen}
-                  onOpenChange={notifications.setPopoverOpen}
-                  unreadCount={notifications.unreadCount}
-                  activeTab={notifications.activeTab}
-                  onTabChange={notifications.setActiveTab}
-                  notice={notifications.notice}
-                  announcements={notifications.announcements}
-                  loading={notifications.loading}
-                />
-              )}
+              {showNotifications && isDesktopHeader && notificationPopover}
 
               {showAuthButtons && (
                 <>
@@ -356,6 +364,7 @@ export function PublicHeader(props: PublicHeaderProps) {
                   <span className='truncate'>{t(pricingLink.title)}</span>
                 </Link>
               )}
+              {showNotifications && !isDesktopHeader && notificationPopover}
               {showThemeSwitch && <ThemeSwitch />}
               {showAuthButtons && !loading && isAuthenticated && (
                 <ProfileDropdown />

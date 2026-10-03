@@ -2,8 +2,10 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 )
 
@@ -89,6 +91,10 @@ type SubscriptionFunding struct {
 	AmountUsedAfter int64
 	PlanId          int
 	PlanTitle       string
+	// Set by a positive Settle: the parts charged to the subscription and,
+	// once it ran out, to the wallet.
+	settledToSubscription int64
+	settledToWallet       int64
 }
 
 func (s *SubscriptionFunding) Source() string { return BillingSourceSubscription }
@@ -115,7 +121,47 @@ func (s *SubscriptionFunding) Settle(delta int) error {
 	if delta == 0 {
 		return nil
 	}
-	return model.PostConsumeUserSubscriptionDelta(s.subscriptionId, int64(delta))
+	if delta < 0 {
+		return model.PostConsumeUserSubscriptionDelta(s.subscriptionId, int64(delta))
+	}
+	subscriptionCharged, walletCharged, err := chargeSubscriptionOverage(s.userId, s.subscriptionId, int64(delta))
+	if err != nil {
+		return err
+	}
+	s.settledToSubscription = subscriptionCharged
+	s.settledToWallet = walletCharged
+	return nil
+}
+
+// chargeSubscriptionOverage charges a positive settlement delta to a subscription
+// up to its remaining quota. The excess goes to the wallet when the user's
+// subscriptions allow wallet overflow (the wallet may go negative, the same as
+// wallet settlement); otherwise it is logged and left uncharged. An error is
+// returned only when nothing was charged, so callers never refund a partially
+// applied settlement.
+func chargeSubscriptionOverage(userId int, subscriptionId int, delta int64) (subscriptionCharged int64, walletCharged int64, err error) {
+	subscriptionCharged, err = model.ConsumeUserSubscriptionUpTo(subscriptionId, delta)
+	if err != nil {
+		return 0, 0, err
+	}
+	overflow := delta - subscriptionCharged
+	if overflow <= 0 {
+		return subscriptionCharged, 0, nil
+	}
+	allow, err := model.UserActiveSubscriptionsAllowWalletOverflow(userId)
+	if err != nil {
+		common.SysLog(fmt.Sprintf("subscription %d of user %d exhausted at settlement; %d quota not charged: %s", subscriptionId, userId, overflow, err.Error()))
+		return subscriptionCharged, 0, nil
+	}
+	if !allow {
+		common.SysLog(fmt.Sprintf("subscription %d of user %d exhausted at settlement; %d quota not charged because its plan does not allow wallet overflow", subscriptionId, userId, overflow))
+		return subscriptionCharged, 0, nil
+	}
+	if err := model.DecreaseUserQuota(userId, int(overflow), false); err != nil {
+		common.SysLog(fmt.Sprintf("subscription %d of user %d exhausted at settlement; failed to charge %d quota to wallet: %s", subscriptionId, userId, overflow, err.Error()))
+		return subscriptionCharged, 0, nil
+	}
+	return subscriptionCharged, overflow, nil
 }
 
 func (s *SubscriptionFunding) Refund() error {

@@ -138,10 +138,12 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `relay/channel/openai/relay-openai.go` | `thinking_to_content` 交错思考 |
 | `relaykit/.../gemini_chat/to_oai_chat_resp.go` | thought 与正文分字段 |
 | `common/constants.go`、`model/log_other.go`、`web/src/features/system-settings/maintenance/log-settings-section.tsx` | 「在使用日志中显示响应模型」开关（默认关；关闭时日志接口不返回 `response_model`，黄色「响应模型」标记对所有人隐藏） |
-| `model/subscription.go`、`service/billing_session.go` | 订阅优先回退钱包：`user_subscriptions` 只按列更新（不再整行 `Save`），「是否允许回退钱包」看套餐当前设置而不是购买时的快照（见第九节） |
+| `model/subscription.go`、`service/{billing_session,funding_source,quota,task_billing}.go`、`relay/common/relay_info.go`、`service/log_info_generate.go` | 结算超出订阅剩余额度时，订阅扣满、超出部分按套餐设置转扣钱包（见第九节）；订阅优先回退钱包：`user_subscriptions` 只按列更新（不再整行 `Save`），「是否允许回退钱包」看套餐当前设置而不是购买时的快照（见第九节） |
 | 新文件 `setting/operation_setting/group_access_setting.go`、`model/group_access.go`、`service/group_access.go`、`middleware/group_access.go`，以及 `middleware/auth.go`、`middleware/distributor.go`、`service/group.go`、`controller/{group,pricing,token,option}.go`、`model/{option,user_cache}.go`、`constant/context_key.go`、`i18n/` 里的小钩子 | 分组充值门槛 + 白名单（见第八节） |
 | `web/src/features/system-settings/billing/group-access-*`、`features/keys/*`、`features/pricing/*` | 分组充值门槛的后台设置页、令牌分组锁定显示、模型广场门槛标记 |
-| `web/src/components/layout/components/public-header.tsx` | 手机端首页顶栏直接显示「模型广场」 |
+| `web/src/components/layout/components/public-header.tsx` | 手机端首页顶栏直接显示「模型广场」和公告铃铛；平板横屏后不再锁死页面滚动 |
+| `model/topup.go` | 管理员补单：Creem 订单按额度原样入账（上游会放大 50 万倍）；重复补单不再给用户 0 记日志 |
+| `middleware/task_plugin.go`、`relay/relay_task.go`、`relay/mjproxy_handler.go` | 基于旧任务的续作/放大请求也受分组准入限制 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
@@ -318,6 +320,7 @@ docker compose logs new-api 2>&1 | grep -E 'relay error:|stream ended: reason='
 - 模型广场里被限制的分组带「累计充值 ≥ 50」或「受限」（仅白名单）标记，价格照常展示；
 - 已有令牌绑定在被限制的分组上、但用户不满足条件时，调用返回 HTTP 403：`分组 svip 需要累计充值满 50 才能使用（当前累计 30）`。**开启规则前想清楚这一点。**
 - 令牌选 `auto`（自动分组）时，不满足条件的分组会被自动跳过。
+- 视频续作、Midjourney 放大/变换等基于旧任务的请求会沿用原任务的渠道；如果这个渠道只服务于用户当前无权使用的分组，请求同样会被拒绝。
 
 **生效时间：** 规则保存后本机立即生效，多节点部署下其它节点最多 60 秒（`SYNC_FREQUENCY`）。用户刚充值后累计金额立即刷新；极少数并发情况下最多延迟 2 分钟（`USER_TOPUP_TOTAL_CACHE_TTL`，默认 120 秒）。
 
@@ -335,6 +338,8 @@ docker compose logs new-api 2>&1 | grep -E 'relay error:|stream ended: reason='
 3. 如果套餐确实关掉了「额度用尽后允许使用钱包余额」，用户会看到更明确的提示：`订阅额度不足，且当前订阅套餐不允许额度用尽后使用钱包余额`。
 
 升级后无需改数据，之前被误改成 0 的订阅会自动恢复回退钱包（只要它的套餐开关是开着的，默认就是开着）。
+
+**另一个相关问题也一并修了：** 请求实际花费超过订阅剩余额度时（预扣时够、结算时不够），上游会结算失败，超出部分既不扣订阅也不扣钱包。现在订阅先扣到用完，超出部分在套餐允许时转扣钱包（和钱包结算一样，余额不足会记为欠费），这部分记录在该条使用日志数据的 `wallet_quota_deducted` 字段里；套餐不允许回退钱包时，超出部分仍不收费，但会在服务器日志里记一条。
 
 **想在升级前先确认某个用户的情况（MySQL）：**
 

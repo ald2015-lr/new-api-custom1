@@ -162,3 +162,39 @@ func GetLockedUsableGroups(c *gin.Context, subject GroupAccessSubject, usableGro
 	}
 	return locked
 }
+
+// CheckPinnedChannelAccess denies a request pinned to channel (a follow-up on an
+// earlier task) when every group the channel serves is recharge-gated and
+// unavailable to the requester, so such follow-ups cannot bypass the gate. A
+// channel that serves at least one group the requester may use is allowed.
+func CheckPinnedChannelAccess(c *gin.Context, channel *model.Channel) (*GroupAccessDenial, error) {
+	subject := GroupAccessSubjectFromContext(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+	var firstDenial *GroupAccessDenial
+	for _, group := range channel.GetGroups() {
+		denial, err := CheckGroupAccess(c, subject, group)
+		if err != nil {
+			return denial, err
+		}
+		if denial == nil {
+			return nil, nil
+		}
+		if firstDenial == nil {
+			firstDenial = denial
+		}
+	}
+	return firstDenial, nil
+}
+
+// PinnedChannelAccessMessage returns the localized reason a pinned follow-up is
+// refused, or "" when it may proceed. A failed check is refused (fail closed).
+func PinnedChannelAccessMessage(c *gin.Context, channel *model.Channel) string {
+	denial, err := CheckPinnedChannelAccess(c, channel)
+	if denial == nil {
+		return ""
+	}
+	if err != nil {
+		common.SysError(fmt.Sprintf("failed to check group access for channel %d: %v", channel.Id, err))
+		return i18n.T(c, i18n.MsgDatabaseError)
+	}
+	return denial.Message(c)
+}

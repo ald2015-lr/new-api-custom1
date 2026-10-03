@@ -1555,6 +1555,40 @@ func GetSubscriptionPlanInfoByUserSubscriptionId(userSubscriptionId int) (*Subsc
 	return info, nil
 }
 
+// ConsumeUserSubscriptionUpTo adds delta (> 0) to amount_used without going past
+// amount_total and returns the part actually applied (0 when already exhausted).
+// Settlement uses it so a request that costs more than the subscription has left
+// still charges the remainder instead of failing and charging nothing.
+func ConsumeUserSubscriptionUpTo(userSubscriptionId int, delta int64) (int64, error) {
+	if userSubscriptionId <= 0 {
+		return 0, errors.New("invalid userSubscriptionId")
+	}
+	if delta <= 0 {
+		return 0, errors.New("delta must be > 0")
+	}
+	applied := delta
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var sub UserSubscription
+		if err := lockForUpdate(tx).
+			Where("id = ?", userSubscriptionId).
+			First(&sub).Error; err != nil {
+			return err
+		}
+		if sub.AmountTotal > 0 {
+			applied = min(delta, max(sub.AmountTotal-sub.AmountUsed, 0))
+		}
+		if applied == 0 {
+			return nil
+		}
+		sub.AmountUsed += applied
+		return saveUserSubscriptionColumnsTx(tx, &sub, "amount_used")
+	})
+	if err != nil {
+		return 0, err
+	}
+	return applied, nil
+}
+
 // Update subscription used amount by delta (positive consume more, negative refund).
 func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error {
 	if userSubscriptionId <= 0 {
