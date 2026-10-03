@@ -29,8 +29,9 @@ import { StatusBadge } from '@/components/status-badge'
 import { getLobeIcon } from '@/lib/lobe-icon'
 
 import { parseTags } from '../lib/filters'
-import type { PricingModel } from '../types'
+import type { GroupAccessRequirement, PricingModel } from '../types'
 import { CachedPriceCell } from './cached-price-cell'
+import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelPriceCell, type ModelPriceCellOptions } from './model-price-cell'
 
@@ -38,7 +39,10 @@ import { ModelPriceCell, type ModelPriceCellOptions } from './model-price-cell'
 // Pricing Table Columns
 // ----------------------------------------------------------------------------
 
-export type PricingColumnsOptions = ModelPriceCellOptions
+export type PricingColumnsOptions = ModelPriceCellOptions & {
+  /** Recharge-gated groups, marked next to the group name. */
+  groupAccess?: Record<string, GroupAccessRequirement>
+}
 
 export function usePricingColumns(
   options: PricingColumnsOptions = {}
@@ -191,7 +195,13 @@ export function usePricingColumns(
         return (
           <BadgeListCell
             items={groups.map((group) => (
-              <GroupBadge key={group} group={group} size='sm' />
+              <span
+                key={group}
+                className='inline-flex min-w-0 shrink-0 items-center gap-1'
+              >
+                <GroupBadge group={group} size='sm' />
+                <GroupAccessBadge requirement={options.groupAccess?.[group]} />
+              </span>
             ))}
             tooltipClassName='max-w-[280px] p-2'
           />

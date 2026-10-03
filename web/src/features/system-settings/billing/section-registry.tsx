@@ -25,6 +25,7 @@ import { PaymentSettingsSection } from '../integrations/payment-settings-section
 import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import { GroupAccessSection } from './group-access-section'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -125,6 +126,18 @@ const BILLING_SECTIONS = [
         groupDefaults={getGroupDefaults(settings)}
         toolPricesDefault={settings['tool_price_setting.prices']}
         visibleTabs={['groups']}
+      />
+    ),
+  },
+  {
+    id: 'group-access',
+    titleKey: 'Group Access',
+    build: (settings: BillingSettings) => (
+      <GroupAccessSection
+        defaultValues={{
+          rules: settings['group_access_setting.rules'],
+          countRedemption: settings['group_access_setting.count_redemption'],
+        }}
       />
     ),
   },

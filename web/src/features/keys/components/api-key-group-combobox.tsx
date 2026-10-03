@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Check, ChevronsUpDown } from 'lucide-react'
+import { Check, ChevronsUpDown, Lock } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -35,8 +35,10 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { useMediaQuery } from '@/hooks'
+import { toIntlLocale } from '@/i18n/languages'
 import { cn } from '@/lib/utils'
 
+import { getApiKeyGroupLockReason, type ApiKeyGroupLock } from '../lib'
 import {
   AUTO_GROUP_FRAME_CLASS_NAME,
   AutoGroupFlowBorder,
@@ -48,6 +50,8 @@ export type ApiKeyGroupOption = {
   label: string
   desc?: string
   ratio?: number | string
+  /** Set for a recharge-gated group the user cannot use yet. */
+  locked?: ApiKeyGroupLock
 }
 
 type ApiKeyGroupComboboxProps = {
@@ -65,12 +69,16 @@ export function ApiKeyGroupCombobox({
   placeholder,
   disabled,
 }: ApiKeyGroupComboboxProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [open, setOpen] = useState(false)
   const [searchValue, setSearchValue] = useState('')
   const shouldReduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const selectedOption = options.find((option) => option.value === value)
   const isAutoSelected = selectedOption?.value === 'auto'
+  const selectedLockReason = selectedOption?.locked
+    ? getApiKeyGroupLockReason(t, selectedOption.locked, locale)
+    : undefined
 
   const filteredOptions = useMemo(() => {
     const search = searchValue.trim().toLowerCase()
@@ -120,10 +128,23 @@ export function ApiKeyGroupCombobox({
         )}
         <span className='flex min-w-0 flex-1 items-center justify-between gap-2 sm:gap-3'>
           <span className='min-w-0'>
-            <span className='block truncate font-medium'>
-              {selectedOption?.label || placeholder || t('Select a group')}
+            <span className='flex min-w-0 items-center gap-1.5 font-medium'>
+              {selectedLockReason && (
+                <Lock
+                  aria-hidden='true'
+                  className='text-warning size-3.5 shrink-0'
+                />
+              )}
+              <span className='truncate'>
+                {selectedOption?.label || placeholder || t('Select a group')}
+              </span>
             </span>
-            {selectedOption?.desc && (
+            {selectedLockReason && (
+              <span className='text-muted-foreground block truncate text-[11px] sm:text-xs'>
+                {selectedLockReason}
+              </span>
+            )}
+            {!selectedLockReason && selectedOption?.desc && (
               <span className='text-muted-foreground block truncate text-[11px] sm:text-xs'>
                 {selectedOption.desc}
               </span>
@@ -159,11 +180,15 @@ export function ApiKeyGroupCombobox({
             <CommandGroup>
               {filteredOptions.map((option) => {
                 const isAutoOption = option.value === 'auto'
+                const lockReason = option.locked
+                  ? getApiKeyGroupLockReason(t, option.locked, locale)
+                  : undefined
 
                 return (
                   <CommandItem
                     key={option.value}
                     value={option.value}
+                    disabled={Boolean(lockReason)}
                     data-auto-group-effect={isAutoOption ? 'option' : undefined}
                     onSelect={() => handleSelect(option.value)}
                     className={cn(
@@ -188,12 +213,20 @@ export function ApiKeyGroupCombobox({
                       )}
                     />
                     <span className='min-w-0 flex-1'>
-                      <span className='block truncate font-medium'>
-                        {option.label}
+                      <span className='flex min-w-0 items-center gap-1.5 font-medium'>
+                        {lockReason && (
+                          <Lock aria-hidden='true' className='size-3.5' />
+                        )}
+                        <span className='truncate'>{option.label}</span>
                       </span>
                       {option.desc && (
                         <span className='text-muted-foreground block truncate text-xs'>
                           {option.desc}
+                        </span>
+                      )}
+                      {lockReason && (
+                        <span className='text-muted-foreground block text-xs'>
+                          {lockReason}
                         </span>
                       )}
                     </span>

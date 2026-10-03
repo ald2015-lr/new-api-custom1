@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, test } from 'vitest'
 
+import type { ApiKeyGroupOption } from '../api-key-group-combobox'
+
 let shouldReduceMotion = false
 const reducedMotionMediaQuery = window.matchMedia('(prefers-reduced-motion)')
 Object.defineProperty(reducedMotionMediaQuery, 'matches', {
@@ -67,13 +69,34 @@ const options = [
   { value: 'vip', label: 'vip', desc: 'Priority group', ratio: 3 },
 ]
 
-function Harness(props: { initialValue: string }) {
+const lockedGroupOptions: ApiKeyGroupOption[] = [
+  { value: 'default', label: 'default', desc: 'User group', ratio: 1 },
+  {
+    value: 'svip',
+    label: 'svip',
+    desc: 'Top-up group',
+    ratio: 0.8,
+    locked: { min_topup: 50, current_topup: 20, whitelist_only: false },
+  },
+  {
+    value: 'partner',
+    label: 'partner',
+    desc: 'Partner group',
+    ratio: 0.5,
+    locked: { min_topup: 0, current_topup: 20, whitelist_only: true },
+  },
+]
+
+function Harness(props: {
+  initialValue: string
+  options?: ApiKeyGroupOption[]
+}) {
   const [value, setValue] = useState(props.initialValue)
 
   return (
     <I18nextProvider i18n={i18n}>
       <ApiKeyGroupCombobox
-        options={options}
+        options={props.options ?? options}
         value={value}
         onValueChange={setValue}
       />
@@ -220,5 +243,70 @@ describe('API key group combobox Auto effect', () => {
     expect(autoOption.querySelector('[data-auto-group-flow-border]')).toBe(null)
     expect(within(autoOption).getByText('Auto')).toBeInTheDocument()
     setReducedMotion(false)
+  })
+})
+
+describe('API key group combobox locked groups', () => {
+  test('lists a locked group as a disabled option with its requirement', () => {
+    render(<Harness initialValue='default' options={lockedGroupOptions} />)
+
+    fireEvent.click(getTrigger())
+
+    const topupOption = getCommandItem('Top-up group')
+    expect(topupOption).toHaveAttribute('aria-disabled', 'true')
+    expect(topupOption).toHaveTextContent(
+      'Requires cumulative top-up of 50 (current 20)'
+    )
+    const whitelistOption = getCommandItem('Partner group')
+    expect(whitelistOption).toHaveAttribute('aria-disabled', 'true')
+    expect(whitelistOption).toHaveTextContent(
+      'Only available to specific users'
+    )
+    expect(getCommandItem('User group')).toHaveAttribute(
+      'aria-disabled',
+      'false'
+    )
+  })
+
+  test('ignores clicks on a locked option and keeps the popup open', () => {
+    const { container } = render(
+      <Harness initialValue='default' options={lockedGroupOptions} />
+    )
+    const trigger = getTrigger()
+    fireEvent.click(trigger)
+
+    fireEvent.click(getCommandItem('Top-up group'))
+
+    expect(within(container).getByTestId('selected-group')).toHaveTextContent(
+      'default'
+    )
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  test('skips locked options when choosing with the keyboard', () => {
+    const { container } = render(
+      <Harness initialValue='svip' options={lockedGroupOptions} />
+    )
+    fireEvent.click(getTrigger())
+    const search = screen.getByPlaceholderText('Search...')
+
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    fireEvent.keyDown(search, { key: 'Enter' })
+
+    expect(within(container).getByTestId('selected-group')).toHaveTextContent(
+      'default'
+    )
+  })
+
+  test('keeps a locked current group selected and shows why it is locked', () => {
+    render(<Harness initialValue='svip' options={lockedGroupOptions} />)
+
+    const trigger = getTrigger()
+
+    expect(trigger).toHaveTextContent('svip')
+    expect(trigger).toHaveTextContent(
+      'Requires cumulative top-up of 50 (current 20)'
+    )
+    expect(trigger).not.toHaveTextContent('Top-up group')
   })
 })

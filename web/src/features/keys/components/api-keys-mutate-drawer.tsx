@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, KeyRound, Settings2, WalletCards } from 'lucide-react'
+import {
+  ChevronDown,
+  KeyRound,
+  Settings2,
+  TriangleAlert,
+  WalletCards,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm, type SubmitErrorHandler } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -169,10 +175,42 @@ export function ApiKeysMutateDrawer({
       })),
     [groupsData]
   )
+  // Recharge-gated groups are shown but cannot be selected; they never feed
+  // the Auto candidates below.
+  const lockedGroups = useMemo<ApiKeyGroupOption[]>(
+    () =>
+      Object.entries(groupsData?.locked || {}).map(([key, info]) => ({
+        value: key,
+        label: key,
+        desc: info.desc || key,
+        ratio: info.ratio,
+        locked: {
+          min_topup: info.min_topup,
+          current_topup: info.current_topup,
+          whitelist_only: info.whitelist_only,
+        },
+      })),
+    [groupsData]
+  )
+  const groupOptions = useMemo(
+    () => [...groups, ...lockedGroups],
+    [groups, lockedGroups]
+  )
   const backendHasAuto = groups.some((g) => g.value === 'auto')
   const availableAutoGroupNames = useMemo(
     () => groups.filter((group) => group.value !== 'auto').map((g) => g.value),
     [groups]
+  )
+  // Stored Auto entries for locked groups are kept, not dropped, so they work
+  // again once the user qualifies. They are still never offered as candidates.
+  const preservableAutoGroupNames = useMemo(
+    () => [
+      ...availableAutoGroupNames,
+      ...lockedGroups
+        .map((group) => group.value)
+        .filter((value) => value !== 'auto'),
+    ],
+    [availableAutoGroupNames, lockedGroups]
   )
   const globalAutoGroups = useMemo(() => {
     const available = new Set(availableAutoGroupNames)
@@ -226,7 +264,7 @@ export function ApiKeysMutateDrawer({
         form.reset(
           transformApiKeyToFormDefaults(
             apiKeyData.data,
-            availableAutoGroupNames,
+            preservableAutoGroupNames,
             maxAutoGroups
           )
         )
@@ -253,7 +291,7 @@ export function ApiKeysMutateDrawer({
     apiKeyData,
     apiKeyFetched,
     apiKeyFetching,
-    availableAutoGroupNames,
+    preservableAutoGroupNames,
     maxAutoGroups,
     initializedTarget,
   ])
@@ -262,11 +300,16 @@ export function ApiKeysMutateDrawer({
     isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
   const isFormInitialized = initializedTarget === formTarget
   const selectedGroup = form.watch('group')
+  const isSelectedGroupLocked = lockedGroups.some(
+    (group) => group.value === selectedGroup
+  )
 
-  // Correct group after groups load: if the form value is not in available groups, fall back
+  // Correct group after groups load: if the form value is not in available groups, fall back.
+  // An existing key keeps its locked group so the owner can see why it fails.
   useEffect(() => {
     if (groups.length === 0) return
     const currentGroup = selectedGroup
+    if (isUpdate && isSelectedGroupLocked) return
     if (currentGroup && !groups.some((g) => g.value === currentGroup)) {
       const fallback =
         groups.find((g) => g.value === 'default')?.value ??
@@ -279,7 +322,7 @@ export function ApiKeysMutateDrawer({
         form.setValue('cross_group_retry', false)
       }
     }
-  }, [groups, form, selectedGroup])
+  }, [groups, form, selectedGroup, isUpdate, isSelectedGroupLocked])
 
   const onSubmit = async (data: ApiKeyFormValues) => {
     setIsSubmitting(true)
@@ -424,7 +467,7 @@ export function ApiKeysMutateDrawer({
                     <FormLabel>{t('Group')}</FormLabel>
                     <FormControl>
                       <ApiKeyGroupCombobox
-                        options={groups}
+                        options={groupOptions}
                         value={field.value}
                         onValueChange={(group) => {
                           field.onChange(group)
@@ -441,6 +484,19 @@ export function ApiKeysMutateDrawer({
                         placeholder={t('Select a group')}
                       />
                     </FormControl>
+                    {isSelectedGroupLocked && (
+                      <FormDescription className='flex items-start gap-1.5'>
+                        <TriangleAlert
+                          aria-hidden='true'
+                          className='text-warning mt-0.5 size-3.5 shrink-0'
+                        />
+                        <span>
+                          {t(
+                            'Requests with this API key fail until you meet the group requirement. Choose another group to keep using it.'
+                          )}
+                        </span>
+                      </FormDescription>
+                    )}
                     <FormMessage />
                   </FormItem>
                 )}
@@ -463,6 +519,7 @@ export function ApiKeysMutateDrawer({
                           value={field.value}
                           mode={autoGroupsMode}
                           options={groups}
+                          lockedOptions={lockedGroups}
                           globalOptions={globalAutoGroupOptions}
                           maxCount={maxAutoGroups}
                           onChange={(value) => {

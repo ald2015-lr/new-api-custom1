@@ -95,12 +95,14 @@ import {
   pricingDisplayFallbackKey,
 } from '../lib/task-price-display'
 import type {
+  GroupAccessRequirement,
   ModelCapability,
   PriceType,
   PricingModel,
   TokenUnit,
 } from '../types'
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
+import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
 import { ModelDetailsPerformance } from './model-details-performance'
@@ -991,6 +993,7 @@ type GroupPricingSectionProps = {
   groupRatio: Record<string, number>
   usableGroup: Record<string, { desc: string; ratio: number }>
   autoGroups: string[]
+  groupAccess?: Record<string, GroupAccessRequirement>
   priceRate: number
   usdExchangeRate: number
   tokenUnit: TokenUnit
@@ -1198,7 +1201,12 @@ function ProviderGroupPricingSection(
             return (
               <div key={group} className='overflow-hidden rounded-lg border'>
                 <div className='bg-muted/20 flex items-center justify-between gap-3 border-b px-3 py-2'>
-                  <GroupBadge group={group} size='sm' />
+                  <span className='flex min-w-0 flex-wrap items-center gap-1.5'>
+                    <GroupBadge group={group} size='sm' />
+                    <GroupAccessBadge
+                      requirement={props.groupAccess?.[group]}
+                    />
+                  </span>
                   <span className='text-muted-foreground font-mono text-xs'>
                     {ratio}x
                   </span>
@@ -1389,7 +1397,12 @@ function ProviderGroupPricingSection(
             header: t('Group'),
             className: thClass,
             cellClassName: 'py-2.5',
-            cell: (group) => <GroupBadge group={group} size='sm' />,
+            cell: (group) => (
+              <span className='flex min-w-0 flex-wrap items-center gap-1.5'>
+                <GroupBadge group={group} size='sm' />
+                <GroupAccessBadge requirement={props.groupAccess?.[group]} />
+              </span>
+            ),
           },
           {
             id: 'ratio',
@@ -1462,6 +1475,7 @@ export interface ModelDetailsContentProps {
   usableGroup: Record<string, { desc: string; ratio: number }>
   endpointMap: Record<string, { path?: string; method?: string }>
   autoGroups: string[]
+  groupAccess?: Record<string, GroupAccessRequirement>
   priceRate: number
   usdExchangeRate: number
   tokenUnit: TokenUnit
@@ -1537,6 +1551,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
               groupRatio={props.groupRatio}
               usableGroup={props.usableGroup}
               autoGroups={props.autoGroups}
+              groupAccess={props.groupAccess}
               priceRate={props.priceRate}
               usdExchangeRate={props.usdExchangeRate}
               tokenUnit={props.tokenUnit}
@@ -1607,6 +1622,7 @@ export function ModelDetails() {
     usableGroup,
     endpointMap,
     autoGroups,
+    groupAccess,
     isLoading,
     priceRate,
     usdExchangeRate,
@@ -1685,6 +1701,7 @@ export function ModelDetails() {
           groupRatio={groupRatio || {}}
           usableGroup={usableGroup || {}}
           autoGroups={autoGroups || []}
+          groupAccess={groupAccess}
           priceRate={priceRate ?? 1}
           usdExchangeRate={usdExchangeRate ?? 1}
           tokenUnit={tokenUnit}

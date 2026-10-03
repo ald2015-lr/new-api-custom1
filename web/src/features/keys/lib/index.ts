@@ -27,3 +27,11 @@ export {
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
 } from './api-key-form'
+
+// ============================================================================
+// Group Access
+// ============================================================================
+export {
+  type ApiKeyGroupLock,
+  getApiKeyGroupLockReason,
+} from './api-key-group-lock'
