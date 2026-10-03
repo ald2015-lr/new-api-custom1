@@ -31,6 +31,7 @@ import { getLobeIcon } from '@/lib/lobe-icon'
 import { parseTags } from '../lib/filters'
 import type { GroupAccessRequirement, PricingModel } from '../types'
 import { CachedPriceCell } from './cached-price-cell'
+import { FreeGroupBadge } from './free-group-badge'
 import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelPriceCell, type ModelPriceCellOptions } from './model-price-cell'
@@ -42,6 +43,8 @@ import { ModelPriceCell, type ModelPriceCellOptions } from './model-price-cell'
 export type PricingColumnsOptions = ModelPriceCellOptions & {
   /** Recharge-gated groups, marked next to the group name. */
   groupAccess?: Record<string, GroupAccessRequirement>
+  /** Groups that do not charge users, marked next to the group name. */
+  freeGroups?: readonly string[]
 }
 
 export function usePricingColumns(
@@ -201,6 +204,7 @@ export function usePricingColumns(
               >
                 <GroupBadge group={group} size='sm' />
                 <GroupAccessBadge requirement={options.groupAccess?.[group]} />
+                <FreeGroupBadge group={group} freeGroups={options.freeGroups} />
               </span>
             ))}
             tooltipClassName='max-w-[280px] p-2'

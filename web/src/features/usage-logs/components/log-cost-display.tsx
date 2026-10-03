@@ -81,6 +81,9 @@ function ToolSurchargeMarker() {
 export function LogCostDisplay(props: LogCostDisplayProps) {
   const { t } = useTranslation()
   const isSubscription = props.other?.billing_source === 'subscription'
+  // A free-group request was not charged to the user; the amount is the real
+  // cost that still counts toward the channel.
+  const isFreeGroup = props.other?.billing_source === 'free_group'
   const showToolSurcharge = hasToolSurcharge(props.other)
   const quota = isSubscription
     ? (props.other?.subscription_consumed ?? props.quota)
@@ -134,6 +137,14 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
           ) : null}
           <span className='whitespace-nowrap'>{formatLogQuota(quota)}</span>
         </StatusBadge>
+        {isFreeGroup ? (
+          <StatusBadge
+            data-free-group-badge=''
+            label={t('Free group')}
+            variant='success'
+            copyable={false}
+          />
+        ) : null}
         {showToolSurcharge ? <ToolSurchargeMarker /> : null}
       </div>
     </TooltipProvider>

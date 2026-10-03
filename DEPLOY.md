@@ -145,6 +145,7 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `model/topup.go` | 管理员补单：Creem 订单按额度原样入账（上游会放大 50 万倍）；重复补单不再给用户 0 记日志 |
 | `middleware/task_plugin.go`、`relay/relay_task.go`、`relay/mjproxy_handler.go` | 基于旧任务的续作/放大请求也受分组准入限制 |
 | 新文件 `model/channel_quota_limit.go`、`controller/channel_quota_limit.go`，以及 `model/{main,channel,channel_cache,ability}.go`、`service/channel_select.go`、`controller/relay.go`、`router/channel-router.go`、`i18n/` 里的小钩子；前端 `web/src/features/channels/*` | 渠道限额（见第十节）；新增 `channel_quota_limits` 表 |
+| 新文件 `setting/operation_setting/group_billing_setting.go`、`service/free_group.go`，以及 `service/{billing,quota,task_billing}.go`、`controller/pricing.go`、`model/option.go` 里的小钩子；前端 `features/system-settings/billing`、`features/pricing`、`features/usage-logs` | 不扣费（免费）分组（见第十一节） |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
@@ -377,4 +378,22 @@ WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TI
 - 用量按每次请求**结算后的实际扣费**累计（退款会减回去），所以并发很高时可能略超限额（最后几个同时进行的请求会全部完成）；
 - 只统计**设置限额之后**的用量；「已使用」列里的历史总用量不受影响；
 - 多节点部署时，其它节点最多 10 秒后看到最新用量。
+
+---
+
+## 十一、不扣费分组（福利分组）
+
+**在哪设置：** 系统设置 → 计费 →「分组计费」。每个分组一个开关：**扣费**（默认）/ **不扣费**。
+
+**设为不扣费的分组：**
+- 用户调用时**不扣**钱包余额、不扣订阅额度、不扣令牌额度；余额是 0 的用户也能用；
+- **照常累计**：渠道的「已使用」、渠道限额（第十节）的用量、使用日志里的花费（日志里标「免费分组」），用户的「已用」统计也会增加；
+- 模型广场里这个分组带「不扣费」标记。
+
+**建议搭配：** 给这个分组的渠道设一个**每日重置的渠道限额**（第十节），就是「每天限量的免费福利」，用完了当天自动停，第二天恢复；再配合分组准入（第八节）控制谁能用。
+
+**注意：**
+- 按「最终实际使用的分组」判断：令牌用 `auto` 时，如果实际落在不扣费分组，就不扣费；先在收费分组预扣、重试后落到不扣费分组的，预扣会全部退回；
+- **Midjourney 请求不受这个开关影响，照常扣费**（它的退款逻辑会直接退钱包，免费会被反向利用）；
+- 令牌本身设置了额度上限且已用完的，仍会被令牌额度检查拦下。
 

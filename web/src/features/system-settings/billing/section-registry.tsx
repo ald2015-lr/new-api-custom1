@@ -26,6 +26,7 @@ import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
 import { GroupAccessSection } from './group-access-section'
+import { GroupBillingSection } from './group-billing-section'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -137,6 +138,17 @@ const BILLING_SECTIONS = [
         defaultValues={{
           rules: settings['group_access_setting.rules'],
           countRedemption: settings['group_access_setting.count_redemption'],
+        }}
+      />
+    ),
+  },
+  {
+    id: 'group-billing',
+    titleKey: 'Group Billing',
+    build: (settings: BillingSettings) => (
+      <GroupBillingSection
+        defaultValues={{
+          freeGroups: settings['group_billing_setting.free_groups'],
         }}
       />
     ),

@@ -26,6 +26,7 @@ import { getPricing } from '../api'
 import type { GroupAccessRequirement } from '../types'
 
 const EMPTY_GROUP_ACCESS: Record<string, GroupAccessRequirement> = {}
+const EMPTY_FREE_GROUPS: string[] = []
 
 export function usePricingData(enabled = true) {
   const { status } = useStatus()
@@ -75,6 +76,7 @@ export function usePricingData(enabled = true) {
     endpointMap: data?.supported_endpoint ?? {},
     autoGroups: data?.auto_groups ?? [],
     groupAccess: data?.group_access ?? EMPTY_GROUP_ACCESS,
+    freeGroups: data?.free_groups ?? EMPTY_FREE_GROUPS,
     isLoading,
     error,
     refetch,

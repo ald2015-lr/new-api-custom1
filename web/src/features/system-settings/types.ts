@@ -308,6 +308,7 @@ export type BillingSettings = {
   'group_ratio_setting.group_special_usable_group': string
   'group_access_setting.rules': string
   'group_access_setting.count_redemption': boolean
+  'group_billing_setting.free_groups': string
   PayAddress: string
   EpayId: string
   EpayKey: string

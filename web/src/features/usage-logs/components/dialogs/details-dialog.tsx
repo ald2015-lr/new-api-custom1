@@ -486,6 +486,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const isTopup = props.log.type === 1
   const isManage = props.log.type === 3
   const isSubscription = other?.billing_source === 'subscription'
+  const isFreeGroup = other?.billing_source === 'free_group'
   const isTieredBilling =
     isConsume &&
     !isViolation &&
@@ -1163,6 +1164,17 @@ export function DetailsDialog(props: DetailsDialogProps) {
             other={other}
             isAdmin={props.isAdmin}
           />
+        )}
+
+        {/* Free group: the cost above was not charged to the user */}
+        {isFreeGroup && (
+          <DetailSection label={t('Free group')}>
+            <p className='text-muted-foreground text-xs'>
+              {t(
+                'Not charged to the user (free group); the channel usage still counts.'
+              )}
+            </p>
+          </DetailSection>
         )}
 
         {/* Tiered pricing breakdown (when billing_mode is tiered_expr) */}

@@ -85,7 +85,7 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 }
 
 func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) error {
-	if relayInfo.UsePrice {
+	if relayInfo.UsePrice || isFreeGroupRequest(relayInfo) {
 		return nil
 	}
 	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
@@ -418,6 +418,12 @@ type postConsumeQuotaResult struct {
 }
 
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) error {
+	// Free groups do not charge the user. Legacy Midjourney billing calls
+	// postConsumeQuotaWithResult directly and keeps charging, because its
+	// refunds credit the wallet unconditionally.
+	if isFreeGroupRequest(relayInfo) {
+		return nil
+	}
 	_, err := postConsumeQuotaWithResult(relayInfo, quota, preConsumedQuota, sendEmail)
 	return err
 }

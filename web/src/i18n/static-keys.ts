@@ -901,4 +901,6 @@ export const STATIC_I18N_KEYS = [
   'The auto group cannot be gated',
   'Must be 1,000,000,000 or less',
   'User IDs must be positive integers',
+  // Group billing settings: save label.
+  'Save group billing',
 ] as const

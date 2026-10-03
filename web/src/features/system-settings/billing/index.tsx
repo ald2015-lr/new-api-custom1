@@ -62,6 +62,7 @@ const defaultBillingSettings: BillingSettings = {
   'group_ratio_setting.group_special_usable_group': '{}',
   'group_access_setting.rules': '[]',
   'group_access_setting.count_redemption': true,
+  'group_billing_setting.free_groups': '[]',
   PayAddress: '',
   EpayId: '',
   EpayKey: '',

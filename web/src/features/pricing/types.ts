@@ -139,6 +139,8 @@ export type PricingData = {
   auto_groups: string[]
   /** Every recharge-gated group; absent on older backends. */
   group_access?: Record<string, GroupAccessRequirement>
+  /** Groups that do not charge users; absent on older backends. */
+  free_groups?: string[]
 }
 
 export type TokenUnit = 'M' | 'K'

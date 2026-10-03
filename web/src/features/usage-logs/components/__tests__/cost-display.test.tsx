@@ -45,6 +45,7 @@ describe('log cost display', () => {
       Subscription: 'Subscription',
       Wallet: 'Wallet',
       'Includes tool-call surcharge': 'Includes tool-call surcharge',
+      'Free group': 'Free group',
     })
   })
 
@@ -115,7 +116,9 @@ describe('log cost display', () => {
 
     expect(screen.getByText('$0.025')).toBeVisible()
     expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
-    expect(screen.queryByRole('img', { name: 'Wallet' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('img', { name: 'Wallet' })
+    ).not.toBeInTheDocument()
   })
 
   test('keeps legacy cost visible without inventing a funding source', () => {
@@ -208,5 +211,30 @@ describe('log cost display', () => {
     expect(
       screen.getByRole('img', { name: 'Includes tool-call surcharge' })
     ).toHaveAttribute('data-tool-surcharge-indicator', 'true')
+  })
+
+  test.each([true, false])(
+    'shows the real cost of a free-group log with a Free group badge and no funding icon (showBillingSource %s)',
+    (showBillingSource) => {
+      renderCost({
+        quota: 5000,
+        other: { billing_source: 'free_group' },
+        showBillingSource,
+      })
+
+      expect(screen.getByText('$0.01')).toBeVisible()
+      expect(screen.getByText('Free group')).toBeVisible()
+      expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    }
+  )
+
+  test('keeps the free group badge out of wallet and subscription logs', () => {
+    renderCost({
+      quota: 5000,
+      other: { billing_source: 'wallet' },
+      showBillingSource: true,
+    })
+
+    expect(screen.queryByText('Free group')).not.toBeInTheDocument()
   })
 })

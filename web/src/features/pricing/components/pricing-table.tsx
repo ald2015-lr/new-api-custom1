@@ -40,6 +40,7 @@ export interface PricingTableProps {
   showRechargePrice?: boolean
   selectedGroup?: string
   groupAccess?: Record<string, GroupAccessRequirement>
+  freeGroups?: readonly string[]
   onModelClick?: (modelName: string) => void
 }
 
@@ -68,6 +69,7 @@ export function PricingTable(props: PricingTableProps) {
     showRechargePrice,
     selectedGroup,
     groupAccess: props.groupAccess,
+    freeGroups: props.freeGroups,
   })
 
   const { table } = useDataTable({

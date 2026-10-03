@@ -244,6 +244,9 @@ func validateOptionValue(key string, value string) error {
 	if operation_setting.IsGroupAccessOptionKey(key) {
 		return operation_setting.ValidateGroupAccessOption(key, value)
 	}
+	if operation_setting.IsGroupBillingOptionKey(key) {
+		return operation_setting.ValidateGroupBillingOption(key, value)
+	}
 	if key == operation_setting.ChannelTestConcurrencyOptionKey {
 		return operation_setting.ValidateChannelTestConcurrency(value)
 	}
@@ -704,6 +707,10 @@ func handleConfigUpdate(key, value string) bool {
 	}
 	if operation_setting.IsGroupAccessOptionKey(key) {
 		operation_setting.LoadGroupAccessOption(key, value)
+		return true
+	}
+	if operation_setting.IsGroupBillingOptionKey(key) {
+		operation_setting.LoadGroupBillingOption(key, value)
 		return true
 	}
 

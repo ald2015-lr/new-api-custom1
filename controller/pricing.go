@@ -2,6 +2,7 @@ package controller
 
 import (
 	"maps"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -72,6 +73,12 @@ func GetPricing(c *gin.Context) {
 		return !visible || g == group
 	})
 
+	// Free groups (users are not charged) among the groups the caller can see.
+	freeGroups := slices.DeleteFunc(operation_setting.GetFreeGroups(), func(g string) bool {
+		_, visible := usableGroup[g]
+		return !visible
+	})
+
 	c.JSON(200, gin.H{
 		"success":            true,
 		"data":               pricing,
@@ -81,6 +88,7 @@ func GetPricing(c *gin.Context) {
 		"supported_endpoint": model.GetSupportedEndpointMap(),
 		"auto_groups":        service.GetUserAutoGroup(group),
 		"group_access":       groupAccess,
+		"free_groups":        freeGroups,
 		"pricing_version":    "a42d372ccf0b5dd13ecf71203521f9d2",
 	})
 }

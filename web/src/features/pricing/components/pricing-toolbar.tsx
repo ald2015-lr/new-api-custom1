@@ -79,6 +79,7 @@ export interface PricingToolbarProps {
   groups: string[]
   groupRatios?: Record<string, number>
   groupAccess?: Record<string, GroupAccessRequirement>
+  freeGroups?: readonly string[]
   tags: string[]
   models: PricingModel[]
   hasActiveFilters: boolean
@@ -224,6 +225,7 @@ export function PricingToolbar(props: PricingToolbarProps) {
               groups={props.groups}
               groupRatios={props.groupRatios}
               groupAccess={props.groupAccess}
+              freeGroups={props.freeGroups}
               tags={props.tags}
               models={props.models}
               hasActiveFilters={props.hasActiveFilters}

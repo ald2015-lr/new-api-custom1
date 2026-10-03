@@ -114,6 +114,9 @@ func taskIsSubscription(task *model.Task) bool {
 
 // taskAdjustFunding 调整任务的资金来源（钱包或订阅），delta > 0 表示扣费，delta < 0 表示退还。
 func taskAdjustFunding(task *model.Task, delta int) error {
+	if task.PrivateData.BillingSource == BillingSourceFreeGroup {
+		return nil
+	}
 	if taskIsSubscription(task) {
 		if delta > 0 {
 			_, _, err := chargeSubscriptionOverage(task.UserId, task.PrivateData.SubscriptionId, int64(delta))
@@ -130,7 +133,7 @@ func taskAdjustFunding(task *model.Task, delta int) error {
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
 // 需要通过 resolveTokenKey 运行时获取 key（不从 PrivateData 中读取）。
 func taskAdjustTokenQuota(ctx context.Context, task *model.Task, delta int) {
-	if task.PrivateData.TokenId <= 0 || delta == 0 {
+	if task.PrivateData.TokenId <= 0 || delta == 0 || task.PrivateData.BillingSource == BillingSourceFreeGroup {
 		return
 	}
 	tokenKey := resolveTokenKey(ctx, task.PrivateData.TokenId, task.TaskID)

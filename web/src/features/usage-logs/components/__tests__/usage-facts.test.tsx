@@ -36,6 +36,9 @@ const i18nKeys = {
   'Group Ratio': 'Group Ratio',
   'Total Cost': 'Total Cost',
   'Usage parameters': 'Usage parameters',
+  'Free group': 'Free group',
+  'Not charged to the user (free group); the channel usage still counts.':
+    'Not charged to the user (free group); the channel usage still counts.',
 }
 
 function makeLog(other: LogOtherData): UsageLog {
@@ -230,5 +233,46 @@ describe('usage facts billing details', () => {
     expect(screen.queryByText('resolution')).toBeNull()
     expect(screen.queryByText('seconds')).toBeNull()
     expect(screen.getByText('Total Cost')).toBeInTheDocument()
+  })
+})
+
+describe('free group billing details', () => {
+  const queryClients: QueryClient[] = []
+
+  beforeAll(() => {
+    i18next.addResourceBundle('en', 'translation', i18nKeys)
+  })
+
+  afterEach(() => {
+    for (const queryClient of queryClients) {
+      queryClient.clear()
+    }
+    queryClients.length = 0
+  })
+
+  test('explains that a free-group log was not charged while keeping the real total cost', () => {
+    queryClients.push(
+      renderDetails({ group_ratio: 1, billing_source: 'free_group' })
+    )
+
+    expect(
+      screen.getByText(
+        'Not charged to the user (free group); the channel usage still counts.'
+      )
+    ).toBeVisible()
+    expect(rowValue('Total Cost')).toBe('$0.01')
+  })
+
+  test('does not show the free group note for a wallet-billed log', () => {
+    queryClients.push(
+      renderDetails({ group_ratio: 1, billing_source: 'wallet' })
+    )
+
+    expect(screen.queryByText('Free group')).toBeNull()
+    expect(
+      screen.queryByText(
+        'Not charged to the user (free group); the channel usage still counts.'
+      )
+    ).toBeNull()
   })
 })

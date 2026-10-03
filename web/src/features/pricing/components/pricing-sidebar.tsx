@@ -44,6 +44,7 @@ import type {
   PricingModel,
   PricingVendor,
 } from '../types'
+import { FreeGroupBadge } from './free-group-badge'
 import { GroupAccessBadge } from './group-access-badge'
 
 type FilterOption = {
@@ -77,6 +78,8 @@ export interface PricingSidebarProps {
   groups: string[]
   groupRatios?: Record<string, number>
   groupAccess?: Record<string, GroupAccessRequirement>
+  /** Groups that do not charge users. */
+  freeGroups?: readonly string[]
   tags: string[]
   models: PricingModel[]
   hasActiveFilters: boolean
@@ -219,10 +222,17 @@ export const PricingSidebar = memo(function PricingSidebar(
       label: group,
       suffix: formatGroupRatio(props.groupRatios?.[group]),
       badge: (
-        <GroupAccessBadge
-          requirement={props.groupAccess?.[group]}
-          className='h-auto px-0 text-xs'
-        />
+        <>
+          <GroupAccessBadge
+            requirement={props.groupAccess?.[group]}
+            className='h-auto px-0 text-xs'
+          />
+          <FreeGroupBadge
+            group={group}
+            freeGroups={props.freeGroups}
+            className='h-auto px-0 text-xs'
+          />
+        </>
       ),
     })),
   ]

@@ -102,6 +102,7 @@ import type {
   TokenUnit,
 } from '../types'
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
+import { FreeGroupBadge } from './free-group-badge'
 import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
@@ -994,6 +995,7 @@ type GroupPricingSectionProps = {
   usableGroup: Record<string, { desc: string; ratio: number }>
   autoGroups: string[]
   groupAccess?: Record<string, GroupAccessRequirement>
+  freeGroups?: readonly string[]
   priceRate: number
   usdExchangeRate: number
   tokenUnit: TokenUnit
@@ -1206,6 +1208,10 @@ function ProviderGroupPricingSection(
                     <GroupAccessBadge
                       requirement={props.groupAccess?.[group]}
                     />
+                    <FreeGroupBadge
+                      group={group}
+                      freeGroups={props.freeGroups}
+                    />
                   </span>
                   <span className='text-muted-foreground font-mono text-xs'>
                     {ratio}x
@@ -1401,6 +1407,7 @@ function ProviderGroupPricingSection(
               <span className='flex min-w-0 flex-wrap items-center gap-1.5'>
                 <GroupBadge group={group} size='sm' />
                 <GroupAccessBadge requirement={props.groupAccess?.[group]} />
+                <FreeGroupBadge group={group} freeGroups={props.freeGroups} />
               </span>
             ),
           },
@@ -1476,6 +1483,7 @@ export interface ModelDetailsContentProps {
   endpointMap: Record<string, { path?: string; method?: string }>
   autoGroups: string[]
   groupAccess?: Record<string, GroupAccessRequirement>
+  freeGroups?: readonly string[]
   priceRate: number
   usdExchangeRate: number
   tokenUnit: TokenUnit
@@ -1552,6 +1560,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
               usableGroup={props.usableGroup}
               autoGroups={props.autoGroups}
               groupAccess={props.groupAccess}
+              freeGroups={props.freeGroups}
               priceRate={props.priceRate}
               usdExchangeRate={props.usdExchangeRate}
               tokenUnit={props.tokenUnit}
@@ -1623,6 +1632,7 @@ export function ModelDetails() {
     endpointMap,
     autoGroups,
     groupAccess,
+    freeGroups,
     isLoading,
     priceRate,
     usdExchangeRate,
@@ -1702,6 +1712,7 @@ export function ModelDetails() {
           usableGroup={usableGroup || {}}
           autoGroups={autoGroups || []}
           groupAccess={groupAccess}
+          freeGroups={freeGroups}
           priceRate={priceRate ?? 1}
           usdExchangeRate={usdExchangeRate ?? 1}
           tokenUnit={tokenUnit}

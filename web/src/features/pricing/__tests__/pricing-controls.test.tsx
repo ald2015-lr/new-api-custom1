@@ -110,6 +110,61 @@ describe('pricing controls', () => {
     expect(within(row).getByText('Restricted')).toBeVisible()
   })
 
+  it('marks free group filters with a not charged badge', () => {
+    const props = toolbarProps()
+
+    render(
+      <PricingSidebar
+        {...props}
+        groups={['default', 'welfare']}
+        groupRatios={{ default: 1, welfare: 1 }}
+        freeGroups={['welfare']}
+      />
+    )
+
+    expect(
+      screen.getByRole('button', { name: /^welfare\s*Not charged\s*x1$/ })
+    ).toBeVisible()
+    expect(screen.getByRole('button', { name: /^default\s*x1$/ })).toBeVisible()
+  })
+
+  it('marks only free groups in the table view Groups column', () => {
+    const model: PricingModel = {
+      id: 1,
+      model_name: 'welfare-model',
+      quota_type: 0,
+      model_ratio: 1,
+      completion_ratio: 1,
+      enable_groups: ['default', 'welfare'],
+    }
+
+    render(<PricingTable models={[model]} freeGroups={['welfare']} />)
+
+    const row = screen.getByRole('row', { name: /welfare-model/ })
+    const badges = within(row).getAllByText('Not charged')
+    expect(badges).toHaveLength(1)
+    expect(badges[0].closest('[data-free-group-badge]')).toBeVisible()
+    expect(
+      badges[0].closest('[data-free-group-badge]')?.parentElement
+    ).toHaveTextContent('welfare')
+  })
+
+  it('shows no free badge when the backend sends no free groups', () => {
+    const model: PricingModel = {
+      id: 1,
+      model_name: 'legacy-model',
+      quota_type: 0,
+      model_ratio: 1,
+      completion_ratio: 1,
+      enable_groups: ['welfare'],
+    }
+
+    render(<PricingTable models={[model]} />)
+
+    const row = screen.getByRole('row', { name: /legacy-model/ })
+    expect(within(row).queryByText('Not charged')).not.toBeInTheDocument()
+  })
+
   it('counts each model once per filter and updates counts when the catalog changes', () => {
     const props = toolbarProps()
     const base: PricingModel = {
