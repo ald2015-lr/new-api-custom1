@@ -18,11 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { CherryStudio } from '@lobehub/icons'
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, BookOpen } from 'lucide-react'
+import { ArrowRight, BookOpen, Store } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import { useStatus } from '@/hooks/use-status'
+import { parseHeaderNavModulesFromStatus } from '@/lib/nav-modules'
+import { cn } from '@/lib/utils'
 
 import { HeroTerminalDemo } from '../hero-terminal-demo'
 
@@ -50,6 +52,18 @@ export function Hero(props: HeroProps) {
   const { status } = useStatus()
   const docsUrl =
     (status?.docs_link as string | undefined) || 'https://docs.newapi.pro'
+  // The pricing page (model square) can be disabled in Header Navigation.
+  const pricingEnabled = parseHeaderNavModulesFromStatus(
+    status as Record<string, unknown> | null
+  ).pricing.enabled
+  // On phones the primary action takes a full row and the secondary buttons
+  // share the next one; Docs spans the row when it is the only one left.
+  const secondaryButtonClassName =
+    'group border-border/50 hover:border-border hover:bg-muted/50 inline-flex h-11 items-center justify-center gap-1.5 rounded-lg px-5 text-sm font-medium max-sm:px-3'
+  const docsButtonClassName = cn(
+    secondaryButtonClassName,
+    !pricingEnabled && 'col-span-2 sm:col-auto'
+  )
 
   const renderDocsButton = () => {
     const isExternal = docsUrl.startsWith('http')
@@ -57,7 +71,7 @@ export function Hero(props: HeroProps) {
       return (
         <Button
           variant='outline'
-          className='group border-border/50 hover:border-border hover:bg-muted/50 inline-flex h-11 items-center gap-1.5 rounded-lg px-5 text-sm font-medium'
+          className={docsButtonClassName}
           render={
             <a href={docsUrl} target='_blank' rel='noopener noreferrer' />
           }
@@ -70,7 +84,7 @@ export function Hero(props: HeroProps) {
     return (
       <Button
         variant='outline'
-        className='group border-border/50 hover:border-border hover:bg-muted/50 inline-flex h-11 items-center gap-1.5 rounded-lg px-5 text-sm font-medium'
+        className={docsButtonClassName}
         render={<Link to={docsUrl} />}
       >
         <BookOpen className='text-muted-foreground/80 group-hover:text-foreground size-4 transition-colors duration-200' />
@@ -134,36 +148,48 @@ export function Hero(props: HeroProps) {
           </p>
 
           <div
-            className='landing-animate-fade-up mt-8 flex flex-wrap items-center gap-3 opacity-0'
+            className='landing-animate-fade-up mt-8 grid w-full grid-cols-2 gap-3 opacity-0 sm:flex sm:w-auto sm:flex-wrap sm:items-center'
             style={{ animationDelay: '180ms' }}
           >
             {props.isAuthenticated ? (
               <>
                 <Button
-                  className='group h-11 rounded-lg px-5 text-sm font-medium'
+                  className='group col-span-2 h-11 rounded-lg px-5 text-sm font-medium sm:col-auto'
                   render={<Link to='/dashboard' />}
                 >
                   {t('Go to Dashboard')}
                   <ArrowRight className='ml-1.5 size-4 transition-transform duration-200 group-hover:translate-x-0.5' />
                 </Button>
+                {pricingEnabled && (
+                  <Button
+                    variant='outline'
+                    className={secondaryButtonClassName}
+                    render={<Link to='/pricing' />}
+                  >
+                    <Store className='text-muted-foreground/80 group-hover:text-foreground size-4 transition-colors duration-200' />
+                    <span>{t('Model Square')}</span>
+                  </Button>
+                )}
                 {renderDocsButton()}
               </>
             ) : (
               <>
                 <Button
-                  className='group h-11 rounded-lg px-5 text-sm font-medium'
+                  className='group col-span-2 h-11 rounded-lg px-5 text-sm font-medium sm:col-auto'
                   render={<Link to='/sign-up' />}
                 >
                   {t('Get Started')}
                   <ArrowRight className='ml-1.5 size-4 transition-transform duration-200 group-hover:translate-x-0.5' />
                 </Button>
-                <Button
-                  variant='outline'
-                  className='border-border/50 hover:border-border hover:bg-muted/50 h-11 rounded-lg px-5 text-sm font-medium'
-                  render={<Link to='/pricing' />}
-                >
-                  {t('View Pricing')}
-                </Button>
+                {pricingEnabled && (
+                  <Button
+                    variant='outline'
+                    className={secondaryButtonClassName}
+                    render={<Link to='/pricing' />}
+                  >
+                    {t('View Pricing')}
+                  </Button>
+                )}
                 {renderDocsButton()}
               </>
             )}
