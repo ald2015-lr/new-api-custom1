@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
@@ -381,6 +382,17 @@ func updatePricing() {
 				if expr, ok := billing_setting.GetBillingExpr(target.Declared); ok && strings.TrimSpace(expr) != "" {
 					pricing.BillingMode = tailMode
 					pricing.BillingExpr = expr
+				}
+			}
+		}
+		if pricing.BillingMode == billing_setting.BillingModeTieredExpr {
+			// The listing follows the active expression, not legacy prices kept
+			// for switching back. Billing itself is unchanged.
+			pricing.QuotaType, pricing.ModelPrice = 0, 0
+			if price, single, perRequest := billingexpr.FixedRequestPricing(pricing.BillingExpr); perRequest {
+				pricing.QuotaType = 1
+				if single {
+					pricing.ModelPrice = price
 				}
 			}
 		}

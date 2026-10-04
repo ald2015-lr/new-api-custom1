@@ -56,6 +56,22 @@ it('shows an explicit free request price alongside token prices with distinct un
   expect(screen.getAllByText('Price per request').length).toBeGreaterThan(0)
 })
 
+it('titles request-priced expressions as per request and keeps mixed expressions dynamic', () => {
+  const { unmount } = render(
+    <DynamicPricingBreakdown billingExpr='tier("request", fixed(0.35))' />
+  )
+  expect(screen.getByText('Per Request')).toBeVisible()
+  expect(screen.queryByText('Dynamic Pricing')).not.toBeInTheDocument()
+  expect(screen.getAllByText('$0.35/request').length).toBeGreaterThan(0)
+  unmount()
+
+  render(
+    <DynamicPricingBreakdown billingExpr='len < 1000 ? tier("free", fixed(0)) : tier("tokens", p * 2 + c * 8)' />
+  )
+  expect(screen.getByText('Dynamic Pricing')).toBeVisible()
+  expect(screen.queryByText('Per Request')).not.toBeInTheDocument()
+})
+
 it('renders weekday and hour conditions as time windows instead of expression source', () => {
   const condition =
     'weekday("Asia/Shanghai") >= 1 && weekday("Asia/Shanghai") <= 5 && ((hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12) || (hour("Asia/Shanghai") >= 14 && hour("Asia/Shanghai") < 18))'

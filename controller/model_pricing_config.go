@@ -79,3 +79,44 @@ func UpdateModelPricingConfig(c *gin.Context) {
 	recordManageAudit(c, "model.pricing.update", map[string]any{"models": names})
 	common.ApiSuccess(c, gin.H{"updated_models": names})
 }
+
+// ConvertAllModelPricing previews (dry_run=true) or saves the conversion of
+// every stored legacy price to a billing expression.
+func ConvertAllModelPricing(c *gin.Context) {
+	var request struct {
+		DryRun *bool `json:"dry_run"`
+	}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if request.DryRun == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "dry_run is required"})
+		return
+	}
+	result, err := model.ConvertAllModelPricing(*request.DryRun)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, model.ErrModelPricingConflict) {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	if !*request.DryRun {
+		converted := make([]string, 0, len(result.Converted))
+		for _, item := range result.Converted {
+			converted = append(converted, item.Model)
+		}
+		reconverted := make([]string, 0, len(result.Suspicious))
+		for _, item := range result.Suspicious {
+			if item.Reconverted {
+				reconverted = append(reconverted, item.Model)
+			}
+		}
+		if len(converted) > 0 || len(reconverted) > 0 {
+			recordManageAudit(c, "model.pricing.convert_all", map[string]any{"models": converted, "reconverted_models": reconverted})
+		}
+	}
+	common.ApiSuccess(c, result)
+}

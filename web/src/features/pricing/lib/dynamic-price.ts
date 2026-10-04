@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 
-import { TOKEN_UNIT_DIVISORS } from '../constants'
+import { QUOTA_TYPE_VALUES, TOKEN_UNIT_DIVISORS } from '../constants'
 import type {
   BillingUsageSchema,
   BillingUsageUnit,
@@ -148,6 +148,31 @@ export function isDynamicPricingModel(model: PricingModel): boolean {
     )
   }
   return model.billing_mode === 'tiered_expr' && Boolean(model.billing_expr)
+}
+
+/**
+ * Whether every pricing tier of a token billing expression charges a fixed
+ * request price. Mixed token and request tiers are not request-priced.
+ */
+export function isRequestPricedExpression(expression: string): boolean {
+  const tiers = parseTiersFromExpr(
+    splitBillingExprAndRequestRules(expression).billingExpr
+  )
+  return (
+    tiers.length > 0 && tiers.every((tier) => tier.billingUnit === 'request')
+  )
+}
+
+/**
+ * Expression models that the pricing API lists as per-request because every
+ * tier charges a fixed request price.
+ */
+export function isRequestPricedExpressionModel(model: PricingModel): boolean {
+  return (
+    model.quota_type === QUOTA_TYPE_VALUES.REQUEST &&
+    !hasTaskUsageSchema(model) &&
+    isDynamicPricingModel(model)
+  )
 }
 
 export function hasTaskUsageSchema(model: PricingModel): boolean {

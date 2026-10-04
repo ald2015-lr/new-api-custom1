@@ -99,6 +99,34 @@ func TestFixedPriceQuotaBoundariesAndUnsupportedTaskSnapshots(t *testing.T) {
 	assert.Nil(t, trace.FixedPrice)
 }
 
+func TestPricingShapeClassifiesRequestAndZeroTokenExpressions(t *testing.T) {
+	for _, tc := range []struct {
+		name, expression   string
+		perRequest, single bool
+		price              float64
+		zeroToken          bool
+	}{
+		{"converted per-call price", `tier("request", fixed(0.35))`, true, true, 0.35, false},
+		{"versioned image price with request rules", `v1:(tier("image", fixed(0.04)) * image_count) * (param("quality") == "hd" ? 2 : 1)`, true, true, 0.04, false},
+		{"conditional request prices", `len <= 32000 ? tier("short", fixed(0.01)) : tier("long", fixed(0.02))`, true, false, 0, false},
+		{"explicit free request price", `tier("free", fixed(0))`, true, true, 0, false},
+		{"mixed request and token leaves", `len <= 32000 ? tier("short", fixed(0.01)) : tier("long", p * 2 + c * 8)`, false, false, 0, false},
+		{"token price", `tier("base", p * 2 + c * 8)`, false, false, 0, false},
+		{"editor zero placeholder", `tier("base", p * 0 + c * 0)`, false, false, 0, true},
+		{"zero token tiers with request rule", `(len <= 1000 ? tier("a", 0 * p) : tier("b", (p + c) * 0 + cr * 0.0)) * (header("x") == "y" ? 3 : 1)`, false, false, 0, true},
+		{"one priced term", `tier("base", p * 0 + c * 0.01)`, false, false, 0, false},
+		{"invalid expression", `tier("base", p * `, false, false, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			price, single, perRequest := billingexpr.FixedRequestPricing(tc.expression)
+			assert.Equal(t, tc.perRequest, perRequest)
+			assert.Equal(t, tc.single, single)
+			assert.Equal(t, tc.price, price)
+			assert.Equal(t, tc.zeroToken, billingexpr.ZeroTokenPricing(tc.expression))
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Claude-style: fixed tiers, input > 200K changes both input & output price
 // ---------------------------------------------------------------------------

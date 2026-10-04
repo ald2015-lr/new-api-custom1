@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { t } from 'i18next'
 
 import { combineBillingExpr } from '@/features/pricing/lib/billing-expr'
+import { isRequestPricedExpression } from '@/features/pricing/lib/dynamic-price'
 import { splitPluginBillingExprKey } from '@/features/pricing/lib/plugin-pricing'
 import type { PricingModel } from '@/features/pricing/types'
 import type { ModelRatioData } from '@/features/system-settings/models/model-pricing-core'
@@ -63,6 +64,19 @@ export type LegacyBillingDetails = {
   request_rules?: { condition: string; multiplier: number }[]
 }
 
+// Mirrors the public pricing list: an expression is per-request only when
+// every tier charges a fixed request price; stored legacy prices are ignored.
+function modelPricingQuotaType(values: PricingValues): number {
+  const expression = values['billing_setting.billing_expr']
+  if (values['billing_setting.billing_mode'] === 'tiered_expr') {
+    return typeof expression === 'string' &&
+      isRequestPricedExpression(expression)
+      ? 1
+      : 0
+  }
+  return values.ModelPrice === undefined ? 0 : 1
+}
+
 export function modelPricingDisplay(
   entry: Pick<ModelPricingEntry, 'model_name' | 'effective' | 'usage_schema'> &
     Partial<Pick<ModelPricingEntry, 'configured' | 'cache_write_mode'>>
@@ -72,11 +86,7 @@ export function modelPricingDisplay(
     id: 0,
     model_name: entry.model_name,
     enable_groups: [],
-    quota_type:
-      values.ModelPrice !== undefined &&
-      values['billing_setting.billing_mode'] !== 'tiered_expr'
-        ? 1
-        : 0,
+    quota_type: modelPricingQuotaType(values),
     model_ratio: Number(values.ModelRatio ?? Number.NaN),
     completion_ratio: Number(values.CompletionRatio ?? Number.NaN),
     model_price:

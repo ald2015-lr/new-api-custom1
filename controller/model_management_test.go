@@ -469,6 +469,84 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 			video, err := model.PreviewModelPricingConversion("opaque-video-route", model.PricingValues{"ModelPrice": 1.0})
 			require.NoError(t, err)
 			assert.Equal(t, "Video pricing must be converted manually.", video.UnsupportedReason)
+
+			t.Run("convert_all", func(t *testing.T) {
+				const zeroExpression = `tier("base", p * 0 + c * 0)`
+				require.NoError(t, model.UpdateModelPricingOptions(map[string]string{
+					"ModelPrice":                            `{"claude-sonnet-5":0.35,"bulk-per-call":0.35,"opaque-video-route":1}`,
+					"ModelRatio":                            `{"bulk-per-call":7,"bulk-ratio":2,"bulk-realtime":1,"bulk-expression":2}`,
+					"CompletionRatio":                       `{"bulk-ratio":3}`,
+					"CacheRatio":                            `{}`,
+					"CreateCacheRatio":                      `{}`,
+					"ImageRatio":                            `{}`,
+					"AudioRatio":                            `{}`,
+					"AudioCompletionRatio":                  `{}`,
+					"billing_setting.billing_mode":          `{"claude-sonnet-5":"tiered_expr","bulk-expression":"tiered_expr","bulk-free":"tiered_expr"}`,
+					"billing_setting.billing_expr":          `{"claude-sonnet-5":"tier(\"base\", p * 0 + c * 0)","bulk-expression":"tier(\"base\", p * 1 + c * 2)","bulk-free":"tier(\"base\", p * 0 + c * 0)"}`,
+					billing_setting.PluginBillingExprOption: `{}`,
+				}))
+				recorder := modelManagementRequest(t, ConvertAllModelPricing, http.MethodPost, "/api/option/model_pricing/convert_all", map[string]any{}, nil)
+				assert.Equal(t, http.StatusBadRequest, recorder.Code, "an omitted dry_run must not write prices")
+
+				before, err := model.GetModelPricingSnapshot(nil)
+				require.NoError(t, err)
+				type bulkResponse struct {
+					Success bool
+					Message string
+					Data    model.ModelPricingBulkConversion
+				}
+				var preview bulkResponse
+				modelManagementRequest(t, ConvertAllModelPricing, http.MethodPost, "/api/option/model_pricing/convert_all", map[string]any{"dry_run": true}, &preview)
+				require.True(t, preview.Success, preview.Message)
+				converted := []model.ModelPricingBulkConversionItem{
+					// A per-call model converts its call price, never its leftover ratio.
+					{Model: "bulk-per-call", Expression: `tier("request", fixed(0.35))`},
+					{Model: "bulk-ratio", Expression: `tier("base", p * 4 + c * 12)`},
+				}
+				assert.Equal(t, converted, preview.Data.Converted)
+				assert.Equal(t, []model.ModelPricingBulkConversionItem{
+					{Model: "bulk-realtime", Reason: "Realtime pricing must be converted manually."},
+					{Model: "opaque-video-route", Reason: "Video pricing must be converted manually."},
+				}, preview.Data.Skipped)
+				suspicious := model.ModelPricingSuspiciousExpression{Model: "claude-sonnet-5", Expression: zeroExpression, LegacyPricing: model.PricingValues{"ModelPrice": 0.35}, Replacement: `tier("request", fixed(0.35))`}
+				assert.Equal(t, []model.ModelPricingSuspiciousExpression{suspicious}, preview.Data.Suspicious)
+				after, err := model.GetModelPricingSnapshot(nil)
+				require.NoError(t, err)
+				assert.Equal(t, before.Entries, after.Entries, "a dry run must not write pricing")
+
+				var saved bulkResponse
+				modelManagementRequest(t, ConvertAllModelPricing, http.MethodPost, "/api/option/model_pricing/convert_all", map[string]any{"dry_run": false}, &saved)
+				require.True(t, saved.Success, saved.Message)
+				assert.Equal(t, converted, saved.Data.Converted)
+				suspicious.Reconverted = true
+				assert.Equal(t, []model.ModelPricingSuspiciousExpression{suspicious}, saved.Data.Suspicious)
+				after, err = model.GetModelPricingSnapshot([]string{"bulk-expression", "bulk-free", "bulk-per-call", "bulk-ratio", "bulk-realtime", "claude-sonnet-5"})
+				require.NoError(t, err)
+				configured := map[string]model.PricingValues{}
+				for _, entry := range after.Entries {
+					configured[entry.ModelName] = entry.Configured
+				}
+				// Legacy fields stay stored so administrators can switch back.
+				assert.Equal(t, model.PricingValues{"ModelPrice": 0.35, "ModelRatio": 7.0, "billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": `tier("request", fixed(0.35))`}, configured["bulk-per-call"])
+				assert.Equal(t, model.PricingValues{"ModelRatio": 2.0, "CompletionRatio": 3.0, "billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": `tier("base", p * 4 + c * 12)`}, configured["bulk-ratio"])
+				assert.Equal(t, model.PricingValues{"ModelPrice": 0.35, "billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": `tier("request", fixed(0.35))`}, configured["claude-sonnet-5"])
+				assert.Equal(t, model.PricingValues{"ModelRatio": 1.0}, configured["bulk-realtime"])
+				assert.Equal(t, model.PricingValues{"ModelRatio": 2.0, "billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": `tier("base", p * 1 + c * 2)`}, configured["bulk-expression"])
+				assert.Equal(t, model.PricingValues{"billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": zeroExpression}, configured["bulk-free"])
+				expression, ok := billing_setting.GetBillingExpr("claude-sonnet-5")
+				require.True(t, ok)
+				cost, trace, err := billingexpr.RunExpr(expression, billingexpr.TokenParams{P: 1000, C: 1000})
+				require.NoError(t, err)
+				assert.Equal(t, 350000.0, cost, "the running process bills the restored per-call price")
+				assert.Equal(t, billingexpr.BillingUnitRequest, trace.BillingUnit)
+
+				var again bulkResponse
+				modelManagementRequest(t, ConvertAllModelPricing, http.MethodPost, "/api/option/model_pricing/convert_all", map[string]any{"dry_run": false}, &again)
+				require.True(t, again.Success, again.Message)
+				assert.Empty(t, again.Data.Converted)
+				assert.Empty(t, again.Data.Suspicious)
+				assert.Equal(t, preview.Data.Skipped, again.Data.Skipped)
+			})
 		})
 	}
 }

@@ -146,6 +146,8 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `middleware/task_plugin.go`、`relay/relay_task.go`、`relay/mjproxy_handler.go` | 基于旧任务的续作/放大请求也受分组准入限制 |
 | 新文件 `model/channel_quota_limit.go`、`controller/channel_quota_limit.go`，以及 `model/{main,channel,channel_cache,ability}.go`、`service/channel_select.go`、`controller/relay.go`、`router/channel-router.go`、`i18n/` 里的小钩子；前端 `web/src/features/channels/*` | 渠道限额（见第十节）；新增 `channel_quota_limits` 表 |
 | 新文件 `setting/operation_setting/group_billing_setting.go`、`service/free_group.go`，以及 `service/{billing,quota,task_billing}.go`、`controller/pricing.go`、`model/option.go` 里的小钩子；前端 `features/system-settings/billing`、`features/pricing`、`features/usage-logs` | 不扣费（免费）分组（见第十一节） |
+| `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
+| `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
@@ -398,4 +400,21 @@ WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TI
 - 按「最终实际使用的分组」判断：令牌用 `auto` 时，如果实际落在不扣费分组，就不扣费；先在收费分组预扣、重试后落到不扣费分组的，预扣会全部退回；
 - **Midjourney 请求不受这个开关影响，照常扣费**（它的退款逻辑会直接退钱包，免费会被反向利用）；
 - 令牌本身设置了额度上限且已用完的，仍会被令牌额度检查拦下。
+
+---
+
+## 十二、旧定价一键转为计费表达式
+
+**升级后先检查一件事：** 以前在模型定价编辑器里点到「计费表达式」标签页时，会自动填一个占位表达式 `tier("base", p * 0 + c * 0)`；如果当时直接保存，这个模型就会**按 $0 计费**（表达式优先于旧的按次/按量价格）。新版已修复这个问题，「全部转换」时会把这类模型单独列为「可疑」，并按它们还保存着的旧价格重新转换。
+
+**怎么转换：** 系统设置 → 计费 →「模型定价」→「全部转换为计费表达式」。
+1. 先弹出预览，列出：将要转换的模型（及生成的表达式）、可疑的 $0 表达式（及替换成什么）、跳过的模型（及原因）；
+2. 确认后一次性保存（和手动保存走同一个事务，有人同时在改定价会提示冲突、什么都不写）；
+3. 旧价格仍然保留，单个模型想切回旧模式还能切回去。
+
+**转换规则：** 按次模型（设置了固定价格）转成 `tier("request", fixed(价格))`；按量模型按倍率转成 token 单价表达式（含缓存等）。规则和单个模型的「转换为计费表达式」完全一样。
+
+**不能自动转换、会被跳过的：** 异步任务模型、视频模型、名字带 realtime 的模型、OpenRouter 上默认价格的 Claude、Gemini/OpenAI 音频价格冲突的模型、只有补全倍率没有输入价格的模型、模型映射有问题的模型。这些请在编辑器里手动处理。
+
+**模型广场的分类：** 表达式只按次收费（全部是 `fixed(...)`）的模型归入「按次计费」并显示每次价格；按 token 的表达式归入「按量计费」；按次和按 token 混合的仍算按量计费。
 

@@ -100,6 +100,56 @@ export async function previewModelPricingConversion(request: {
   return response.data.data
 }
 
+export type ModelPricingBulkConversionItem = {
+  model: string
+  expression?: string
+  reason?: string
+}
+
+export type ModelPricingSuspiciousExpression = {
+  model: string
+  expression: string
+  legacy_pricing: PricingValues
+  replacement?: string
+  reason?: string
+  reconverted: boolean
+}
+
+export type ModelPricingBulkConversion = {
+  dry_run: boolean
+  converted: ModelPricingBulkConversionItem[]
+  skipped: ModelPricingBulkConversionItem[]
+  suspicious: ModelPricingSuspiciousExpression[]
+}
+
+// Models a bulk conversion writes: legacy prices plus reconverted free
+// expressions that still have stored legacy prices.
+export function convertibleModelCount(
+  result: ModelPricingBulkConversion
+): number {
+  return (
+    result.converted.length +
+    result.suspicious.filter((item) => item.replacement).length
+  )
+}
+
+export async function convertAllModelPricing(
+  dryRun: boolean
+): Promise<ModelPricingBulkConversion> {
+  const response = await api.post('/api/option/model_pricing/convert_all', {
+    dry_run: dryRun,
+  })
+  if (!response.data.success) {
+    throw createServerError(
+      response.data,
+      dryRun
+        ? t('Failed to prepare pricing conversion')
+        : t('Failed to save model pricing')
+    )
+  }
+  return response.data.data
+}
+
 export async function previewModelPricing(request: {
   model_name: string
   pricing: PricingValues

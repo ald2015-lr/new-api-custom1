@@ -596,6 +596,56 @@ it('preserves a legacy per-request draft when conversion is unsupported', async 
   expect(draft?.billingExpr).toBeUndefined()
 })
 
+it('keeps a per-call price convertible after opening the empty expression tab and refuses to save the zero placeholder', async () => {
+  const expression = 'tier("request", fixed(0.35))'
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: { expression, effective: { ModelPrice: 0.35 } },
+    },
+  })
+  const editor = renderEditor({
+    name: 'claude-sonnet-5',
+    billingMode: 'per-request',
+    price: '0.35',
+    ratio: '',
+    completionRatio: '',
+  })
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('tab', { name: 'Expression' }))
+  expect(await commit(editor.ref)).toBeNull()
+  expect(
+    screen.getByText(
+      'This model still has legacy prices. Convert them before saving, or the empty expression would make every request free.'
+    )
+  ).toBeVisible()
+
+  await user.click(
+    screen.getByRole('tab', { name: 'Per-request (deprecated)' })
+  )
+  const convert = screen.getByRole('button', { name: 'Convert to expression' })
+  expect(convert).toBeEnabled()
+  await user.click(screen.getByRole('tab', { name: 'Expression' }))
+  await user.click(
+    screen.getByRole('button', { name: 'Convert to expression' })
+  )
+  const dialog = await screen.findByRole('alertdialog', {
+    name: 'Preview pricing conversion',
+  })
+  expect(post).toHaveBeenCalledWith('/api/option/model_pricing/convert', {
+    model_name: 'claude-sonnet-5',
+    pricing: { 'billing_setting.billing_mode': 'ratio', ModelPrice: 0.35 },
+  })
+  await user.click(
+    within(dialog).getByRole('button', { name: 'Apply to draft' })
+  )
+  expect(await commit(editor.ref)).toMatchObject({
+    billingMode: 'tiered_expr',
+    billingExpr: expression,
+    price: '0.35',
+  })
+})
+
 it('defaults to USD, remembers a currency choice and restores it when reopened', async () => {
   const editor = renderEditor()
   expect(

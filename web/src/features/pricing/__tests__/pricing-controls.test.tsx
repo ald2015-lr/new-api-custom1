@@ -26,6 +26,8 @@ import {
   PricingToolbar,
   type PricingToolbarProps,
 } from '../components/pricing-toolbar'
+import { QUOTA_TYPES } from '../constants'
+import { filterByQuotaType } from '../lib/filters'
 import type { PricingModel } from '../types'
 
 function toolbarProps(): PricingToolbarProps {
@@ -241,6 +243,70 @@ describe('pricing controls', () => {
     expect(
       screen.getByRole('button', { name: /^Task billing\s*0$/ })
     ).toBeVisible()
+  })
+
+  it('counts request-priced expressions under Per Request so the pricing type counts add up to all models', () => {
+    const props = toolbarProps()
+    const base: PricingModel = {
+      id: 1,
+      model_name: 'legacy-token',
+      quota_type: 0,
+      model_ratio: 1,
+      completion_ratio: 1,
+      enable_groups: ['default'],
+    }
+    const models: PricingModel[] = [
+      base,
+      { ...base, id: 2, model_name: 'legacy-request', quota_type: 1 },
+      {
+        ...base,
+        id: 3,
+        model_name: 'expression-request',
+        quota_type: 1,
+        model_price: 0.35,
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("request", fixed(0.35))',
+      },
+      {
+        ...base,
+        id: 4,
+        model_name: 'expression-token',
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("base", p * 2 + c * 8)',
+      },
+      {
+        ...base,
+        id: 5,
+        model_name: 'task-model',
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("base", u("seconds") * 0.4)',
+        billing_usage_schema: { seconds: { type: 'number', unit: 'second' } },
+      },
+    ]
+    render(<PricingSidebar {...props} models={models} />)
+
+    expect(
+      screen.getByRole('button', { name: /^All Models\s*5$/ })
+    ).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: /^Token-based\s*2$/ })
+    ).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: /^Per Request\s*2$/ })
+    ).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: /^Task billing\s*1$/ })
+    ).toBeVisible()
+    expect(
+      filterByQuotaType(models, QUOTA_TYPES.REQUEST).map(
+        (model) => model.model_name
+      )
+    ).toEqual(['legacy-request', 'expression-request'])
+    expect(
+      filterByQuotaType(models, QUOTA_TYPES.TOKEN).map(
+        (model) => model.model_name
+      )
+    ).toEqual(['legacy-token', 'expression-token'])
   })
 
   it('changes the token unit and keeps the selected unit pressed when clicked again', async () => {

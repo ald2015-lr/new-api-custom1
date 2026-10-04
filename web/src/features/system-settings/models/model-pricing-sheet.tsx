@@ -228,6 +228,7 @@ export const ModelPricingEditorPanel = forwardRef<
   const [conversionReason, setConversionReason] = useState('')
   const [wasConverted, setWasConverted] = useState(false)
   const conversionGeneration = useRef(0)
+  const conversionSourceMode = useRef<PricingMode>('per-token')
   const [conversionPreview, setConversionPreview] =
     useState<PricingConversionPreview | null>(null)
   const conversion = useMutation({
@@ -346,6 +347,19 @@ export const ModelPricingEditorPanel = forwardRef<
     (!billingExpr || billingExpr === DEFAULT_TOKEN_BILLING_EXPR)
       ? defaultTaskBillingExpr
       : billingExpr
+  // The zero-price starter expression is not a draft. Opening the Expression
+  // tab must not block converting, or replace, the stored legacy prices.
+  const hasExpressionDraft =
+    billingExpr.trim() !== '' && billingExpr !== DEFAULT_TOKEN_BILLING_EXPR
+  const legacyPricingMode: PricingMode = hasValue(watchedValues.price)
+    ? 'per-request'
+    : 'per-token'
+  const legacyPricesNeedConversion =
+    editData?.billingMode !== 'tiered_expr' &&
+    Boolean(hasLegacyPricing) &&
+    !taskUsageSchema &&
+    !wasConverted &&
+    !hasExpressionDraft
 
   useEffect(() => {
     conversionGeneration.current += 1
@@ -712,18 +726,31 @@ export const ModelPricingEditorPanel = forwardRef<
     ]
   )
 
-  const convertPricing = async () => {
+  // Conversion always reads a legacy mode's prices. From the Expression tab it
+  // uses the stored mode, so a per-call price is never converted as tokens.
+  const legacyConversionDraft = useCallback(
+    (values: ModelPricingFormValues, sourceMode: PricingMode) => {
+      const data = buildSubmitData(values)
+      delete data.billingExpr
+      delete data.requestRuleExpr
+      return { ...data, billingMode: sourceMode }
+    },
+    [buildSubmitData]
+  )
+
+  const convertPricing = async (sourceMode: PricingMode = pricingMode) => {
     if (
       conversion.isPending ||
       conversionPreview ||
-      billingExpr.trim() ||
-      pricingMode === 'tiered_expr'
+      hasExpressionDraft ||
+      sourceMode === 'tiered_expr'
     ) {
       return
     }
     if (!(await form.trigger()) || !validatePricingValues()) return
-    const draft = buildSubmitData(form.getValues())
+    const draft = legacyConversionDraft(form.getValues(), sourceMode)
     const generation = ++conversionGeneration.current
+    conversionSourceMode.current = sourceMode
     setConversionReason('')
     try {
       const pricing = pricingFromDraft(draft)
@@ -732,7 +759,7 @@ export const ModelPricingEditorPanel = forwardRef<
         pricing,
       })
       if (generation !== conversionGeneration.current) return
-      const current = buildSubmitData(form.getValues())
+      const current = legacyConversionDraft(form.getValues(), sourceMode)
       if (
         current.name !== draft.name ||
         JSON.stringify(pricingFromDraft(current)) !== JSON.stringify(pricing)
@@ -766,10 +793,10 @@ export const ModelPricingEditorPanel = forwardRef<
     if (!conversionPreview) return
     setConversionPreview(null)
     if (
-      billingExpr.trim() ||
-      pricingMode === 'tiered_expr' ||
-      JSON.stringify(buildSubmitData(form.getValues())) !==
-        conversionPreview.draftFingerprint
+      hasExpressionDraft ||
+      JSON.stringify(
+        legacyConversionDraft(form.getValues(), conversionSourceMode.current)
+      ) !== conversionPreview.draftFingerprint
     ) {
       setConversionReason(
         'Prices changed while preparing the conversion. Try again.'
@@ -800,10 +827,19 @@ export const ModelPricingEditorPanel = forwardRef<
         }
         const isValid = await form.trigger()
         if (!isValid || !validatePricingValues()) return null
+        if (pricingMode === 'tiered_expr' && legacyPricesNeedConversion) {
+          return null
+        }
         return buildSubmitData(form.getValues())
       },
     }),
-    [form, validatePricingValues, buildSubmitData]
+    [
+      form,
+      validatePricingValues,
+      buildSubmitData,
+      pricingMode,
+      legacyPricesNeedConversion,
+    ]
   )
 
   const expressionEditor = taskUsageSchema ? (
@@ -954,8 +990,7 @@ export const ModelPricingEditorPanel = forwardRef<
                             type='button'
                             className='w-full sm:w-auto'
                             disabled={
-                              conversion.isPending ||
-                              Boolean(billingExpr.trim())
+                              conversion.isPending || hasExpressionDraft
                             }
                             onClick={() => void convertPricing()}
                           >
@@ -963,7 +998,7 @@ export const ModelPricingEditorPanel = forwardRef<
                               ? t('Preparing conversion...')
                               : t('Convert to expression')}
                           </Button>
-                          {billingExpr.trim() && (
+                          {hasExpressionDraft && (
                             <p>
                               {t(
                                 'An expression draft already exists. Open the Expression tab to keep editing it.'
@@ -1137,6 +1172,34 @@ export const ModelPricingEditorPanel = forwardRef<
 
                     <TabsContent value='tiered_expr' className='pt-0'>
                       <FieldGroup className='gap-5'>
+                        {legacyPricesNeedConversion && (
+                          <Alert variant='destructive'>
+                            <AlertTriangle data-icon='inline-start' />
+                            <AlertDescription className='space-y-3'>
+                              <p>
+                                {t(
+                                  'This model still has legacy prices. Convert them before saving, or the empty expression would make every request free.'
+                                )}
+                              </p>
+                              <Button
+                                type='button'
+                                variant='outline'
+                                className='w-full sm:w-auto'
+                                disabled={conversion.isPending}
+                                onClick={() =>
+                                  void convertPricing(legacyPricingMode)
+                                }
+                              >
+                                {conversion.isPending
+                                  ? t('Preparing conversion...')
+                                  : t('Convert to expression')}
+                              </Button>
+                              {conversionReason && (
+                                <p role='status'>{t(conversionReason)}</p>
+                              )}
+                            </AlertDescription>
+                          </Alert>
+                        )}
                         {expressionEditor}
                       </FieldGroup>
                     </TabsContent>

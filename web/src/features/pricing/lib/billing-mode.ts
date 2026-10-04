@@ -17,7 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { PricingModel } from '../types'
-import { hasTaskUsageSchema, isDynamicPricingModel } from './dynamic-price'
+import {
+  hasTaskUsageSchema,
+  isDynamicPricingModel,
+  isRequestPricedExpressionModel,
+} from './dynamic-price'
 import { isTokenBasedModel } from './model-helpers'
 
 export type BillingModeLabelKey =
@@ -32,6 +36,8 @@ export function getBillingModeLabelKey(
   // Task-usage models badge as one business category; the metering unit
   // ($/1M token, $/credit, $/second) is already carried by the price line.
   if (hasTaskUsageSchema(model)) return 'Task billing'
+  // Fixed request-price expressions are per-request, like the filter bucket.
+  if (isRequestPricedExpressionModel(model)) return 'Per Request'
   if (isDynamicPricingModel(model)) return 'Dynamic Pricing'
   if (isTokenBasedModel(model)) return 'Token-based'
   return 'Per Request'

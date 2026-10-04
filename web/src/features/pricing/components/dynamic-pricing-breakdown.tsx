@@ -336,6 +336,11 @@ export function DynamicPricingBreakdown({
   }, [expr, usageSchema, requestRules])
 
   const hasTiers = tiers.length > 0
+  const requestPriced =
+    hasTiers &&
+    tiers.every(
+      (tier) => !isTaskBreakdownTier(tier) && tier.billingUnit === 'request'
+    )
   const hasRules = ruleGroups.length > 0
 
   if (!expr) return null
@@ -464,10 +469,12 @@ export function DynamicPricingBreakdown({
           </span>
           <div>
             <div className='text-foreground text-base font-medium'>
-              {t('Dynamic Pricing')}
+              {requestPriced ? t('Per Request') : t('Dynamic Pricing')}
             </div>
             <div className='text-muted-foreground text-xs'>
-              {t('Prices vary by usage tier and request conditions')}
+              {requestPriced
+                ? t('Charged per successful request, regardless of tokens used')
+                : t('Prices vary by usage tier and request conditions')}
             </div>
           </div>
         </div>

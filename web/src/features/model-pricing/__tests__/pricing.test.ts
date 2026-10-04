@@ -22,6 +22,7 @@ import { buildPricingChanges, type ModelPricingConfig } from '../api'
 import {
   applyPriceSyncSelections,
   applyPricingDraft,
+  modelPricingDisplay,
   pricingFromDraft,
   pricingOptions,
   pricingRow,
@@ -134,6 +135,34 @@ describe('shared model pricing', () => {
       example: 'ratio',
     })
   })
+
+  it.each([
+    [{ ModelPrice: 0.35 }, 1],
+    [{ ModelRatio: 2 }, 0],
+    [
+      {
+        ModelPrice: 0.35,
+        'billing_setting.billing_mode': 'tiered_expr',
+        'billing_setting.billing_expr': 'tier("request", fixed(0.35))',
+      },
+      1,
+    ],
+    [
+      {
+        ModelPrice: 0.35,
+        'billing_setting.billing_mode': 'tiered_expr',
+        'billing_setting.billing_expr': 'tier("base", p * 0 + c * 0)',
+      },
+      0,
+    ],
+  ] as const)(
+    'lists %o with quota type %i like the public pricing list',
+    (effective, quotaType) => {
+      expect(
+        modelPricingDisplay({ model_name: 'example', effective }).quota_type
+      ).toBe(quotaType)
+    }
+  )
 
   it('rejects invalid prices instead of silently coercing them', () => {
     for (const price of ['-1', 'NaN', 'Infinity', 'invalid']) {

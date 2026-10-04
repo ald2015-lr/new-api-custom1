@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
-import { Code2, Eye, RotateCcw, Save } from 'lucide-react'
+import { Code2, Eye, RotateCcw, Save, Sparkles } from 'lucide-react'
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { UseFormReturn } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -70,8 +70,10 @@ type ModelRatioFormProps = {
   savedValues: ModelFormValues
   onSave: (values: ModelFormValues) => Promise<void>
   onReset: () => void
+  onConvertAll?: () => void
   isSaving: boolean
   isResetting: boolean
+  isPreparingConversion?: boolean
   variant?: 'default' | 'unset'
 }
 
@@ -173,8 +175,10 @@ export const ModelRatioForm = memo(function ModelRatioForm({
   savedValues,
   onSave,
   onReset,
+  onConvertAll,
   isSaving,
   isResetting,
+  isPreparingConversion = false,
   variant = 'default',
 }: ModelRatioFormProps) {
   const { t } = useTranslation()
@@ -276,6 +280,20 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               <RotateCcw data-icon='inline-start' />
               {t('Reset prices')}
             </Button>
+            {onConvertAll && (
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                onClick={onConvertAll}
+                disabled={isPreparingConversion || isSaving}
+              >
+                <Sparkles data-icon='inline-start' />
+                {isPreparingConversion
+                  ? t('Preparing conversion...')
+                  : t('Convert all to expressions')}
+              </Button>
+            )}
             {editMode === 'json' && (
               <Button
                 type='button'

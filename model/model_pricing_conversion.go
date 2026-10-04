@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -351,4 +352,120 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 	}
 	preview.Expression = expression
 	return preview, nil
+}
+
+// legacyPricingKeys are the stored fields of the deprecated ratio and
+// per-call modes. Conversion keeps them so administrators can switch back.
+var legacyPricingKeys = []string{
+	"ModelPrice", "ModelRatio", "CompletionRatio", "CacheRatio",
+	"CreateCacheRatio", "ImageRatio", "AudioRatio", "AudioCompletionRatio",
+}
+
+type ModelPricingBulkConversionItem struct {
+	Model      string `json:"model"`
+	Expression string `json:"expression,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// ModelPricingSuspiciousExpression is a stored expression that is free for
+// every input although legacy prices are still stored for the model.
+type ModelPricingSuspiciousExpression struct {
+	Model         string        `json:"model"`
+	Expression    string        `json:"expression"`
+	LegacyPricing PricingValues `json:"legacy_pricing"`
+	Replacement   string        `json:"replacement,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
+	Reconverted   bool          `json:"reconverted"`
+}
+
+type ModelPricingBulkConversion struct {
+	DryRun     bool                               `json:"dry_run"`
+	Converted  []ModelPricingBulkConversionItem   `json:"converted"`
+	Skipped    []ModelPricingBulkConversionItem   `json:"skipped"`
+	Suspicious []ModelPricingSuspiciousExpression `json:"suspicious"`
+}
+
+// ConvertAllModelPricing converts every stored legacy price with the
+// per-model conversion. A model with a per-call price converts that price
+// only, as the editor's per-request mode does. Expressions that are free for
+// every input while legacy prices remain stored are reconverted from those
+// prices. Unless dryRun is set, all conversions are saved in one versioned
+// pricing transaction, so a concurrent edit rejects the whole batch.
+func ConvertAllModelPricing(dryRun bool) (*ModelPricingBulkConversion, error) {
+	snapshot, err := GetModelPricingSnapshot(nil)
+	if err != nil {
+		return nil, err
+	}
+	result := &ModelPricingBulkConversion{
+		DryRun:     dryRun,
+		Converted:  []ModelPricingBulkConversionItem{},
+		Skipped:    []ModelPricingBulkConversionItem{},
+		Suspicious: []ModelPricingSuspiciousExpression{},
+	}
+	var changes []ModelPricingChange
+	for _, entry := range snapshot.Entries {
+		legacy := make(PricingValues)
+		for _, key := range legacyPricingKeys {
+			if value, exists := entry.Configured[key]; exists {
+				legacy[key] = value
+			}
+		}
+		if len(legacy) == 0 {
+			continue
+		}
+		var suspicious *ModelPricingSuspiciousExpression
+		if entry.Effective["billing_setting.billing_mode"] == billing_setting.BillingModeTieredExpr {
+			expression, _ := entry.Effective["billing_setting.billing_expr"].(string)
+			if !billingexpr.ZeroTokenPricing(expression) {
+				continue
+			}
+			suspicious = &ModelPricingSuspiciousExpression{Model: entry.ModelName, Expression: expression, LegacyPricing: legacy}
+		}
+		draft := PricingValues{"billing_setting.billing_mode": billing_setting.BillingModeRatio}
+		if variants, exists := entry.Configured[billing_setting.PluginBillingExprOption]; exists {
+			draft[billing_setting.PluginBillingExprOption] = variants
+		}
+		if price, fixed := legacy["ModelPrice"]; fixed {
+			draft["ModelPrice"] = price
+		} else {
+			maps.Copy(draft, legacy)
+		}
+		var reason string
+		conversion, err := PreviewModelPricingConversion(entry.ModelName, draft)
+		switch {
+		case err != nil:
+			reason = err.Error()
+		case conversion.UnsupportedReason != "":
+			reason = conversion.UnsupportedReason
+		}
+		if reason != "" {
+			if suspicious != nil {
+				suspicious.Reason = reason
+				result.Suspicious = append(result.Suspicious, *suspicious)
+			} else {
+				result.Skipped = append(result.Skipped, ModelPricingBulkConversionItem{Model: entry.ModelName, Reason: reason})
+			}
+			continue
+		}
+		pricing := maps.Clone(entry.Configured)
+		pricing["billing_setting.billing_mode"] = billing_setting.BillingModeTieredExpr
+		pricing["billing_setting.billing_expr"] = conversion.Expression
+		changes = append(changes, ModelPricingChange{ModelName: entry.ModelName, ExpectedVersion: entry.Version, Pricing: pricing})
+		if suspicious != nil {
+			suspicious.Replacement = conversion.Expression
+			result.Suspicious = append(result.Suspicious, *suspicious)
+		} else {
+			result.Converted = append(result.Converted, ModelPricingBulkConversionItem{Model: entry.ModelName, Expression: conversion.Expression})
+		}
+	}
+	if dryRun || len(changes) == 0 {
+		return result, nil
+	}
+	if err := UpdateModelPricing(changes); err != nil {
+		return nil, err
+	}
+	for i := range result.Suspicious {
+		result.Suspicious[i].Reconverted = result.Suspicious[i].Replacement != ""
+	}
+	return result, nil
 }

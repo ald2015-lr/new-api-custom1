@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -31,10 +31,15 @@ import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   buildPricingChanges,
+  convertAllModelPricing,
+  convertibleModelCount,
+  invalidateModelPricing,
   useModelPricing,
   useSaveModelPricing,
+  type ModelPricingBulkConversion,
   type ModelPricingConfig,
 } from '@/features/model-pricing/api'
+import { BulkPricingConversionDialog } from '@/features/model-pricing/bulk-pricing-conversion-dialog'
 import { pricingOptions } from '@/features/model-pricing/pricing'
 import { handleServerError } from '@/lib/handle-server-error'
 
@@ -175,8 +180,11 @@ export function RatioSettingsCard({
   const updateOption = useUpdateOption()
   const [confirmOpen, setConfirmOpen] = useState(false)
 
+  const queryClient = useQueryClient()
   const pricingQuery = useModelPricing()
   const savePricing = useSaveModelPricing()
+  const [bulkConversion, setBulkConversion] =
+    useState<ModelPricingBulkConversion | null>(null)
   const [pricingBaseline, setPricingBaseline] =
     useState<ModelPricingConfig | null>(null)
   useEffect(() => {
@@ -217,6 +225,31 @@ export function RatioSettingsCard({
     onSuccess: () => {
       toast.success(t('Model prices reset successfully'))
       setConfirmOpen(false)
+    },
+    onError: (error) => handleServerError(error),
+  })
+
+  const bulkConversionPreview = useMutation({
+    mutationFn: () => convertAllModelPricing(true),
+    onSuccess: setBulkConversion,
+    onError: (error) =>
+      handleServerError(error, t('Failed to prepare pricing conversion')),
+  })
+  const bulkConversionSave = useMutation({
+    mutationFn: async () => {
+      const result = await convertAllModelPricing(false)
+      await invalidateModelPricing(queryClient)
+      const refreshed = await pricingQuery.refetch()
+      setPricingBaseline(refreshed.data ?? null)
+      return result
+    },
+    onSuccess: (result) => {
+      setBulkConversion(null)
+      toast.success(
+        t('Converted {{count}} models to billing expressions', {
+          count: convertibleModelCount(result),
+        })
+      )
     },
     onError: (error) => handleServerError(error),
   })
@@ -501,8 +534,14 @@ export function RatioSettingsCard({
             savedValues={savedModelValues}
             onSave={saveModelRatios}
             onReset={handleResetRatios}
-            isSaving={updateOption.isPending || savePricing.isPending}
+            onConvertAll={() => bulkConversionPreview.mutate()}
+            isSaving={
+              updateOption.isPending ||
+              savePricing.isPending ||
+              bulkConversionSave.isPending
+            }
             isResetting={resetMutation.isPending}
+            isPreparingConversion={bulkConversionPreview.isPending}
             variant={tab === 'unset-models' ? 'unset' : 'default'}
           />
         </>
@@ -582,6 +621,15 @@ export function RatioSettingsCard({
         handleConfirm={handleConfirmReset}
         confirmText={t('Reset')}
       />
+      {bulkConversion && (
+        <BulkPricingConversionDialog
+          preview={bulkConversion}
+          isConverting={bulkConversionSave.isPending}
+          discardsUnsavedChanges={modelForm.formState.isDirty}
+          onCancel={() => setBulkConversion(null)}
+          onConfirm={() => bulkConversionSave.mutate()}
+        />
+      )}
     </>
   )
 }

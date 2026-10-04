@@ -310,3 +310,62 @@ func TestPricingSharedPluginVariantsUseEachSchemaAndExpression(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), "billing_plugin_variants")
 }
+
+func TestPricingListsExpressionQuotaTypeFromActiveExpression(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+	insertPricingEndpointChannel(t, 920, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	models := map[string]struct {
+		expression string
+		quotaType  int
+		price      float64
+	}{
+		"listing-per-call":    {`tier("request", fixed(0.35))`, 1, 0.35},
+		"listing-image":       {`(tier("image", fixed(0.04)) * image_count) * (param("quality") == "hd" ? 2 : 1)`, 1, 0.04},
+		"listing-conditional": {`len <= 32000 ? tier("short", fixed(0.01)) : tier("long", fixed(0.02))`, 1, 0},
+		"listing-mixed":       {`len <= 32000 ? tier("short", fixed(0.01)) : tier("long", p * 2 + c * 8)`, 0, 0},
+		// A legacy per-call price kept for switching back must not make a
+		// token expression look like a per-request model.
+		"listing-token": {`tier("base", p * 0 + c * 0)`, 0, 0},
+	}
+	modes, expressions := map[string]string{}, map[string]string{}
+	for name, tc := range models {
+		insertPricingEndpointAbility(t, 920, name)
+		modes[name] = billing_setting.BillingModeTieredExpr
+		expressions[name] = tc.expression
+	}
+	insertPricingEndpointAbility(t, 920, "listing-legacy")
+	encodedModes, err := common.Marshal(modes)
+	require.NoError(t, err)
+	encodedExpressions, err := common.Marshal(expressions)
+	require.NoError(t, err)
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(saved))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+		InvalidatePricingCache()
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": string(encodedModes),
+		"billing_setting.billing_expr": string(encodedExpressions),
+	}))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"listing-token":0.35,"listing-mixed":0.5,"listing-legacy":0.2}`))
+	InitChannelCache()
+	InvalidatePricingCache()
+
+	pricing := pricingByModel(GetPricing())
+	for name, tc := range models {
+		require.Contains(t, pricing, name)
+		assert.Equal(t, tc.quotaType, pricing[name].QuotaType, name)
+		assert.Equal(t, tc.price, pricing[name].ModelPrice, name)
+		assert.Equal(t, tc.expression, pricing[name].BillingExpr, name)
+		assert.Equal(t, []int{tc.quotaType}, GetModelQuotaTypes(name), name)
+	}
+	assert.Equal(t, 1, pricing["listing-legacy"].QuotaType)
+	assert.Equal(t, 0.2, pricing["listing-legacy"].ModelPrice)
+	assert.Empty(t, pricing["listing-legacy"].BillingMode)
+}

@@ -29,6 +29,7 @@ import {
   getDynamicPricingTiers,
   getTaskUsagePriceUnitLabelKey,
   hasTaskUsageSchema,
+  isRequestPricedExpression,
   isUnconfiguredTaskUsageModel,
 } from '../lib/dynamic-price'
 import { isTokenBasedModel } from '../lib/model-helpers'
@@ -475,6 +476,54 @@ describe('task dynamic pricing', () => {
       getBillingModeLabelKey(pricingModel({ quota_type: 1 })),
       'Per Request'
     )
+  })
+
+  test.each([
+    ['tier("request", fixed(0.35))', true],
+    [
+      'tier("image", fixed(0.04)) * image_count * (param("quality") == "hd" ? 2 : 1)',
+      true,
+    ],
+    [
+      'len <= 32000 ? tier("short", fixed(0.01)) : tier("long", fixed(0.02))',
+      true,
+    ],
+    [
+      'len <= 32000 ? tier("short", fixed(0.01)) : tier("long", p * 2 + c * 8)',
+      false,
+    ],
+    ['tier("base", p * 0 + c * 0)', false],
+    ['not an expression', false],
+  ])('classifies %s as request-priced: %s', (expression, expected) => {
+    expect(isRequestPricedExpression(expression)).toBe(expected)
+  })
+
+  test('badges request-priced expressions listed per request as Per Request with a per-call price', () => {
+    const model = pricingModel({
+      quota_type: 1,
+      model_price: 0.35,
+      billing_mode: 'tiered_expr',
+      billing_expr: 'tier("request", fixed(0.35))',
+    })
+    expect(getBillingModeLabelKey(model)).toBe('Per Request')
+    const summary = getDynamicPricingSummary(model, { tokenUnit: 'M' })
+    expect(summary?.primaryEntries).toEqual([
+      expect.objectContaining({
+        shortLabel: 'Per-call',
+        unit: 'request',
+        value: 0.35,
+      }),
+    ])
+    expect(
+      getBillingModeLabelKey(
+        pricingModel({
+          quota_type: 0,
+          billing_mode: 'tiered_expr',
+          billing_expr:
+            'len <= 32000 ? tier("short", fixed(0.01)) : tier("long", p * 2 + c * 8)',
+        })
+      )
+    ).toBe('Dynamic Pricing')
   })
 
   test('marks task usage field labels as schema-owned so they are not translated', () => {
