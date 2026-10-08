@@ -58,6 +58,21 @@ func TestWebRouterServesHashedAssetsAsImmutableWithETag(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNotModified, revalidated.Code)
 	assert.Empty(t, revalidated.Body.String())
+
+	// Browsers send Accept-Encoding: gzip, which takes the precompressed path.
+	gzipped := performWebRequest(engine, "/static/js/app.js", "192.0.2.10:1234", map[string]string{
+		"Accept-Encoding": "gzip, deflate, br",
+	})
+	require.Equal(t, http.StatusOK, gzipped.Code)
+	assert.Equal(t, "gzip", gzipped.Header().Get("Content-Encoding"))
+	assert.Equal(t, `"static/js/app.js"`, gzipped.Header().Get("ETag"))
+	gzipRevalidated := performWebRequest(engine, "/static/js/app.js", "192.0.2.10:1234", map[string]string{
+		"Accept-Encoding": "gzip, deflate, br",
+		"If-None-Match":   `W/"other", "static/js/app.js"`,
+	})
+	assert.Equal(t, http.StatusNotModified, gzipRevalidated.Code)
+	assert.Empty(t, gzipRevalidated.Body.String())
+	assert.Empty(t, gzipRevalidated.Header().Get("Content-Encoding"))
 }
 
 func TestWebRouterMissingChunkIs404NotIndexHTML(t *testing.T) {

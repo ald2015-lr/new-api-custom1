@@ -9,7 +9,6 @@ import (
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/gin-contrib/gzip"
-	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
 )
 
@@ -30,20 +29,26 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 		distPath = defaultWebDistPath
 	}
 	frontendFS := common.EmbedFolder(assets.BuildFS, distPath)
+	compress := gzip.Gzip(gzip.DefaultCompression)
 
 	router.NoRoute(
 		pluginDispatcher,
 		middleware.RouteTag("web"),
-		gzip.Gzip(gzip.DefaultCompression),
+		func(c *gin.Context) {
+			// ServeFrontendFiles sends build files already compressed.
+			if !frontendFS.Exists("/", c.Request.URL.Path) {
+				compress(c)
+			}
+		},
 		middleware.AccessTokenAudit(),
+		// Build files get their own (by default disabled) limiter, so only the
+		// SPA HTML fallback and 404s count against GLOBAL_WEB_RATE_LIMIT. A cold
+		// load needs dozens of hashed chunks; counting them made the per-IP
+		// budget run out mid-navigation and the 429 on a route chunk surfaced
+		// as the dashboard's generic error page.
+		middleware.GlobalWebRateLimit(frontendFS),
 		middleware.Cache(),
-		static.Serve("/", frontendFS),
-		// Embedded files were served (and the chain aborted) above, so only
-		// the SPA HTML fallback and 404s count against GLOBAL_WEB_RATE_LIMIT.
-		// A cold load needs a dozen hashed chunks; counting them made the
-		// per-IP budget run out mid-navigation and the 429 on a route chunk
-		// surfaced as the dashboard's generic error page.
-		middleware.GlobalWebRateLimit(),
+		middleware.ServeFrontendFiles(frontendFS),
 		func(c *gin.Context) {
 			requestPath := c.Request.URL.Path
 			if strings.HasPrefix(requestPath, "/static/") {

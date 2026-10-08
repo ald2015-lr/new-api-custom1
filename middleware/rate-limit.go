@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
 )
 
@@ -159,24 +160,44 @@ func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gi
 	}
 }
 
-func GlobalWebRateLimit() func(c *gin.Context) {
-	if !common.GlobalWebRateLimitEnable {
-		return defNext
+// GlobalWebRateLimit limits dashboard pages and other fallback paths per IP.
+// Files that exist in the frontend build count against a separate static
+// limiter instead, so lazy-loaded chunks and icons do not use up the page
+// budget. The static limiter is disabled by default.
+func GlobalWebRateLimit(frontendFS static.ServeFileSystem) func(c *gin.Context) {
+	webLimit := defNext
+	if common.GlobalWebRateLimitEnable {
+		webLimit = webTierRateLimit(common.GlobalWebRateLimitNum, common.GlobalWebRateLimitDuration, "GW")
 	}
+	staticLimit := defNext
+	if common.GlobalStaticRateLimitEnable {
+		staticLimit = webTierRateLimit(common.GlobalStaticRateLimitNum, common.GlobalStaticRateLimitDuration, "GS")
+	}
+	return func(c *gin.Context) {
+		if frontendFS.Exists("/", c.Request.URL.Path) {
+			staticLimit(c)
+			return
+		}
+		webLimit(c)
+	}
+}
+
+// webTierRateLimit is rateLimitFactory for page and frontend-file requests,
+// except that it fails open: a Redis hiccup must not turn every dashboard
+// page load into an error page. API limiters stay closed.
+func webTierRateLimit(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
 	if !common.RedisEnabled {
-		return rateLimitFactory(common.GlobalWebRateLimitNum, common.GlobalWebRateLimitDuration, "GW")
+		return rateLimitFactory(maxRequestNum, duration, mark)
 	}
 	return func(c *gin.Context) {
 		allowed, _, ttlSeconds, err := redisFixedWindowTake(
 			c.Request.Context(),
-			redisIPRateLimitKey("GW", c.ClientIP()),
-			common.GlobalWebRateLimitNum,
-			common.GlobalWebRateLimitDuration,
+			redisIPRateLimitKey(mark, c.ClientIP()),
+			maxRequestNum,
+			duration,
 		)
 		if err != nil {
-			// A Redis hiccup must not turn every dashboard page load into an
-			// error page: the web tier fails open, API limiters stay closed.
-			logger.LogError(c.Request.Context(), fmt.Sprintf("rate limit check failed (mark=GW): %v", err))
+			logger.LogError(c.Request.Context(), fmt.Sprintf("rate limit check failed (mark=%s): %v", mark, err))
 			return
 		}
 		if !allowed {
