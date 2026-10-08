@@ -16,6 +16,7 @@ import (
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,10 @@ func serveTaskPluginImageProtocol(c *gin.Context, pinned pluginruntime.PinnedEnd
 	if !exists || !ok || protocolRequest.Protocol != pinned.Protocol || pinned.Plugin == nil {
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
+	}
+	// Image tasks write nothing until they settle, which can take minutes.
+	if keepAlive := helper.InstallJSONKeepAlive(c); keepAlive != nil {
+		defer keepAlive.Finalize()
 	}
 	clientRequest := c.Request
 	var relayInfo *relaycommon.RelayInfo

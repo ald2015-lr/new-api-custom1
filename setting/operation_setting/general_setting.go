@@ -1,6 +1,11 @@
 package operation_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 // 额度展示类型
 const (
@@ -10,10 +15,19 @@ const (
 	QuotaDisplayTypeCustom = "CUSTOM"
 )
 
+const (
+	PingIntervalSecondsOptionKey = "general_setting.ping_interval_seconds"
+	MaxPingIntervalSeconds       = 3600
+)
+
 type GeneralSetting struct {
 	DocsLink            string `json:"docs_link"`
 	PingIntervalEnabled bool   `json:"ping_interval_enabled"`
 	PingIntervalSeconds int    `json:"ping_interval_seconds"`
+	// NonStreamPingEnabled extends keepalive to non-stream requests, sent as
+	// whitespace before the JSON body. It only applies while
+	// PingIntervalEnabled is on.
+	NonStreamPingEnabled bool `json:"non_stream_ping_enabled"`
 	// 当前站点额度展示类型：USD / CNY / TOKENS
 	QuotaDisplayType string `json:"quota_display_type"`
 	// 自定义货币符号，用于 CUSTOM 展示类型
@@ -27,6 +41,7 @@ var generalSetting = GeneralSetting{
 	DocsLink:                   "https://docs.newapi.pro",
 	PingIntervalEnabled:        false,
 	PingIntervalSeconds:        60,
+	NonStreamPingEnabled:       false,
 	QuotaDisplayType:           QuotaDisplayTypeUSD,
 	CustomCurrencySymbol:       "¤",
 	CustomCurrencyExchangeRate: 1.0,
@@ -39,6 +54,14 @@ func init() {
 
 func GetGeneralSetting() *GeneralSetting {
 	return &generalSetting
+}
+
+func ValidatePingIntervalSeconds(value string) error {
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 1 || seconds > MaxPingIntervalSeconds {
+		return fmt.Errorf("ping interval must be an integer between 1 and %d seconds", MaxPingIntervalSeconds)
+	}
+	return nil
 }
 
 // IsCurrencyDisplay 是否以货币形式展示（美元或人民币）

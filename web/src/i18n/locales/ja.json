@@ -6959,6 +6959,12 @@
     "A new version may have been deployed. Please reload the page.": "新しいバージョンがデプロイされた可能性があります。ページを再読み込みしてください。",
     "Reload page": "ページを再読み込み",
     "A new version is available. Reload to update.": "新しいバージョンが利用可能です。再読み込みして更新してください。",
+    "Send keep-alive data every interval while waiting so clients and proxies do not time out. Streaming responses get an SSE comment line (\": PING\").": "待機中は設定した間隔ごとにキープアライブデータを送信し、クライアントやプロキシのタイムアウトを防ぎます。ストリーミング応答には SSE コメント行（\": PING\"）を送信します。",
+    "Sent only after this many seconds without any output. 10–30 seconds suits most clients.": "この秒数のあいだ出力がまったくない場合にのみ送信します。ほとんどのクライアントには 10〜30 秒が適しています。",
+    "Keep-alive for non-streaming requests": "非ストリーミングリクエストのキープアライブ",
+    "Send a newline before the JSON body every interval while waiting (as OpenRouter does). The status code is then fixed at 200: errors that happen later come back as a JSON error body with status 200, so official SDKs neither raise their usual errors nor retry. Native Gemini requests are not covered.": "待機中は設定した間隔ごとに JSON 本文の前に改行を送信します（OpenRouter と同じ方式）。送信後はステータスコードが 200 に固定されるため、その後に発生したエラーはステータス 200 の JSON エラー本文として返され、公式 SDK は通常のエラーを送出せず、自動リトライも行いません。Gemini ネイティブ形式のリクエストは対象外です。",
+    "Ping interval must be between 1 and 3600 seconds": "Ping間隔は1～3600秒にしてください",
+    "Proxies such as nginx and AWS load balancers close requests that stay idle for 60 seconds by default, so an interval of 60 seconds or more fires too late. Use 10–30 seconds.": "nginx や AWS のロードバランサーなどのプロキシは、既定で 60 秒間データがないリクエストを切断します。間隔が 60 秒以上だと間に合わないため、10〜30 秒にしてください。",
     "Reload": "再読み込み"
   }
 }

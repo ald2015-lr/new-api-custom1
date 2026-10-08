@@ -16,6 +16,18 @@ func TestValidateOptionValueRejectsInvalidMaxTokenAutoGroups(t *testing.T) {
 	require.NoError(t, validateOptionValue("MaxTokenAutoGroups", "999999"))
 }
 
+func TestValidateOptionValueRejectsPingIntervalOutsideRange(t *testing.T) {
+	const key = "general_setting.ping_interval_seconds"
+	for _, value := range []string{"", "0", "-1", "3601", "1.5", "ten"} {
+		t.Run(value, func(t *testing.T) {
+			assert.Error(t, validateOptionValue(key, value))
+		})
+	}
+	for _, value := range []string{"1", "10", "3600"} {
+		require.NoError(t, validateOptionValue(key, value))
+	}
+}
+
 func TestValidateOptionValueGroupAccessRules(t *testing.T) {
 	const key = "group_access_setting.rules"
 	for name, value := range map[string]string{

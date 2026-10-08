@@ -27,6 +27,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -1057,6 +1058,218 @@ func TestResponsesHTTPHealthCountsFinalResult(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Keepalive end to end through Relay: the upstream holds its answer until the
+// client has read a keepalive, so the response is committed before the
+// upstream decides how the attempt ends. A second request then shows whether
+// the success limiter (SuccessCount 1) counted the first one as a success.
+func TestResponsesHTTPKeepAlive(t *testing.T) {
+	const completed = `{"id":"completed","status":"completed","usage":{"input_tokens":1000,"output_tokens":1,"total_tokens":1001}}`
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+		stream   bool
+		statuses []int // upstream status per attempt
+		frame    string
+		attempts int64
+		success  bool
+	}{
+		{name: "json body follows whitespace", statuses: []int{200}, frame: "\n", attempts: 1, success: true},
+		{name: "retry after keepalive", statuses: []int{500, 200}, frame: "\n", attempts: 2, success: true},
+		{name: "error after keepalive", statuses: []int{400}, frame: "\n", attempts: 1},
+		{name: "stream pings before events", stream: true, statuses: []int{200}, frame: ": PING\n\n", attempts: 1, success: true},
+		{name: "disabled", disabled: true, statuses: []int{400}, attempts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(*websocket.Conn, *http.Request) {})
+			settings := operation_setting.GetGeneralSetting()
+			previous := *settings
+			t.Cleanup(func() { *settings = previous })
+			settings.PingIntervalEnabled, settings.NonStreamPingEnabled, settings.PingIntervalSeconds = !tc.disabled, true, 1
+			oldRetries := common.RetryTimes
+			common.RetryTimes = 1
+			t.Cleanup(func() { common.RetryTimes = oldRetries })
+			setting.ModelRequestRateLimitEnabled = true
+			setting.ModelRequestRateLimitDurationMinutes = 1
+			setting.ModelRequestRateLimitSuccessCount = 1
+			setting.ModelRequestRateLimitCount = 0
+
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseUpstream)
+			var attempts atomic.Int64
+			fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+				attempt := int(attempts.Add(1))
+				if attempt == 1 {
+					<-release
+				}
+				status := tc.statuses[min(attempt, len(tc.statuses))-1]
+				if tc.stream && status == http.StatusOK {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"completed\",\"status\":\"in_progress\"}}\n\n")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":%s}\n\n", completed)
+					_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if status == http.StatusOK {
+					_, _ = fmt.Fprint(w, completed)
+					return
+				}
+				code := "context_length_exceeded"
+				if status >= http.StatusInternalServerError {
+					code = "server_error"
+				}
+				_, _ = fmt.Fprintf(w, `{"error":{"type":"%s","code":"%s","message":"test rejection"}}`, code, code)
+			}
+			send := func() *http.Response {
+				body := `{"model":"ws-billing","input":"hello"}`
+				if tc.stream {
+					body = `{"model":"ws-billing","input":"hello","stream":true}`
+				}
+				request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(body))
+				require.NoError(t, err)
+				request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+				request.Header.Set("Content-Type", "application/json")
+				response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+				require.NoError(t, err)
+				return response
+			}
+			waitRelay := func() {
+				select {
+				case <-fixture.httpDone:
+				case <-time.After(10 * time.Second):
+					t.Fatal("HTTP request did not finish")
+				}
+			}
+
+			if tc.disabled {
+				// Without keepalive nothing is sent before the upstream answers.
+				releaseUpstream()
+			}
+			response := send()
+			reader := bufio.NewReader(response.Body)
+			frame := make([]byte, len(tc.frame))
+			_, err := io.ReadFull(reader, frame)
+			require.NoError(t, err)
+			assert.Equal(t, tc.frame, string(frame))
+			releaseUpstream()
+			rest, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			require.NoError(t, response.Body.Close())
+			waitRelay()
+			assert.Equal(t, tc.attempts, attempts.Load())
+			payload := strings.TrimLeft(string(rest), "\n")
+
+			switch {
+			case tc.disabled:
+				assert.Equal(t, http.StatusBadRequest, response.StatusCode)
+				assert.Equal(t, string(rest), payload, "no keepalive bytes without the switch")
+				assert.Contains(t, payload, "test rejection")
+			case tc.stream:
+				assert.Equal(t, http.StatusOK, response.StatusCode)
+				assert.Equal(t, "text/event-stream", response.Header.Get("Content-Type"))
+				assert.True(t, strings.HasPrefix(payload, "event: response.created\ndata: "), payload)
+				assert.Contains(t, payload, "event: response.completed\ndata: ")
+			default:
+				// The status line went out with the first keepalive; the body is
+				// whitespace followed by one JSON document either way.
+				assert.Equal(t, http.StatusOK, response.StatusCode)
+				assert.Equal(t, "application/json", response.Header.Get("Content-Type"))
+				if tc.success {
+					assert.JSONEq(t, completed, payload)
+					break
+				}
+				var failure struct {
+					Error struct {
+						Code    string `json:"code"`
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(payload, &failure), payload)
+				assert.Equal(t, "context_length_exceeded", failure.Error.Code)
+				assert.Contains(t, failure.Error.Message, "test rejection")
+			}
+
+			// Middleware reads the handler's status, not the keepalive's 200.
+			next := send()
+			_, err = io.Copy(io.Discard, next.Body)
+			require.NoError(t, err)
+			require.NoError(t, next.Body.Close())
+			if tc.success {
+				assert.Equal(t, http.StatusTooManyRequests, next.StatusCode)
+				return
+			}
+			waitRelay()
+			assert.Equal(t, http.StatusBadRequest, next.StatusCode)
+		})
+	}
+}
+
+// A non-stream chat request whose upstream answers with SSE anyway is relayed
+// as a stream. JSON keepalive ends at the first byte of that stream, so the
+// stream scanner's own pings must keep the rest of it alive: the upstream only
+// finishes once the client has seen one.
+func TestChatKeepAliveKeepsForcedStreamAlive(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(*websocket.Conn, *http.Request) {})
+	settings := operation_setting.GetGeneralSetting()
+	previous := *settings
+	t.Cleanup(func() { *settings = previous })
+	settings.PingIntervalEnabled, settings.NonStreamPingEnabled, settings.PingIntervalSeconds = true, true, 1
+
+	sawPing := make(chan struct{})
+	var sawPingOnce sync.Once
+	releaseUpstream := func() { sawPingOnce.Do(func() { close(sawPing) }) }
+	fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		<-sawPing
+		_, _ = fmt.Fprint(w, `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+	done := make(chan struct{})
+	engine := gin.New()
+	engine.POST("/v1/chat/completions", middleware.TokenAuth(), middleware.Distribute(), func(c *gin.Context) {
+		defer close(done)
+		Relay(c, types.RelayFormatOpenAI)
+	})
+	gateway := httptest.NewServer(engine)
+	t.Cleanup(gateway.Close)
+	// Runs before Close, so a failing test cannot leave the upstream blocked.
+	t.Cleanup(releaseUpstream)
+
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"model":"ws-billing","messages":[{"role":"user","content":"hi"}]}`))
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+
+	reader := bufio.NewReader(response.Body)
+	var body strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		body.WriteString(line)
+		if line == ": PING\n" {
+			releaseUpstream()
+		}
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err, "no keepalive reached the client during the upstream's pause")
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("relay did not finish")
+	}
+	assert.Contains(t, body.String(), "data: {\"id\":\"c1\"")
+	assert.True(t, strings.HasSuffix(body.String(), "data: [DONE]\n\n"), body.String())
 }
 
 func TestResponsesWebSocketLocalErrorsKeepStreamIdentity(t *testing.T) {

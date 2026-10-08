@@ -6959,6 +6959,12 @@
     "A new version may have been deployed. Please reload the page.": "可能已部署新版本，请刷新页面。",
     "Reload page": "刷新页面",
     "A new version is available. Reload to update.": "有新版本可用，刷新以更新。",
+    "Send keep-alive data every interval while waiting so clients and proxies do not time out. Streaming responses get an SSE comment line (\": PING\").": "等待期间每隔设定的间隔发送保活数据，防止客户端或反向代理判定超时。流式响应发送 SSE 注释行（\": PING\"）。",
+    "Sent only after this many seconds without any output. 10–30 seconds suits most clients.": "仅在连续这么多秒没有任何输出时发送。多数客户端建议 10–30 秒。",
+    "Keep-alive for non-streaming requests": "非流式请求也保活",
+    "Send a newline before the JSON body every interval while waiting (as OpenRouter does). The status code is then fixed at 200: errors that happen later come back as a JSON error body with status 200, so official SDKs neither raise their usual errors nor retry. Native Gemini requests are not covered.": "等待上游期间，每隔设定的间隔在 JSON 正文前发送一个换行（与 OpenRouter 相同）。一旦发送，状态码固定为 200：之后出现的错误会以状态码 200 的 JSON 错误体返回，官方 SDK 不会抛出相应的错误，也不会自动重试。Gemini 原生格式请求不受此开关影响。",
+    "Ping interval must be between 1 and 3600 seconds": "Ping 间隔必须在 1 到 3600 秒之间",
+    "Proxies such as nginx and AWS load balancers close requests that stay idle for 60 seconds by default, so an interval of 60 seconds or more fires too late. Use 10–30 seconds.": "nginx、AWS 负载均衡等反向代理默认在连续 60 秒没有数据时断开请求，间隔设为 60 秒或更长就来不及了，建议 10–30 秒。",
     "Reload": "刷新"
   }
 }

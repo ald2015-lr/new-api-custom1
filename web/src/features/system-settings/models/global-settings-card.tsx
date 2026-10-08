@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import { TriangleAlert } from 'lucide-react'
 import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -76,6 +77,15 @@ const chatToResponsesPolicyAllChannelsExample = JSON.stringify(
   2
 )
 
+const MAX_PING_INTERVAL_SECONDS = 3600
+// nginx proxy_read_timeout and the AWS ALB idle timeout both default to 60s.
+const PROXY_IDLE_TIMEOUT_SECONDS = 60
+
+const isValidPingInterval = (seconds: number) =>
+  Number.isInteger(seconds) &&
+  seconds >= 1 &&
+  seconds <= MAX_PING_INTERVAL_SECONDS
+
 const jsonString = z.string().refine((value) => {
   const trimmed = value.trim()
   if (!trimmed) return true
@@ -93,10 +103,26 @@ const schema = z.object({
     thinking_model_blacklist: jsonString,
     chat_completions_to_responses_policy: jsonString,
   }),
-  general_setting: z.object({
-    ping_interval_enabled: z.boolean(),
-    ping_interval_seconds: z.coerce.number().min(1),
-  }),
+  general_setting: z
+    .object({
+      ping_interval_enabled: z.boolean(),
+      ping_interval_seconds: z.coerce.number(),
+      non_stream_ping_enabled: z.boolean(),
+    })
+    // The interval only matters while ping is on. A legacy out-of-range value
+    // must not block saving the other fields in this card.
+    .superRefine((value, ctx) => {
+      if (!value.ping_interval_enabled) return
+      const seconds = value.ping_interval_seconds
+      if (isValidPingInterval(seconds)) return
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ping_interval_seconds'],
+        message: Number.isInteger(seconds)
+          ? 'Ping interval must be between 1 and 3600 seconds'
+          : 'Must be a whole number',
+      })
+    }),
 })
 
 type GlobalModelSettingsFormValues = z.output<typeof schema>
@@ -108,6 +134,7 @@ type FlatGlobalModelSettings = {
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
+  'general_setting.non_stream_ping_enabled': boolean
 }
 
 const flattenGlobalValues = (
@@ -127,6 +154,8 @@ const flattenGlobalValues = (
     values.general_setting.ping_interval_enabled,
   'general_setting.ping_interval_seconds':
     values.general_setting.ping_interval_seconds,
+  'general_setting.non_stream_ping_enabled':
+    values.general_setting.non_stream_ping_enabled,
 })
 
 function normalizeJsonText(value: string, fallback: string) {
@@ -156,12 +185,23 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   }, [defaultValues, form])
 
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
+  const pingIntervalSeconds = Number(
+    form.watch('general_setting.ping_interval_seconds')
+  )
+  const pingIntervalTooLong =
+    pingEnabled && pingIntervalSeconds >= PROXY_IDLE_TIMEOUT_SECONDS
 
   const onSubmit = async (values: GlobalModelSettingsFormValues) => {
     const flattenedDefaults = flattenGlobalValues(defaultValues)
     const flattenedValues = flattenGlobalValues(values)
+    // With ping off the interval is not validated; the server would reject an
+    // invalid one, so it stays unsaved instead.
+    const skipInterval = !isValidPingInterval(
+      values.general_setting.ping_interval_seconds
+    )
     const updates = Object.entries(flattenedValues).filter(
       ([key, value]) =>
+        !(skipInterval && key === 'general_setting.ping_interval_seconds') &&
         value !== flattenedDefaults[key as keyof FlatGlobalModelSettings]
     )
 
@@ -327,14 +367,22 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                   <FormLabel>{t('Keep-alive Ping')}</FormLabel>
                   <FormDescription>
                     {t(
-                      'Periodically send ping frames to keep streaming connections active.'
+                      'Send keep-alive data every interval while waiting so clients and proxies do not time out. Streaming responses get an SSE comment line (": PING").'
                     )}
                   </FormDescription>
                 </SettingsSwitchContent>
                 <FormControl>
                   <Switch
                     checked={field.value}
-                    onCheckedChange={field.onChange}
+                    onCheckedChange={(checked) => {
+                      field.onChange(checked)
+                      // The interval is only validated while ping is on.
+                      if (!checked) {
+                        form.clearErrors(
+                          'general_setting.ping_interval_seconds'
+                        )
+                      }
+                    }}
                   />
                 </FormControl>
               </SettingsSwitchItem>
@@ -351,6 +399,7 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                   <Input
                     type='number'
                     min={1}
+                    max={MAX_PING_INTERVAL_SECONDS}
                     disabled={!pingEnabled}
                     className='w-24'
                     value={
@@ -366,11 +415,50 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'Recommended to keep this high to avoid upstream throttling.'
+                    'Sent only after this many seconds without any output. 10–30 seconds suits most clients.'
                   )}
                 </FormDescription>
+                {pingIntervalTooLong && (
+                  <p className='text-muted-foreground flex items-start gap-1.5 text-sm'>
+                    <TriangleAlert
+                      aria-hidden='true'
+                      className='text-warning mt-0.5 size-3.5 shrink-0'
+                    />
+                    <span>
+                      {t(
+                        'Proxies such as nginx and AWS load balancers close requests that stay idle for 60 seconds by default, so an interval of 60 seconds or more fires too late. Use 10–30 seconds.'
+                      )}
+                    </span>
+                  </p>
+                )}
                 <FormMessage />
               </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='general_setting.non_stream_ping_enabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>
+                    {t('Keep-alive for non-streaming requests')}
+                  </FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Send a newline before the JSON body every interval while waiting (as OpenRouter does). The status code is then fixed at 200: errors that happen later come back as a JSON error body with status 200, so official SDKs neither raise their usual errors nor retry. Native Gemini requests are not covered.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    disabled={!pingEnabled}
+                  />
+                </FormControl>
+              </SettingsSwitchItem>
             )}
           />
         </SettingsForm>

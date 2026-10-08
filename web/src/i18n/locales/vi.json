@@ -6959,6 +6959,12 @@
     "A new version may have been deployed. Please reload the page.": "Có thể phiên bản mới đã được triển khai. Vui lòng tải lại trang.",
     "Reload page": "Tải lại trang",
     "A new version is available. Reload to update.": "Đã có phiên bản mới. Tải lại để cập nhật.",
+    "Send keep-alive data every interval while waiting so clients and proxies do not time out. Streaming responses get an SSE comment line (\": PING\").": "Trong khi chờ, gửi dữ liệu duy trì kết nối theo mỗi khoảng thời gian để máy khách và proxy không bị hết thời gian chờ. Phản hồi phát trực tuyến sẽ nhận một dòng chú thích SSE (\": PING\").",
+    "Sent only after this many seconds without any output. 10–30 seconds suits most clients.": "Chỉ gửi sau khi không có bất kỳ đầu ra nào trong số giây này. 10–30 giây phù hợp với hầu hết máy khách.",
+    "Keep-alive for non-streaming requests": "Duy trì kết nối cho yêu cầu không phát trực tuyến",
+    "Send a newline before the JSON body every interval while waiting (as OpenRouter does). The status code is then fixed at 200: errors that happen later come back as a JSON error body with status 200, so official SDKs neither raise their usual errors nor retry. Native Gemini requests are not covered.": "Trong khi chờ, gửi một ký tự xuống dòng trước phần thân JSON theo mỗi khoảng thời gian (giống OpenRouter). Khi đó mã trạng thái được cố định là 200: các lỗi xảy ra sau đó được trả về dưới dạng phần thân lỗi JSON với mã trạng thái 200, nên SDK chính thức sẽ không ném lỗi thông thường và không tự thử lại. Không áp dụng cho yêu cầu định dạng Gemini gốc.",
+    "Ping interval must be between 1 and 3600 seconds": "Thời gian Ping phải từ 1 đến 3600 giây",
+    "Proxies such as nginx and AWS load balancers close requests that stay idle for 60 seconds by default, so an interval of 60 seconds or more fires too late. Use 10–30 seconds.": "Các proxy như nginx và bộ cân bằng tải AWS mặc định đóng các yêu cầu không có dữ liệu trong 60 giây, nên khoảng thời gian từ 60 giây trở lên sẽ gửi quá muộn. Hãy dùng 10–30 giây.",
     "Reload": "Tải lại"
   }
 }

@@ -111,7 +111,8 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	generalSettings := operation_setting.GetGeneralSetting()
-	pingEnabled := generalSettings.PingIntervalEnabled && !info.DisablePing
+	// An SSE KeepAliveWriter already pings between events.
+	pingEnabled := generalSettings.PingIntervalEnabled && !info.DisablePing && !KeepAliveStreaming(c)
 	pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
 	if pingInterval <= 0 {
 		pingInterval = DefaultPingInterval

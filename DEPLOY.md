@@ -111,7 +111,7 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 
 ## 三、合并上游更新并重新构建
 
-当前基线：`v1.0.0-rc.41` + 上游 `main` 到 `1a4166d8e` 的 7 个修复提交（2026-10-03 合并；当时没有比 rc.41 更新的正式版）。rc.41 是 2026-10-01 从 rc.40 合并的，rc.40 是 2026-09-27 从 rc.30 合并的。上游发新版时：
+当前基线：`v1.0.0-rc.42` + 上游 `main` 到 `7aa3531ef` 的 1 个修复提交（2026-10-08 合并；当时没有比 rc.42 更新的正式版）。rc.42 之前依次是：rc.41（2026-10-01，从 rc.40 合并）、rc.40（2026-09-27，从 rc.30 合并）。上游发新版时：
 
 ```bash
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
@@ -131,7 +131,7 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | `model/option.go` | 三个手续费键、`LogResponseModelEnabled` 的注册与解析 |
 | `web/src/features/system-settings/integrations/*` | 「计价与手续费」UI |
 | `web/src/i18n/locales/*.json` | 46 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
-| `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go` | 静态资源不限流、缺失 chunk 返回 404、immutable 缓存（见第六节） |
+| `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go`、`middleware/frontend_static.go` | 静态资源不计入页面限流、缺失 chunk 返回 404、immutable 缓存与 304、页面/静态限流在 Redis 故障时放行（见第六节） |
 | `service/relay_error.go`（rc.40 前在 `controller/relay.go`） | `DecideRelayRetry` 开头的"已向客户端输出就不再重试"守卫 |
 | `controller/relay.go` | defer 里流已开始时改走 `helper.WriteStreamError` |
 | `relay/helper/stream_scanner.go`、`stream_error.go`、`common.go` | 裸 `[DONE]`、流内错误事件、写超时续期 |
@@ -147,6 +147,7 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | 新文件 `model/channel_quota_limit.go`、`controller/channel_quota_limit.go`，以及 `model/{main,channel,channel_cache,ability}.go`、`service/channel_select.go`、`controller/relay.go`、`router/channel-router.go`、`i18n/` 里的小钩子；前端 `web/src/features/channels/*` | 渠道限额（见第十节）；新增 `channel_quota_limits` 表 |
 | 新文件 `setting/operation_setting/group_billing_setting.go`、`service/free_group.go`，以及 `service/{billing,quota,task_billing}.go`、`controller/pricing.go`、`model/option.go` 里的小钩子；前端 `features/system-settings/billing`、`features/pricing`、`features/usage-logs` | 不扣费（免费）分组（见第十一节） |
 | `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
+| 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go` 与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式发 `: PING`、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
@@ -154,7 +155,9 @@ rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/rel
 
 rc.40 → rc.41、rc.41 → upstream main（1a4166d8e）都是无冲突合并，上表定制点全部原样保留。
 
-注意上游这 7 个提交里有一条：Waffo Pancake 的支付回调现在会校验 Store ID，后台「Waffo Pancake」设置里的 Store ID 必须已填写且和商户后台一致，否则订单回调会被拒绝、充值不到账。
+rc.41 → rc.42（2026-10-08）：上游自己也修了「前端静态文件把页面限流用光」——静态文件改为预压缩直出，并单独加了一个默认关闭的静态限流（`GLOBAL_STATIC_RATE_LIMIT_ENABLE` / `GLOBAL_STATIC_RATE_LIMIT` / `GLOBAL_STATIC_RATE_LIMIT_DURATION`）。冲突在 `router/web-router.go`、`middleware/rate-limit.go`：以上游结构为主，保留我们的缺失 chunk 404、Redis 故障放行，并在预压缩路径补上 `If-None-Match` → 304（上游这条路径不回 304，会让浏览器每次重新下载整个 chunk）。另外上游把 Go 升到 1.26、构建时用了 moejs 的 PGO 文件，Dockerfile 已同步，不需要手动处理。
+
+注意 rc.41 → upstream main（1a4166d8e）那次合并的 7 个提交里有一条（feefe09f2）：Waffo Pancake 的支付回调现在会校验 Store ID，后台「Waffo Pancake」设置里的 Store ID 必须已填写且和商户后台一致，否则订单回调会被拒绝、充值不到账。
 
 解冲突的原则：**保留定制改动，接受上游其他部分**。解完必须验证：
 
@@ -218,7 +221,7 @@ docker run -d --name new-api-alpha-us --restart always \
 回滚的两个注意点：
 
 1. **定制功能会全部失效**——官方镜像结算币种是 USD、最低充值数量读数据库（你后台设过就是那个值）、没有手续费转嫁。已经产生的订单和用户余额不受影响。
-2. **数据库 schema 不会自动回退**。当前定制版基于 `v1.0.0-rc.41`。rc.41 启动时新建 `user_access_tokens` 表，并在 `options` 表写入一行 `LegacyAccessTokenRetireAt`（见第五节）；rc.40 启动时会做一次 `options` 表主键修复、新建审计日志/账号安全/请求策略等多张表并给若干列改类型；回滚到 rc.40 之前的镜像时这些新表和列会留在库里——通常是加法式变更，旧版本能正常跑；万一起不来，用切换前的 `mysqldump` 恢复。
+2. **数据库 schema 不会自动回退**。当前定制版基于 `v1.0.0-rc.42`。rc.41 启动时新建 `user_access_tokens` 表，并在 `options` 表写入一行 `LegacyAccessTokenRetireAt`（见第五节）；rc.40 启动时会做一次 `options` 表主键修复、新建审计日志/账号安全/请求策略等多张表并给若干列改类型；回滚到 rc.40 之前的镜像时这些新表和列会留在库里——通常是加法式变更，旧版本能正常跑；万一起不来，用切换前的 `mysqldump` 恢复。
 
 ---
 
@@ -418,3 +421,54 @@ WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TI
 
 **模型广场的分类：** 表达式只按次收费（全部是 `fixed(...)`）的模型归入「按次计费」并显示每次价格；按 token 的表达式归入「按量计费」；按次和按 token 混合的仍算按量计费。
 
+
+---
+
+## 十三、长请求保活（每隔 N 秒发送心跳，和 OpenRouter 一样）
+
+**解决什么：** 推理模型、画图、视频等请求可能几十秒甚至几分钟才出第一个字。这期间连接上一个字节都没有，客户端（或宝塔/nginx/CDN 等反向代理）会按「读超时」把请求断掉，用户看到的是超时报错，而上游其实还在生成。
+
+**在哪设置：** 系统设置 → 模型 → 全局模型配置：
+- 「保持连接心跳」：总开关，打开后**流式请求**生效；
+- 「Ping 间隔（秒）」：连续这么多秒没有任何输出才发一次，范围 1–3600，**建议填 10**。**不要用默认的 60**：nginx（宝塔）`proxy_read_timeout`、AWS 负载均衡的空闲超时默认都是 60 秒，60 秒才发第一个心跳就晚了（设为 ≥60 时页面会给出提示）；
+- 「非流式请求也保活」：总开关打开后才能勾选，打开后**非流式请求**也生效。
+
+**会发什么：**
+
+| 请求类型 | 发送内容 | 客户端看到的 |
+|---|---|---|
+| 流式（SSE） | `: PING` 注释行 | 标准 SSE 解析器（OpenAI / Anthropic 官方 SDK 等）会忽略注释行，实测正常 |
+| 非流式（JSON） | 在 JSON 正文前发换行符 `\n` | JSON 允许前导空白，`json.loads` / `JSON.parse` / 各官方 SDK 都能正常解析 |
+
+只在「静默满 N 秒」时才发，正常出字的流不会多出心跳；流式心跳只插在两个事件之间，不会把一个事件拆开。
+
+**适用范围：**
+- 流式：OpenAI 格式（chat/completions、responses、图片流式）、Claude 格式；
+- 非流式：OpenAI 格式（chat/completions、responses、图片生成/编辑、embeddings、rerank）、Claude 格式，以及**插件接管的同步任务**（如视频/图片插件在 `/v1/responses`、`/v1/images/*` 上的同步请求，这类请求可能要等几分钟）；
+- **不发**心跳：音频（TTS 返回二进制、转写可能是纯文本；只有 `stream_format: sse` 的流式 TTS 仍沿用旧的 `: PING`）、Realtime、**Gemini 原生格式**（流式：Google 官方 Python SDK 遇到注释行会解析报错；非流式：心跳之后若出错，Google SDK 会静默返回空结果而不报错，比超时更糟）、Midjourney / 视频提交等本来就很快返回的任务接口。
+
+**一定要知道的副作用（和 OpenRouter 相同）：** 心跳一旦发出，HTTP 状态码就已经是 200 了，无法再改。所以：
+- 之后如果出错（比如上游 400/429/500），非流式请求会收到**状态码 200 + `{"error": {...}}` 错误体**，流式请求会收到流内的错误事件；
+- 实测各官方 SDK 对「200 + 错误体」**都不会抛出原本的错误类型、也不会自动重试**：Python/Node 的 OpenAI SDK 返回 `choices` 为空的对象（再取 `choices[0]` 才报 TypeError），Anthropic SDK 返回 `content` 为空的消息。流式的流内错误事件则能正常抛错。这就是「非流式请求也保活」单独设开关、默认关闭的原因——只在用户确实常被超时困扰时再打开；
+- 后台日志、渠道亲和、模型限流统计里记录的仍是真实的错误状态码，不受影响；
+- **只发过心跳、还没输出正文时上游失败，仍然会自动重试其他渠道**（以前开了 Ping 之后，只要发过一次心跳就不再重试，这次一并修了）。
+
+**哪些客户端能被救：** 心跳解决的是「读超时」（两次收到数据之间的最长间隔）。实测：Python 的 OpenAI / Anthropic SDK（httpx 读超时）、Node 的 Anthropic SDK、Node 的 OpenAI SDK **流式**请求都能被保住；Node 的 OpenAI SDK **非流式**请求用的是「总超时」，心跳救不了，只能让用户调大 `timeout`。Google 官方 SDK（Python / Node）走 Gemini 原生格式，不发心跳，也只能调大超时。
+
+**反向代理：** 心跳响应都带 `X-Accel-Buffering: no`，宝塔 / nginx 默认会立即转发（即使开着 `proxy_buffering on` 也一样），不用改配置。如果心跳仍被攒住，检查 nginx 是否配置了 `proxy_ignore_headers ... X-Accel-Buffering`（会让这个头失效），或者前面还有会缓冲响应的 CDN / 另一层代理。
+
+**注意：** 和其他后台设置一样，一旦点过保存，就以数据库里的值为准（代码默认值是：总开关关、间隔 60 秒、非流式关）。
+
+**上线后怎么确认生效（把 `<令牌>`、`<模型>` 换成实际值，挑一个首字较慢的模型）：**
+
+```bash
+# 流式：首字出来之前应每隔 N 秒看到一行 ": PING"
+curl -N https://<你的域名>/v1/chat/completions \
+  -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
+  -d '{"model":"<模型>","stream":true,"messages":[{"role":"user","content":"写一首长诗"}]}'
+
+# 非流式：等待期间每隔 N 秒收到一个空行，最后是完整 JSON
+curl -N https://<你的域名>/v1/chat/completions \
+  -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
+  -d '{"model":"<模型>","messages":[{"role":"user","content":"写一首长诗"}]}' | cat -A | head
+```

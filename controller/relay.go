@@ -86,6 +86,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		defer ws.Close()
 	}
 
+	var keepAlive *helper.KeepAliveWriter
+	// Runs after the error writer below: a response that never reached the
+	// wire leaves its status and headers on the keepalive writer, while gin
+	// finishes the request on its own writer.
+	defer func() {
+		if keepAlive != nil {
+			keepAlive.Finalize()
+		}
+	}()
+
 	defer func() {
 		if newAPIError != nil {
 			service.RecordRequestPolicyTermination(c, newAPIError)
@@ -99,6 +109,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				if strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
 					helper.WriteStreamError(c, relayFormat, newAPIError)
 				}
+				return
+			}
+			// Only keepalive comments went out, but they committed an SSE
+			// stream, so the error has to be an event as well. The status is
+			// still recorded, as c.JSON does below after JSON keepalive
+			// whitespace: the wire keeps its 200, while the middleware sees
+			// the failure.
+			if committed, sse := helper.KeepAliveCommitted(c); committed && sse {
+				c.Status(newAPIError.StatusCode)
+				helper.WriteStreamError(c, relayFormat, newAPIError)
 				return
 			}
 			switch relayFormat {
@@ -132,6 +152,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if err != nil {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
+	}
+
+	// Stopped before the error writer runs, panics included, so the error
+	// sees the final wire state and no keepalive interleaves with it.
+	if keepAlive = helper.InstallKeepAlive(c, relayFormat, relayInfo); keepAlive != nil {
+		defer keepAlive.Stop()
 	}
 
 	defer func() {
@@ -215,6 +241,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.LastError = newAPIError
 
 		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
+		if decision.Action != "retry" || retryParam.GetRetry() >= common.RetryTimes {
+			// The outcome is known; error logging must not give a keepalive
+			// the chance to turn an error status into 200.
+			keepAlive.Stop()
+		}
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
@@ -222,6 +253,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 	}
+	// Every other way out of the loop decided the outcome as well.
+	keepAlive.Stop()
 
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {

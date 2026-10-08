@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -694,6 +696,72 @@ func TestServeTaskPluginProtocolNonStreamUsesFinalHookAndHostEnvelope(t *testing
 	assert.Contains(t, recorder.Body.String(), `"custom_field":"kept"`)
 	assert.NotContains(t, recorder.Body.String(), "plugin-controlled-id")
 	assert.NotContains(t, recorder.Body.String(), "client_response_secret")
+}
+
+// A sync request waits for its task without writing anything, possibly for
+// minutes, so non-stream keepalive covers it with whitespace before the body.
+func TestServeTaskPluginProtocolNonStreamKeepAlive(t *testing.T) {
+	settings := operation_setting.GetGeneralSetting()
+	previous := *settings
+	t.Cleanup(func() { *settings = previous })
+	settings.PingIntervalEnabled, settings.NonStreamPingEnabled, settings.PingIntervalSeconds = true, true, 1
+
+	pinned := compilePluginProtocolTestEndpoint(t, "keepalive-sync", `
+		export const protocols = {openai_responses: {
+			renderEvents: function() { throw new Error("non-stream called renderEvents"); },
+			renderFinal: function(ctx, task) { return {output: []}; }
+		}};
+	`)
+	settle := make(chan struct{})
+	var settleOnce sync.Once
+	settleTask := func() { settleOnce.Do(func() { close(settle) }) }
+	deps := pluginProtocolTestDeps()
+	deps.tickInterval = 10 * time.Millisecond
+	deps.submit = func(_ *gin.Context, info *relaycommon.RelayInfo) (*taskSubmissionOutcome, *dto.TaskError) {
+		return pluginProtocolTestOutcome(info, pinned.Plugin.Meta.Key, "task_keepalive"), nil
+	}
+	deps.loadTask = func(context.Context, int, constant.TaskPlatform, string) (*model.Task, bool, error) {
+		status := model.TaskStatus(model.TaskStatusInProgress)
+		select {
+		case <-settle:
+			status = model.TaskStatusSuccess
+		default:
+		}
+		task := &model.Task{TaskID: "task_keepalive", Platform: constant.TaskPlatform(pinned.Plugin.Meta.Key), UserId: 71, Status: status}
+		task.SetData(map[string]any{"value": "done"})
+		return task, true, nil
+	}
+	engine := gin.New()
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		protocol, _ := newPluginProtocolTestContext(false, false)
+		for key, value := range protocol.Keys {
+			c.Set(key, value)
+		}
+		serveTaskPluginProtocol(c, pinned, deps)
+	})
+	server := httptest.NewServer(engine)
+	t.Cleanup(server.Close)
+	// Registered after Close so it runs first: a failing test must not leave
+	// the handler waiting for the task while Close waits for the handler.
+	t.Cleanup(settleTask)
+
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"video-model"}`))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	first := make([]byte, 1)
+	_, err = io.ReadFull(response.Body, first)
+	require.NoError(t, err)
+	assert.Equal(t, "\n", string(first), "a keepalive goes out while the task is still running")
+	settleTask()
+	rest, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+	assert.Equal(t, "application/json", response.Header.Get("Content-Type"))
+	var final dto.PluginResponsesResponse
+	require.NoError(t, common.Unmarshal([]byte(strings.TrimLeft(string(rest), "\n")), &final), string(rest))
+	assert.Equal(t, "completed", final.Status)
+	assert.Equal(t, "task_keepalive", final.Metadata["task_id"])
 }
 
 func TestServeTaskPluginProtocolNonStreamInjectsHostArtifactCapabilities(t *testing.T) {

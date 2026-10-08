@@ -244,6 +244,13 @@ func serveTaskPluginProtocol(
 	defer release()
 	logger.LogDebug(c, "task_plugin subsystem=protocol event=admission_acquired generation=%d plugin=%q", generation, pluginKey)
 
+	if !protocolRequest.Stream {
+		// A sync request writes nothing until its task settles, which can take
+		// minutes. Streams have their own heartbeat below.
+		if keepAlive := helper.InstallJSONKeepAlive(c); keepAlive != nil {
+			defer keepAlive.Finalize()
+		}
+	}
 	clientRequest := c.Request
 	var relayInfo *relaycommon.RelayInfo
 	var outcome *taskSubmissionOutcome

@@ -6959,6 +6959,12 @@
     "A new version may have been deployed. Please reload the page.": "Une nouvelle version a peut-être été déployée. Veuillez recharger la page.",
     "Reload page": "Recharger la page",
     "A new version is available. Reload to update.": "Une nouvelle version est disponible. Rechargez pour mettre à jour.",
+    "Send keep-alive data every interval while waiting so clients and proxies do not time out. Streaming responses get an SSE comment line (\": PING\").": "Pendant l'attente, envoie des données de maintien de connexion à chaque intervalle afin que les clients et les proxys n'expirent pas. Les réponses en streaming reçoivent une ligne de commentaire SSE (\": PING\").",
+    "Sent only after this many seconds without any output. 10–30 seconds suits most clients.": "Envoyé uniquement après ce nombre de secondes sans aucune sortie. 10 à 30 secondes conviennent à la plupart des clients.",
+    "Keep-alive for non-streaming requests": "Maintien de connexion pour les requêtes non streaming",
+    "Send a newline before the JSON body every interval while waiting (as OpenRouter does). The status code is then fixed at 200: errors that happen later come back as a JSON error body with status 200, so official SDKs neither raise their usual errors nor retry. Native Gemini requests are not covered.": "Pendant l'attente, envoie un saut de ligne avant le corps JSON à chaque intervalle (comme le fait OpenRouter). Le code de statut est alors fixé à 200 : les erreurs survenant ensuite sont renvoyées sous forme de corps d'erreur JSON avec le statut 200, si bien que les SDK officiels ne lèvent pas leurs erreurs habituelles et ne relancent pas la requête. Les requêtes Gemini natives ne sont pas concernées.",
+    "Ping interval must be between 1 and 3600 seconds": "L'intervalle de ping doit être compris entre 1 et 3600 secondes",
+    "Proxies such as nginx and AWS load balancers close requests that stay idle for 60 seconds by default, so an interval of 60 seconds or more fires too late. Use 10–30 seconds.": "Les proxys comme nginx et les répartiteurs de charge AWS ferment par défaut les requêtes inactives depuis 60 secondes ; un intervalle de 60 secondes ou plus arrive donc trop tard. Utilisez 10 à 30 secondes.",
     "Reload": "Recharger"
   }
 }

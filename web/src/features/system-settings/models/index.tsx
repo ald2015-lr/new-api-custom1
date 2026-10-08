@@ -30,6 +30,7 @@ const defaultModelSettings: ModelSettings = {
   'global.chat_completions_to_responses_policy': '{}',
   'general_setting.ping_interval_enabled': false,
   'general_setting.ping_interval_seconds': 60,
+  'general_setting.non_stream_ping_enabled': false,
   'gemini.safety_settings': '',
   'gemini.version_settings': '',
   'gemini.supported_imagine_models': '',

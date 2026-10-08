@@ -543,9 +543,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	var pingerDone <-chan struct{}
 	if info.IsStream {
 		helper.SetEventStreamHeaders(c)
-		// 处理流式请求的 ping 保活
+		// 处理流式请求的 ping 保活。Relay 装了 KeepAliveWriter 时由它负责：
+		// 这里的 ping 会被当成响应正文，导致无法再重试其他渠道。
 		generalSettings := operation_setting.GetGeneralSetting()
-		if generalSettings.PingIntervalEnabled && !info.DisablePing {
+		if generalSettings.PingIntervalEnabled && !info.DisablePing && !helper.KeepAliveActive(c) {
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
 			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval)
 			// 使用defer确保在任何情况下都能停止ping goroutine

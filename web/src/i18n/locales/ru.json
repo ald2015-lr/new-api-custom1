@@ -6959,6 +6959,12 @@
     "A new version may have been deployed. Please reload the page.": "Возможно, была развёрнута новая версия. Пожалуйста, перезагрузите страницу.",
     "Reload page": "Перезагрузить страницу",
     "A new version is available. Reload to update.": "Доступна новая версия. Перезагрузите страницу, чтобы обновить.",
+    "Send keep-alive data every interval while waiting so clients and proxies do not time out. Streaming responses get an SSE comment line (\": PING\").": "Во время ожидания отправлять keep-alive данные с заданным интервалом, чтобы клиенты и прокси не обрывали соединение по тайм-ауту. Потоковые ответы получают строку комментария SSE (\": PING\").",
+    "Sent only after this many seconds without any output. 10–30 seconds suits most clients.": "Отправляется только после указанного числа секунд без какого-либо вывода. Для большинства клиентов подходит 10–30 секунд.",
+    "Keep-alive for non-streaming requests": "Keep-alive для непотоковых запросов",
+    "Send a newline before the JSON body every interval while waiting (as OpenRouter does). The status code is then fixed at 200: errors that happen later come back as a JSON error body with status 200, so official SDKs neither raise their usual errors nor retry. Native Gemini requests are not covered.": "Во время ожидания отправлять перевод строки перед JSON-телом с заданным интервалом (как это делает OpenRouter). После этого код состояния фиксируется на 200: ошибки, возникшие позже, возвращаются в виде JSON-тела ошибки со статусом 200, поэтому официальные SDK не выбрасывают обычные исключения и не повторяют запрос. Запросы в нативном формате Gemini не затрагиваются.",
+    "Ping interval must be between 1 and 3600 seconds": "Интервал Ping должен быть от 1 до 3600 секунд",
+    "Proxies such as nginx and AWS load balancers close requests that stay idle for 60 seconds by default, so an interval of 60 seconds or more fires too late. Use 10–30 seconds.": "Прокси, такие как nginx и балансировщики нагрузки AWS, по умолчанию закрывают запросы, простаивающие 60 секунд, поэтому интервал 60 секунд и больше срабатывает слишком поздно. Используйте 10–30 секунд.",
     "Reload": "Перезагрузить"
   }
 }
