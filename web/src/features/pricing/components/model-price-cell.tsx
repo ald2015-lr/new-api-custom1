@@ -30,10 +30,12 @@ import {
   getDynamicPricingSummary,
   isUnconfiguredTaskUsageModel,
 } from '../lib/dynamic-price'
+import { getSplitPriceGroups } from '../lib/model-family'
 import { isTokenBasedModel } from '../lib/model-helpers'
 import { formatPrice, formatRequestPrice } from '../lib/price'
 import { taskUsageUnitLabel } from '../lib/task-price-display'
 import type { PricingModel, TokenUnit } from '../types'
+import { GroupPriceList, VariantPrice } from './model-family-price'
 
 export type ModelPriceCellOptions = {
   tokenUnit?: TokenUnit
@@ -265,5 +267,32 @@ export function ModelPriceCell(props: {
         {caption}
       </span>
     </span>
+  )
+}
+
+/**
+ * The table's price cell, listed per group when the model's groups price it
+ * differently, so a row never shows the cheapest group's price as if it were
+ * every group's. Each group gets one compact line; the cached price stays in
+ * its own column.
+ */
+export function ModelGroupPriceCell(props: {
+  model: PricingModel
+  options?: ModelPriceCellOptions
+}) {
+  const selectedGroup = props.options?.selectedGroup
+  const groups = useMemo(
+    () => getSplitPriceGroups(props.model, selectedGroup),
+    [props.model, selectedGroup]
+  )
+  if (groups.length === 0) {
+    return <ModelPriceCell model={props.model} options={props.options} />
+  }
+  return (
+    <GroupPriceList groups={groups} options={props.options} stacked>
+      {(options) => (
+        <VariantPrice model={props.model} options={options} hideCached />
+      )}
+    </GroupPriceList>
   )
 }

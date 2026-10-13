@@ -16,9 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { TFunction } from 'i18next'
+
 import type { SuccessRatePoint } from '@/features/performance-metrics/types'
 
-import { QUOTA_TYPE_VALUES, SORT_OPTIONS } from '../constants'
+import {
+  EXCLUDED_GROUPS,
+  FILTER_ALL,
+  QUOTA_TYPE_VALUES,
+  SORT_OPTIONS,
+} from '../constants'
 import type { PricingModel } from '../types'
 import {
   getDynamicDisplayGroupRatio,
@@ -32,6 +39,7 @@ import { getDisplayGroupRatio, isTokenBasedModel } from './model-helpers'
 import {
   stripLineTag,
   type ModelFamily,
+  type ModelFamilyLine,
   type ModelVariant,
 } from './model-variants'
 import { formatPrice, formatRequestPrice } from './price'
@@ -228,6 +236,227 @@ export function getLowestPricePoint(
   }
   if (lowest) return { point: lowest }
   return missing(reasons.size === 1 ? [...reasons][0] : 'dynamic')
+}
+
+function pricePointKey(result: PricePointResult): string {
+  return result.point
+    ? `${pricePointUnitKey(result.point)}:${result.point.value}`
+    : `missing:${result.reason}`
+}
+
+function groupRatioOf(
+  ratios: Record<string, number> | undefined,
+  group: string
+): number | undefined {
+  const ratio = ratios?.[group]
+  return typeof ratio === 'number' && Number.isFinite(ratio) ? ratio : undefined
+}
+
+function sortGroupsByRatio(
+  groups: Iterable<string>,
+  ratios: Record<string, number> | undefined
+): string[] {
+  return unique(groups).sort(
+    (a, b) =>
+      (groupRatioOf(ratios, a) ?? 1) - (groupRatioOf(ratios, b) ?? 1) ||
+      a.localeCompare(b)
+  )
+}
+
+/**
+ * Groups a model is priced in for the viewer, cheapest first: the selected
+ * group while a group filter is active, otherwise every enabled group that
+ * has a ratio (the groups the summary price takes its lowest ratio from), or
+ * every enabled group when none has one.
+ */
+export function getModelPriceGroups(
+  model: PricingModel,
+  selectedGroup?: string
+): string[] {
+  const enabled = Array.isArray(model.enable_groups) ? model.enable_groups : []
+  if (
+    selectedGroup &&
+    selectedGroup !== FILTER_ALL &&
+    enabled.includes(selectedGroup)
+  ) {
+    return [selectedGroup]
+  }
+  const candidates = enabled.filter((group) => !EXCLUDED_GROUPS.includes(group))
+  const priced = candidates.filter(
+    (group) => groupRatioOf(model.group_ratio, group) !== undefined
+  )
+  // Without any configured ratio every group bills at 1, like the summary.
+  return sortGroupsByRatio(
+    priced.length > 0 ? priced : candidates,
+    model.group_ratio
+  )
+}
+
+/**
+ * What a model's price shows in one group, or null when no shown price
+ * depends on the group (special expression, not configured, no entries).
+ */
+function groupPriceSignature(
+  model: PricingModel,
+  group: string
+): string | null {
+  const summary = getDynamicPricingSummary(model, {
+    tokenUnit: 'M',
+    groupRatioMultiplier: getDynamicDisplayGroupRatio(model, group),
+  })
+  if (summary) {
+    if (summary.isSpecialExpression || summary.primaryEntries.length === 0) {
+      return null
+    }
+    return summary.primaryEntries
+      .map(
+        (entry) => `${entry.field}:${entry.formattedRange ?? entry.formatted}`
+      )
+      .join('|')
+  }
+  if (isUnconfiguredTaskUsageModel(model)) return null
+  const ratio = getDisplayGroupRatio(model, group)
+  if (isTokenBasedModel(model)) {
+    return Number.isFinite(model.model_ratio)
+      ? `token:${model.model_ratio * ratio}`
+      : null
+  }
+  if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) return null
+  const price = model.model_price ?? 0
+  return Number.isFinite(price) ? `request:${price * ratio}` : null
+}
+
+/**
+ * The groups to list a model's price under one by one: its price groups when
+ * the prices shown for them differ, otherwise none (one price covers them
+ * all, e.g. a free model or a special expression).
+ */
+export function getSplitPriceGroups(
+  model: PricingModel,
+  selectedGroup?: string
+): string[] {
+  const groups = getModelPriceGroups(model, selectedGroup)
+  if (groups.length < 2) return []
+  const signatures = groups.map((group) => groupPriceSignature(model, group))
+  if (signatures.some((signature) => signature === null)) return []
+  return new Set(signatures).size > 1 ? groups : []
+}
+
+/** Whether the table's Cached column has a price to show for the model. */
+export function hasCachedPrice(model: PricingModel): boolean {
+  const summary = getDynamicPricingSummary(model, { tokenUnit: 'M' })
+  if (summary) {
+    return (
+      !summary.isSpecialExpression &&
+      summary.entries.some(
+        (entry) =>
+          entry.field === 'cacheReadPrice' || entry.field === 'imageCachePrice'
+      )
+    )
+  }
+  return (
+    !isUnconfiguredTaskUsageModel(model) &&
+    isTokenBasedModel(model) &&
+    model.cache_ratio != null
+  )
+}
+
+/** Every group any variant of the line is priced in, cheapest first. */
+export function getLineGroups(
+  line: ModelFamilyLine,
+  selectedGroup?: string
+): string[] {
+  return sortGroupsByRatio(
+    line.variants.flatMap((variant) =>
+      getModelPriceGroups(variant.model, selectedGroup)
+    ),
+    line.variants[0]?.model.group_ratio
+  )
+}
+
+/** Tags of a family's tagged lines. */
+export function getFamilyTags(family: ModelFamily): Set<string> {
+  return new Set(family.lines.map((line) => line.line).filter(Boolean))
+}
+
+/**
+ * Name of a line: its tag, or for untagged models the groups they are sold
+ * in, so a line reads `Anthropic` rather than a bare `Default`. When one of
+ * those groups is also the tag of another line in the family (`x` in group
+ * 按量 next to `[按量]x`), the untagged line keeps `Default` in front so the
+ * two never share a name.
+ */
+export function getLineDisplayName(
+  t: TFunction,
+  line: string,
+  groups: readonly string[],
+  familyTags: ReadonlySet<string>
+): string {
+  if (line) return line
+  const name = groups.join(' / ')
+  if (!name) return t('Default')
+  if (groups.some((group) => familyTags.has(group))) {
+    return `${t('Default')} · ${name}`
+  }
+  return name
+}
+
+export type LinePriceEntry = {
+  key: string
+  /** The line tag; '' for untagged models. */
+  line: string
+  /** Set when the entry prices one group of a line split by group. */
+  group?: string
+  /** Groups the entry covers, cheapest first. */
+  groups: string[]
+  price: PricePointResult
+}
+
+/**
+ * Lowest price of each line. A line whose groups price it differently is
+ * split into one entry per group (the lowest price within that group), so a
+ * card never presents another group's cheaper price as this one's.
+ */
+export function getFamilyLinePrices(
+  family: ModelFamily,
+  options: PricePointOptions
+): LinePriceEntry[] {
+  return family.lines.flatMap((line) => {
+    const groups = getLineGroups(line, options.selectedGroup)
+    const whole: LinePriceEntry = {
+      key: line.line,
+      line: line.line,
+      groups,
+      price: getLowestPricePoint(line.variants, options),
+    }
+    // A variant without a priced group would belong to no split entry.
+    const unpriced = line.variants.some(
+      (variant) =>
+        getModelPriceGroups(variant.model, options.selectedGroup).length === 0
+    )
+    if (groups.length < 2 || unpriced) return [whole]
+    const byGroup = groups.map((group): LinePriceEntry => {
+      const members = line.variants.filter((variant) =>
+        getModelPriceGroups(variant.model, options.selectedGroup).includes(
+          group
+        )
+      )
+      return {
+        key: JSON.stringify([line.line, group]),
+        line: line.line,
+        group,
+        groups: [group],
+        price: getLowestPricePoint(members, {
+          ...options,
+          selectedGroup: group,
+        }),
+      }
+    })
+    const firstKey = pricePointKey(byGroup[0].price)
+    return byGroup.every((entry) => pricePointKey(entry.price) === firstKey)
+      ? [whole]
+      : byGroup
+  })
 }
 
 function unique(values: Iterable<string>): string[] {

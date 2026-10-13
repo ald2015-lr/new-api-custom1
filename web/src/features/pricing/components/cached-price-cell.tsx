@@ -28,9 +28,11 @@ import {
   getDynamicPricingSummary,
   isUnconfiguredTaskUsageModel,
 } from '../lib/dynamic-price'
+import { getSplitPriceGroups, hasCachedPrice } from '../lib/model-family'
 import { isTokenBasedModel } from '../lib/model-helpers'
 import { formatPrice, stripTrailingZeros } from '../lib/price'
 import type { PricingModel } from '../types'
+import { GroupPriceList } from './model-family-price'
 import type { ModelPriceCellOptions } from './model-price-cell'
 
 export function CachedPriceCell(props: {
@@ -147,5 +149,31 @@ export function CachedPriceCell(props: {
         / {tokenUnitLabel}
       </div>
     </div>
+  )
+}
+
+/**
+ * The table's Cached cell, split by group like the price cell beside it when
+ * the groups price the model differently and it has a cached price.
+ */
+export function ModelGroupCachedPriceCell(props: {
+  model: PricingModel
+  options: ModelPriceCellOptions
+}) {
+  const selectedGroup = props.options.selectedGroup
+  const groups = useMemo(
+    () =>
+      hasCachedPrice(props.model)
+        ? getSplitPriceGroups(props.model, selectedGroup)
+        : [],
+    [props.model, selectedGroup]
+  )
+  if (groups.length === 0) {
+    return <CachedPriceCell model={props.model} options={props.options} />
+  }
+  return (
+    <GroupPriceList groups={groups} options={props.options} stacked>
+      {(options) => <CachedPriceCell model={props.model} options={options} />}
+    </GroupPriceList>
   )
 }

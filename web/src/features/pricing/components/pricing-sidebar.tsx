@@ -202,7 +202,12 @@ export const PricingSidebar = memo(function PricingSidebar(
       label: t('All Vendors'),
       count: props.models.length,
     },
+    // Older backends can list one vendor name under several ids.
     ...props.vendors
+      .filter(
+        (vendor, index, all) =>
+          all.findIndex((other) => other.name === vendor.name) === index
+      )
       .map((vendor) => ({
         value: vendor.name,
         label: vendor.name,

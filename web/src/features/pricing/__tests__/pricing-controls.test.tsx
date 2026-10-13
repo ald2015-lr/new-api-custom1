@@ -170,6 +170,94 @@ describe('pricing controls', () => {
     ).toHaveTextContent('welfare')
   })
 
+  describe('table prices by group', () => {
+    const twoGroupModel = (
+      overrides: Partial<PricingModel> = {}
+    ): PricingModel => ({
+      id: 1,
+      model_name: 'two-group-model',
+      quota_type: 1,
+      model_price: 0.5,
+      model_ratio: 0,
+      completion_ratio: 1,
+      enable_groups: ['default', 'premium'],
+      group_ratio: { default: 1, premium: 3 },
+      ...overrides,
+    })
+
+    function cellOf(column: string) {
+      const index = screen
+        .getAllByRole('columnheader')
+        .findIndex((header) => header.textContent?.trim() === column)
+      const row = screen.getByRole('row', { name: /two-group-model/ })
+      return within(row).getAllByRole('cell')[index]
+    }
+
+    it('lists the price per group when the groups price the model differently', () => {
+      render(<PricingTable models={[twoGroupModel()]} />)
+
+      expect(
+        within(cellOf('Price'))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['default$0.5/ request', 'premium$1.5/ request'])
+    })
+
+    it('keeps one price when every group costs the same', () => {
+      render(
+        <PricingTable
+          models={[twoGroupModel({ group_ratio: { default: 1, premium: 1 } })]}
+        />
+      )
+      expect(within(cellOf('Price')).queryByRole('listitem')).toBeNull()
+    })
+
+    it('keeps one price for the selected group while a group filter is active', () => {
+      render(
+        <PricingTable models={[twoGroupModel()]} selectedGroup='premium' />
+      )
+      const price = cellOf('Price')
+      expect(within(price).queryByRole('listitem')).toBeNull()
+      expect(price).toHaveTextContent('1.5')
+    })
+
+    it('shows a special billing expression once instead of once per group', () => {
+      render(
+        <PricingTable
+          models={[
+            twoGroupModel({
+              quota_type: 0,
+              billing_mode: 'tiered_expr',
+              billing_expr: 'p > 100 ? p * 2 : c * 3',
+            }),
+          ]}
+        />
+      )
+      expect(
+        within(cellOf('Price')).getAllByText('Special billing expression')
+      ).toHaveLength(1)
+    })
+
+    it('splits the cached price by group next to a split price', () => {
+      render(
+        <PricingTable
+          models={[
+            twoGroupModel({
+              quota_type: 0,
+              model_ratio: 1,
+              cache_ratio: 0.1,
+            }),
+          ]}
+        />
+      )
+      expect(
+        within(cellOf('Cached'))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['default$0.2/ 1M', 'premium$0.6/ 1M'])
+    })
+  })
+
   it('shows no free badge when the backend sends no free groups', () => {
     const model: PricingModel = {
       id: 1,
@@ -221,9 +309,11 @@ describe('pricing controls', () => {
     ]
     const sidebarProps = {
       ...props,
+      // The duplicate id must not add a second Vendor A option.
       vendors: [
         { id: 1, name: 'Vendor A' },
         { id: 2, name: 'Vendor B' },
+        { id: 4, name: 'Vendor A' },
       ],
       tags: ['Chat', 'Image', 'Video'],
     }

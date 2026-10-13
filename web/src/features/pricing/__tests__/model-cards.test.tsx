@@ -352,6 +352,8 @@ describe('model cards', () => {
             seconds: { type: 'number', unit: 'second' },
             mode: { enum: ['std', 'pro'] },
           },
+          // One group: the per-group chips are covered on their own.
+          enable_groups: ['default'],
         })}
         onClick={vi.fn()}
         tokenUnit='K'
@@ -615,5 +617,104 @@ describe('model cards', () => {
       expect(slot.classList.contains('bg-muted-foreground/15')).toBe(true)
     })
     vi.useRealTimers()
+  })
+
+  it('lists each group price under the headline when the groups price the model differently', () => {
+    render(<ModelCard model={pricingModel()} onClick={vi.fn()} />)
+
+    const groupPricing = screen.getByRole('group', { name: 'Group Pricing' })
+    expect(
+      within(groupPricing)
+        .getAllByRole('listitem')
+        .map((chip) => chip.textContent)
+    ).toEqual(['defaultInput $2 / 1M', 'premiumInput $6 / 1M'])
+  })
+
+  it('keeps a task price range and its name in each group chip', () => {
+    render(
+      <ModelCard
+        model={pricingModel({
+          billing_mode: 'tiered_expr',
+          billing_expr:
+            'u("mode") == "pro" ? tier("pro", u("seconds") * 0.8) : tier("std", u("seconds") * 0.4)',
+          billing_usage_schema: {
+            seconds: { type: 'number', unit: 'second' },
+            mode: { enum: ['std', 'pro'] },
+          },
+        })}
+        onClick={vi.fn()}
+      />
+    )
+
+    const groupPricing = screen.getByRole('group', { name: 'Group Pricing' })
+    expect(
+      within(groupPricing)
+        .getAllByRole('listitem')
+        .map((chip) => chip.textContent)
+    ).toEqual([
+      'defaultseconds $0.4 – $0.8 / s',
+      'premiumseconds $1.2 – $2.4 / s',
+    ])
+  })
+
+  it('names the input price in the group chips of an expression model', () => {
+    render(
+      <ModelCard
+        model={pricingModel({
+          billing_mode: 'tiered_expr',
+          billing_expr: 'tier("standard", p * 2 + c * 6)',
+        })}
+        onClick={vi.fn()}
+      />
+    )
+
+    const groupPricing = screen.getByRole('group', { name: 'Group Pricing' })
+    expect(
+      within(groupPricing)
+        .getAllByRole('listitem')
+        .map((chip) => chip.textContent)
+    ).toEqual(['defaultInput $2 / 1M', 'premiumInput $6 / 1M'])
+  })
+
+  it('shows no group pricing for a free model whose groups have different ratios', () => {
+    render(
+      <ModelCard
+        model={pricingModel({ quota_type: 1, model_price: 0 })}
+        onClick={vi.fn()}
+      />
+    )
+    expect(screen.queryByRole('group', { name: 'Group Pricing' })).toBeNull()
+  })
+
+  it('shows no group pricing when every group costs the same', () => {
+    render(
+      <ModelCard
+        model={pricingModel({ group_ratio: { default: 1, premium: 1 } })}
+        onClick={vi.fn()}
+      />
+    )
+    expect(screen.queryByRole('group', { name: 'Group Pricing' })).toBeNull()
+  })
+
+  it('shows no group pricing while a group filter is selected', () => {
+    render(
+      <ModelCard
+        model={pricingModel()}
+        selectedGroup='premium'
+        onClick={vi.fn()}
+      />
+    )
+    expect(screen.queryByRole('group', { name: 'Group Pricing' })).toBeNull()
+  })
+
+  it('lets the details action wrap below the metrics instead of covering them', () => {
+    render(<ModelCard model={pricingModel()} onClick={vi.fn()} />)
+
+    const metrics = screen.getByLabelText(
+      'Performance metrics for the last 24 hours'
+    )
+    const details = within(metrics).getByRole('button', { name: /Details/ })
+    expect(metrics).toHaveClass('flex-wrap')
+    expect(details).toHaveClass('ml-auto')
   })
 })

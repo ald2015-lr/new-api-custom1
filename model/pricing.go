@@ -218,16 +218,9 @@ func updatePricing() {
 	// 初始化默认供应商映射
 	initDefaultVendorMapping(metaMap, vendorMap, enableAbilities)
 
-	// 构建对前端友好的供应商列表
-	vendorsList = make([]PricingVendor, 0, len(vendorMap))
-	for _, v := range vendorMap {
-		vendorsList = append(vendorsList, PricingVendor{
-			ID:          v.Id,
-			Name:        v.Name,
-			Description: v.Description,
-			Icon:        v.Icon,
-		})
-	}
+	// 构建对前端友好的供应商列表（同名供应商只保留一条）
+	var vendorAliases map[int]int
+	vendorsList, vendorAliases = dedupePricingVendors(vendorMap)
 
 	modelGroupsMap := make(map[string]*types.Set[string])
 
@@ -344,6 +337,9 @@ func updatePricing() {
 			pricing.Icon = meta.Icon
 			pricing.Tags = meta.Tags
 			pricing.VendorID = meta.VendorID
+			if canonical, ok := vendorAliases[meta.VendorID]; ok {
+				pricing.VendorID = canonical
+			}
 		}
 		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
 		if findPrice {

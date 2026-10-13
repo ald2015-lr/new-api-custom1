@@ -292,3 +292,34 @@ func TestCacheUpdateChannelSyncsAdvancedCustomConfig(t *testing.T) {
 
 	assert.Nil(t, channel2advancedCustomConfig[401])
 }
+
+func TestPricingListsDuplicateVendorNamesOnce(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	// Rows left behind by releases that created vendors while reading pricing.
+	for _, vendor := range []Vendor{
+		{Id: 3, Name: "Anthropic", Status: 1},
+		{Id: 5, Name: "Anthropic", Icon: "Claude.Color", Description: "Claude", Status: 1},
+		{Id: 7, Name: " anthropic", Status: 1},
+		{Id: 9, Name: "OpenAI", Icon: "OpenAI", Status: 1},
+	} {
+		require.NoError(t, DB.Create(&vendor).Error)
+	}
+	insertPricingEndpointChannel(t, 105, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	for _, name := range []string{"claude-saved", "claude-inferred", "gpt-4o"} {
+		insertPricingEndpointAbility(t, 105, name)
+	}
+	require.NoError(t, DB.Create(&Model{ModelName: "claude-saved", VendorID: 7, Status: 1, NameRule: NameRuleExact}).Error)
+	InitChannelCache()
+
+	vendorByModel := make(map[string]int)
+	for _, pricing := range GetPricing() {
+		vendorByModel[pricing.ModelName] = pricing.VendorID
+	}
+
+	assert.Equal(t, []PricingVendor{
+		{ID: 3, Name: "Anthropic", Icon: "Claude.Color", Description: "Claude"},
+		{ID: 9, Name: "OpenAI", Icon: "OpenAI"},
+	}, GetVendors())
+	assert.Equal(t, map[string]int{"claude-saved": 3, "claude-inferred": 3, "gpt-4o": 9}, vendorByModel)
+}

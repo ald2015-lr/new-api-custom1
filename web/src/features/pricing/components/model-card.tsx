@@ -37,11 +37,13 @@ import {
   isUnconfiguredTaskUsageModel,
 } from '../lib/dynamic-price'
 import { parseTags } from '../lib/filters'
+import { getSplitPriceGroups } from '../lib/model-family'
 import { isTokenBasedModel } from '../lib/model-helpers'
 import { formatPrice, formatRequestPrice } from '../lib/price'
 import { taskPriceLabel, taskUsageUnitLabel } from '../lib/task-price-display'
 import type { PricingModel, PriceType, TokenUnit } from '../types'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
+import { ModelGroupPriceChips } from './model-family-price'
 import { ModelGroupsEndpoints } from './model-groups-endpoints'
 import { ModelPerfBadge, type ModelPerfBadgeData } from './model-perf-badge'
 
@@ -100,6 +102,12 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
     // Currency is read indirectly by the price formatter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [props.model, dynamicPriceOptions, currency]
+  )
+  // The headline price is the cheapest group's; groups that price the model
+  // differently are listed under it.
+  const splitGroups = useMemo(
+    () => getSplitPriceGroups(props.model, props.selectedGroup),
+    [props.model, props.selectedGroup]
   )
   const cardExamplePrice = useMemo(
     () => getCardExamplePrice(props.model, dynamicPriceOptions),
@@ -333,6 +341,19 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           <div className='grid grid-cols-[repeat(auto-fit,minmax(88px,1fr))] gap-x-3 gap-y-2'>
             {priceSummary}
           </div>
+          {splitGroups.length > 0 && (
+            <ModelGroupPriceChips
+              model={props.model}
+              groups={splitGroups}
+              options={{
+                tokenUnit,
+                priceRate,
+                usdExchangeRate,
+                showRechargePrice,
+              }}
+              className='border-border/60 mt-1 border-t pt-2'
+            />
+          )}
         </div>
         <ModelGroupsEndpoints groups={groups} endpoints={endpoints} />
       </CardContent>
@@ -344,6 +365,7 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           <Button
             variant='ghost'
             size='sm'
+            className='ml-auto'
             onClick={() => props.onClick(props.model.model_name || '')}
           >
             {t('Details')}

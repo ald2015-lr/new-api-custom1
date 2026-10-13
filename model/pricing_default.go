@@ -157,3 +157,56 @@ func getDefaultVendorIcon(vendorName string) string {
 	}
 	return ""
 }
+
+// dedupePricingVendors lists each vendor name once. Releases that created
+// vendor rows while reading pricing could insert the same name more than once
+// when refreshes overlapped, so a database may hold several active rows per
+// name. The oldest row stands for the name (its empty icon or description is
+// filled from a duplicate); aliases maps every other id to it. The list is
+// ordered by id, saved vendors before built-in display vendors, so it no
+// longer reshuffles on every refresh.
+func dedupePricingVendors(vendorMap map[int]*Vendor) ([]PricingVendor, map[int]int) {
+	ids := make([]int, 0, len(vendorMap))
+	for id := range vendorMap {
+		ids = append(ids, id)
+	}
+	slices.SortFunc(ids, func(a, b int) int {
+		if (a > 0) != (b > 0) {
+			if a > 0 {
+				return -1
+			}
+			return 1
+		}
+		if a > 0 {
+			return a - b
+		}
+		return b - a
+	})
+
+	list := make([]PricingVendor, 0, len(ids))
+	aliases := make(map[int]int)
+	byName := make(map[string]int, len(ids))
+	for _, id := range ids {
+		vendor := vendorMap[id]
+		key := strings.ToLower(strings.TrimSpace(vendor.Name))
+		if index, seen := byName[key]; seen {
+			kept := &list[index]
+			aliases[id] = kept.ID
+			if kept.Icon == "" {
+				kept.Icon = vendor.Icon
+			}
+			if kept.Description == "" {
+				kept.Description = vendor.Description
+			}
+			continue
+		}
+		byName[key] = len(list)
+		list = append(list, PricingVendor{
+			ID:          vendor.Id,
+			Name:        vendor.Name,
+			Description: vendor.Description,
+			Icon:        vendor.Icon,
+		})
+	}
+	return list, aliases
+}

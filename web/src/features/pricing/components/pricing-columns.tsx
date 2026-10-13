@@ -33,12 +33,15 @@ import { cn } from '@/lib/utils'
 
 import { parseTags } from '../lib/filters'
 import type { GroupAccessRequirement } from '../types'
-import { CachedPriceCell } from './cached-price-cell'
+import { ModelGroupCachedPriceCell } from './cached-price-cell'
 import { FreeGroupBadge } from './free-group-badge'
 import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { FamilyLinePrices } from './model-family-price'
-import { ModelPriceCell, type ModelPriceCellOptions } from './model-price-cell'
+import {
+  ModelGroupPriceCell,
+  type ModelPriceCellOptions,
+} from './model-price-cell'
 import {
   FamilyBillingModes,
   FamilyNameCell,
@@ -163,7 +166,7 @@ function buildPricingColumns(
             layout='list'
           />
         ) : (
-          <ModelPriceCell model={row.original} options={options} />
+          <ModelGroupPriceCell model={row.original} options={options} />
         ),
       size: 180,
       enableSorting: false,
@@ -177,7 +180,7 @@ function buildPricingColumns(
         row.original.family ? (
           <span className='text-muted-foreground/30 text-xs'>—</span>
         ) : (
-          <CachedPriceCell model={row.original} options={options} />
+          <ModelGroupCachedPriceCell model={row.original} options={options} />
         ),
       size: 110,
       enableSorting: false,

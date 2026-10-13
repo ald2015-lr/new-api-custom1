@@ -40,6 +40,7 @@ import {
   FamilyLinePrices,
   VariantPrice,
 } from '../components/model-family-price'
+import { ModelVariantList } from '../components/model-variant-list'
 import {
   DEFAULT_MODEL_VARIANT_RULES,
   groupModelFamilies,
@@ -262,5 +263,194 @@ describe('family card summary', () => {
       'vip'
     )
     expect(endpoints).toHaveTextContent('Endpointsopenai, anthropic')
+  })
+})
+
+describe('lines and prices by group', () => {
+  // Anthropic costs twice the 按量 group; model_ratio 1 is $2 / 1M input.
+  const ratios = { 按量: 1, Anthropic: 2, kiro: 1 }
+  const inGroups = (
+    name: string,
+    groups: string[],
+    overrides: Partial<PricingModel> = {}
+  ) => model(name, { enable_groups: groups, group_ratio: ratios, ...overrides })
+
+  function renderList(family: ModelFamily, selectedGroup?: string) {
+    return renderWithI18n(
+      <ModelVariantList
+        family={family}
+        perfMap={new Map()}
+        priceOptions={{ selectedGroup }}
+        onModelClick={vi.fn()}
+      />
+    )
+  }
+
+  it('names an untagged line after its group instead of Default', () => {
+    const family = familyOf(
+      inGroups('x', ['Anthropic']),
+      inGroups('[按量]x', ['按量']),
+      inGroups('[按量]x-thinking', ['按量'])
+    )
+    renderWithI18n(<FamilyLinePrices family={family} layout='chips' />)
+    expect(
+      screen.getAllByRole('listitem').map((chip) => chip.textContent)
+    ).toEqual(['Anthropicfrom $4 / 1M', '按量from $2 / 1M'])
+
+    renderList(family)
+    expect(screen.getByRole('heading', { name: 'Anthropic' })).toBeVisible()
+    expect(screen.queryByText('Default')).toBeNull()
+  })
+
+  it('splits a line into one price per group when the groups price it differently', () => {
+    const family = familyOf(
+      inGroups('x', ['Anthropic', '按量']),
+      inGroups('x-thinking', ['Anthropic'])
+    )
+    renderWithI18n(
+      <div data-testid='chips'>
+        <FamilyLinePrices family={family} layout='chips' />
+      </div>
+    )
+    expect(
+      within(screen.getByTestId('chips'))
+        .getAllByRole('listitem')
+        .map((chip) => chip.textContent)
+    ).toEqual(['按量from $2 / 1M', 'Anthropicfrom $4 / 1M'])
+
+    renderList(family)
+    const standard = screen.getByText('Standard').closest('li') as HTMLElement
+    const prices = within(standard).getAllByRole('listitem')
+    expect(prices.map((price) => price.textContent)).toEqual([
+      expect.stringMatching(/^按量Input\$2.*Output\$6/),
+      expect.stringMatching(/^AnthropicInput\$4.*Output\$12/),
+    ])
+  })
+
+  it('names the group of a one-group row in a line spanning several groups', () => {
+    const family = familyOf(
+      inGroups('x', ['Anthropic', '按量']),
+      inGroups('x-thinking', ['Anthropic'])
+    )
+    renderList(family)
+    const thinking = screen.getByText('thinking').closest('li') as HTMLElement
+    expect(within(thinking).getByTitle('Anthropic')).toBeVisible()
+  })
+
+  it('keeps one chip when every group prices the line the same', () => {
+    const family = familyOf(
+      inGroups('[按量]x', ['按量', 'kiro']),
+      inGroups('[按量]x-thinking', ['按量', 'kiro'])
+    )
+    renderWithI18n(<FamilyLinePrices family={family} layout='chips' />)
+    expect(
+      screen.getAllByRole('listitem').map((chip) => chip.textContent)
+    ).toEqual(['按量from $2 / 1M'])
+  })
+
+  it('keeps one unlabelled price per row while a group filter is selected', () => {
+    const family = familyOf(
+      inGroups('x', ['Anthropic', '按量']),
+      inGroups('x-thinking', ['Anthropic', '按量'])
+    )
+    renderList(family, 'Anthropic')
+    const standard = screen.getByText('Standard').closest('li') as HTMLElement
+    expect(within(standard).queryByRole('listitem')).toBeNull()
+    expect(within(standard).queryByTitle('Anthropic')).toBeNull()
+    expect(standard).toHaveTextContent(/Input\$4.*Output\$12/)
+  })
+
+  it('keeps Default on an untagged line whose group is also a line tag', () => {
+    const family = familyOf(
+      inGroups('x', ['按量']),
+      inGroups('[按量]x', ['按量'], { model_ratio: 0.5 })
+    )
+    renderWithI18n(
+      <div data-testid='chips'>
+        <FamilyLinePrices family={family} layout='chips' />
+      </div>
+    )
+    expect(
+      within(screen.getByTestId('chips'))
+        .getAllByRole('listitem')
+        .map((chip) => chip.textContent)
+    ).toEqual(['Default · 按量from $2 / 1M', '按量from $1 / 1M'])
+
+    renderList(family)
+    expect(
+      screen.getAllByRole('heading', { level: 4 }).map((h) => h.textContent)
+    ).toEqual(['Default · 按量', '按量'])
+  })
+
+  it('prices a group without a configured ratio at 1 under its own name', () => {
+    const family = familyOf(
+      inGroups('x', ['按量', 'Anthropic']),
+      // vip2 has no ratio, so it bills at 1 like the summary price assumes.
+      inGroups('x-thinking', ['vip2'], { model_ratio: 0.1 })
+    )
+    renderWithI18n(<FamilyLinePrices family={family} layout='chips' />)
+    expect(
+      screen.getAllByRole('listitem').map((chip) => chip.textContent)
+    ).toEqual(
+      expect.arrayContaining([
+        '按量from $2 / 1M',
+        'vip2from $0.2 / 1M',
+        'Anthropicfrom $4 / 1M',
+      ])
+    )
+  })
+
+  it('does not split a line by group when one of its variants has no group', () => {
+    const family = familyOf(
+      inGroups('x', ['按量', 'Anthropic']),
+      inGroups('x-thinking', [], { model_ratio: 0.1 })
+    )
+    renderWithI18n(<FamilyLinePrices family={family} layout='chips' />)
+    expect(
+      screen.getAllByRole('listitem').map((chip) => chip.textContent)
+    ).toEqual(['from $0.2 / 1M'])
+  })
+
+  it('keeps Default on a split untagged group that is also a line tag', () => {
+    const family = familyOf(
+      inGroups('x', ['按量', 'Anthropic']),
+      inGroups('[按量]x', ['按量'], { model_ratio: 0.5 }),
+      inGroups('[按量]x-thinking', ['按量'], { model_ratio: 0.5 })
+    )
+    renderWithI18n(<FamilyLinePrices family={family} layout='chips' />)
+    expect(
+      screen.getAllByRole('listitem').map((chip) => chip.textContent)
+    ).toEqual([
+      'Default · 按量from $2 / 1M',
+      'Anthropicfrom $4 / 1M',
+      '按量from $1 / 1M',
+    ])
+  })
+
+  it('names a split tagged line by its tag and its other groups by tag · group', () => {
+    const family = familyOf(
+      inGroups('[kiro]x', ['kiro', '按量'], {
+        group_ratio: { kiro: 1, 按量: 2 },
+      }),
+      inGroups('[kiro]x-thinking', ['kiro', '按量'], {
+        group_ratio: { kiro: 1, 按量: 2 },
+      })
+    )
+    renderWithI18n(<FamilyLinePrices family={family} layout='chips' />)
+    expect(
+      screen.getAllByRole('listitem').map((chip) => chip.textContent)
+    ).toEqual(['kirofrom $2 / 1M', 'kiro · 按量from $4 / 1M'])
+  })
+
+  it('names the groups of a tagged line that differ from its tag', () => {
+    const family = familyOf(
+      inGroups('[正价kiro]x', ['kiro']),
+      inGroups('[按量]x', ['按量'])
+    )
+    renderList(family)
+    expect(screen.getByRole('heading', { name: '正价kiro' })).toBeVisible()
+    expect(screen.getByText('Group kiro')).toBeVisible()
+    expect(screen.getByRole('heading', { name: '按量' })).toBeVisible()
+    expect(screen.queryByText('Group 按量')).toBeNull()
   })
 })
