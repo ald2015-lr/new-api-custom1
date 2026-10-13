@@ -27,7 +27,7 @@ import { getLobeIcon } from '@/lib/lobe-icon'
 import { cn } from '@/lib/utils'
 
 import { parseTags } from '../lib/filters'
-import { aggregateModelPerf, getFamilyUnion } from '../lib/model-family'
+import { pickBestModelPerf, getFamilyUnion } from '../lib/model-family'
 import type { ModelFamily } from '../lib/model-variants'
 import { FamilyLinePrices } from './model-family-price'
 import { ModelGroupsEndpoints } from './model-groups-endpoints'
@@ -73,7 +73,7 @@ export const ModelFamilyCard = memo(function ModelFamilyCard(
   const union = useMemo(() => getFamilyUnion(family), [family])
   const perf = useMemo(
     () =>
-      aggregateModelPerf(
+      pickBestModelPerf(
         family.models.map((model) => props.perfMap.get(model.model_name))
       ),
     [family.models, props.perfMap]

@@ -52,104 +52,43 @@ export type ModelPerfSample = {
   request_count?: number
 }
 
-/** Below this success rate a slot is critical (rendered red). */
-const CRITICAL_SUCCESS_RATE = 70
-
 function isValidRate(rate: number | undefined): rate is number {
   return rate != null && Number.isFinite(rate) && rate >= 0 && rate <= 100
 }
 
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b)
-  const middle = Math.floor(sorted.length / 2)
-  return sorted.length % 2 === 0
-    ? (sorted[middle - 1] + sorted[middle]) / 2
-    : sorted[middle]
+function latencyOf(sample: ModelPerfSample): number {
+  return Number.isFinite(sample.avg_latency_ms) && sample.avg_latency_ms > 0
+    ? sample.avg_latency_ms
+    : Number.POSITIVE_INFINITY
 }
 
-function weightedMean(values: { value: number; weight: number }[]): number {
-  const total = values.reduce((sum, item) => sum + item.weight, 0)
-  return values.reduce((sum, item) => sum + item.value * item.weight, 0) / total
+/** Negative when `a` is the healthier variant. */
+function compareHealth(a: ModelPerfSample, b: ModelPerfSample): number {
+  const rateA = isValidRate(a.success_rate) ? a.success_rate : -1
+  const rateB = isValidRate(b.success_rate) ? b.success_rate : -1
+  if (rateA !== rateB) return rateB - rateA
+  const requestsA = a.request_count ?? 0
+  const requestsB = b.request_count ?? 0
+  if (requestsA !== requestsB) return requestsB - requestsA
+  return latencyOf(a) - latencyOf(b)
 }
 
 /**
- * Combine the performance of a family's variants into one badge value.
- *
- * - Success rate: weighted by request counts when every sampled variant
- *   reports one, otherwise the mean of the available rates.
- * - Latency and throughput: request-weighted mean with counts, otherwise the
- *   median of the variants that have a value (robust to one slow variant).
- * - Hourly slots: the same weighted/plain mean per slot, except that a slot
- *   takes the worst variant rate when any variant is critical in that hour, so
- *   a badly failing variant always shows up as a red slot.
+ * The performance a family card shows: its healthiest variant, i.e. the
+ * highest success rate (ties: more requests, then lower latency). The status
+ * bar, latency and throughput all come from that one variant so the line
+ * describes a real model rather than a blend; the expanded list still shows
+ * every variant on its own.
  */
-export function aggregateModelPerf(
+export function pickBestModelPerf(
   samples: readonly (ModelPerfSample | undefined)[]
 ): ModelPerfSample | undefined {
-  const present = samples.filter(
-    (sample): sample is ModelPerfSample => sample != null
-  )
-  if (present.length === 0) return undefined
-  const weighted = present.every((sample) => (sample.request_count ?? 0) > 0)
-  const weightOf = (sample: ModelPerfSample) =>
-    weighted ? (sample.request_count ?? 1) : 1
-
-  const rated = present.filter((sample) => isValidRate(sample.success_rate))
-  const successRate =
-    rated.length > 0
-      ? weightedMean(
-          rated.map((sample) => ({
-            value: sample.success_rate,
-            weight: weightOf(sample),
-          }))
-        )
-      : Number.NaN
-
-  const combine = (pick: (sample: ModelPerfSample) => number) => {
-    const values = present.filter(
-      (sample) => Number.isFinite(pick(sample)) && pick(sample) > 0
-    )
-    if (values.length === 0) return 0
-    if (weighted) {
-      return weightedMean(
-        values.map((sample) => ({
-          value: pick(sample),
-          weight: weightOf(sample),
-        }))
-      )
-    }
-    return median(values.map(pick))
+  let best: ModelPerfSample | undefined
+  for (const sample of samples) {
+    if (sample == null) continue
+    if (best == null || compareHealth(sample, best) < 0) best = sample
   }
-
-  const slots = new Map<number, { value: number; weight: number }[]>()
-  for (const sample of present) {
-    for (const point of sample.recent_success_series ?? []) {
-      if (!isValidRate(point.success_rate)) continue
-      const slot = slots.get(point.ts) ?? []
-      slot.push({ value: point.success_rate, weight: weightOf(sample) })
-      slots.set(point.ts, slot)
-    }
-  }
-  const series = [...slots.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([ts, values]) => {
-      const worst = Math.min(...values.map((item) => item.value))
-      return {
-        ts,
-        success_rate:
-          worst < CRITICAL_SUCCESS_RATE ? worst : weightedMean(values),
-      }
-    })
-
-  const windowed = present.find((sample) => sample.window_start != null)
-  return {
-    window_start: windowed?.window_start,
-    window_end: windowed?.window_end,
-    success_rate: successRate,
-    avg_latency_ms: combine((sample) => sample.avg_latency_ms),
-    avg_tps: combine((sample) => sample.avg_tps),
-    recent_success_series: series,
-  }
+  return best
 }
 
 export type ModelPricePoint =

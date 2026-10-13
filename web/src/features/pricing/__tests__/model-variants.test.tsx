@@ -40,7 +40,7 @@ import {
 import { ModelCardGrid } from '../components/model-card-grid'
 import { PricingTable } from '../components/pricing-table'
 import { PricingToolbar } from '../components/pricing-toolbar'
-import { aggregateModelPerf } from '../lib/model-family'
+import { pickBestModelPerf } from '../lib/model-family'
 import {
   DEFAULT_MODEL_VARIANT_RULES,
   groupModelFamilies,
@@ -374,60 +374,59 @@ describe('validateVariantRules', () => {
   })
 })
 
-describe('aggregateModelPerf', () => {
+describe('pickBestModelPerf', () => {
   const hour = 1_800_000_000 - (1_800_000_000 % 3600)
 
-  it('averages success rates and takes the median latency without request counts', () => {
-    const perf = aggregateModelPerf([
-      { success_rate: 100, avg_latency_ms: 1000, avg_tps: 10 },
-      { success_rate: 90, avg_latency_ms: 2000, avg_tps: 20 },
-      { success_rate: 80, avg_latency_ms: 9000, avg_tps: 30 },
+  it('shows the variant with the highest success rate, not an average', () => {
+    const best = {
+      success_rate: 99.5,
+      avg_latency_ms: 9000,
+      avg_tps: 12,
+      window_start: hour,
+      recent_success_series: [{ ts: hour, success_rate: 100 }],
+    }
+    const perf = pickBestModelPerf([
+      { success_rate: 60, avg_latency_ms: 1000, avg_tps: 40 },
       undefined,
+      best,
+      { success_rate: 84.5, avg_latency_ms: 2000, avg_tps: 30 },
     ])
-    expect(perf?.success_rate).toBe(90)
-    expect(perf?.avg_latency_ms).toBe(2000)
-    expect(perf?.avg_tps).toBe(20)
+    // Rate, status bar, latency and throughput all come from that variant.
+    expect(perf).toBe(best)
   })
 
-  it('weights the success rate by request counts when every variant reports one', () => {
-    const perf = aggregateModelPerf([
-      { success_rate: 100, avg_latency_ms: 1, avg_tps: 1, request_count: 3 },
-      { success_rate: 60, avg_latency_ms: 1, avg_tps: 1, request_count: 1 },
-    ])
-    expect(perf?.success_rate).toBe(90)
+  it('breaks ties by request count, then by lower latency', () => {
+    const busy = {
+      success_rate: 100,
+      avg_latency_ms: 5000,
+      avg_tps: 1,
+      request_count: 9,
+    }
+    const quiet = {
+      success_rate: 100,
+      avg_latency_ms: 100,
+      avg_tps: 1,
+      request_count: 2,
+    }
+    expect(pickBestModelPerf([quiet, busy])).toBe(busy)
+
+    const slow = { success_rate: 100, avg_latency_ms: 5000, avg_tps: 1 }
+    const fast = { success_rate: 100, avg_latency_ms: 800, avg_tps: 1 }
+    expect(pickBestModelPerf([slow, fast])).toBe(fast)
   })
 
-  it('shows the worst variant in an hour where one variant is failing badly', () => {
-    const perf = aggregateModelPerf([
-      {
-        success_rate: 100,
-        avg_latency_ms: 1,
-        avg_tps: 1,
-        window_start: hour,
-        recent_success_series: [
-          { ts: hour, success_rate: 100 },
-          { ts: hour + 3600, success_rate: 100 },
-        ],
-      },
-      {
-        success_rate: 50,
-        avg_latency_ms: 1,
-        avg_tps: 1,
-        recent_success_series: [
-          { ts: hour, success_rate: 90 },
-          { ts: hour + 3600, success_rate: 20 },
-        ],
-      },
-    ])
-    expect(perf?.window_start).toBe(hour)
-    expect(perf?.recent_success_series).toEqual([
-      { ts: hour, success_rate: 95 },
-      { ts: hour + 3600, success_rate: 20 },
-    ])
+  it('prefers any variant with a success rate over one without', () => {
+    const unrated = {
+      success_rate: Number.NaN,
+      avg_latency_ms: 100,
+      avg_tps: 1,
+    }
+    const rated = { success_rate: 40, avg_latency_ms: 9000, avg_tps: 1 }
+    expect(pickBestModelPerf([unrated, rated])).toBe(rated)
   })
 
   it('returns no metrics when no variant has any', () => {
-    expect(aggregateModelPerf([undefined, undefined])).toBeUndefined()
+    expect(pickBestModelPerf([undefined, undefined])).toBeUndefined()
   })
 })
 
