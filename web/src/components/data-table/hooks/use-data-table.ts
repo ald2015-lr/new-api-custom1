@@ -44,6 +44,7 @@ type DataTableFeatureOptions<TData> = Pick<
   | 'enableRowSelection'
   | 'getRowId'
   | 'getSubRows'
+  | 'paginateExpandedRows'
   | 'globalFilterFn'
   | 'autoResetPageIndex'
   | 'manualFiltering'
@@ -396,6 +397,11 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     enableSorting: resolvedEnableSorting,
     getRowId: options.getRowId,
     getSubRows: options.getSubRows,
+    // Only forward an explicit value: an undefined key would override
+    // TanStack's default (true) for every table.
+    ...(options.paginateExpandedRows === undefined
+      ? {}
+      : { paginateExpandedRows: options.paginateExpandedRows }),
     globalFilterFn: options.globalFilterFn,
     autoResetPageIndex: options.autoResetPageIndex,
     manualFiltering,

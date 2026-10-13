@@ -903,4 +903,10 @@ export const STATIC_I18N_KEYS = [
   'User IDs must be positive integers',
   // Group billing settings: save label.
   'Save group billing',
+  // Model Square variant rules: validation messages.
+  'Suffix is required',
+  'Suffix must not contain spaces',
+  'Duplicate suffix',
+  'Label is required',
+  'At most {{max}} rules',
 ] as const

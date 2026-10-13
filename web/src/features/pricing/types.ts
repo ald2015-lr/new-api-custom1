@@ -141,6 +141,14 @@ export type PricingData = {
   group_access?: Record<string, GroupAccessRequirement>
   /** Groups that do not charge users; absent on older backends. */
   free_groups?: string[]
+  /**
+   * Model Square display settings; absent on older backends, which means
+   * grouping on with the built-in variant rules.
+   */
+  model_square?: {
+    variant_grouping_enabled: boolean
+    variant_rules: { suffix: string; label: string; description?: string }[]
+  }
 }
 
 export type TokenUnit = 'M' | 'K'

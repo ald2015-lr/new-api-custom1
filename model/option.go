@@ -247,6 +247,9 @@ func validateOptionValue(key string, value string) error {
 	if operation_setting.IsGroupBillingOptionKey(key) {
 		return operation_setting.ValidateGroupBillingOption(key, value)
 	}
+	if operation_setting.IsModelSquareOptionKey(key) {
+		return operation_setting.ValidateModelSquareOption(key, value)
+	}
 	if key == operation_setting.ChannelTestConcurrencyOptionKey {
 		return operation_setting.ValidateChannelTestConcurrency(value)
 	}
@@ -714,6 +717,10 @@ func handleConfigUpdate(key, value string) bool {
 	}
 	if operation_setting.IsGroupBillingOptionKey(key) {
 		operation_setting.LoadGroupBillingOption(key, value)
+		return true
+	}
+	if operation_setting.IsModelSquareOptionKey(key) {
+		operation_setting.LoadModelSquareOption(key, value)
 		return true
 	}
 

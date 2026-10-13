@@ -23,6 +23,7 @@ import { useStatus } from '@/hooks/use-status'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getPricing } from '../api'
+import { resolveModelSquareSettings } from '../lib/model-variants'
 import type { GroupAccessRequirement } from '../types'
 
 const EMPTY_GROUP_ACCESS: Record<string, GroupAccessRequirement> = {}
@@ -68,6 +69,11 @@ export function usePricingData(enabled = true) {
     })
   }, [data])
 
+  const modelSquare = useMemo(
+    () => resolveModelSquareSettings(data?.model_square),
+    [data?.model_square]
+  )
+
   return {
     models,
     vendors: data?.vendors ?? [],
@@ -77,6 +83,7 @@ export function usePricingData(enabled = true) {
     autoGroups: data?.auto_groups ?? [],
     groupAccess: data?.group_access ?? EMPTY_GROUP_ACCESS,
     freeGroups: data?.free_groups ?? EMPTY_FREE_GROUPS,
+    modelSquare,
     isLoading,
     error,
     refetch,

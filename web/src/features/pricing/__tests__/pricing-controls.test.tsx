@@ -112,6 +112,25 @@ describe('pricing controls', () => {
     expect(within(row).getByText('Restricted')).toBeVisible()
   })
 
+  it('updates table prices when the token unit changes', () => {
+    const model: PricingModel = {
+      id: 1,
+      model_name: 'token-model',
+      quota_type: 0,
+      model_ratio: 1,
+      completion_ratio: 2,
+      enable_groups: [],
+    }
+    const { rerender } = render(<PricingTable models={[model]} tokenUnit='M' />)
+    const row = () => screen.getByRole('row', { name: /token-model/ })
+    expect(row()).toHaveTextContent('USD / 1M tokens')
+    rerender(<PricingTable models={[model]} tokenUnit='K' />)
+    expect(row()).toHaveTextContent('USD / 1K tokens')
+    expect(within(row()).getByText('Input').parentElement).toHaveTextContent(
+      '0.002'
+    )
+  })
+
   it('marks free group filters with a not charged badge', () => {
     const props = toolbarProps()
 

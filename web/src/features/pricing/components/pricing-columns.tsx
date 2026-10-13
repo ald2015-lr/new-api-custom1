@@ -17,6 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
+import type { TFunction } from 'i18next'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -27,14 +29,21 @@ import {
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { getLobeIcon } from '@/lib/lobe-icon'
+import { cn } from '@/lib/utils'
 
 import { parseTags } from '../lib/filters'
-import type { GroupAccessRequirement, PricingModel } from '../types'
+import type { GroupAccessRequirement } from '../types'
 import { CachedPriceCell } from './cached-price-cell'
 import { FreeGroupBadge } from './free-group-badge'
 import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
+import { FamilyLinePrices } from './model-family-price'
 import { ModelPriceCell, type ModelPriceCellOptions } from './model-price-cell'
+import {
+  FamilyBillingModes,
+  FamilyNameCell,
+  type PricingTableRow,
+} from './pricing-family-cells'
 
 // ----------------------------------------------------------------------------
 // Pricing Table Columns
@@ -48,10 +57,49 @@ export type PricingColumnsOptions = ModelPriceCellOptions & {
 }
 
 export function usePricingColumns(
-  options: PricingColumnsOptions = {}
-): ColumnDef<PricingModel>[] {
+  columnOptions: PricingColumnsOptions = {}
+): ColumnDef<PricingTableRow>[] {
   const { t } = useTranslation()
+  const {
+    tokenUnit,
+    priceRate,
+    usdExchangeRate,
+    showRechargePrice,
+    selectedGroup,
+    groupAccess,
+    freeGroups,
+  } = columnOptions
 
+  // Stable column definitions keep cell components mounted across row
+  // updates (e.g. expanding a family keeps focus on its toggle) and let rows
+  // re-render only when a display option really changes.
+  return useMemo(() => {
+    const options: PricingColumnsOptions = {
+      tokenUnit,
+      priceRate,
+      usdExchangeRate,
+      showRechargePrice,
+      selectedGroup,
+      groupAccess,
+      freeGroups,
+    }
+    return buildPricingColumns(t, options)
+  }, [
+    t,
+    tokenUnit,
+    priceRate,
+    usdExchangeRate,
+    showRechargePrice,
+    selectedGroup,
+    groupAccess,
+    freeGroups,
+  ])
+}
+
+function buildPricingColumns(
+  t: TFunction,
+  options: PricingColumnsOptions
+): ColumnDef<PricingTableRow>[] {
   return [
     // Model column
     {
@@ -62,11 +110,20 @@ export function usePricingColumns(
       ),
       cell: ({ row }) => {
         const model = row.original
+        if (model.family) {
+          return <FamilyNameCell row={row} family={model.family} />
+        }
         const modelIconKey = model.icon || model.vendor_icon
         const modelIcon = modelIconKey ? getLobeIcon(modelIconKey, 14) : null
 
         return (
-          <div className='flex max-w-full min-w-0 items-center gap-2'>
+          <div
+            className={cn(
+              'flex max-w-full min-w-0 items-center gap-2',
+              // Variant rows sit under their family's expand toggle.
+              row.depth > 0 && 'pl-6'
+            )}
+          >
             {modelIcon}
             <span className='truncate font-mono text-sm font-medium'>
               {model.model_name}
@@ -81,9 +138,12 @@ export function usePricingColumns(
     {
       accessorKey: 'quota_type',
       header: t('Type'),
-      cell: ({ row }) => (
-        <ModelBillingModeBadge model={row.original} className='-ml-1.5' />
-      ),
+      cell: ({ row }) =>
+        row.original.family ? (
+          <FamilyBillingModes family={row.original.family} />
+        ) : (
+          <ModelBillingModeBadge model={row.original} className='-ml-1.5' />
+        ),
       size: 110,
       enableSorting: false,
     },
@@ -95,9 +155,16 @@ export function usePricingColumns(
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title={t('Price')} />
       ),
-      cell: ({ row }) => (
-        <ModelPriceCell model={row.original} options={options} />
-      ),
+      cell: ({ row }) =>
+        row.original.family ? (
+          <FamilyLinePrices
+            family={row.original.family}
+            options={options}
+            layout='list'
+          />
+        ) : (
+          <ModelPriceCell model={row.original} options={options} />
+        ),
       size: 180,
       enableSorting: false,
     },
@@ -106,9 +173,12 @@ export function usePricingColumns(
     {
       id: 'cached_price',
       header: t('Cached'),
-      cell: ({ row }) => (
-        <CachedPriceCell model={row.original} options={options} />
-      ),
+      cell: ({ row }) =>
+        row.original.family ? (
+          <span className='text-muted-foreground/30 text-xs'>—</span>
+        ) : (
+          <CachedPriceCell model={row.original} options={options} />
+        ),
       size: 110,
       enableSorting: false,
     },

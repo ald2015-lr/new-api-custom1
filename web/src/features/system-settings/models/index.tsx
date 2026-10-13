@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { DEFAULT_MODEL_VARIANT_RULES } from '@/features/pricing/lib/model-variants'
+
 import { SettingsPage } from '../components/settings-page'
 import type { ModelSettings } from '../types'
 import {
@@ -44,6 +46,10 @@ const defaultModelSettings: ModelSettings = {
   'claude.thinking_adapter_budget_tokens_percentage': 0.8,
   'grok.violation_deduction_enabled': true,
   'grok.violation_deduction_amount': 0.05,
+  'model_square_setting.variant_grouping_enabled': true,
+  'model_square_setting.variant_rules': JSON.stringify(
+    DEFAULT_MODEL_VARIANT_RULES
+  ),
   ModelPrice: '',
   ModelRatio: '',
   CacheRatio: '',

@@ -60,16 +60,23 @@ function getNoTime(): undefined {
   return undefined
 }
 
+/** Whether a billing expression prices by the time of day or date. */
+export function usesBillingTime(
+  expression: string | null | undefined
+): boolean {
+  const compiled = expression ? compileBillingExpression(expression) : null
+  return (
+    compiled?.status === 'ready' &&
+    TIME_FUNCTIONS.some((name) => compiled.functions.has(name))
+  )
+}
+
 /** One minute clock for active time-dependent previews; never used by settlement logs. */
 export function useBillingTime(
   expression: string | null | undefined,
   enabled = true
 ): number | undefined {
-  const compiled =
-    expression && enabled ? compileBillingExpression(expression) : null
-  const needsTime =
-    compiled?.status === 'ready' &&
-    TIME_FUNCTIONS.some((name) => compiled.functions.has(name))
+  const needsTime = enabled && usesBillingTime(expression)
   return useSyncExternalStore(
     needsTime ? subscribeBillingTime : subscribeWithoutTime,
     needsTime ? getBillingTime : getNoTime,

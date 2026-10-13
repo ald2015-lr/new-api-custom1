@@ -493,6 +493,83 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 	require.Empty(t, anthropicResponse.LastID)
 }
 
+func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
+	setupModelListControllerTestDB(t)
+	optionKeys := []string{operation_setting.ModelSquareVariantGroupingEnabledOptionKey, operation_setting.ModelSquareVariantRulesOptionKey}
+	previousConfig := config.GlobalConfig.ExportAllConfigs()
+	t.Cleanup(func() {
+		for _, key := range optionKeys {
+			operation_setting.LoadModelSquareOption(key, previousConfig[key])
+		}
+	})
+
+	var defaultRules []operation_setting.ModelVariantRule
+	require.NoError(t, common.UnmarshalJsonStr(previousConfig[operation_setting.ModelSquareVariantRulesOptionKey], &defaultRules))
+	assert.Contains(t, defaultRules, operation_setting.ModelVariantRule{Suffix: "-thinking-high", Label: "thinking-high"})
+	assert.Contains(t, defaultRules, operation_setting.ModelVariantRule{Suffix: "-nothinking", Label: "nothinking", Description: "会思考，但不返回思考内容"})
+	assert.Contains(t, defaultRules, operation_setting.ModelVariantRule{Suffix: "-128", Label: "128", Description: "思考预算 128（最低思考强度）"})
+	// Generic effort suffixes would fold distinct models such as gpt-5.1-codex-max.
+	for _, rule := range defaultRules {
+		assert.NotContains(t, []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max"}, rule.Suffix)
+	}
+
+	tests := []struct {
+		name        string
+		enabled     string
+		rules       string
+		wantEnabled bool
+		wantRules   []operation_setting.ModelVariantRule
+	}{
+		{
+			name:        "stored rules",
+			enabled:     "false",
+			rules:       `[{"suffix":"-fast","label":"fast"},{"suffix":"-128","label":"128","description":"思考预算 128"}]`,
+			wantEnabled: false,
+			wantRules: []operation_setting.ModelVariantRule{
+				{Suffix: "-fast", Label: "fast"},
+				{Suffix: "-128", Label: "128", Description: "思考预算 128"},
+			},
+		},
+		{
+			name:        "invalid stored values fall back to defaults",
+			enabled:     "yes",
+			rules:       `[{"suffix":"-fast"}]`,
+			wantEnabled: true,
+			wantRules:   defaultRules,
+		},
+		{
+			name:        "empty rules fold no suffix",
+			enabled:     "true",
+			rules:       `[]`,
+			wantEnabled: true,
+			wantRules:   []operation_setting.ModelVariantRule{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareVariantGroupingEnabledOptionKey, tc.enabled)
+			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareVariantRulesOptionKey, tc.rules)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/pricing", nil)
+
+			GetPricing(ctx)
+
+			var response struct {
+				Success     bool `json:"success"`
+				ModelSquare struct {
+					VariantGroupingEnabled bool                                 `json:"variant_grouping_enabled"`
+					VariantRules           []operation_setting.ModelVariantRule `json:"variant_rules"`
+				} `json:"model_square"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response), recorder.Body.String())
+			require.True(t, response.Success)
+			assert.Equal(t, tc.wantEnabled, response.ModelSquare.VariantGroupingEnabled)
+			assert.Equal(t, tc.wantRules, response.ModelSquare.VariantRules)
+		})
+	}
+}
+
 func TestSetupLoginDoesNotTouchPasswordWhenPasswordFieldOmitted(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.AuditLog{}, &model.UserSession{}, &model.TwoFA{}, &model.PasskeyCredential{}))

@@ -35,6 +35,8 @@ import {
 import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
 import { useFilters } from './hooks/use-filters'
 import { usePricingData } from './hooks/use-pricing-data'
+import { sortModelFamilies } from './lib/model-family'
+import { groupModelFamilies } from './lib/model-variants'
 
 export function Pricing() {
   const { t } = useTranslation()
@@ -51,6 +53,7 @@ export function Pricing() {
     autoGroups,
     groupAccess,
     freeGroups,
+    modelSquare,
     isLoading,
     priceRate,
     usdExchangeRate,
@@ -84,6 +87,18 @@ export function Pricing() {
     clearFilters,
     clearSearch,
   } = useFilters(models || [])
+
+  // Display-only grouping of name variants; undefined keeps one card per model.
+  const families = useMemo(
+    () =>
+      modelSquare.variant_grouping_enabled
+        ? sortModelFamilies(
+            groupModelFamilies(filteredModels, modelSquare.variant_rules),
+            sortBy
+          )
+        : undefined,
+    [filteredModels, modelSquare, sortBy]
+  )
 
   const handleModelClick = useCallback((modelName: string) => {
     setSelectedModelName(modelName)
@@ -127,6 +142,7 @@ export function Pricing() {
       return (
         <ModelCardGrid
           models={filteredModels}
+          families={families}
           onModelClick={handleModelClick}
           priceRate={priceRate}
           usdExchangeRate={usdExchangeRate}
@@ -140,6 +156,7 @@ export function Pricing() {
     return (
       <PricingTable
         models={filteredModels}
+        families={families}
         priceRate={priceRate}
         usdExchangeRate={usdExchangeRate}
         tokenUnit={tokenUnit}
@@ -233,6 +250,7 @@ export function Pricing() {
             <main className='min-w-0 space-y-4'>
               <PricingToolbar
                 filteredCount={filteredModels.length}
+                familyCount={families?.length}
                 totalCount={models?.length}
                 sortBy={sortBy}
                 onSortChange={setSortBy}

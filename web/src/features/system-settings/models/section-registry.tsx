@@ -23,6 +23,7 @@ import { ClaudeSettingsCard } from './claude-settings-card'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
+import { ModelSquareSettingsCard } from './model-square-settings-card'
 
 function formatJsonForEditor(value: string, fallback: string) {
   const raw = (value ?? '').toString().trim()
@@ -118,6 +119,19 @@ const MODELS_SECTIONS = [
             settings['grok.violation_deduction_enabled'] ?? true,
           'grok.violation_deduction_amount':
             settings['grok.violation_deduction_amount'] ?? 0.05,
+        }}
+      />
+    ),
+  },
+  {
+    id: 'model-square',
+    titleKey: 'Model Square Display',
+    build: (settings: ModelSettings) => (
+      <ModelSquareSettingsCard
+        defaultValues={{
+          variantGroupingEnabled:
+            settings['model_square_setting.variant_grouping_enabled'],
+          variantRules: settings['model_square_setting.variant_rules'],
         }}
       />
     ),

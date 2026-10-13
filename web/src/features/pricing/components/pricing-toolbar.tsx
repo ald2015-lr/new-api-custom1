@@ -56,6 +56,11 @@ import { PricingSidebar } from './pricing-sidebar'
 
 export interface PricingToolbarProps {
   filteredCount: number
+  /**
+   * Number of variant families among the filtered models when grouping is
+   * on; the count then reads "N models · M variants".
+   */
+  familyCount?: number
   totalCount?: number
   sortBy: string
   onSortChange: (value: string) => void
@@ -91,6 +96,9 @@ export function PricingToolbar(props: PricingToolbarProps) {
   const { t } = useTranslation()
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
   const sortLabels = getSortLabels(t)
+  const familyCount = props.familyCount ?? props.filteredCount
+  // Only worth the extra figure when some variants were folded together.
+  const isGrouped = familyCount < props.filteredCount
 
   return (
     <div className='bg-card rounded-xl border p-3'>
@@ -112,11 +120,31 @@ export function PricingToolbar(props: PricingToolbarProps) {
             )}
           </Button>
 
-          <div className='text-muted-foreground flex items-baseline gap-1 text-sm'>
-            <span className='text-foreground font-semibold tabular-nums'>
-              {props.filteredCount.toLocaleString()}
-            </span>
-            <span>{props.filteredCount === 1 ? t('model') : t('models')}</span>
+          <div className='text-muted-foreground flex flex-wrap items-baseline gap-x-1 text-sm'>
+            {isGrouped ? (
+              <>
+                <span className='text-foreground font-semibold tabular-nums'>
+                  {familyCount.toLocaleString()}
+                </span>
+                <span>{familyCount === 1 ? t('model') : t('models')}</span>
+                <span aria-hidden className='text-muted-foreground/60'>
+                  ·
+                </span>
+                <span className='text-foreground font-semibold tabular-nums'>
+                  {props.filteredCount.toLocaleString()}
+                </span>
+                <span>{t('variants')}</span>
+              </>
+            ) : (
+              <>
+                <span className='text-foreground font-semibold tabular-nums'>
+                  {props.filteredCount.toLocaleString()}
+                </span>
+                <span>
+                  {props.filteredCount === 1 ? t('model') : t('models')}
+                </span>
+              </>
+            )}
             {props.totalCount != null &&
               props.filteredCount !== props.totalCount && (
                 <span className='text-muted-foreground/60 text-xs'>

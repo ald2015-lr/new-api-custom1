@@ -34,10 +34,17 @@ export type ModelPerfBadgeData = {
   success_rate: number
   avg_tps: number
   recent_success_series?: SuccessRatePoint[]
+  /** Requests in the window, when the summary reports it. */
+  request_count?: number
 }
 
 export interface ModelPerfBadgeProps extends React.HTMLAttributes<HTMLDivElement> {
   perf: ModelPerfBadgeData | undefined
+  /**
+   * One-line layout for dense lists: labels stay available to assistive
+   * technology and tooltips but are not shown above each value.
+   */
+  compact?: boolean
 }
 
 const STATUS_SLOTS = Array.from({ length: 24 }, (_, slot) => slot)
@@ -72,6 +79,75 @@ export const ModelPerfBadge = memo(function ModelPerfBadge(
     })
   }, [props.perf?.recent_success_series, props.perf?.window_start])
 
+  const successRateText = hasSuccessRate ? `${successRate.toFixed(2)}%` : '—'
+  const latencyValue = latencyText === '—' ? '—s' : latencyText
+  const throughputValue = throughputText === '—' ? '—t/s' : throughputText
+  const statusStrip = (
+    <dd
+      role='img'
+      aria-label={t(
+        'Recent success-rate samples; gray bars indicate missing data.'
+      )}
+      title={t('Recent success-rate samples; gray bars indicate missing data.')}
+      className={cn(
+        'flex h-3 items-center gap-px',
+        props.compact ? 'w-[71px] shrink-0' : 'mt-1 w-24'
+      )}
+    >
+      {STATUS_SLOTS.map((slot) => {
+        const rate = statusRates[slot]
+        return (
+          <span
+            key={slot}
+            aria-hidden
+            className={cn(
+              'h-full shrink-0 rounded-xs',
+              props.compact ? 'w-[2px]' : 'w-[3px]',
+              rate != null && Number.isFinite(rate) && rate >= 0 && rate <= 100
+                ? getSuccessRateDotClass(rate)
+                : 'bg-muted-foreground/15'
+            )}
+          />
+        )
+      })}
+    </dd>
+  )
+
+  if (props.compact) {
+    return (
+      <div
+        aria-label={t('Performance metrics for the last 24 hours')}
+        className={cn('flex min-w-0 items-center gap-2', props.className)}
+      >
+        <dl className='flex min-w-0 items-center gap-2 text-xs tabular-nums'>
+          <div
+            className='flex shrink-0 items-center gap-1.5'
+            title={t(
+              'Success rate excludes business rejections and includes the current partial hour.'
+            )}
+          >
+            <dt className='sr-only'>{t('Status')}</dt>
+            {statusStrip}
+            <dd className='min-w-[2.75rem] font-mono'>{successRateText}</dd>
+          </div>
+          <div title={t('Average latency')} className='shrink-0'>
+            <dt className='sr-only'>{t('Latency short')}</dt>
+            <dd className='min-w-10 font-mono whitespace-nowrap'>
+              {latencyValue}
+            </dd>
+          </div>
+          <div title={t('Throughput')} className='shrink-0'>
+            <dt className='sr-only'>{t('Throughput short')}</dt>
+            <dd className='min-w-[3.25rem] font-mono whitespace-nowrap'>
+              {throughputValue}
+            </dd>
+          </div>
+        </dl>
+        {props.children}
+      </div>
+    )
+  }
+
   return (
     <div
       aria-label={t('Performance metrics for the last 24 hours')}
@@ -89,54 +165,22 @@ export const ModelPerfBadge = memo(function ModelPerfBadge(
             className='text-muted-foreground flex items-center justify-between gap-1 text-[11px] leading-4'
           >
             <span>{t('Status')}</span>
-            <span className='font-mono'>
-              {hasSuccessRate ? `${successRate.toFixed(2)}%` : '—'}
-            </span>
+            <span className='font-mono'>{successRateText}</span>
           </dt>
-          <dd
-            role='img'
-            aria-label={t(
-              'Recent success-rate samples; gray bars indicate missing data.'
-            )}
-            title={t(
-              'Recent success-rate samples; gray bars indicate missing data.'
-            )}
-            className='mt-1 flex h-3 w-24 items-center gap-px'
-          >
-            {STATUS_SLOTS.map((slot) => {
-              const rate = statusRates[slot]
-              return (
-                <span
-                  key={slot}
-                  aria-hidden
-                  className={cn(
-                    'h-full w-[3px] shrink-0 rounded-xs',
-                    rate != null &&
-                      Number.isFinite(rate) &&
-                      rate >= 0 &&
-                      rate <= 100
-                      ? getSuccessRateDotClass(rate)
-                      : 'bg-muted-foreground/15'
-                  )}
-                />
-              )
-            })}
-          </dd>
+          {statusStrip}
         </div>
         <div title={t('Average latency')} className='shrink-0'>
           <dt className='text-muted-foreground text-[11px] leading-4'>
             {t('Latency short')}
           </dt>
-          <dd className='mt-1 font-mono whitespace-nowrap'>
-            {latencyText === '—' ? '—s' : latencyText}
-          </dd>
+          <dd className='mt-1 font-mono whitespace-nowrap'>{latencyValue}</dd>
         </div>
         <div title={t('Throughput')} className='shrink-0'>
           <dt className='text-muted-foreground text-[11px] leading-4'>
             {t('Throughput short')}
           </dt>
           <dd className='mt-1 font-mono whitespace-nowrap'>
-            {throughputText === '—' ? '—t/s' : throughputText}
+            {throughputValue}
           </dd>
         </div>
       </dl>

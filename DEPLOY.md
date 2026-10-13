@@ -148,6 +148,7 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | 新文件 `setting/operation_setting/group_billing_setting.go`、`service/free_group.go`，以及 `service/{billing,quota,task_billing}.go`、`controller/pricing.go`、`model/option.go` 里的小钩子；前端 `features/system-settings/billing`、`features/pricing`、`features/usage-logs` | 不扣费（免费）分组（见第十一节） |
 | `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
 | 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go` 与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式发 `: PING`、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
+| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`；前端 `features/pricing/lib/model-variants.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`features/system-settings/models/model-square-*` | 模型广场按基础模型合并变体（见第十四节） |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 
@@ -472,3 +473,30 @@ curl -N https://<你的域名>/v1/chat/completions \
   -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
   -d '{"model":"<模型>","messages":[{"role":"user","content":"写一首长诗"}]}' | cat -A | head
 ```
+
+---
+
+## 十四、模型广场按「基础模型」合并变体
+
+**效果：** 模型广场里同一个基础模型只显示一张卡片。比如 `[按次]claude-opus-4-6`、`[按次]claude-opus-4-6-thinking-high`、`[正价kiro]claude-opus-4-6-thinking-max` 都归到 `claude-opus-4-6` 这张卡：
+- 卡片正面：各线路（名称开头的 `[...]` 标签）及其最低价、变体标签、综合状态条；
+- 点「展开」：卡片所在行的下方展开一个整行面板，按线路分组列出每个变体的价格、状态条、延迟、吞吐，「复制」复制的是**完整模型名**，「详情」打开原来的模型详情；
+- 表格视图同样按家族一行、点 ▸ 展开；只有一个变体的模型照常显示。
+
+**只影响展示**：用户调用、计费、日志里用的模型名一律不变。
+
+**在哪设置：** 系统设置 → 模型 → 模型广场显示：
+- 「合并模型变体」开关（默认开），关掉即恢复成每个模型名一张卡；
+- 「变体后缀规则」：从模型名末尾去掉哪些后缀算作变体，以及显示名和说明。默认规则：
+
+| 后缀 | 显示名 | 说明 |
+|---|---|---|
+| `-thinking` | thinking | |
+| `-thinking-minimal / -low / -medium / -high / -xhigh / -max` | thinking-minimal … thinking-max | |
+| `-nothinking` | nothinking | 会思考，但不返回思考内容 |
+| `-128` | 128 | 思考预算 128（最低思考强度） |
+
+规则从名称末尾按「最长匹配」逐层去除，可以叠加，例如 `-128-nothinking` 显示为「128 · nothinking」。规则顺序就是变体的显示顺序。设置页底部有「预览」框，输入一个模型名能看到它会被拆成什么。
+
+**注意：** 默认规则里**没有**单独的 `-low / -high / -max` 等后缀，因为它们会把本来不同的模型（如 `gpt-5.1-codex-max`、`qwen-max`）误归为变体；需要的话可以在设置里自己加。没有任何规则时，同一个模型不同线路（`[按次]x`、`[按量]x`）仍会合并到一张卡；要完全不合并，请关掉开关。
+

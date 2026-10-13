@@ -89,6 +89,7 @@ func GetPricing(c *gin.Context) {
 		"auto_groups":        service.GetUserAutoGroup(group),
 		"group_access":       groupAccess,
 		"free_groups":        freeGroups,
+		"model_square":       operation_setting.GetModelSquareDisplay(),
 		"pricing_version":    "a42d372ccf0b5dd13ecf71203521f9d2",
 	})
 }
