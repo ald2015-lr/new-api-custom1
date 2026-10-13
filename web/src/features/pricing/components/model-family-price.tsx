@@ -168,7 +168,7 @@ export function FamilyLinePrices(props: {
               {showLineNames && (
                 <Badge
                   variant='outline'
-                  className='max-w-[7rem] font-normal'
+                  className='text-foreground max-w-[7rem] font-semibold'
                   title={lineName}
                 >
                   <span className='truncate'>{lineName}</span>
@@ -216,7 +216,7 @@ export function FamilyLinePrices(props: {
             >
               {/* Only the line name gives way: the price is what the chip is for. */}
               {showLineNames && (
-                <span className='text-foreground max-w-[10rem] min-w-0 truncate font-medium'>
+                <span className='text-foreground max-w-[10rem] min-w-0 truncate font-bold'>
                   {lineName}
                 </span>
               )}

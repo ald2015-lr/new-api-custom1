@@ -57,6 +57,8 @@ export const ModelVariantList = memo(function ModelVariantList(
     <div
       className={cn(
         '@container/variants divide-border/70 min-w-0 divide-y overflow-hidden rounded-lg border',
+        // Long lists scroll inside the panel instead of pushing the page.
+        'max-h-[min(70vh,36rem)] overflow-y-auto overscroll-contain',
         props.className
       )}
     >
@@ -105,8 +107,13 @@ function VariantLine(props: {
 
   return (
     <div role='group' aria-labelledby={headingId}>
-      <div className='bg-muted/40 flex min-w-0 items-center justify-between gap-2 px-3 py-1.5 text-xs'>
-        <h4 id={headingId} className='truncate font-medium' title={lineName}>
+      {/* Sticky so the line stays named while its variants scroll by. */}
+      <div className='bg-muted sticky top-0 z-10 flex min-w-0 items-center justify-between gap-2 px-3 py-2 text-xs'>
+        <h4
+          id={headingId}
+          className='text-foreground truncate text-sm font-bold'
+          title={lineName}
+        >
           {lineName}
         </h4>
         <span className='text-muted-foreground shrink-0 tabular-nums'>
