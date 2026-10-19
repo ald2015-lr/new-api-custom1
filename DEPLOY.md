@@ -456,7 +456,33 @@ WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TI
 
 **哪些客户端能被救：** 心跳解决的是「读超时」（两次收到数据之间的最长间隔）。实测：Python 的 OpenAI / Anthropic SDK（httpx 读超时）、Node 的 Anthropic SDK、Node 的 OpenAI SDK **流式**请求都能被保住；Node 的 OpenAI SDK **非流式**请求用的是「总超时」，心跳救不了，只能让用户调大 `timeout`。Google 官方 SDK（Python / Node）走 Gemini 原生格式，不发心跳，也只能调大超时。
 
-**反向代理：** 心跳响应都带 `X-Accel-Buffering: no`，宝塔 / nginx 默认会立即转发（即使开着 `proxy_buffering on` 也一样），不用改配置。如果心跳仍被攒住，检查 nginx 是否配置了 `proxy_ignore_headers ... X-Accel-Buffering`（会让这个头失效），或者前面还有会缓冲响应的 CDN / 另一层代理。
+**反向代理：** 心跳响应都带 `X-Accel-Buffering: no`。只有**一层** nginx（宝塔）直接反代 new-api 时，nginx 会立即转发，不用改配置。
+
+**两层 nginx 串联**（例如 国内宝塔反代 → 美国服务器上的 nginx → new-api）要改外层：nginx 默认不会把 `X-Accel-*` 响应头转给下一层，外层收不到这个头；外层如果还用 nginx 默认的 HTTP/1.0 回源，心跳（连同普通流式输出）会被攒到请求结束才一起发出。在外层 API 所在的 `location` 里加：
+
+```nginx
+proxy_http_version 1.1;
+proxy_buffering off;
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+```
+
+或者让外层直接反代 new-api 的 `3009` 端口，去掉中间那层（再用防火墙只放行外层的 IP）。另外宝塔自带的 `/www/server/nginx/conf/proxy.conf` 通常在 http 级别把超时设成 60 秒，超时要写在 API 实际走的那个 `location` 里才稳妥。每一层都用下面的命令核对实际生效的值：
+
+```bash
+nginx -T 2>/dev/null | grep -nE "proxy_pass|proxy_(read|send|connect)_timeout|proxy_http_version|proxy_buffering"
+```
+
+如果心跳仍被攒住，再检查是否配置了 `proxy_ignore_headers ... X-Accel-Buffering`（会让这个头失效），或者前面还有会缓冲响应的 CDN。
+
+**504 / 524 排查：** 心跳只保护「用户 ↔ new-api」这一段，管不到「new-api ↔ 上游」。
+- 先看报错是谁发的：响应头里有 `X-Oneapi-Request-Id`，说明是 new-api 转发的上游错误；没有，就是某层 nginx / CDN 自己产生的。
+- `Deadline expired before operation could complete.`（code 504）：Google（Gemini / Vertex）服务端的截止时间到了。在该渠道 → 请求与响应 → 覆盖规则 → 请求头覆盖 里加 `{"X-Server-Timeout": "1700"}`（单位秒，要小于 `RELAY_RESPONSE_HEADER_TIMEOUT`，默认 1800），先在一个渠道上观察效果。第三方中转渠道要对方把这个头转发给 Google 才有效。
+- 524 只有 Cloudflare 会发：通常是挂在 Cloudflare 后面的上游中转站约 100 秒没输出。让用户对长回答用流式，或把这类模型换到不走 Cloudflare 的渠道。
+- 504 / 524 **不会**换渠道重试（请求可能其实已在上游完成，重试会重复计费、等待时间翻倍）。确实要重试，可在渠道的「状态码映射」里写 `{"524":"502"}`，并把「重试次数」设为 ≥1。
+- 在 compose 里加 `ERROR_LOG_ENABLED=true` 后，使用日志 → 通用日志 → 类型「错误」能看到每次失败的渠道、模型、是否流式和用时；也可以先用 `docker logs new-api-alpha-us 2>&1 | grep -E "status code: (504|524)"` 按渠道统计。
+- 用户等了约 60 秒就报错：多半是某层 nginx 还是默认 60 秒；约 100–125 秒：Cloudflare；约 300 / 600 秒：Google 默认截止时间或客户端自己的超时。
+- `STREAMING_TIMEOUT` 的单位是秒，写 `1800000` 等于约 20.8 天，想要 30 分钟应写 `1800`。
 
 **注意：** 和其他后台设置一样，一旦点过保存，就以数据库里的值为准（代码默认值是：总开关关、间隔 60 秒、非流式关）。
 
