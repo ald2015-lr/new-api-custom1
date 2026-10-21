@@ -442,6 +442,45 @@ describe('lines and prices by group', () => {
     ).toEqual(['kirofrom $2 / 1M', 'kiro · 按量from $4 / 1M'])
   })
 
+  it('leaves the group off rows that share every group the line header names', () => {
+    const family = familyOf(
+      inGroups('[按次]x', ['按量', 'kiro'], {
+        quota_type: 1,
+        model_price: 0.1,
+      }),
+      inGroups('[按次]x-thinking', ['按量', 'kiro'], {
+        quota_type: 1,
+        model_price: 0.1,
+      })
+    )
+    renderList(family)
+    // Same ratio: groups are listed by name, Latin before CJK.
+    expect(screen.getByText('Group kiro, 按量')).toBeVisible()
+    for (const label of ['Standard', 'thinking']) {
+      const row = screen.getByText(label).closest('li') as HTMLElement
+      expect(within(row).queryByTitle('kiro, 按量')).toBeNull()
+    }
+  })
+
+  it('keeps the group on a row that is in only some of the line header groups', () => {
+    const family = familyOf(
+      inGroups('[按次]x', ['按量', 'kiro'], {
+        quota_type: 1,
+        model_price: 0.1,
+      }),
+      inGroups('[按次]x-thinking', ['kiro'], {
+        quota_type: 1,
+        model_price: 0.1,
+      })
+    )
+    renderList(family)
+    expect(screen.getByText('Group kiro, 按量')).toBeVisible()
+    const thinking = screen.getByText('thinking').closest('li') as HTMLElement
+    expect(within(thinking).getByTitle('kiro')).toBeVisible()
+    const standard = screen.getByText('Standard').closest('li') as HTMLElement
+    expect(within(standard).queryByTitle('kiro, 按量')).toBeNull()
+  })
+
   it('names the groups of a tagged line that differ from its tag', () => {
     const family = familyOf(
       inGroups('[正价kiro]x', ['kiro']),

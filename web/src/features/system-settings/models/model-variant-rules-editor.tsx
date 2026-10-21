@@ -41,6 +41,7 @@ import {
   DEFAULT_MODEL_VARIANT_RULES,
   MODEL_VARIANT_RULE_LIMITS,
   parseModelName,
+  splitFamilyBases,
 } from '@/features/pricing/lib/model-variants'
 
 import type { ModelSquareSettingsFormValues } from './model-square-settings-schema'
@@ -101,16 +102,18 @@ function RuleInput(props: {
   )
 }
 
-/** Type a model name to see how the current rules split it. */
+/** Type a model name to see how the current rules and bases split it. */
 function RulesPreview(props: {
   rules: ModelSquareSettingsFormValues['variant_rules']
+  familyBases: string
 }) {
   const { t } = useTranslation()
   const inputId = useId()
   const [name, setName] = useState('[按次]gemini-3-pro-preview-128-nothinking')
   const parsed = parseModelName(
     name.trim(),
-    props.rules.filter((rule) => rule.suffix && rule.label)
+    props.rules.filter((rule) => rule.suffix && rule.label),
+    splitFamilyBases(props.familyBases)
   )
   const items = [
     { label: t('Base model'), value: parsed.base },
@@ -161,6 +164,7 @@ export function ModelVariantRulesEditor(props: {
     name: 'variant_rules',
   })
   const rules = useWatch({ control: props.control, name: 'variant_rules' })
+  const familyBases = useWatch({ control: props.control, name: 'family_bases' })
   const { errors } = useFormState({
     control: props.control,
     name: 'variant_rules',
@@ -317,7 +321,7 @@ export function ModelVariantRulesEditor(props: {
         </Button>
       </div>
 
-      <RulesPreview rules={rules ?? []} />
+      <RulesPreview rules={rules ?? []} familyBases={familyBases ?? ''} />
     </div>
   )
 }

@@ -97,10 +97,51 @@ func TestValidateOptionValueModelSquareSetting(t *testing.T) {
 	require.NoError(t, validateOptionValue("model_square_setting.variant_grouping_enabled", "false"))
 }
 
+func TestValidateOptionValueModelSquareFamilyBases(t *testing.T) {
+	const key = operation_setting.ModelSquareFamilyBasesOptionKey
+	bases := make([]string, 501)
+	for i := range bases {
+		bases[i] = fmt.Sprintf("model-%d", i)
+	}
+	tooMany, err := common.Marshal(bases)
+	require.NoError(t, err)
+	maxBases, err := common.Marshal(bases[:500])
+	require.NoError(t, err)
+
+	for name, value := range map[string]string{
+		"empty value":     "",
+		"null":            "null",
+		"not an array":    `"gemini-4-argon"`,
+		"not strings":     `[{"base":"gemini-4-argon"}]`,
+		"empty base":      `[""]`,
+		"base with space": `["gemini 4"]`,
+		"line tag":        `["[按次]gemini-4-argon"]`,
+		"trailing dash":   `["gemini-4-argon-"]`,
+		"too long":        `["` + strings.Repeat("a", 129) + `"]`,
+		"duplicate":       `["gemini-4-argon","gemini-4-argon"]`,
+		"too many":        string(tooMany),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Error(t, validateOptionValue(key, value))
+		})
+	}
+	for _, value := range []string{
+		`[]`,
+		`["gemini-4-argon","gemini-4"]`,
+		`["` + strings.Repeat("模", 128) + `"]`,
+		string(maxBases),
+		config.GlobalConfig.ExportAllConfigs()[key],
+	} {
+		require.NoError(t, validateOptionValue(key, value))
+	}
+}
+
 func TestUpdateOptionMapAppliesModelSquareSetting(t *testing.T) {
 	const enabledKey = operation_setting.ModelSquareVariantGroupingEnabledOptionKey
 	const rulesKey = operation_setting.ModelSquareVariantRulesOptionKey
+	const basesKey = operation_setting.ModelSquareFamilyBasesOptionKey
 	const rules = `[{"suffix":"-fast","label":"fast"}]`
+	const bases = `["gemini-4-argon"]`
 	originalMap := common.OptionMap
 	common.OptionMap = map[string]string{}
 	previousConfig := config.GlobalConfig.ExportAllConfigs()
@@ -108,14 +149,18 @@ func TestUpdateOptionMapAppliesModelSquareSetting(t *testing.T) {
 		common.OptionMap = originalMap
 		operation_setting.LoadModelSquareOption(enabledKey, previousConfig[enabledKey])
 		operation_setting.LoadModelSquareOption(rulesKey, previousConfig[rulesKey])
+		operation_setting.LoadModelSquareOption(basesKey, previousConfig[basesKey])
 	})
 
 	require.NoError(t, updateOptionMap(enabledKey, "false"))
 	require.NoError(t, updateOptionMap(rulesKey, rules))
+	require.NoError(t, updateOptionMap(basesKey, bases))
 
 	assert.Equal(t, operation_setting.ModelSquareDisplay{
 		VariantGroupingEnabled: false,
 		VariantRules:           []operation_setting.ModelVariantRule{{Suffix: "-fast", Label: "fast"}},
+		FamilyBases:            []string{"gemini-4-argon"},
 	}, operation_setting.GetModelSquareDisplay())
 	assert.Equal(t, rules, config.GlobalConfig.ExportAllConfigs()[rulesKey])
+	assert.Equal(t, bases, config.GlobalConfig.ExportAllConfigs()[basesKey])
 }

@@ -93,7 +93,11 @@ export function Pricing() {
     () =>
       modelSquare.variant_grouping_enabled
         ? sortModelFamilies(
-            groupModelFamilies(filteredModels, modelSquare.variant_rules),
+            groupModelFamilies(
+              filteredModels,
+              modelSquare.variant_rules,
+              modelSquare.family_bases
+            ),
             sortBy
           )
         : undefined,

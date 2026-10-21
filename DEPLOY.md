@@ -524,6 +524,14 @@ curl -N https://<你的域名>/v1/chat/completions \
 
 规则从名称末尾按「最长匹配」逐层去除，可以叠加，例如 `-128-nothinking` 显示为「128 · nothinking」。规则顺序就是变体的显示顺序。设置页底部有「预览」框，输入一个模型名能看到它会被拆成什么。
 
+**合并的基础模型（按模型名指定）：** 同页「合并的基础模型」里每行填一个基础模型（不带 `[...]` 线路标签），例如 `gemini-4-argon`。之后名称是「基础模型 + `-` + 任意内容」的模型都会并进这张卡，`-` 后面的部分直接作为变体名：
+- `[按次]gemini-4-argon-low`、`[按量]gemini-4-argon-medium` → 卡片 `gemini-4-argon`，线路「按次」「按量」，变体 `low`、`medium`；
+- 后面还能叠加上表的规则：`gemini-4-argon-medium-nothinking` 显示为「medium · nothinking」；
+- 多个基础模型都匹配时取最长的（同时填 `gemini-4` 和 `gemini-4-argon`，`gemini-4-argon-low` 归 `gemini-4-argon`）；`gemini-4-argonx` 这种只是字母相同的不会被并入；
+- 变体顺序：标准在前，接着是只带上表规则后缀的变体（如 nothinking，按规则顺序），然后 minimal / low / medium / high / xhigh / max，其他变体名按字母排。
+
+适合只想合并个别模型、又不想加全局 `-low / -high` 规则（会误伤 `gpt-5.1-codex-max` 这类模型）的情况。
+
 **注意：** 默认规则里**没有**单独的 `-low / -high / -max` 等后缀，因为它们会把本来不同的模型（如 `gpt-5.1-codex-max`、`qwen-max`）误归为变体；需要的话可以在设置里自己加。没有任何规则时，同一个模型不同线路（`[按次]x`、`[按量]x`）仍会合并到一张卡；要完全不合并，请关掉开关。
 
 **分组与价格：**

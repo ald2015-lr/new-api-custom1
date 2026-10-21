@@ -28,10 +28,17 @@ import {
   FormControl,
   FormDescription,
   FormField,
+  FormItem,
   FormLabel,
+  useFormField,
 } from '@/components/ui/form'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  splitFamilyBases,
+  validateFamilyBases,
+} from '@/features/pricing/lib/model-variants'
 
 import {
   SettingsForm,
@@ -43,7 +50,9 @@ import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import {
   modelSquareSettingsSchema,
+  serializeFamilyBases,
   serializeVariantRules,
+  toFamilyBasesFormValue,
   toVariantRuleFormValues,
   type ModelSquareSettingsFormValues,
 } from './model-square-settings-schema'
@@ -51,13 +60,41 @@ import { ModelVariantRulesEditor } from './model-variant-rules-editor'
 
 const GROUPING_KEY = 'model_square_setting.variant_grouping_enabled'
 const RULES_KEY = 'model_square_setting.variant_rules'
+const FAMILY_BASES_KEY = 'model_square_setting.family_bases'
 
 type ModelSquareSettingsCardProps = {
   defaultValues: {
     variantGroupingEnabled: boolean
     /** Raw JSON option value; empty or invalid falls back to the defaults. */
     variantRules: string
+    /** Raw JSON option value; empty or invalid means no base models. */
+    familyBases?: string
   }
+}
+
+/**
+ * Each invalid base model on its own line, under the textarea. It takes the
+ * form message id, so the textarea's aria-describedby points at the list.
+ */
+function FamilyBaseIssues(props: { text: string }) {
+  const { t } = useTranslation()
+  const { formMessageId } = useFormField()
+  const issues = validateFamilyBases(splitFamilyBases(props.text))
+  if (issues.length === 0) return null
+  return (
+    <ul
+      id={formMessageId}
+      data-slot='form-message'
+      // A long name without break points must wrap, not widen the form.
+      className='text-destructive flex min-w-0 flex-col gap-0.5 text-sm [overflow-wrap:anywhere]'
+    >
+      {issues.map((issue) => (
+        <li key={`${issue.index}:${issue.message}`}>
+          {t(issue.message, issue.values)}
+        </li>
+      ))}
+    </ul>
+  )
 }
 
 export function ModelSquareSettingsCard(props: ModelSquareSettingsCardProps) {
@@ -66,12 +103,14 @@ export function ModelSquareSettingsCard(props: ModelSquareSettingsCardProps) {
   const updateOption = useUpdateOption()
   const enabled = props.defaultValues.variantGroupingEnabled
   const storedRules = props.defaultValues.variantRules
+  const storedBases = props.defaultValues.familyBases ?? ''
   const initialValues = useMemo<ModelSquareSettingsFormValues>(
     () => ({
       variant_grouping_enabled: enabled,
+      family_bases: toFamilyBasesFormValue(storedBases),
       variant_rules: toVariantRuleFormValues(storedRules),
     }),
-    [enabled, storedRules]
+    [enabled, storedBases, storedRules]
   )
 
   const form = useForm<ModelSquareSettingsFormValues>({
@@ -92,6 +131,10 @@ export function ModelSquareSettingsCard(props: ModelSquareSettingsCardProps) {
         key: GROUPING_KEY,
         value: values.variant_grouping_enabled,
       })
+    }
+    const bases = serializeFamilyBases(values.family_bases)
+    if (bases !== serializeFamilyBases(initialValues.family_bases)) {
+      updates.push({ key: FAMILY_BASES_KEY, value: bases })
     }
     const rules = serializeVariantRules(values.variant_rules)
     if (rules !== serializeVariantRules(initialValues.variant_rules)) {
@@ -141,6 +184,34 @@ export function ModelSquareSettingsCard(props: ModelSquareSettingsCardProps) {
                   />
                 </FormControl>
               </SettingsSwitchItem>
+            )}
+          />
+
+          <Separator />
+
+          <FormField
+            control={form.control}
+            name='family_bases'
+            render={({ field, fieldState }) => (
+              <FormItem>
+                <FormLabel>{t('Merged base models')}</FormLabel>
+                <FormDescription>
+                  {t(
+                    'One base model per line, without the leading [...] line tag. Every model named after it plus "-" and anything else (for example gemini-4-argon-low and gemini-4-argon-medium for gemini-4-argon) is shown in that base model\'s card, and the rest of its name becomes the variant. Use it for suffixes the rules below do not cover.'
+                  )}
+                </FormDescription>
+                <FormControl>
+                  <Textarea
+                    {...field}
+                    rows={3}
+                    placeholder={t('e.g. gemini-4-argon')}
+                    autoComplete='off'
+                    spellCheck={false}
+                    className='font-mono'
+                  />
+                </FormControl>
+                {fieldState.error && <FamilyBaseIssues text={field.value} />}
+              </FormItem>
             )}
           />
 

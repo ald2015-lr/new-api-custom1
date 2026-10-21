@@ -148,6 +148,8 @@ export type PricingData = {
   model_square?: {
     variant_grouping_enabled: boolean
     variant_rules: { suffix: string; label: string; description?: string }[]
+    /** Absent on older backends: no base model is merged by name. */
+    family_bases?: string[]
   }
 }
 

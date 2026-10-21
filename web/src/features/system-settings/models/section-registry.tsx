@@ -132,6 +132,7 @@ const MODELS_SECTIONS = [
           variantGroupingEnabled:
             settings['model_square_setting.variant_grouping_enabled'],
           variantRules: settings['model_square_setting.variant_rules'],
+          familyBases: settings['model_square_setting.family_bases'],
         }}
       />
     ),

@@ -248,6 +248,7 @@ export type ModelSettings = {
   'grok.violation_deduction_amount': number
   'model_square_setting.variant_grouping_enabled': boolean
   'model_square_setting.variant_rules': string
+  'model_square_setting.family_bases': string
   ModelPrice: string
   ModelRatio: string
   CacheRatio: string

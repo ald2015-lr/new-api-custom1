@@ -31,6 +31,11 @@ export type ModelVariantRule = {
 export type ModelSquareSettings = {
   variant_grouping_enabled: boolean
   variant_rules: ModelVariantRule[]
+  /**
+   * Base models named by the admin: every `<base>-<anything>` model joins the
+   * base's family, even when no rule covers its suffix.
+   */
+  family_bases: string[]
 }
 
 /**
@@ -66,6 +71,14 @@ export const MODEL_VARIANT_RULE_LIMITS = {
   maxDescriptionLength: 200,
 } as const
 
+export const MODEL_FAMILY_BASE_LIMITS = {
+  maxBases: 500,
+  maxBaseLength: 128,
+} as const
+
+/** Display order of free-form variant names under a configured base. */
+const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
 const LINE_TAG_PATTERN = /^\[([^\]]+)\]/
 /** Lines listed first, in this order; other lines follow alphabetically. */
 const PREFERRED_LINE_ORDER = ['按次', '按量']
@@ -80,6 +93,11 @@ export type ParsedModelName = {
   suffixes: string[]
   /** Rule index of each stripped suffix, in name order. */
   ruleIndexes: number[]
+  /**
+   * The rest of the name after a configured family base and before any rule
+   * suffix (`low` in `gemini-4-argon-low`); '' otherwise.
+   */
+  extra: string
   /** Labels joined with ` · `; '' for the standard (no suffix) variant. */
   label: string
   /** Non-empty rule descriptions joined with `；`. */
@@ -124,18 +142,53 @@ export function stripLineTag(name: string): string {
 }
 
 /**
+ * The longest configured base the name is, or starts with followed by `-`.
+ * Bases never end with `-`, so only the whole name and its prefixes that stop
+ * right before a `-` can match: a few set lookups per name, however many
+ * bases there are.
+ */
+function matchFamilyBase(
+  name: string,
+  bases: ReadonlySet<string>
+): string | undefined {
+  if (bases.size === 0) return undefined
+  if (bases.has(name)) return name
+  for (
+    let dash = name.lastIndexOf('-');
+    dash > 0;
+    dash = name.lastIndexOf('-', dash - 1)
+  ) {
+    const prefix = name.slice(0, dash)
+    if (bases.has(prefix)) return prefix
+  }
+  return undefined
+}
+
+function toBaseSet(
+  familyBases: readonly string[] | ReadonlySet<string>
+): ReadonlySet<string> {
+  return familyBases instanceof Set ? familyBases : new Set(familyBases)
+}
+
+/**
  * Parse a model name into its line, base model and variant suffixes.
  *
  * Suffixes are stripped from the end, longest matching rule first, until no
  * rule matches or stripping would leave an empty base or one ending in `-`.
+ * When the name (without its line tag) starts with a configured family base,
+ * that base is the family and rules never cut into it; whatever is left
+ * between the base and the stripped suffixes names the variant (`low`).
  */
 export function parseModelName(
   name: string,
-  rules: readonly ModelVariantRule[]
+  rules: readonly ModelVariantRule[],
+  familyBases: readonly string[] | ReadonlySet<string> = []
 ): ParsedModelName {
   const tag = LINE_TAG_PATTERN.exec(name)
   const line = tag ? tag[1] : ''
   let base = tag ? name.slice(tag[0].length) : name
+  const familyBase = matchFamilyBase(base, toBaseSet(familyBases))
+  const minLength = familyBase?.length ?? 0
   const stripped: { suffix: string; index: number }[] = []
 
   for (;;) {
@@ -145,6 +198,7 @@ export function parseModelName(
       if (
         suffix &&
         base.endsWith(suffix) &&
+        base.length - suffix.length >= minLength &&
         (match < 0 || suffix.length > rules[match].suffix.length)
       ) {
         match = index
@@ -157,13 +211,22 @@ export function parseModelName(
     base = rest
   }
 
+  let extra = ''
+  if (familyBase !== undefined) {
+    extra = base.slice(familyBase.length + 1)
+    base = familyBase
+  }
+  const labels = stripped.map((item) => rules[item.index].label)
+  if (extra) labels.unshift(extra)
+
   return {
     name,
     line,
     base,
     suffixes: stripped.map((item) => item.suffix),
     ruleIndexes: stripped.map((item) => item.index),
-    label: stripped.map((item) => rules[item.index].label).join(' · '),
+    extra,
+    label: labels.join(' · '),
     description: stripped
       .map((item) => rules[item.index].description?.trim() ?? '')
       .filter(Boolean)
@@ -179,8 +242,21 @@ function compareRuleIndexes(a: number[], b: number[]): number {
   return a.length - b.length
 }
 
+/**
+ * Variants with no free-form name come first (standard, then rule-only ones
+ * such as nothinking in rule order), then known effort names in order, then
+ * the rest alphabetically.
+ */
+function extraRank(extra: string): number {
+  if (!extra) return -1
+  const rank = EFFORT_ORDER.indexOf(extra)
+  return rank < 0 ? EFFORT_ORDER.length : rank
+}
+
 function compareVariants(a: ModelVariant, b: ModelVariant): number {
   return (
+    extraRank(a.parsed.extra) - extraRank(b.parsed.extra) ||
+    a.parsed.extra.localeCompare(b.parsed.extra) ||
     compareRuleIndexes(a.parsed.ruleIndexes, b.parsed.ruleIndexes) ||
     a.parsed.name.localeCompare(b.parsed.name)
   )
@@ -203,11 +279,13 @@ export function compareLines(a: string, b: string): number {
  */
 export function groupModelFamilies(
   models: readonly PricingModel[],
-  rules: readonly ModelVariantRule[]
+  rules: readonly ModelVariantRule[],
+  familyBases: readonly string[] = []
 ): ModelFamily[] {
   const families = new Map<string, ModelVariant[]>()
+  const bases = new Set(familyBases)
   for (const model of models) {
-    const parsed = parseModelName(model.model_name || '', rules)
+    const parsed = parseModelName(model.model_name || '', rules, bases)
     const members = families.get(parsed.base)
     if (members) members.push({ model, parsed })
     else families.set(parsed.base, [{ model, parsed }])
@@ -277,8 +355,27 @@ export function parseVariantRules(value: unknown): ModelVariantRule[] | null {
 }
 
 /**
+ * Read the family base list from untrusted JSON (API payload or a stored
+ * option). Returns null when the value is not an array of strings.
+ */
+export function parseFamilyBases(value: unknown): string[] | null {
+  let raw = value
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  if (!Array.isArray(raw)) return null
+  if (!raw.every((item) => typeof item === 'string')) return null
+  return raw as string[]
+}
+
+/**
  * Resolve the Model Square display settings from the pricing payload. Older
- * backends omit them: grouping is then on with the built-in rules.
+ * backends omit them: grouping is then on with the built-in rules and no
+ * family bases.
  */
 export function resolveModelSquareSettings(
   value: unknown
@@ -287,6 +384,7 @@ export function resolveModelSquareSettings(
     return {
       variant_grouping_enabled: true,
       variant_rules: [...DEFAULT_MODEL_VARIANT_RULES],
+      family_bases: [],
     }
   }
   // A Go nil slice encodes an empty rule list as null.
@@ -297,6 +395,7 @@ export function resolveModelSquareSettings(
     variant_rules: (rules ?? [...DEFAULT_MODEL_VARIANT_RULES]).filter(
       (rule) => rule.suffix && rule.label
     ),
+    family_bases: (parseFamilyBases(value.family_bases) ?? []).filter(Boolean),
   }
 }
 
@@ -364,6 +463,66 @@ export function validateVariantRules(
         message: 'Must be {{max}} characters or fewer',
         values: { max: limits.maxDescriptionLength },
       })
+    }
+  })
+  return issues
+}
+
+export type FamilyBaseIssue = {
+  index: number
+  /** i18n key */
+  message: string
+  values?: Record<string, number | string>
+}
+
+/**
+ * One base per line, as typed in the settings: lines are trimmed, blank lines
+ * dropped and repeats kept once.
+ */
+export function splitFamilyBases(text: string): string[] {
+  const bases: string[] = []
+  for (const line of text.split('\n')) {
+    const base = line.trim()
+    if (base && !bases.includes(base)) bases.push(base)
+  }
+  return bases
+}
+
+/** Validate family bases with the same constraints the backend enforces. */
+export function validateFamilyBases(
+  bases: readonly string[]
+): FamilyBaseIssue[] {
+  const issues: FamilyBaseIssue[] = []
+  const limits = MODEL_FAMILY_BASE_LIMITS
+  if (bases.length > limits.maxBases) {
+    issues.push({
+      index: -1,
+      message: 'At most {{max}} base models',
+      values: { max: limits.maxBases },
+    })
+  }
+  bases.forEach((base, index) => {
+    const values = { base }
+    if (codePointLength(base) > limits.maxBaseLength) {
+      issues.push({
+        index,
+        message: '{{base}}: must be {{max}} characters or fewer',
+        values: { ...values, max: limits.maxBaseLength },
+      })
+    } else if (GO_SPACE_PATTERN.test(base)) {
+      issues.push({
+        index,
+        message: '{{base}}: must not contain spaces',
+        values,
+      })
+    } else if (base.startsWith('[')) {
+      issues.push({
+        index,
+        message: '{{base}}: leave out the leading [...] line tag',
+        values,
+      })
+    } else if (base.endsWith('-')) {
+      issues.push({ index, message: '{{base}}: must not end with -', values })
     }
   })
   return issues

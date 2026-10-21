@@ -909,4 +909,10 @@ export const STATIC_I18N_KEYS = [
   'Duplicate suffix',
   'Label is required',
   'At most {{max}} rules',
+  // Model Square family bases: validation messages.
+  'At most {{max}} base models',
+  '{{base}}: must be {{max}} characters or fewer',
+  '{{base}}: must not contain spaces',
+  '{{base}}: leave out the leading [...] line tag',
+  '{{base}}: must not end with -',
 ] as const

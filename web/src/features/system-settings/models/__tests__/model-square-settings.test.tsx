@@ -38,7 +38,7 @@ import { ModelSquareSettingsCard } from '../model-square-settings-card'
 const GROUPING_SWITCH = { name: 'Group model variants' }
 const SAVE = { name: 'Save Changes' }
 
-function Fixture(props: { enabled: boolean; rules: string }) {
+function Fixture(props: { enabled: boolean; rules: string; bases?: string }) {
   const [container, setContainer] = useState<HTMLDivElement | null>(null)
   return (
     <>
@@ -48,6 +48,7 @@ function Fixture(props: { enabled: boolean; rules: string }) {
           defaultValues={{
             variantGroupingEnabled: props.enabled,
             variantRules: props.rules,
+            familyBases: props.bases,
           }}
         />
       </SettingsPageProvider>
@@ -59,14 +60,17 @@ let client: QueryClient
 
 async function renderSettings(
   enabled = true,
-  rules = JSON.stringify(DEFAULT_MODEL_VARIANT_RULES)
+  rules = JSON.stringify(DEFAULT_MODEL_VARIANT_RULES),
+  bases = '[]'
 ) {
   client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   const router = createRouter({
     routeTree: createRootRoute({
-      component: () => <Fixture enabled={enabled} rules={rules} />,
+      component: () => (
+        <Fixture enabled={enabled} rules={rules} bases={bases} />
+      ),
     }),
     history: createMemoryHistory({ initialEntries: ['/'] }),
   })
@@ -230,4 +234,71 @@ test('saving without changes reports that nothing changed', async () => {
   await user.click(screen.getByRole('button', SAVE))
   await waitFor(() => expect(info).toHaveBeenCalledWith('No changes to save'))
   expect(api.put).not.toHaveBeenCalled()
+})
+
+const BASES = { name: 'Merged base models' }
+
+test('lists the stored base models one per line', async () => {
+  await renderSettings(true, undefined, '["gemini-4-argon","gemini-4"]')
+  expect(screen.getByRole('textbox', BASES)).toHaveValue(
+    'gemini-4-argon\ngemini-4'
+  )
+})
+
+test('saving base models stores them as a JSON list without blanks or repeats', async () => {
+  const user = userEvent.setup()
+  await renderSettings(true)
+  await user.type(
+    screen.getByRole('textbox', BASES),
+    ' gemini-4-argon {enter}{enter}gemini-4{enter}gemini-4-argon'
+  )
+  await user.click(screen.getByRole('button', SAVE))
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith('/api/option/', {
+      key: 'model_square_setting.family_bases',
+      value: '["gemini-4-argon","gemini-4"]',
+    })
+  )
+  expect(api.put).toHaveBeenCalledTimes(1)
+})
+
+test('an invalid base model is named under the field and blocks saving', async () => {
+  const user = userEvent.setup()
+  await renderSettings(true)
+  const bases = screen.getByRole('textbox', BASES)
+  await user.type(bases, 'gemini-4-argon{enter}gemini 4')
+  await user.click(screen.getByRole('button', SAVE))
+  await waitFor(() => expect(bases).toHaveAttribute('aria-invalid', 'true'))
+  expect(screen.getByText('gemini 4: must not contain spaces')).toBeVisible()
+  expect(bases).toHaveAccessibleDescription(
+    expect.stringContaining('gemini 4: must not contain spaces')
+  )
+  expect(api.put).not.toHaveBeenCalled()
+})
+
+test('the preview folds a name into a base model being edited', async () => {
+  const user = userEvent.setup()
+  await renderSettings(true)
+  await user.type(screen.getByRole('textbox', BASES), 'gemini-4-argon')
+  const preview = screen.getByRole('textbox', { name: 'Preview' })
+  await user.clear(preview)
+  await user.type(preview, 'gemini-4-argon-medium')
+  const result = preview.parentElement?.querySelector('dl')
+  if (!result) throw new Error('Preview result is missing')
+  expect(within(result).getByText('gemini-4-argon')).toBeVisible()
+  expect(within(result).getByText('medium')).toBeVisible()
+})
+
+test('a long invalid base model wraps in the error list instead of widening the form', async () => {
+  const user = userEvent.setup()
+  await renderSettings(true)
+  const bases = screen.getByRole('textbox', BASES)
+  // `[[` types a literal bracket in user-event.
+  await user.type(bases, `[[按次]${'a_'.repeat(40)}`)
+  await user.click(screen.getByRole('button', SAVE))
+  await waitFor(() => expect(bases).toHaveAttribute('aria-invalid', 'true'))
+  const issues = screen
+    .getByText(/leave out the leading \[\.\.\.\] line tag/)
+    .closest('ul')
+  expect(issues).toHaveClass('min-w-0', '[overflow-wrap:anywhere]')
 })

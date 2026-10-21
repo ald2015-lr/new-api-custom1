@@ -28,6 +28,7 @@ import {
   getFamilyTags,
   getLineDisplayName,
   getLineGroups,
+  getModelPriceGroups,
 } from '../lib/model-family'
 import type {
   ModelFamily,
@@ -120,13 +121,27 @@ function VariantLine(props: {
     props.line.line !== '' &&
     props.groups.length > 0 &&
     !(props.groups.length === 1 && props.groups[0] === props.line.line)
+  // A row names its groups only when the header does not already say them:
+  // the line spans several groups and this variant is not in all of them.
+  const labelsGroups = (variant: ModelVariant) => {
+    if (props.groups.length < 2) return false
+    if (!props.showHeader) return true
+    const groups = getModelPriceGroups(
+      variant.model,
+      props.priceOptions.selectedGroup
+    )
+    return (
+      groups.length !== props.groups.length ||
+      groups.some((group) => !props.groups.includes(group))
+    )
+  }
   const rows = (
     <ul className='divide-border/60 divide-y'>
       {props.line.variants.map((variant) => (
         <ModelVariantRow
           key={variant.model.model_name}
           variant={variant}
-          labelGroups={props.groups.length > 1}
+          labelGroups={labelsGroups(variant)}
           perf={props.perfMap.get(variant.model.model_name)}
           priceOptions={props.priceOptions}
           onModelClick={props.onModelClick}

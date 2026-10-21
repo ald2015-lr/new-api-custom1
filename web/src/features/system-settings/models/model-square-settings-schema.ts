@@ -21,12 +21,21 @@ import * as z from 'zod'
 import {
   DEFAULT_MODEL_VARIANT_RULES,
   MODEL_VARIANT_RULE_LIMITS,
+  parseFamilyBases,
   parseVariantRules,
+  splitFamilyBases,
+  validateFamilyBases,
   validateVariantRules,
 } from '@/features/pricing/lib/model-variants'
 
 export const modelSquareSettingsSchema = z.object({
   variant_grouping_enabled: z.boolean(),
+  /** One base model per line; the card lists the individual problems. */
+  family_bases: z.string().superRefine((text, ctx) => {
+    if (validateFamilyBases(splitFamilyBases(text)).length > 0) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid base models' })
+    }
+  }),
   variant_rules: z
     .array(
       z.object({
@@ -81,4 +90,14 @@ export function toVariantRuleFormValues(
     label: rule.label,
     description: rule.description ?? '',
   }))
+}
+
+/** Stored option value of the base model text, as the backend expects it. */
+export function serializeFamilyBases(text: string): string {
+  return JSON.stringify(splitFamilyBases(text))
+}
+
+/** Textarea text for a stored option value; empty or invalid means none. */
+export function toFamilyBasesFormValue(value: string): string {
+  return (parseFamilyBases(value) ?? []).join('\n')
 }

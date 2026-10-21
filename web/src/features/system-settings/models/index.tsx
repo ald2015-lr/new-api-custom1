@@ -50,6 +50,7 @@ const defaultModelSettings: ModelSettings = {
   'model_square_setting.variant_rules': JSON.stringify(
     DEFAULT_MODEL_VARIANT_RULES
   ),
+  'model_square_setting.family_bases': '[]',
   ModelPrice: '',
   ModelRatio: '',
   CacheRatio: '',

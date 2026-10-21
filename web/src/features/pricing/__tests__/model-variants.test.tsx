@@ -46,6 +46,8 @@ import {
   groupModelFamilies,
   parseModelName,
   resolveModelSquareSettings,
+  splitFamilyBases,
+  validateFamilyBases,
   validateVariantRules,
 } from '../lib/model-variants'
 import type { PricingModel } from '../types'
@@ -163,6 +165,130 @@ describe('parseModelName', () => {
   )
 })
 
+describe('family bases', () => {
+  const rules = DEFAULT_MODEL_VARIANT_RULES
+
+  it('folds a suffix no rule covers into a configured base', () => {
+    const parsed = parseModelName('gemini-4-argon-low', rules, [
+      'gemini-4-argon',
+    ])
+    expect(parsed).toMatchObject({
+      base: 'gemini-4-argon',
+      line: '',
+      extra: 'low',
+      label: 'low',
+    })
+  })
+
+  it('keeps the line tag and stacks rule suffixes after the free-form part', () => {
+    const parsed = parseModelName(
+      '[按次]gemini-4-argon-medium-nothinking',
+      rules,
+      ['gemini-4-argon']
+    )
+    expect(parsed).toMatchObject({
+      base: 'gemini-4-argon',
+      line: '按次',
+      label: 'medium · nothinking',
+      description: '会思考，但不返回思考内容',
+    })
+  })
+
+  it('never strips a rule suffix into the base', () => {
+    expect(
+      parseModelName('foo-thinking-high', rules, ['foo-thinking'])
+    ).toMatchObject({ base: 'foo-thinking', label: 'high' })
+    expect(
+      parseModelName('foo-thinking', rules, ['foo-thinking'])
+    ).toMatchObject({ base: 'foo-thinking', label: '' })
+  })
+
+  it('prefers the longest matching base', () => {
+    const bases = ['gemini-4', 'gemini-4-argon']
+    expect(parseModelName('gemini-4-argon-low', rules, bases)).toMatchObject({
+      base: 'gemini-4-argon',
+      label: 'low',
+    })
+    expect(parseModelName('gemini-4-pro', rules, bases)).toMatchObject({
+      base: 'gemini-4',
+      label: 'pro',
+    })
+  })
+
+  it('ignores a base that the name only shares letters with', () => {
+    expect(
+      parseModelName('gemini-4-argonx-low', rules, ['gemini-4-argon'])
+    ).toMatchObject({ base: 'gemini-4-argonx-low', label: '' })
+  })
+
+  it('shows every line of a base in one family ordered standard, low, medium, others', () => {
+    const names = [
+      '[按次]gemini-4-argon-zeta',
+      '[按次]gemini-4-argon-medium',
+      '[按次]gemini-4-argon-max',
+      '[按次]gemini-4-argon-low',
+      '[按次]gemini-4-argon',
+      '[按量]gemini-4-argon-low',
+      '[按量]gemini-4-argon',
+    ]
+    const families = groupModelFamilies(
+      names.map((name) => model(name)),
+      rules,
+      ['gemini-4-argon']
+    )
+    expect(families).toHaveLength(1)
+    expect(families[0].base).toBe('gemini-4-argon')
+    expect(
+      families[0].lines.map((line) => [
+        line.line,
+        line.variants.map((variant) => variant.parsed.label),
+      ])
+    ).toEqual([
+      ['按次', ['', 'low', 'medium', 'max', 'zeta']],
+      ['按量', ['', 'low']],
+    ])
+  })
+
+  it('splits one base per line, trimming and dropping blanks and repeats', () => {
+    expect(
+      splitFamilyBases(' gemini-4-argon \r\n\n gemini-4\ngemini-4-argon\n')
+    ).toEqual(['gemini-4-argon', 'gemini-4'])
+  })
+
+  it.each([
+    ['gemini 4', '{{base}}: must not contain spaces'],
+    ['[按次]gemini-4', '{{base}}: leave out the leading [...] line tag'],
+    ['gemini-4-', '{{base}}: must not end with -'],
+    ['a'.repeat(129), '{{base}}: must be {{max}} characters or fewer'],
+  ])('rejects the base "%s" like the backend', (base, message) => {
+    expect(validateFamilyBases([base])).toEqual([
+      expect.objectContaining({ index: 0, message }),
+    ])
+  })
+
+  it('accepts up to 500 bases', () => {
+    const bases = Array.from({ length: 500 }, (_, index) => `m-${index}`)
+    expect(validateFamilyBases(bases)).toEqual([])
+    expect(validateFamilyBases([...bases, 'one-more'])).toEqual([
+      expect.objectContaining({
+        index: -1,
+        message: 'At most {{max}} base models',
+      }),
+    ])
+  })
+
+  it('counts the 128-character limit in code points like Go', () => {
+    // Two UTF-16 units each: a length check in units would reject 128 of them.
+    const astral = '\u{1F9E0}'
+    expect(validateFamilyBases([astral.repeat(128)])).toEqual([])
+    expect(validateFamilyBases([astral.repeat(129)])).toEqual([
+      expect.objectContaining({
+        message: '{{base}}: must be {{max}} characters or fewer',
+      }),
+    ])
+  })
+})
+
 describe('groupModelFamilies', () => {
   it('puts every line of a base model into one family ordered 按次, 按量, then other lines', () => {
     const [opus] = groupModelFamilies(claudeCatalog(), RULES)
@@ -273,7 +399,25 @@ describe('resolveModelSquareSettings', () => {
     expect(resolveModelSquareSettings(undefined)).toEqual({
       variant_grouping_enabled: true,
       variant_rules: [...DEFAULT_MODEL_VARIANT_RULES],
+      family_bases: [],
     })
+  })
+
+  it('reads the family bases and ignores a malformed list', () => {
+    expect(
+      resolveModelSquareSettings({
+        variant_grouping_enabled: true,
+        variant_rules: [],
+        family_bases: ['gemini-4-argon'],
+      }).family_bases
+    ).toEqual(['gemini-4-argon'])
+    expect(
+      resolveModelSquareSettings({
+        variant_grouping_enabled: true,
+        variant_rules: [],
+        family_bases: [1, 'gemini-4-argon'],
+      }).family_bases
+    ).toEqual([])
   })
 
   it('turns grouping off when the backend disables it', () => {

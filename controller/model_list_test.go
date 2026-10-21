@@ -495,7 +495,7 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 
 func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
 	setupModelListControllerTestDB(t)
-	optionKeys := []string{operation_setting.ModelSquareVariantGroupingEnabledOptionKey, operation_setting.ModelSquareVariantRulesOptionKey}
+	optionKeys := []string{operation_setting.ModelSquareVariantGroupingEnabledOptionKey, operation_setting.ModelSquareVariantRulesOptionKey, operation_setting.ModelSquareFamilyBasesOptionKey}
 	previousConfig := config.GlobalConfig.ExportAllConfigs()
 	t.Cleanup(func() {
 		for _, key := range optionKeys {
@@ -513,42 +513,54 @@ func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
 		assert.NotContains(t, []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max"}, rule.Suffix)
 	}
 
+	// No base model is merged unless the admin names one.
+	assert.Equal(t, "[]", previousConfig[operation_setting.ModelSquareFamilyBasesOptionKey])
+
 	tests := []struct {
 		name        string
 		enabled     string
 		rules       string
+		bases       string
 		wantEnabled bool
 		wantRules   []operation_setting.ModelVariantRule
+		wantBases   []string
 	}{
 		{
 			name:        "stored rules",
 			enabled:     "false",
 			rules:       `[{"suffix":"-fast","label":"fast"},{"suffix":"-128","label":"128","description":"思考预算 128"}]`,
+			bases:       `["gemini-4-argon","gemini-4"]`,
 			wantEnabled: false,
 			wantRules: []operation_setting.ModelVariantRule{
 				{Suffix: "-fast", Label: "fast"},
 				{Suffix: "-128", Label: "128", Description: "思考预算 128"},
 			},
+			wantBases: []string{"gemini-4-argon", "gemini-4"},
 		},
 		{
 			name:        "invalid stored values fall back to defaults",
 			enabled:     "yes",
 			rules:       `[{"suffix":"-fast"}]`,
+			bases:       `["gemini 4"]`,
 			wantEnabled: true,
 			wantRules:   defaultRules,
+			wantBases:   []string{},
 		},
 		{
 			name:        "empty rules fold no suffix",
 			enabled:     "true",
 			rules:       `[]`,
+			bases:       `[]`,
 			wantEnabled: true,
 			wantRules:   []operation_setting.ModelVariantRule{},
+			wantBases:   []string{},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareVariantGroupingEnabledOptionKey, tc.enabled)
 			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareVariantRulesOptionKey, tc.rules)
+			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareFamilyBasesOptionKey, tc.bases)
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/pricing", nil)
@@ -560,12 +572,14 @@ func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
 				ModelSquare struct {
 					VariantGroupingEnabled bool                                 `json:"variant_grouping_enabled"`
 					VariantRules           []operation_setting.ModelVariantRule `json:"variant_rules"`
+					FamilyBases            []string                             `json:"family_bases"`
 				} `json:"model_square"`
 			}
 			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response), recorder.Body.String())
 			require.True(t, response.Success)
 			assert.Equal(t, tc.wantEnabled, response.ModelSquare.VariantGroupingEnabled)
 			assert.Equal(t, tc.wantRules, response.ModelSquare.VariantRules)
+			assert.Equal(t, tc.wantBases, response.ModelSquare.FamilyBases)
 		})
 	}
 }
