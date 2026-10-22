@@ -923,4 +923,14 @@ export const STATIC_I18N_KEYS = [
   'Channel priorities changed. Refresh and try again.',
   'Invalid channel priority move',
   'Channel priority is outside the sortable range',
+  // Model rate limits: dialog and rule validation messages.
+  'Must be from 0 to 100,000,000',
+  'Must be from 1 to 1,440',
+  'Model name must be at most 255 characters',
+  'This model already has a rate limit',
+  'Model rate limits must be a JSON object that maps model names to rules',
+  'Model rate limits can list at most {{max}} models',
+  'Model names in model rate limits must have 1 to {{max}} characters and no leading or trailing spaces: "{{model}}"',
+  'The time window of the rate limit for model {{model}} must be 1 to {{max}} minutes',
+  'The request counts of the rate limit for model {{model}} must be 0 to {{max}}',
 ] as const
