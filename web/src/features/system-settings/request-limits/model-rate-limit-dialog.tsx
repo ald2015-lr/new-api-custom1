@@ -99,7 +99,14 @@ export function ModelRateLimitDialog(props: ModelRateLimitDialogProps) {
   }, [props.editData, form, props.open])
 
   const handleSubmit = (values: ModelRateLimitDialogFormValues) => {
-    if (!isEditMode && props.existingModelNames.includes(values.modelName)) {
+    if (props.editData) {
+      // The name is locked while editing: save under the key of the rule
+      // being edited, not its trimmed form, which can be another rule's key.
+      props.onSave({ ...values, modelName: props.editData.modelName })
+      props.onOpenChange(false)
+      return
+    }
+    if (props.existingModelNames.includes(values.modelName)) {
       form.setError('modelName', {
         message: 'This model already has a rate limit',
       })

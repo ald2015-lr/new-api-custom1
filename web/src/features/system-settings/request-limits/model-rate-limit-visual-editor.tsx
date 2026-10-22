@@ -90,7 +90,7 @@ export function ModelRateLimitVisualEditor(
   }
 
   return (
-    <div className='space-y-4'>
+    <div className='min-w-0 space-y-4'>
       <div className='flex items-center gap-4'>
         <div className='relative flex-1'>
           <Search className='text-muted-foreground absolute top-2.5 left-2.5 h-4 w-4' />

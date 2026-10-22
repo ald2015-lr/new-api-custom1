@@ -129,9 +129,14 @@ export function RateLimitDialog({
       }
     >
       <Form {...form}>
+        {/* The dialog is portaled, but its submit still bubbles through the
+            React tree to the settings form, which must not save on it. */}
         <form
           id={RATE_LIMIT_FORM_ID}
-          onSubmit={form.handleSubmit(handleSubmit)}
+          onSubmit={(event) => {
+            event.stopPropagation()
+            void form.handleSubmit(handleSubmit)(event)
+          }}
           className='space-y-4'
         >
           <FormField

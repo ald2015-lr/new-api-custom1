@@ -31,12 +31,18 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 
 import { SettingsPageProvider } from '../../components/settings-page-context'
+import {
+  getOptionValue,
+  useSystemOptions,
+} from '../../hooks/use-system-options'
+import { getSecuritySectionContent } from '../../security/section-registry'
+import type { SecuritySettings } from '../../types'
 import { RateLimitSection } from '../rate-limit-section'
 
 const storedRules = JSON.stringify({
@@ -64,14 +70,68 @@ function Fixture(props: { modelRules: string }) {
   )
 }
 
-async function renderSection(modelRules = '{}') {
+const securityDefaults: SecuritySettings = {
+  ModelRequestRateLimitEnabled: false,
+  ModelRequestRateLimitCount: 0,
+  ModelRequestRateLimitSuccessCount: 1000,
+  ModelRequestRateLimitDurationMinutes: 1,
+  ModelRequestRateLimitGroup: '',
+  ModelRequestRateLimitModel: '{}',
+  CheckSensitiveEnabled: false,
+  CheckSensitiveOnPromptEnabled: false,
+  SensitiveWords: '',
+  'fetch_setting.enable_ssrf_protection': true,
+  'fetch_setting.allow_private_ip': false,
+  'fetch_setting.domain_filter_mode': false,
+  'fetch_setting.ip_filter_mode': false,
+  'fetch_setting.domain_list': [],
+  'fetch_setting.ip_list': [],
+  'fetch_setting.allowed_ports': [],
+  'fetch_setting.apply_ip_filter_for_domain': false,
+  'token_setting.max_user_tokens': 1000,
+}
+
+// The section as the settings page shows it: built from the options query,
+// which every saved option refetches.
+function LivePage() {
+  const [container, setContainer] = useState<HTMLDivElement | null>(null)
+  const { data } = useSystemOptions()
+  const settings = useMemo(
+    () => getOptionValue(data?.data, securityDefaults),
+    [data?.data]
+  )
+  if (!data) return null
+  return (
+    <>
+      <div ref={setContainer} />
+      <SettingsPageProvider actionsContainer={container}>
+        {getSecuritySectionContent('rate-limit', settings)}
+      </SettingsPageProvider>
+    </>
+  )
+}
+
+/** Serves options from a store that api.put writes to, like the server. */
+function serveOptions(options: Record<string, string>) {
+  vi.spyOn(api, 'get').mockImplementation(async () => ({
+    data: {
+      success: true,
+      data: Object.entries(options).map(([key, value]) => ({ key, value })),
+    },
+  }))
+  vi.mocked(api.put).mockImplementation(async (_url, body) => {
+    const option = body as { key: string; value: unknown }
+    options[option.key] = String(option.value)
+    return { data: { success: true } }
+  })
+}
+
+function renderRoute(component: () => ReactNode) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   const router = createRouter({
-    routeTree: createRootRoute({
-      component: () => <Fixture modelRules={modelRules} />,
-    }),
+    routeTree: createRootRoute({ component }),
     history: createMemoryHistory({ initialEntries: ['/'] }),
   })
   render(
@@ -80,6 +140,10 @@ async function renderSection(modelRules = '{}') {
     </QueryClientProvider>
   )
   return screen.findByRole('group', { name: 'Model-based rate limits' })
+}
+
+async function renderSection(modelRules = '{}') {
+  return renderRoute(() => <Fixture modelRules={modelRules} />)
 }
 
 beforeEach(() => {
@@ -384,4 +448,114 @@ test('rules the visual table cannot read show a notice and cannot be replaced by
   expect(
     within(modelRules).getByRole('button', { name: 'Add model' })
   ).toBeDisabled()
+})
+
+test('adding a group after a model rule saves neither until Save, then both', async () => {
+  const user = userEvent.setup()
+  const options: Record<string, string> = {
+    ModelRequestRateLimitEnabled: 'true',
+    ModelRequestRateLimitCount: '0',
+    ModelRequestRateLimitSuccessCount: '1000',
+    ModelRequestRateLimitDurationMinutes: '1',
+    ModelRequestRateLimitGroup: '{}',
+    ModelRequestRateLimitModel: '{}',
+  }
+  serveOptions(options)
+  const modelRules = await renderRoute(LivePage)
+
+  await user.click(
+    within(modelRules).getByRole('button', { name: 'Add model' })
+  )
+  let dialog = await screen.findByRole('dialog')
+  await user.type(
+    within(dialog).getByRole('textbox', { name: 'Model Name' }),
+    'gpt-4o'
+  )
+  await user.type(
+    within(dialog).getByRole('spinbutton', {
+      name: 'Max Requests (including failures)',
+    }),
+    '20'
+  )
+  await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Add group' }))
+  dialog = await screen.findByRole('dialog')
+  await user.type(
+    within(dialog).getByRole('textbox', { name: 'Group Name' }),
+    'vip'
+  )
+  await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+
+  expect(api.put).not.toHaveBeenCalled()
+  expect(screen.getByRole('row', { name: /vip/ })).toBeVisible()
+
+  await user.click(screen.getByRole('button', { name: 'Save rate limits' }))
+  await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2))
+  expect(JSON.parse(options.ModelRequestRateLimitGroup)).toEqual({
+    vip: [0, 1],
+  })
+  expect(JSON.parse(options.ModelRequestRateLimitModel)).toEqual({
+    'gpt-4o': { duration_minutes: 1, total_count: 20, success_count: 0 },
+  })
+})
+
+test('editing a rule whose name has surrounding spaces changes only that rule', async () => {
+  const user = userEvent.setup()
+  const modelRules = await renderSection(
+    JSON.stringify({
+      'gpt-4o': { duration_minutes: 1, total_count: 60, success_count: 0 },
+      'gpt-4o ': { duration_minutes: 5, total_count: 3, success_count: 0 },
+    })
+  )
+
+  const row = within(modelRules)
+    .getAllByRole('row')
+    .find(
+      (candidate) =>
+        within(candidate).queryAllByRole('cell')[0]?.textContent === 'gpt-4o '
+    ) as HTMLElement
+  await user.click(within(row).getByRole('button', { name: 'Edit' }))
+  const dialog = await screen.findByRole('dialog')
+  const totalInput = within(dialog).getByRole('spinbutton', {
+    name: 'Max Requests (including failures)',
+  })
+  await user.clear(totalInput)
+  await user.type(totalInput, '7')
+  await user.click(within(dialog).getByRole('button', { name: 'Update' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+
+  const textarea = await switchToJsonMode(modelRules)
+  expect(JSON.parse((textarea as HTMLTextAreaElement).value)).toEqual({
+    'gpt-4o': { duration_minutes: 1, total_count: 60, success_count: 0 },
+    'gpt-4o ': { duration_minutes: 5, total_count: 7, success_count: 0 },
+  })
+})
+
+/** The element of the form item that holds the field's table. */
+function getTableEditor(formItem: HTMLElement): HTMLElement {
+  let editor = within(formItem).getByRole('table') as HTMLElement
+  while (editor.parentElement !== formItem) {
+    editor = editor.parentElement as HTMLElement
+  }
+  return editor
+}
+
+test('the rate limit tables scroll inside their fields instead of widening them', async () => {
+  const modelRules = await renderSection(storedRules)
+
+  // A grid item's min-content width otherwise follows its nowrap table.
+  const groupRules = screen
+    .getByText('Group-based rate limits')
+    .closest('[data-slot=form-item]') as HTMLElement
+  expect(getTableEditor(groupRules)).toHaveClass('min-w-0')
+  expect(getTableEditor(modelRules)).toHaveClass('min-w-0')
 })
