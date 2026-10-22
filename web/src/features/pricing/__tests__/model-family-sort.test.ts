@@ -40,6 +40,17 @@ function model(name: string, price = 1): PricingModel {
   }
 }
 
+function tokenModel(name: string, ratio: number): PricingModel {
+  return {
+    id: nextId++,
+    model_name: name,
+    quota_type: 0,
+    model_ratio: ratio,
+    completion_ratio: 1,
+    enable_groups: ['default'],
+  }
+}
+
 /** Sort like the page does, group, then order the families. */
 function familyTitles(models: PricingModel[], sortBy: string): string[] {
   const families = sortModelFamilies(
@@ -87,7 +98,7 @@ describe('sortModelFamilies', () => {
     expect(titles).toEqual(['beta-1', '[按量]beta-10', '[正价kiro]beta-2'])
   })
 
-  it('ranks families by their lowest member price with Price: High to Low', () => {
+  it('ranks families by their lowest member price with Per-request Price: High to Low', () => {
     const titles = familyTitles(
       [
         model('[按次]alpha-1', 0.2),
@@ -95,20 +106,44 @@ describe('sortModelFamilies', () => {
         model('[按次]beta-1', 1),
         model('[按次]gamma-1', 0.5),
       ],
-      SORT_OPTIONS.PRICE_HIGH
+      SORT_OPTIONS.REQUEST_PRICE_HIGH
     )
     expect(titles).toEqual(['[按次]beta-1', '[按次]gamma-1', 'alpha-1'])
   })
 
-  it('keeps the order of the cheapest member with Price: Low to High', () => {
+  it('keeps the order of the cheapest member with Per-request Price: Low to High', () => {
     const titles = familyTitles(
       [
         model('[按次]beta-1', 1),
         model('[按次]alpha-1-thinking-max', 5),
         model('[按次]alpha-1', 0.2),
       ],
-      SORT_OPTIONS.PRICE_LOW
+      SORT_OPTIONS.REQUEST_PRICE_LOW
     )
     expect(titles).toEqual(['alpha-1', '[按次]beta-1'])
+  })
+
+  it('ranks families by their lowest member input price with Input Price: High to Low', () => {
+    const titles = familyTitles(
+      [
+        tokenModel('[按量]alpha-1', 0.1),
+        tokenModel('[按量]alpha-1-thinking', 3),
+        tokenModel('[按量]beta-1', 1),
+      ],
+      SORT_OPTIONS.INPUT_PRICE_HIGH
+    )
+    expect(titles).toEqual(['[按量]beta-1', 'alpha-1'])
+  })
+
+  it('keeps a family without a per-request price last with Per-request Price: High to Low', () => {
+    const titles = familyTitles(
+      [
+        tokenModel('[按量]alpha-1', 5),
+        tokenModel('[按量]alpha-1-thinking', 5),
+        model('[按次]beta-1', 0.1),
+      ],
+      SORT_OPTIONS.REQUEST_PRICE_HIGH
+    )
+    expect(titles).toEqual(['[按次]beta-1', 'alpha-1'])
   })
 })

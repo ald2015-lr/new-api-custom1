@@ -78,6 +78,8 @@ func TestNewBillingSessionSubscriptionFirstWalletOverflowFollowsPlan(t *testing.
 				UserSetting:     dto.UserSetting{BillingPreference: "subscription_first"},
 			}
 			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			// Billing reads the client's language from the request.
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
 			session, apiErr := NewBillingSession(ctx, relayInfo, requestQuota)
 
@@ -150,6 +152,7 @@ func TestSubscriptionSettleOverageGoesToWalletWhenPlanAllows(t *testing.T) {
 				UserSetting:     dto.UserSetting{BillingPreference: "subscription_first"},
 			}
 			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 			session, apiErr := NewBillingSession(ctx, relayInfo, preConsume)
 			require.Nil(t, apiErr)
 			require.Equal(t, BillingSourceSubscription, relayInfo.BillingSource)

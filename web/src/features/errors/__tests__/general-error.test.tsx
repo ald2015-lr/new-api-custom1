@@ -16,19 +16,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen } from '@testing-library/react'
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  lazyRouteComponent,
+  Outlet,
+  RouterProvider,
+} from '@tanstack/react-router'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { GeneralError } from '../general-error'
-
-const navigate = vi.hoisted(() => vi.fn())
-const historyGo = vi.hoisted(() => vi.fn())
-
-vi.mock('@tanstack/react-router', () => ({
-  useNavigate: () => navigate,
-  useRouter: () => ({ history: { go: historyGo } }),
-}))
 
 const CHUNK_URL = 'http://localhost/static/js/async/42.js'
 
@@ -40,76 +41,169 @@ function rspackChunkLoadError(): Error {
   return error
 }
 
-describe('GeneralError', () => {
-  const reload = vi.fn()
+/** Shape thrown by rspack's CSS chunk loader. */
+function rspackCssChunkLoadError(): Error {
+  return Object.assign(
+    new Error('Loading CSS chunk 42 failed.\n(/static/css/42.old.css)'),
+    { code: 'CSS_CHUNK_LOAD_FAILED' }
+  )
+}
 
-  beforeEach(() => {
-    vi.stubGlobal('location', { ...window.location, reload })
-    window.sessionStorage.clear()
+const chunkErrors = [
+  { kind: 'JS', createError: rspackChunkLoadError },
+  { kind: 'CSS', createError: rspackCssChunkLoadError },
+]
+
+const reload = vi.fn()
+
+beforeEach(() => {
+  sessionStorage.clear()
+  vi.stubGlobal('location', { ...window.location, reload })
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  sessionStorage.clear()
+  reload.mockReset()
+})
+
+function createTestRouter(error: unknown) {
+  const root = createRootRoute({
+    component: Outlet,
+    errorComponent: GeneralError,
   })
-
-  afterEach(() => {
-    vi.unstubAllGlobals()
-    window.sessionStorage.clear()
+  const home = createRoute({
+    getParentRoute: () => root,
+    path: '/',
+    component: () => <p>Current page</p>,
   })
-
-  test('first chunk load failure reloads the page once and renders nothing', () => {
-    const { container } = render(
-      <GeneralError error={rspackChunkLoadError()} reset={() => undefined} />
-    )
-
-    expect(reload).toHaveBeenCalledTimes(1)
-    expect(container).toBeEmptyDOMElement()
+  const broken = createRoute({
+    getParentRoute: () => root,
+    path: '/wallet',
+    component: lazyRouteComponent(() => Promise.reject(error)),
   })
+  return createRouter({
+    routeTree: root.addChildren([home, broken]),
+    history: createMemoryHistory({ initialEntries: ['/'] }),
+    defaultPreload: 'intent',
+  })
+}
 
-  test('chunk load failure that already triggered a reload shows the chunk notice with a Reload button and no numeric heading', async () => {
-    window.sessionStorage.setItem(
-      `newapi:chunk-reload:${CHUNK_URL}`,
-      String(Date.now())
-    )
+/** Renders the app on a working page, then navigates to the broken route. */
+async function openBrokenRoute(error: unknown) {
+  const router = createTestRouter(error)
+  const view = render(<RouterProvider router={router} />)
+  await screen.findByText('Current page')
+  await act(() => router.navigate({ to: '/wallet' }))
+  return view
+}
 
-    render(
-      <GeneralError error={rspackChunkLoadError()} reset={() => undefined} />
-    )
+/** Fails the route once (which reloads), then fails it again after the reload. */
+async function openPersistentlyBrokenRoute(error: unknown) {
+  const beforeReload = await openBrokenRoute(error)
+  await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+  beforeReload.unmount()
+  return openBrokenRoute(error)
+}
 
-    expect(reload).not.toHaveBeenCalled()
+test.each(chunkErrors)(
+  'a failed $kind route chunk reloads the page once and renders nothing while it reloads',
+  async ({ createError }) => {
+    const view = await openBrokenRoute(createError())
+
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+    expect(view.container).toBeEmptyDOMElement()
+  }
+)
+
+test.each(chunkErrors)(
+  'a $kind route chunk that still fails after its reload shows the chunk notice without a numeric heading',
+  async ({ createError }) => {
+    await openPersistentlyBrokenRoute(createError())
+
     expect(
-      screen.getByText('Failed to load part of the page')
-    ).toBeInTheDocument()
+      await screen.findByText('Failed to load part of the page')
+    ).toBeVisible()
     expect(
       screen.getByText(
         'A new version may have been deployed. Please reload the page.',
         { exact: false }
       )
-    ).toBeInTheDocument()
+    ).toBeVisible()
     expect(screen.queryByRole('heading', { level: 1 })).not.toBeInTheDocument()
-
-    await userEvent.click(screen.getByRole('button', { name: 'Reload page' }))
-
     expect(reload).toHaveBeenCalledTimes(1)
+  }
+)
+
+test('the Reload page button on the chunk notice reloads the page', async () => {
+  await openPersistentlyBrokenRoute(rspackChunkLoadError())
+  reload.mockClear()
+
+  await userEvent.click(
+    await screen.findByRole('button', { name: 'Reload page' })
+  )
+
+  expect(reload).toHaveBeenCalledTimes(1)
+})
+
+test('failed and repeated intent preloads keep the current page usable until navigation', async () => {
+  const router = createTestRouter(rspackChunkLoadError())
+  render(<RouterProvider router={router} />)
+  await screen.findByText('Current page')
+
+  await act(() => router.preloadRoute({ to: '/wallet' }))
+  await act(() => router.preloadRoute({ to: '/wallet' }))
+
+  expect(screen.getByText('Current page')).toBeVisible()
+  expect(reload).not.toHaveBeenCalled()
+  expect(
+    screen.queryByText('Failed to load part of the page')
+  ).not.toBeInTheDocument()
+  await act(() => router.navigate({ to: '/wallet' }))
+  await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+})
+
+test('a chunk failure with blocked session storage shows the chunk notice without risking a reload loop', async () => {
+  vi.stubGlobal('sessionStorage', {
+    getItem: () => null,
+    setItem: () => {
+      throw new Error('Storage blocked')
+    },
+    clear: () => {},
   })
 
-  test('axios-like 429 error renders the Too many requests notice with the 429 heading', () => {
-    render(<GeneralError error={{ response: { status: 429 } }} />)
+  await openBrokenRoute(rspackChunkLoadError())
 
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('429')
-    expect(screen.getByText('Too many requests')).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Reload page' })
-    ).toBeInTheDocument()
-    expect(reload).not.toHaveBeenCalled()
-  })
+  expect(
+    await screen.findByText('Failed to load part of the page')
+  ).toBeVisible()
+  expect(reload).not.toHaveBeenCalled()
+})
 
-  test('no error renders the generic 500 heading and the Reload button', () => {
-    render(<GeneralError />)
+test('a 429 response shows the Too many requests notice under its 429 heading without reloading', async () => {
+  await openBrokenRoute({ response: { status: 429 } })
 
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('500')
-    expect(
-      screen.getByText('Oops! Something went wrong', { exact: false })
-    ).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', { name: 'Reload page' })
-    ).toBeInTheDocument()
-    expect(reload).not.toHaveBeenCalled()
-  })
+  expect(await screen.findByRole('heading', { name: '429' })).toBeVisible()
+  expect(screen.getByText('Too many requests')).toBeVisible()
+  expect(
+    screen.getByText(/Please wait a moment before trying again/)
+  ).toBeVisible()
+  expect(reload).not.toHaveBeenCalled()
+})
+
+test('a 500 response shows the generic notice under its 500 heading without reloading', async () => {
+  await openBrokenRoute({ response: { status: 500 } })
+
+  expect(await screen.findByRole('heading', { name: '500' })).toBeVisible()
+  expect(screen.getByText(/Oops! Something went wrong/)).toBeVisible()
+  expect(reload).not.toHaveBeenCalled()
+})
+
+test('an error without an HTTP status shows the generic notice and a Reload page button without a fake numeric heading', async () => {
+  await openBrokenRoute(new Error('Render failed'))
+
+  expect(await screen.findByText(/Oops! Something went wrong/)).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Reload page' })).toBeVisible()
+  expect(screen.queryByRole('heading', { level: 1 })).not.toBeInTheDocument()
+  expect(reload).not.toHaveBeenCalled()
 })

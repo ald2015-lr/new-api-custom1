@@ -1799,6 +1799,7 @@ func TestServeTaskPluginImageProtocolWaitsForAsynchronousTask(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pinned := imageProtocolTestEndpoint(t)
 			c, recorder := newImageProtocolTestContext("")
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://private.example.com")
 			deps := pluginProtocolTestDeps()
 			deps.imagePollInterval = time.Millisecond
 			deps.submissionTimeout = 50 * time.Millisecond
@@ -1812,7 +1813,7 @@ func TestServeTaskPluginImageProtocolWaitsForAsynchronousTask(t *testing.T) {
 					return nil
 				}
 				task.Status = tc.terminal
-				task.FailReason = "DataInspectionFailed"
+				task.FailReason = "DataInspectionFailed: see https://private.example.com/jobs/1"
 				task.SetData(map[string]any{"images": []string{"https://cdn.example/polled.png"}})
 				return nil
 			}
@@ -1831,6 +1832,7 @@ func TestServeTaskPluginImageProtocolWaitsForAsynchronousTask(t *testing.T) {
 			errorBody := response["error"].(map[string]any)
 			assert.Equal(t, tc.wantCode, errorBody["code"])
 			assert.Contains(t, errorBody["message"], tc.wantMessage)
+			assert.NotContains(t, errorBody["message"], "private.example.com")
 		})
 	}
 }

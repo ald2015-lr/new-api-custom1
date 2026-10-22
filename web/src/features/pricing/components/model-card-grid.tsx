@@ -31,6 +31,7 @@ import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
+import type { PerfSummaryAllData } from '@/features/performance-metrics/types'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -72,6 +73,40 @@ function useCardGridColumns(): number {
  */
 type Expansion = { families: ModelFamily[]; page: number; key: string }
 
+/** The summary endpoint accepts at most this many recent_model names. */
+const MAX_RECENT_MODELS = 50
+
+/**
+ * The 24-hour summary with the status series of every given model, asked in
+ * batches the server accepts. Each batch returns the same model summaries, so
+ * only the series are merged.
+ */
+async function fetchRecentPerfSummary(
+  names: readonly string[]
+): Promise<PerfSummaryAllData> {
+  const batches: string[][] = []
+  for (let start = 0; start < names.length; start += MAX_RECENT_MODELS) {
+    batches.push(names.slice(start, start + MAX_RECENT_MODELS))
+  }
+  const [first, ...rest] = await Promise.all(
+    batches.map(async (batch) =>
+      requireServerSuccess(await getPerfMetricsSummary(24, batch))
+    )
+  )
+  if (rest.length === 0) return first
+  return {
+    ...first,
+    data: {
+      ...first.data,
+      recent_success_series: Object.assign(
+        {},
+        first.data?.recent_success_series,
+        ...rest.map((result) => result.data?.recent_success_series)
+      ),
+    },
+  }
+}
+
 export const ModelCardGrid = memo(function ModelCardGrid(
   props: ModelCardGridProps
 ) {
@@ -90,22 +125,31 @@ export const ModelCardGrid = memo(function ModelCardGrid(
       : null
   const panelId = useId()
 
-  const perfQuery = useQuery({
-    queryKey: ['perf-metrics-summary', 24],
-    queryFn: async () => requireServerSuccess(await getPerfMetricsSummary(24)),
-    staleTime: 60 * 1000,
-    retry: false,
-  })
-
   const pagedModels = useMemo(() => {
     const start = (currentPage - 1) * pageSize
     return props.models.slice(start, start + pageSize)
   }, [currentPage, pageSize, props.models])
-
   const pagedFamilies = useMemo(() => {
     const start = (currentPage - 1) * pageSize
     return props.families?.slice(start, start + pageSize)
   }, [currentPage, pageSize, props.families])
+  // Status bars need the series of every model shown: in family view that is
+  // each variant of the families on this page, not the flat list's page.
+  const recentModels = useMemo(() => {
+    const names = pagedFamilies
+      ? pagedFamilies.flatMap((family) =>
+          family.models.map((model) => model.model_name || '')
+        )
+      : pagedModels.map((model) => model.model_name || '')
+    return [...new Set(names)]
+  }, [pagedFamilies, pagedModels])
+  const perfQuery = useQuery({
+    queryKey: ['perf-metrics-summary', 24, recentModels],
+    queryFn: () => fetchRecentPerfSummary(recentModels),
+    enabled: recentModels.length > 0,
+    staleTime: 60 * 1000,
+    retry: false,
+  })
 
   const priceOptions = useMemo(
     () => ({
@@ -131,6 +175,17 @@ export const ModelCardGrid = memo(function ModelCardGrid(
         ...model,
         window_start: perfQuery.data?.data.window_start,
         window_end: perfQuery.data?.data.window_end,
+      })
+    }
+    for (const [name, series] of Object.entries(
+      perfQuery.data?.data?.recent_success_series ?? {}
+    )) {
+      map.set(name, {
+        avg_latency_ms: Number.NaN,
+        avg_tps: Number.NaN,
+        success_rate: Number.NaN,
+        ...map.get(name),
+        recent_success_series: series,
       })
     }
     return map

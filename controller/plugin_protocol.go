@@ -212,7 +212,7 @@ func serveTaskPluginProtocol(
 			missing = true
 		}
 		if missing {
-			logger.LogError(c, "pinned task plugin does not support the requested protocol form")
+			logger.LogError(c, common.LogText("pinned task plugin does not support the requested protocol form"))
 			respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 			return
 		}
@@ -300,7 +300,7 @@ func serveTaskPluginProtocol(
 	}
 	if relayInfoErr != nil {
 		err := relayInfoErr
-		logger.LogError(c, "build task protocol relay info failed: "+err.Error())
+		logger.LogError(c, common.LogText("build task protocol relay info failed: %s", err.Error()))
 		logger.LogDebug(c, "task_plugin subsystem=protocol event=bridge_failed generation=%d plugin=%q stage=relay_info reason=invalid_context", generation, pluginKey)
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
@@ -334,7 +334,7 @@ func serveTaskPluginProtocol(
 	if outcome == nil || outcome.Task == nil || outcome.RelayInfo == nil ||
 		outcome.Task.UserId != relayInfo.UserId ||
 		outcome.Task.Platform != constant.TaskPlatform(pinned.Plugin.Meta.Key) {
-		logger.LogError(c, "task protocol submission returned an invalid durable outcome")
+		logger.LogError(c, common.LogText("task protocol submission returned an invalid durable outcome"))
 		logger.LogDebug(c, "task_plugin subsystem=protocol event=submission_failed generation=%d plugin=%q reason=invalid_durable_outcome", generation, pluginKey)
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
@@ -372,7 +372,7 @@ func serveTaskPluginProtocol(
 		outcome.Task.PrivateData.ResponsesBackground = true
 		if outcome.Task.ID != 0 {
 			if err := model.DB.Model(outcome.Task).Update("private_data", outcome.Task.PrivateData).Error; err != nil {
-				logger.LogError(c, "persist task background flag failed: "+err.Error())
+				logger.LogError(c, common.LogText("persist task background flag failed: %s", err.Error()))
 			}
 		}
 		machine.SetBackground(true)
@@ -454,7 +454,7 @@ func streamTaskPluginProtocol(
 		if errors.Is(loadContextErr, context.DeadlineExceeded) &&
 			observationContext.Err() == nil &&
 			c.Request.Context().Err() == nil {
-			logger.LogWarn(c, fmt.Sprintf(
+			logger.LogWarn(c, common.LogText(
 				"task protocol database observation overloaded; plugin=%s task=%s",
 				pinned.Plugin.Meta.Key,
 				taskID,
@@ -489,7 +489,7 @@ func streamTaskPluginProtocol(
 				return
 			}
 			if loadErr != nil && !errors.Is(loadErr, context.Canceled) {
-				logger.LogError(c, "task protocol database observation failed")
+				logger.LogError(c, common.LogText("task protocol database observation failed"))
 			}
 			if c.Request.Context().Err() == nil {
 				logger.LogDebug(c, "task_plugin subsystem=protocol event=observation_failed generation=%d plugin=%q mode=stream stage=load reason=task_unavailable", generation, pluginKey)
@@ -515,20 +515,20 @@ func streamTaskPluginProtocol(
 		}
 		view, viewErr := service.BuildTaskPluginView(task)
 		if viewErr != nil {
-			logger.LogError(c, "build task protocol view failed: "+viewErr.Error())
+			logger.LogError(c, common.LogText("build task protocol view failed: %s", viewErr.Error()))
 			writeTaskPluginProtocolFailure(c, machine, lastStatus)
 			return
 		}
 		viewValue, viewErr := taskPluginProtocolJSONValue(view)
 		if viewErr != nil {
-			logger.LogError(c, "encode task protocol view failed: "+viewErr.Error())
+			logger.LogError(c, common.LogText("encode task protocol view failed: %s", viewErr.Error()))
 			writeTaskPluginProtocolFailure(c, machine, lastStatus)
 			return
 		}
 		hookStarted := deps.now()
 		rendererContext, contextErr := taskPluginProtocolRendererContext(protocolRequest, pinned, task, deps.artifactContentURL)
 		if contextErr != nil {
-			logger.LogError(c, "build task protocol renderer context failed")
+			logger.LogError(c, common.LogText("build task protocol renderer context failed"))
 			writeTaskPluginProtocolFailure(c, machine, lastStatus)
 			return
 		}
@@ -551,13 +551,13 @@ func streamTaskPluginProtocol(
 			}
 			if errors.Is(callErr, pluginruntime.ErrCallAdmissionTimeout) {
 				overloaded = true
-				logger.LogWarn(c, fmt.Sprintf(
+				logger.LogWarn(c, common.LogText(
 					"task protocol render hook overloaded; plugin=%s task=%s",
 					pinned.Plugin.Meta.Key,
 					taskID,
 				))
 			} else {
-				logger.LogError(c, "task protocol render hook failed")
+				logger.LogError(c, common.LogText("task protocol render hook failed"))
 				logger.LogDebug(
 					c,
 					"task_plugin subsystem=protocol event=observation_failed generation=%d plugin=%q mode=stream stage=render_events reason=hook_failed elapsed_ms=%d",
@@ -572,13 +572,13 @@ func streamTaskPluginProtocol(
 		if !overloaded {
 			result, decodeErr := relay.DecodePluginProtocolEventResult(value, deps.protocolLimits)
 			if decodeErr != nil {
-				logger.LogError(c, "task protocol render result invalid: "+decodeErr.Error())
+				logger.LogError(c, common.LogText("task protocol render result invalid: %s", decodeErr.Error()))
 				writeTaskPluginProtocolFailure(c, machine, lastStatus)
 				return
 			}
 			events, applyErr := machine.ApplyTick(result, lastStatus)
 			if applyErr != nil {
-				logger.LogError(c, "task protocol state transition failed: "+applyErr.Error())
+				logger.LogError(c, common.LogText("task protocol state transition failed: %s", applyErr.Error()))
 				writeTaskPluginProtocolFailure(c, machine, lastStatus)
 				return
 			}
@@ -614,7 +614,7 @@ func streamTaskPluginProtocol(
 			delay += deps.tickInterval
 		} else if hookElapsed > deps.tickInterval {
 			delay += deps.tickInterval
-			logger.LogWarn(c, fmt.Sprintf(
+			logger.LogWarn(c, common.LogText(
 				"task protocol render hook slow; plugin=%s task=%s elapsed_ms=%d",
 				pinned.Plugin.Meta.Key,
 				taskID,
@@ -699,7 +699,7 @@ func waitTaskPluginProtocol(
 			observationContext.Err() == nil &&
 			c.Request.Context().Err() == nil
 		if loadOverloaded {
-			logger.LogWarn(c, fmt.Sprintf(
+			logger.LogWarn(c, common.LogText(
 				"task protocol database observation overloaded; plugin=%s task=%s",
 				pinned.Plugin.Meta.Key,
 				taskID,
@@ -719,7 +719,7 @@ func waitTaskPluginProtocol(
 				return
 			}
 			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.LogError(c, "task protocol database observation failed")
+				logger.LogError(c, common.LogText("task protocol database observation failed"))
 			}
 			if c.Request.Context().Err() == nil {
 				logger.LogDebug(c, "task_plugin subsystem=protocol event=observation_failed generation=%d plugin=%q mode=nonstream stage=load reason=task_unavailable", generation, pluginKey)
@@ -780,13 +780,13 @@ func waitTaskPluginProtocol(
 				}
 				if errors.Is(callErr, pluginruntime.ErrCallAdmissionTimeout) {
 					overloaded = true
-					logger.LogWarn(c, fmt.Sprintf(
+					logger.LogWarn(c, common.LogText(
 						"task protocol final hook overloaded; plugin=%s task=%s",
 						pinned.Plugin.Meta.Key,
 						taskID,
 					))
 				} else {
-					logger.LogError(c, "task protocol final hook failed")
+					logger.LogError(c, common.LogText("task protocol final hook failed"))
 					logger.LogDebug(
 						c,
 						"task_plugin subsystem=protocol event=observation_failed generation=%d plugin=%q mode=nonstream stage=render_final reason=hook_failed elapsed_ms=%d",
@@ -963,7 +963,7 @@ func retrieveTaskPluginResponse(c *gin.Context, deps pluginProtocolBridgeDeps) {
 
 	task, exists, err := deps.getByTaskId(userID, taskID)
 	if err != nil {
-		logger.LogError(c, "task protocol retrieve lookup failed")
+		logger.LogError(c, common.LogText("task protocol retrieve lookup failed"))
 		logger.LogDebug(c, "task_plugin subsystem=protocol event=retrieve_failed reason=lookup_error public_task_id=%q", taskID)
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
@@ -1067,7 +1067,7 @@ func retrieveTaskPluginResponse(c *gin.Context, deps pluginProtocolBridgeDeps) {
 		)
 	}
 	if renderErr != nil {
-		logger.LogError(c, "task protocol retrieve render failed")
+		logger.LogError(c, common.LogText("task protocol retrieve render failed"))
 		logger.LogDebug(
 			c,
 			"task_plugin subsystem=protocol event=retrieve_failed generation=%d plugin=%q public_task_id=%q stage=render_final elapsed_ms=%d",
@@ -1110,7 +1110,7 @@ func writeTaskPluginProtocolFailure(
 ) {
 	failed, err := machine.FailureEvent(taskStatus)
 	if err != nil {
-		logger.LogError(c, "task protocol failure event failed: "+err.Error())
+		logger.LogError(c, common.LogText("task protocol failure event failed: %s", err.Error()))
 		return
 	}
 	_ = writeTaskPluginProtocolEvent(c, failed)
@@ -1123,7 +1123,7 @@ func writeTaskPluginProtocolTimeout(
 ) {
 	incomplete, err := machine.TimeoutEvent(taskStatus)
 	if err != nil {
-		logger.LogError(c, "task protocol timeout event failed: "+err.Error())
+		logger.LogError(c, common.LogText("task protocol timeout event failed: %s", err.Error()))
 		return
 	}
 	_ = writeTaskPluginProtocolEvent(c, incomplete)
@@ -1137,7 +1137,7 @@ func writeTaskPluginProtocolFailureResponse(
 	if taskStatus == string(model.TaskStatusFailure) {
 		response, err := machine.FinalResponse(nil, taskStatus)
 		if err != nil {
-			logger.LogError(c, "task protocol terminal failure response failed: "+err.Error())
+			logger.LogError(c, common.LogText("task protocol terminal failure response failed: %s", err.Error()))
 			respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 			return
 		}
@@ -1146,7 +1146,7 @@ func writeTaskPluginProtocolFailureResponse(
 	}
 	response, err := machine.FailureResponse(taskStatus)
 	if err != nil {
-		logger.LogError(c, "task protocol failure response failed: "+err.Error())
+		logger.LogError(c, common.LogText("task protocol failure response failed: %s", err.Error()))
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
 	}
@@ -1160,7 +1160,7 @@ func writeTaskPluginProtocolTimeoutResponse(
 ) {
 	response, err := machine.TimeoutResponse(lastStatus)
 	if err != nil {
-		logger.LogError(c, "task protocol timeout response failed: "+err.Error())
+		logger.LogError(c, common.LogText("task protocol timeout response failed: %s", err.Error()))
 		respondPluginProtocolError(c, http.StatusInternalServerError, "task_protocol_error", "Task protocol request failed")
 		return
 	}

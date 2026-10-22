@@ -59,8 +59,10 @@ export function GeneralError({
   const isRateLimited = status === 429
   const isChunkError = isChunkLoadError(error)
 
-  // Layout effect: the state update is flushed before paint, so a page that
-  // is about to reload never flashes the error UI first.
+  // Recover only when the failed route is displayed, never on intent preload:
+  // this component renders only for the route that is actually shown. Layout
+  // effect: the state update is flushed before paint, so a page that is about
+  // to reload never flashes the error UI first.
   useLayoutEffect(() => {
     if (!isChunkError) return
     if (reloadOnceForChunkError(error)) setReloading(true)
@@ -86,10 +88,8 @@ export function GeneralError({
   return (
     <div className={cn('h-svh w-full', className)}>
       <div className='m-auto flex h-full w-full flex-col items-center justify-center gap-2'>
-        {!minimal && !isChunkError && (
-          <h1 className='text-[7rem] leading-tight font-bold'>
-            {status ?? 500}
-          </h1>
+        {!minimal && status !== undefined && (
+          <h1 className='text-[7rem] leading-tight font-bold'>{status}</h1>
         )}
         <span className='font-medium'>{title}</span>
         <p className='text-muted-foreground text-center'>

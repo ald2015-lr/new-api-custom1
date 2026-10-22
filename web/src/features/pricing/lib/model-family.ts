@@ -34,7 +34,13 @@ import {
   type DynamicPriceEntry,
   type DynamicPriceOptions,
 } from './dynamic-price'
-import { getModelPrice, parseTags } from './filters'
+import {
+  compareSortPrices,
+  getPriceSort,
+  getSortPrice,
+  parseTags,
+  type SortPriceKind,
+} from './filters'
 import { getDisplayGroupRatio, isTokenBasedModel } from './model-helpers'
 import {
   stripLineTag,
@@ -488,16 +494,23 @@ function familySortName(family: ModelFamily): string {
     : family.base
 }
 
-function lowestSortPrice(family: ModelFamily): number {
-  return Math.min(...family.models.map(getModelPrice))
+function lowestSortPrice(
+  family: ModelFamily,
+  kind: SortPriceKind
+): number | undefined {
+  const prices = family.models
+    .map((model) => getSortPrice(model, kind))
+    .filter((price) => price !== undefined)
+  return prices.length > 0 ? Math.min(...prices) : undefined
 }
 
 /**
  * Order families for the active sort. Grouping keeps the order in which each
- * family's first member appears, which is right for Price: Low to High (the
- * cheapest member leads). Name sorts by the title a family shows, without the
- * line tag, so the A-Z order does not restart once per line. Price: High to
- * Low ranks by the lowest member price, the one the family's chips show.
+ * family's first member appears, which is right for a Low to High price sort
+ * (the cheapest member leads). Name sorts by the title a family shows, without
+ * the line tag, so the A-Z order does not restart once per line. A High to Low
+ * price sort ranks by the lowest member price of that kind, the one the
+ * family's chips show; families without that price stay last.
  */
 export function sortModelFamilies(
   families: ModelFamily[],
@@ -512,8 +525,17 @@ export function sortModelFamilies(
         )
     )
   }
-  if (sortBy === SORT_OPTIONS.PRICE_HIGH) {
-    return [...families].sort((a, b) => lowestSortPrice(b) - lowestSortPrice(a))
+  const priceSort = getPriceSort(sortBy)
+  if (priceSort?.dir === -1) {
+    const lowest = new Map(
+      families.map((family) => [
+        family,
+        lowestSortPrice(family, priceSort.kind),
+      ])
+    )
+    return [...families].sort((a, b) =>
+      compareSortPrices(lowest.get(a), lowest.get(b), priceSort.dir)
+    )
   }
   return families
 }

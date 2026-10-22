@@ -12,19 +12,19 @@ import (
 // an event in the dialect the client speaks and the stream is terminated.
 // Writing a JSON body at that point would glue a non-SSE object onto the
 // stream, which every strict client reports as a parse error mid-answer.
-func WriteStreamError(c *gin.Context, relayFormat types.RelayFormat, apiErr *types.NewAPIError) {
+func WriteStreamError(c *gin.Context, relayFormat types.RelayFormat, apiErr *types.NewAPIError, upstreamURLs ...string) {
 	if c == nil || c.Writer == nil || apiErr == nil {
 		return
 	}
 	switch relayFormat {
 	case types.RelayFormatClaude:
-		payload, err := common.Marshal(gin.H{"type": "error", "error": apiErr.ToClaudeError()})
+		payload, err := common.Marshal(gin.H{"type": "error", "error": apiErr.ToClaudeError(upstreamURLs...)})
 		if err != nil {
 			return
 		}
 		ClaudeChunkData(c, dto.ClaudeResponse{Type: "error"}, string(payload))
 	case types.RelayFormatOpenAIResponses, types.RelayFormatOpenAIResponsesCompaction:
-		openaiErr := apiErr.ToOpenAIError()
+		openaiErr := apiErr.ToOpenAIError(upstreamURLs...)
 		payload, err := common.Marshal(gin.H{
 			"type":    "error",
 			"code":    openaiErr.Code,
@@ -43,7 +43,7 @@ func WriteStreamError(c *gin.Context, relayFormat types.RelayFormat, apiErr *typ
 	default:
 		// Chat completions and every other data:-only stream. openai
 		// compatible SDKs raise a typed error for a {"error": ...} chunk.
-		_ = ObjectData(c, gin.H{"error": apiErr.ToOpenAIError()})
+		_ = ObjectData(c, gin.H{"error": apiErr.ToOpenAIError(upstreamURLs...)})
 		Done(c)
 	}
 }

@@ -116,6 +116,7 @@ function buildExistingKey(overrides: Partial<ApiKey>): ApiKey {
     model_limits_enabled: false,
     model_limits: '',
     allow_ips: '',
+    allow_user_quota_query: false,
     ...overrides,
   }
 }
@@ -451,5 +452,26 @@ describe('API keys mutate drawer recharge-gated groups', () => {
       'Requires cumulative top-up of 50 (current 20)'
     )
     expect(usableEntry).not.toHaveTextContent('Requires cumulative top-up')
+  })
+})
+
+describe('API keys mutate drawer user quota query switch', () => {
+  test('sends false for a new key after the switch, which starts on, is turned off', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderDrawer()
+
+    fireEvent.click(findButton('Advanced Settings', true))
+    const quotaQuerySwitch = await screen.findByRole('switch', {
+      name: 'Allow querying user quota',
+    })
+    expect(quotaQuerySwitch).toBeChecked()
+    fireEvent.click(quotaQuerySwitch)
+    expect(quotaQuerySwitch).not.toBeChecked()
+
+    changeInput(getControlByLabel('Name'), 'no-user-quota')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+    expect(createdPayloads[0]?.allow_user_quota_query).toBe(false)
   })
 })

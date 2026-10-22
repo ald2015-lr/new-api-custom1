@@ -95,6 +95,29 @@ func createMiddlewarePATUser(t *testing.T, username, token string) *model.User {
 	return user
 }
 
+// Read-only API key routes (/api/usage/token, /api/log/token) are called by
+// scripts, not the web console, so their errors are translated by the backend
+// in the language the request asks for.
+func TestTokenAuthReadOnlyTranslatesErrors(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, tc := range []struct {
+		acceptLanguage string
+		want           string
+	}{
+		{"zh-CN", "未提供令牌"},
+		{"en-US", "Token not provided"},
+	} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/log/token", nil)
+		c.Request.Header.Set("Accept-Language", tc.acceptLanguage)
+		TokenAuthReadOnly()(c)
+		assert.True(t, c.IsAborted(), tc.acceptLanguage)
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code, tc.acceptLanguage)
+		assert.JSONEq(t, `{"success":false,"message":"`+tc.want+`"}`, recorder.Body.String(), tc.acceptLanguage)
+	}
+}
+
 func TestUserAuthAllowsOpaqueDottedPAT(t *testing.T) {
 	setupDashboardAuthMiddlewareTest(t)
 	user := createMiddlewarePATUser(t, "dotted-pat-user", "opaque.key.with-dots")

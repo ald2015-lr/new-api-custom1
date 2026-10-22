@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -102,6 +103,7 @@ func TestFreeGroupRefundsReservationFromEarlierPaidGroup(t *testing.T) {
 		UserSetting:     dto.UserSetting{BillingPreference: "wallet_only"},
 	}
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	require.Nil(t, PreConsumeBilling(ctx, 5000, relayInfo))
 	require.NotNil(t, relayInfo.Billing)
 	assert.Equal(t, 95_000, getUserQuota(t, 895))
