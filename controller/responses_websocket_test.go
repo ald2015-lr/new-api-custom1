@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -277,6 +278,8 @@ func TestResponsesWSRequestRunnerSharesRedisSuccessLimitWithHTTP(t *testing.T) {
 
 type responsesWSBillingTest struct {
 	httpUpstream http.HandlerFunc
+	// httpRelayed, when set, inspects the gateway context after an HTTP relay.
+	httpRelayed  func(*gin.Context)
 	httpDone     chan struct{}
 	user         *model.User
 	token        *model.Token
@@ -414,6 +417,9 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 		defer func() { fixture.httpDone <- struct{}{} }()
 		c.Set(common.RequestIdKey, "responses-http-billing")
 		Relay(c, types.RelayFormatOpenAIResponses)
+		if fixture.httpRelayed != nil {
+			fixture.httpRelayed(c)
+		}
 	})
 	gateway := httptest.NewServer(engine)
 	fixture.gatewayURL = gateway.URL
@@ -426,7 +432,7 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 }
 
 func TestResponsesInterruptedStreamHealth(t *testing.T) {
-	for _, scenario := range []string{"websocket timeout", "sse timeout", "sse client cancel"} {
+	for _, scenario := range []string{"websocket timeout", "sse timeout", "sse upstream eof", "sse client cancel"} {
 		t.Run(scenario, func(t *testing.T) {
 			events := []string{`{"type":"response.created","response":{"id":"partial","status":"in_progress"}}`, `{"type":"response.output_text.delta","delta":"hello"}`}
 			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
@@ -447,6 +453,9 @@ func TestResponsesInterruptedStreamHealth(t *testing.T) {
 					_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
 				}
 				w.(http.Flusher).Flush()
+				if scenario == "sse upstream eof" {
+					return
+				}
 				<-r.Context().Done()
 			}
 			if scenario == "websocket timeout" {
@@ -475,8 +484,13 @@ func TestResponsesInterruptedStreamHealth(t *testing.T) {
 					}
 					cancel()
 				} else {
-					_, err = io.Copy(io.Discard, response.Body)
+					// The cut stream ends with one error event after the
+					// delivered events, not with a silent close.
+					body, err := io.ReadAll(response.Body)
 					require.NoError(t, err)
+					assert.Equal(t, 1, strings.Count(string(body), "event: error\n"), string(body))
+					assert.True(t, strings.HasSuffix(string(body), "event: error\n"+`data: {"code":"upstream_stream_interrupted","message":"upstream stream ended before the response was complete (request id: responses-http-billing)","param":"","type":"error"}`+"\n\n"), string(body))
+					assert.Equal(t, 1, strings.Count(string(body), "event: response.output_text.delta\n"), "delivered output is never retried")
 				}
 				require.NoError(t, response.Body.Close())
 				select {
@@ -487,6 +501,22 @@ func TestResponsesInterruptedStreamHealth(t *testing.T) {
 			}
 			fixture.closeAndWait(t)
 			assertResponsesWSAccounting(t, fixture, []int{1000})
+			if scenario != "websocket timeout" {
+				var logs []model.Log
+				require.NoError(t, model.LOG_DB.Where("token_id = ? AND type = ?", fixture.token.Id, model.LogTypeConsume).Find(&logs).Error)
+				require.Len(t, logs, 1)
+				var other map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &other))
+				stream := other["stream_status"].(map[string]any)
+				if scenario == "sse client cancel" {
+					assert.NotContains(t, stream, "response_status", "a client that left is not reported as an upstream cut")
+					// The upstream read fails with the client's cancellation
+					// as well; it must not be logged as a scanner error.
+					assert.Equal(t, "client_gone", stream["end_reason"])
+				} else {
+					assert.Equal(t, "failed", stream["response_status"])
+				}
+			}
 			if scenario == "sse client cancel" {
 				keys, err := common.RDB.Keys(context.Background(), "perf:ws-billing:*").Result()
 				require.NoError(t, err)
@@ -498,6 +528,151 @@ func TestResponsesInterruptedStreamHealth(t *testing.T) {
 			assert.Zero(t, successes)
 		})
 	}
+}
+
+// A client that gives up on a slow non-stream request takes the upstream
+// request with it: the upstream connection closes at once, no other channel
+// is tried, the channel is not blamed and the reservation is refunded.
+func TestResponsesClientCancelAbortsUpstreamRequest(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(*websocket.Conn, *http.Request) {})
+	previousRetries, previousErrorLog := common.RetryTimes, constant.ErrorLogEnabled
+	common.RetryTimes, constant.ErrorLogEnabled = 2, true
+	t.Cleanup(func() { common.RetryTimes, constant.ErrorLogEnabled = previousRetries, previousErrorLog })
+	// A second channel the relay could switch to.
+	second := &model.Channel{Name: "responses-ws-second", Key: "upstream-third", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: "ws-billing", BaseURL: fixture.channel.BaseURL}
+	require.NoError(t, model.DB.Create(second).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: second.Id, Model: "ws-billing", Group: "default", Enabled: true}).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("channel_id = ?", second.Id).Delete(&model.Ability{}).Error)
+		require.NoError(t, model.DB.Delete(second).Error)
+	})
+
+	var upstreamRequests atomic.Int32
+	reserved, upstreamClosed, testDone := make(chan int, 1), make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(testDone) })
+	fixture.httpUpstream = func(_ http.ResponseWriter, r *http.Request) {
+		// net/http notices a closed connection only after the body is read.
+		_, _ = io.ReadAll(r.Body)
+		if upstreamRequests.Add(1) > 1 {
+			return
+		}
+		var token model.Token
+		if assert.NoError(t, model.DB.First(&token, fixture.token.Id).Error) {
+			reserved <- token.RemainQuota
+		}
+		select {
+		case <-r.Context().Done():
+			close(upstreamClosed)
+		case <-testDone:
+		}
+	}
+	var usedChannels []string
+	var events []service.PolicyEvent
+	fixture.httpRelayed = func(c *gin.Context) {
+		usedChannels = c.GetStringSlice("use_channel")
+		events = service.RequestPolicy(c).Events()
+	}
+
+	ctx, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":"hello"}`))
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+	request.Header.Set("Content-Type", "application/json")
+	clientErr := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		clientErr <- err
+	}()
+	select {
+	case quota := <-reserved:
+		assert.Equal(t, 2000, quota, "the request reserved quota before contacting upstream")
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream did not receive the request")
+	}
+	disconnect()
+	require.ErrorIs(t, <-clientErr, context.Canceled)
+	select {
+	case <-upstreamClosed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the upstream request stayed open after the client left")
+	}
+	select {
+	case <-fixture.httpDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the abandoned request did not finish")
+	}
+
+	assert.Equal(t, int32(1), upstreamRequests.Load())
+	assert.Len(t, usedChannels, 1, "no other channel is tried for a client that left")
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	assert.Equal(t, service.PolicyDecision{Action: "stop", Reason: "client_gone", Source: "client"}, last.Decision)
+	assert.Equal(t, "unchanged", last.Health)
+	var errorLogs int64
+	require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("type = ?", model.LogTypeError).Count(&errorLogs).Error)
+	assert.Zero(t, errorLogs, "the channel is not blamed for the client leaving")
+	// The refund runs asynchronously and restores the token last.
+	require.Eventually(t, func() bool {
+		var token model.Token
+		return model.DB.First(&token, fixture.token.Id).Error == nil && token.RemainQuota == 3000
+	}, 3*time.Second, 10*time.Millisecond, "the reservation is refunded")
+	assertResponsesWSAccounting(t, fixture, nil)
+	keys, err := common.RDB.Keys(context.Background(), "perf:ws-billing:*").Result()
+	require.NoError(t, err)
+	assert.Empty(t, keys, "client cancellation must not affect model health")
+}
+
+// A WebSocket client that closes while the upstream dial is still pending
+// cancels the dial itself: the channel is not blamed and the reservation is
+// refunded.
+func TestResponsesWebSocketClientLeavingDuringDialDoesNotBlameChannel(t *testing.T) {
+	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(*websocket.Conn, *http.Request) {})
+	previousRetries, previousErrorLog := common.RetryTimes, constant.ErrorLogEnabled
+	common.RetryTimes, constant.ErrorLogEnabled = 2, true
+	t.Cleanup(func() { common.RetryTimes, constant.ErrorLogEnabled = previousRetries, previousErrorLog })
+	// The upstream accepts the connection but never answers the TLS
+	// handshake, so the dial waits until it is cancelled.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case accepted <- conn:
+			default:
+				_ = conn.Close()
+			}
+		}
+	}()
+	require.NoError(t, model.DB.Model(fixture.channel).Update("base_url", "https://"+listener.Addr().String()).Error)
+
+	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hello"}`)))
+	select {
+	case conn := <-accepted:
+		t.Cleanup(func() { _ = conn.Close() })
+	case <-time.After(3 * time.Second):
+		t.Fatal("the upstream dial did not start")
+	}
+	fixture.closeAndWait(t)
+
+	var errorLogs int64
+	require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("type = ?", model.LogTypeError).Count(&errorLogs).Error)
+	assert.Zero(t, errorLogs, "the channel is not blamed for the client leaving")
+	// The refund runs asynchronously and restores the token last.
+	require.Eventually(t, func() bool {
+		var token model.Token
+		return model.DB.First(&token, fixture.token.Id).Error == nil && token.RemainQuota == 3000
+	}, 3*time.Second, 10*time.Millisecond, "the reservation is refunded")
+	assertResponsesWSAccounting(t, fixture, nil)
 }
 
 func readResponsesWSTestEvent(t *testing.T, client *websocket.Conn) map[string]any {
@@ -1067,20 +1242,27 @@ func TestResponsesHTTPHealthCountsFinalResult(t *testing.T) {
 // upstream decides how the attempt ends. A second request then shows whether
 // the success limiter (SuccessCount 1) counted the first one as a success.
 func TestResponsesHTTPKeepAlive(t *testing.T) {
+	// The success limiter's 429 is translated.
+	require.NoError(t, i18n.Init())
 	const completed = `{"id":"completed","status":"completed","usage":{"input_tokens":1000,"output_tokens":1,"total_tokens":1001}}`
 	for _, tc := range []struct {
 		name     string
 		disabled bool
 		stream   bool
 		statuses []int // upstream status per attempt
-		frame    string
-		attempts int64
-		success  bool
+		// the upstream pauses after its first event instead of before it
+		afterCreated bool
+		frame        string
+		attempts     int64
+		success      bool
 	}{
 		{name: "json body follows whitespace", statuses: []int{200}, frame: "\n", attempts: 1, success: true},
 		{name: "retry after keepalive", statuses: []int{500, 200}, frame: "\n", attempts: 2, success: true},
 		{name: "error after keepalive", statuses: []int{400}, frame: "\n", attempts: 1},
+		// The OpenAI SDK stream helpers reject any event ahead of
+		// response.created; Codex only counts events.
 		{name: "stream pings before events", stream: true, statuses: []int{200}, frame: ": PING\n\n", attempts: 1, success: true},
+		{name: "stream keepalive event after the first event", stream: true, afterCreated: true, statuses: []int{200}, frame: "event: keepalive\ndata: {\"type\":\"keepalive\"}\n\n", attempts: 1, success: true},
 		{name: "disabled", disabled: true, statuses: []int{400}, attempts: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1104,13 +1286,17 @@ func TestResponsesHTTPKeepAlive(t *testing.T) {
 			var attempts atomic.Int64
 			fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
 				attempt := int(attempts.Add(1))
-				if attempt == 1 {
+				if attempt == 1 && !tc.afterCreated {
 					<-release
 				}
 				status := tc.statuses[min(attempt, len(tc.statuses))-1]
 				if tc.stream && status == http.StatusOK {
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, _ = fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"completed\",\"status\":\"in_progress\"}}\n\n")
+					if tc.afterCreated {
+						w.(http.Flusher).Flush()
+						<-release
+					}
 					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":%s}\n\n", completed)
 					_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 					return
@@ -1154,6 +1340,18 @@ func TestResponsesHTTPKeepAlive(t *testing.T) {
 			}
 			response := send()
 			reader := bufio.NewReader(response.Body)
+			var head string
+			for tc.afterCreated && !strings.HasSuffix(head, "\n\n") {
+				line, err := reader.ReadString('\n')
+				require.NoError(t, err)
+				if head == "" && line == ": PING\n" {
+					// A keepalive ahead of the first event stays a comment.
+					_, err = reader.ReadString('\n')
+					require.NoError(t, err)
+					continue
+				}
+				head += line
+			}
 			frame := make([]byte, len(tc.frame))
 			_, err := io.ReadFull(reader, frame)
 			require.NoError(t, err)
@@ -1174,8 +1372,10 @@ func TestResponsesHTTPKeepAlive(t *testing.T) {
 			case tc.stream:
 				assert.Equal(t, http.StatusOK, response.StatusCode)
 				assert.Equal(t, "text/event-stream", response.Header.Get("Content-Type"))
-				assert.True(t, strings.HasPrefix(payload, "event: response.created\ndata: "), payload)
-				assert.Contains(t, payload, "event: response.completed\ndata: ")
+				events := head + payload
+				assert.True(t, strings.HasPrefix(events, "event: response.created\ndata: "), events)
+				assert.Contains(t, events, "event: response.completed\ndata: ")
+				assert.NotContains(t, events, "keepalive", "one keepalive per idle interval")
 			default:
 				// The status line went out with the first keepalive; the body is
 				// whitespace followed by one JSON document either way.

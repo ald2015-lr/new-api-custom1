@@ -2,15 +2,18 @@ package gemini
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/tokenkit"
@@ -751,6 +754,176 @@ func TestGeminiHandlersCountGroundingQueries(t *testing.T) {
 				}
 			}
 			assert.Equal(t, tt.want, counts)
+		})
+	}
+}
+
+// A Gemini upstream that closes before any candidate finishes used to be
+// finished as a normal answer; each client dialect now gets one error event
+// instead, a finished stream is unchanged, and an in-band error envelope
+// stops the stream with the upstream's own status and message.
+func TestGeminiStreamHandlersReportCutUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	const (
+		partial  = `{"candidates":[{"content":{"role":"model","parts":[{"text":"hel"}]},"index":0}],"modelVersion":"gemini-2.5-flash"}`
+		finished = `{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,"totalTokenCount":6},"modelVersion":"gemini-2.5-flash"}`
+		inBand   = `{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}`
+		blocked  = `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":4,"totalTokenCount":4},"modelVersion":"gemini-2.5-flash"}`
+		message  = "upstream stream ended before the response was complete (request id: gemini-cut)"
+	)
+	runBody := func(t *testing.T, format types.RelayFormat, body io.Reader) (*relaycommon.RelayInfo, *dto.Usage, *types.NewAPIError, *gin.Context, *httptest.ResponseRecorder) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set(common.RequestIdKey, "gemini-cut")
+		info := &relaycommon.RelayInfo{
+			RelayFormat:        format,
+			IsStream:           true,
+			ShouldIncludeUsage: true,
+			DisablePing:        true,
+			OriginModelName:    "gemini-2.5-flash",
+			ChannelMeta:        &relaycommon.ChannelMeta{UpstreamModelName: "gemini-2.5-flash"},
+			ClaudeConvertInfo:  &relaycommon.ClaudeConvertInfo{LastMessagesType: relaycommon.LastMessageTypeNone},
+		}
+		info.SetEstimatePromptTokens(4)
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(body)}
+		var usage *dto.Usage
+		var apiErr *types.NewAPIError
+		switch format {
+		case types.RelayFormatGemini:
+			usage, apiErr = GeminiTextGenerationStreamHandler(c, info, resp)
+		case types.RelayFormatOpenAIResponses:
+			usage, apiErr = GeminiResponsesStreamHandler(c, info, resp)
+		default:
+			usage, apiErr = GeminiChatStreamHandler(c, info, resp)
+		}
+		return info, usage, apiErr, c, recorder
+	}
+	run := func(t *testing.T, format types.RelayFormat, events ...string) (*relaycommon.RelayInfo, *dto.Usage, *types.NewAPIError, *gin.Context, *httptest.ResponseRecorder) {
+		t.Helper()
+		var body strings.Builder
+		for _, event := range events {
+			body.WriteString("data: " + event + "\n\n")
+		}
+		return runBody(t, format, strings.NewReader(body.String()))
+	}
+
+	t.Run("openai cut", func(t *testing.T) {
+		info, usage, apiErr, _, recorder := run(t, types.RelayFormatOpenAI, partial)
+		require.Nil(t, apiErr)
+		assert.Positive(t, usage.CompletionTokens, "the delivered output is still billed")
+		got := recorder.Body.String()
+		assert.Equal(t, 1, strings.Count(got, `"error"`))
+		assert.True(t, strings.HasSuffix(got, `data: {"error":{"message":"`+message+`","type":"upstream_error","param":"","code":"upstream_stream_interrupted"}}`+"\n\ndata: [DONE]\n\n"), got)
+		usageChunk := strings.Index(got, `"choices":[],"usage":{"prompt_tokens":4`)
+		assert.Less(t, strings.Index(got, `"content":"hel"`), usageChunk)
+		assert.Less(t, usageChunk, strings.Index(got, `{"error"`), "the usage chunk still precedes the error")
+		assert.NotContains(t, got, `"finish_reason":"`)
+		assert.Equal(t, "upstream_stream_interrupted", info.StreamStatus.OutcomeSnapshot().ErrorCode)
+	})
+
+	t.Run("openai complete", func(t *testing.T) {
+		info, _, apiErr, _, recorder := run(t, types.RelayFormatOpenAI, partial, finished)
+		require.Nil(t, apiErr)
+		got := recorder.Body.String()
+		assert.NotContains(t, got, `"error"`)
+		assert.True(t, strings.HasSuffix(got, "}\n\ndata: [DONE]\n\n"), got)
+		assert.Contains(t, got, `"finish_reason":"stop"`)
+		assert.Equal(t, string(relaycommon.ResponseOutcomeCompleted), info.StreamStatus.ResponseOutcome())
+	})
+
+	t.Run("claude cut", func(t *testing.T) {
+		info, _, apiErr, _, recorder := run(t, types.RelayFormatClaude, partial)
+		require.Nil(t, apiErr)
+		got := recorder.Body.String()
+		assert.Equal(t, 1, strings.Count(got, "event: error\n"))
+		assert.True(t, strings.HasSuffix(got, "event: error\n"+`data: {"error":{"type":"api_error","message":"`+message+`"},"type":"error"}`+"\n\n\n"), got)
+		assert.NotContains(t, got, "event: message_delta\n", "no stop the upstream never sent")
+		assert.NotContains(t, got, "event: message_stop\n")
+		assert.True(t, info.StreamStatus.ResponseFailed())
+	})
+
+	t.Run("native cut", func(t *testing.T) {
+		info, _, apiErr, _, recorder := run(t, types.RelayFormatGemini, partial)
+		require.Nil(t, apiErr)
+		assert.Equal(t, "data: "+partial+"\n\n"+`data: {"error":{"code":502,"message":"`+message+`","status":"UNAVAILABLE"}}`+"\n\n", recorder.Body.String())
+		assert.True(t, info.StreamStatus.ResponseFailed())
+	})
+
+	t.Run("native complete", func(t *testing.T) {
+		_, _, apiErr, _, recorder := run(t, types.RelayFormatGemini, partial, finished)
+		require.Nil(t, apiErr)
+		assert.Equal(t, "data: "+partial+"\n\ndata: "+finished+"\n\n", recorder.Body.String())
+	})
+
+	t.Run("in-band error", func(t *testing.T) {
+		info, _, apiErr, c, recorder := run(t, types.RelayFormatGemini, partial, inBand)
+		require.NotNil(t, apiErr, "the error envelope must not be swallowed")
+		assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+		assert.Equal(t, "The model is overloaded.", apiErr.Error())
+		assert.Equal(t, http.StatusServiceUnavailable, info.StreamStatus.OutcomeSnapshot().ErrorStatus)
+		assert.Equal(t, "data: "+partial+"\n\n", recorder.Body.String(), "the stream stops at the error without an ending of its own")
+
+		// What the relay error writer then sends to the client.
+		helper.WriteStreamError(c, info.RelayFormat, apiErr)
+		assert.True(t, strings.HasSuffix(recorder.Body.String(), `data: {"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}`+"\n\n"), recorder.Body.String())
+	})
+
+	// A blocked prompt is one chunk with promptFeedback and no candidate:
+	// Gemini's complete answer, which every dialect still ends normally.
+	for _, tc := range []struct {
+		format types.RelayFormat
+		ending string
+	}{
+		{format: types.RelayFormatGemini, ending: "data: " + blocked + "\n\n"},
+		{format: types.RelayFormatOpenAI, ending: "data: [DONE]\n\n"},
+		{format: types.RelayFormatClaude, ending: "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"},
+		{format: types.RelayFormatOpenAIResponses, ending: "event: response.completed\n"},
+	} {
+		t.Run("prompt blocked "+string(tc.format), func(t *testing.T) {
+			info, _, apiErr, _, recorder := run(t, tc.format, blocked)
+			require.Nil(t, apiErr)
+			got := recorder.Body.String()
+			if tc.format == types.RelayFormatOpenAIResponses {
+				assert.Contains(t, got, tc.ending)
+			} else {
+				assert.True(t, strings.HasSuffix(got, tc.ending), got)
+			}
+			assert.NotContains(t, got, "upstream_stream_interrupted")
+			assert.NotContains(t, got, "event: error\n")
+			assert.False(t, info.StreamStatus.ResponseFailed())
+			assert.True(t, info.PerformanceBusinessRejection)
+		})
+	}
+
+	// A Responses client gets the same error event for an early EOF and for a
+	// read error, and both are recorded as an interrupted stream. The read
+	// error itself stays in the server log.
+	for _, tc := range []struct {
+		name      string
+		body      io.Reader
+		endReason relaycommon.StreamEndReason
+	}{
+		{name: "responses cut", body: strings.NewReader("data: " + partial + "\n\n"), endReason: relaycommon.StreamEndReasonEOF},
+		{name: "responses read error", body: io.MultiReader(strings.NewReader("data: "+partial+"\n\n"), iotest.ErrReader(errors.New("read tcp 10.0.0.7:443: connection reset by peer"))), endReason: relaycommon.StreamEndReasonScannerErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, usage, apiErr, _, recorder := runBody(t, types.RelayFormatOpenAIResponses, tc.body)
+			require.Nil(t, apiErr)
+			assert.Positive(t, usage.CompletionTokens, "the delivered output is still billed")
+			got := recorder.Body.String()
+			assert.Equal(t, 1, strings.Count(got, "event: error\n"))
+			assert.True(t, strings.HasSuffix(got, "event: error\n"+`data: {"code":"upstream_stream_interrupted","message":"`+message+`","param":"","type":"error"}`+"\n\n"), got)
+			assert.NotContains(t, got, "response.completed")
+			assert.NotContains(t, got, "10.0.0.7")
+			outcome := info.StreamStatus.OutcomeSnapshot()
+			assert.Equal(t, tc.endReason, outcome.EndReason)
+			assert.Equal(t, relaycommon.ResponseOutcomeFailed, outcome.Response)
+			assert.Equal(t, "upstream_stream_interrupted", outcome.ErrorCode)
 		})
 	}
 }

@@ -159,13 +159,20 @@ func GeminiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, r
 		return usage, streamAPIError
 	}
 	if info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() {
-		if info.StreamStatus.EndReason != relaycommon.StreamEndReasonClientGone {
+		// A timeout, read error or panic cuts the stream like an early EOF
+		// and is reported and recorded the same way.
+		if !helper.ReportStreamInterruption(c, info) && info.StreamStatus.EndReason != relaycommon.StreamEndReasonClientGone {
 			failResponsesStream(fmt.Errorf("gemini stream ended unexpectedly: %s", info.StreamStatus.Summary()))
 		}
 		return usage, nil
 	}
 	if streamErr != nil {
 		return nil, streamErr
+	}
+	// A cut stream gets an error event instead of a response.completed the
+	// upstream never sent; its partial usage is still billed.
+	if helper.ReportStreamInterruption(c, info) {
+		return usage, nil
 	}
 	hostedEvents, err := hostedBridge.Finalize(state)
 	if err != nil {

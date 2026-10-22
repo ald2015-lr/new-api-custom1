@@ -206,6 +206,29 @@ func (s *StreamStatus) TotalErrorCount() int {
 	return s.ErrorCount
 }
 
+// Interrupted reports a stream the upstream cut before the response was
+// complete: the transport broke, or a protocol that always ends with a
+// terminal event ended without one. A response that reached any terminal
+// outcome is not interrupted (a failure already carries its own error and
+// incomplete is a legitimate end such as max_tokens), and neither is a stream
+// whose client went away. perf_metrics counts the same streams as failures.
+func (s *StreamStatus) Interrupted() bool {
+	if s == nil {
+		return false
+	}
+	outcome := s.OutcomeSnapshot()
+	if outcome.Response != ResponseOutcomeUnknown {
+		return false
+	}
+	switch outcome.EndReason {
+	case StreamEndReasonClientGone, StreamEndReasonPingFail:
+		return false
+	case StreamEndReasonTimeout, StreamEndReasonScannerErr, StreamEndReasonPanic:
+		return true
+	}
+	return outcome.ExpectsTerminal && outcome.EndReason != StreamEndReasonDone
+}
+
 func (s *StreamStatus) IsNormalEnd() bool {
 	if s == nil {
 		return true

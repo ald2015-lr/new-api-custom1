@@ -217,10 +217,27 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			sr.Stop(streamErr)
 			return
 		}
+		// Gemini reports a failure inside an open stream as a bare error
+		// envelope; it ends the response like the same body sent as an HTTP
+		// error would.
+		if envelope := gjson.Get(data, "error"); envelope.IsObject() {
+			var upstreamError types.OpenAIError
+			_ = common.UnmarshalJsonStr(envelope.Raw, &upstreamError)
+			statusCode := int(envelope.Get("code").Int())
+			if statusCode < http.StatusBadRequest {
+				statusCode = http.StatusInternalServerError
+			}
+			streamErr = types.WithOpenAIError(upstreamError, statusCode)
+			sr.Stop(streamErr)
+			return
+		}
 
 		if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			info.PerformanceBusinessRejection = true
 			common.SetContextKey(c, constant.ContextKeyAdminRejectReason, fmt.Sprintf("gemini_block_reason=%s", *geminiResponse.PromptFeedback.BlockReason))
+			// The block is Gemini's whole answer, as final as a SAFETY
+			// finishReason, not a stream cut before its end.
+			info.StreamStatus.MarkCompleted()
 		}
 		info.ObserveResponseModel(gjson.Get(data, "modelVersion").Str)
 		for _, candidate := range geminiResponse.Candidates {
@@ -287,7 +304,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if streamErr != nil {
 		return usage, types.NewOpenAIError(streamErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	if info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() {
+	if info.StreamStatus != nil && !info.StreamStatus.IsNormalEnd() && info.StreamStatus.EndReason != relaycommon.StreamEndReasonClientGone {
 		logger.LogWarn(c, common.LogText("Gemini stream ended unexpectedly: %s", info.StreamStatus.Summary()))
 	}
 
@@ -395,6 +412,11 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 
 	if err != nil {
 		return usage, err
+	}
+	// Every Gemini chunk already reached a Claude client; the final response
+	// below would only fabricate the stop of a stream the upstream cut.
+	if info.RelayFormat == types.RelayFormatClaude && helper.ReportStreamInterruption(c, info) {
+		return usage, nil
 	}
 
 	response := helper.GenerateFinalUsageResponse(id, createAt, info.UpstreamModelName, *usage)

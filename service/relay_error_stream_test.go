@@ -41,6 +41,9 @@ func TestDecideRelayRetryStopsOnceResponseStarted(t *testing.T) {
 
 	channelErr := types.NewError(errors.New("key revoked"), types.ErrorCodeChannelInvalidKey)
 	assert.Equal(t, "stop", DecideRelayRetry(started, channelErr, 1).Action, "channel errors are no exception once the stream started")
+
+	started.Request = cancelledClientRequest()
+	assert.Equal(t, "response_started", DecideRelayRetry(started, retryable, 1).Reason, "a client that left mid-stream keeps the response_started reason")
 }
 
 func TestDecideRelayRetryStillRetriesWebSocketRelays(t *testing.T) {

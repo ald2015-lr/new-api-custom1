@@ -303,7 +303,9 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	relayconvert.FinalizeClaudeStreamBillingUsage(claudeInfo)
 
 	if info.RelayFormat == types.RelayFormatClaude {
-		//
+		// The upstream's own events went through as they came; only a cut
+		// stream needs an ending, the error event.
+		helper.ReportStreamInterruption(c, info)
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		if info.ShouldIncludeUsage {
 			openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
@@ -313,8 +315,15 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 				common.SysLog(common.LogText("send final response failed: %s", err.Error()))
 			}
 		}
-		helper.Done(c)
+		if !helper.ReportStreamInterruption(c, info) {
+			helper.Done(c)
+		}
 	} else if info.RelayFormat == types.RelayFormatGemini {
+		// Finalizing a cut stream would close it with a finishReason the
+		// upstream never sent.
+		if helper.ReportStreamInterruption(c, info) {
+			return
+		}
 		state, err := claudeToGeminiStreamState(info)
 		if err != nil {
 			common.SysLog(common.LogText("error creating Gemini stream state: %s", err.Error()))

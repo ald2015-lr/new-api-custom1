@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -153,6 +154,11 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var responseId = common.GetUUID()
 	var created = time.Now().Unix()
 	var toolCallIndex int
+	// Delivered text, billed by estimate when no done frame arrives: the
+	// client left (which cancels the upstream read) or the upstream cut off.
+	var responseTextBuilder strings.Builder
+	var toolCount int
+	sawDone := false
 	start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
 	if data, err := common.Marshal(start); err == nil {
 		_ = helper.StringData(c, string(data))
@@ -166,6 +172,10 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		var chunk ollamaChatStreamChunk
 		if err := common.Unmarshal([]byte(line), &chunk); err != nil {
+			if service.ClientGone(c) {
+				// The cancelled read left a truncated last line.
+				break
+			}
 			logger.LogError(c, common.LogText("ollama stream json decode error: %s line=%s", err.Error(), line))
 			return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 		}
@@ -176,6 +186,7 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 
 		if !chunk.Done {
 			delta, _ := buildOllamaStreamDelta(&chunk, responseId, created, model, &toolCallIndex)
+			_ = openai.ProcessStreamResponse(delta, &responseTextBuilder, &toolCount)
 			if data, err := common.Marshal(delta); err == nil {
 				_ = helper.StringData(c, string(data))
 			}
@@ -188,6 +199,7 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			}
 		}
 		// finalize once and break loop
+		sawDone = true
 		usage.PromptTokens = chunk.PromptEvalCount
 		usage.CompletionTokens = chunk.EvalCount
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
@@ -215,7 +227,16 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		break
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
-		logger.LogError(c, common.LogText("ollama stream scan error: %s", err.Error()))
+		if service.ClientGone(c) {
+			logger.LogInfo(c, common.LogText("ollama stream stopped, client disconnected: %s", err.Error()))
+		} else {
+			logger.LogError(c, common.LogText("ollama stream scan error: %s", err.Error()))
+		}
+	}
+	if !sawDone {
+		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+		usage.CompletionTokens += toolCount * 7
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
 	return usage, nil
 }

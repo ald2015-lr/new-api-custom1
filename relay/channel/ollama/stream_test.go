@@ -1,6 +1,8 @@
 package ollama
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/tokenkit"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -241,4 +244,89 @@ func TestOllamaStreamHandlerDoneToolCalls(t *testing.T) {
 	assert.Equal(t, 1, *toolCalls[1].Index)
 	assert.Equal(t, constant.FinishReasonToolCalls, *chunks[stopChunkIndex].Choices[0].FinishReason)
 	assert.Contains(t, w.Body.String(), "data: [DONE]")
+}
+
+// clientBoundBody is an upstream body read through a request bound to the
+// client: once the received bytes are used up, the client leaves and the next
+// read fails with its cancellation, as the HTTP transport reports it.
+type clientBoundBody struct {
+	received *strings.Reader
+	leave    context.CancelFunc
+}
+
+func (b *clientBoundBody) Read(p []byte) (int, error) {
+	if b.received.Len() > 0 {
+		return b.received.Read(p)
+	}
+	b.leave()
+	return 0, context.Canceled
+}
+
+func (b *clientBoundBody) Close() error { return nil }
+
+// A client that leaves mid-stream cancels the upstream read before the done
+// frame with Ollama's usage arrives; what it received is still billed (its
+// text by estimate plus 7 tokens per tool call), and the cut (with its
+// truncated last line) is not reported as an error.
+func TestOllamaStreamHandlerClientLeavesMidStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var errorLogs bytes.Buffer
+	common.LogWriterMu.Lock()
+	previousWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &errorLogs
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = previousWriter
+		common.LogWriterMu.Unlock()
+	})
+
+	for _, tc := range []struct {
+		name, received string
+		// billedText is the delivered output the estimate counts.
+		billedText string
+		toolCalls  int
+		delivered  string
+	}{
+		{
+			name: "text",
+			received: `{"model":"llama3.1","message":{"role":"assistant","content":"The answer is "},"done":false}` + "\n" +
+				`{"model":"llama3.1","message":{"role":"assistant","content":"forty-two."},"done":false}` + "\n" +
+				`{"model":"llama3.1","message":{"role":"assis`,
+			billedText: "The answer is forty-two.",
+			delivered:  "forty-two.",
+		},
+		{
+			name: "tool call",
+			received: `{"model":"llama3.1","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"get_weather","arguments":{"city":"Paris"}}}]},"done":false}` + "\n" +
+				`{"model":"llama3.1","message":{"role":"assis`,
+			billedText: `get_weather{"city":"Paris"}`,
+			toolCalls:  1,
+			delivered:  `"name":"get_weather"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errorLogs.Reset()
+			clientContext, leave := context.WithCancel(context.Background())
+			t.Cleanup(leave)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(clientContext)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "llama3.1"}}
+			info.SetEstimatePromptTokens(10)
+
+			usage, apiErr := ollamaStreamHandler(c, info, &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       &clientBoundBody{received: strings.NewReader(tc.received), leave: leave},
+			})
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, 10, usage.PromptTokens)
+			assert.Equal(t, tokenkit.Estimate("llama3.1", tc.billedText)+7*tc.toolCalls, usage.CompletionTokens, "the delivered output is billed")
+			assert.Equal(t, usage.PromptTokens+usage.CompletionTokens, usage.TotalTokens)
+			assert.Contains(t, w.Body.String(), tc.delivered)
+			assert.NotContains(t, errorLogs.String(), "[ERR]")
+		})
+	}
 }

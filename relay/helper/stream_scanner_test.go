@@ -15,6 +15,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -376,8 +377,92 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	assert.NotContains(t, body, "second")
 }
 
+// clientBoundUpstreamBody behaves like the body of an upstream request bound
+// to the client's context: once the chunks run out, the client leaves and the
+// read fails with the context error, as net/http reports it.
+type clientBoundUpstreamBody struct {
+	chunks     chan string
+	disconnect context.CancelFunc
+}
+
+func (b *clientBoundUpstreamBody) Read(p []byte) (int, error) {
+	if chunk, ok := <-b.chunks; ok {
+		return copy(p, chunk), nil
+	}
+	b.disconnect()
+	return 0, context.Canceled
+}
+
+func (b *clientBoundUpstreamBody) Close() error { return nil }
+
+// The upstream read can fail from the client's cancellation before the
+// handler itself notices the client is gone. That is still the client leaving:
+// health metrics ignore client_gone but count scanner_error as an upstream
+// failure.
+func TestStreamScannerHandler_CancelledUpstreamReadIsClientGone(t *testing.T) {
+	clientContext, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(clientContext)
+	body := &clientBoundUpstreamBody{chunks: make(chan string, 1), disconnect: disconnect}
+	body.chunks <- "data: first\n"
+	info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	StreamScannerHandler(c, &http.Response{Body: body}, info, func(data string, sr *StreamResult) {
+		assert.NoError(t, StringData(c, data))
+		close(body.chunks)
+	})
+
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+	assert.ErrorIs(t, info.StreamStatus.EndError, context.Canceled)
+	assert.Equal(t, "data: first\n\n", recorder.Body.String())
+}
+
+// A client that leaves while a long line is still arriving cancels that read,
+// and the scanner hands back the half-received line as its last token. The
+// adaptor must never see it: Claude and Gemini fail the whole request on the
+// truncated JSON, which refunds output the client already received. Whether
+// the handler or the scanner sees the cancellation first is up to the
+// scheduler, so the case runs several times.
+func TestStreamScannerHandler_CancelledReadDropsPartialLine(t *testing.T) {
+	for range 20 {
+		clientContext, disconnect := context.WithCancel(context.Background())
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(clientContext)
+		body := &clientBoundUpstreamBody{chunks: make(chan string, 1), disconnect: disconnect}
+		body.chunks <- `data: {"a":1}` + "\n"
+		info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{}}
+
+		var received []string
+		StreamScannerHandler(c, &http.Response{Body: body}, info, func(data string, sr *StreamResult) {
+			received = append(received, data)
+			if len(received) > 1 {
+				return
+			}
+			assert.NoError(t, StringData(c, data))
+			// The next line arrives only in part before the client leaves.
+			body.chunks <- `data: {"text":"wor`
+			close(body.chunks)
+		})
+		disconnect()
+
+		require.NotNil(t, info.StreamStatus)
+		require.Equal(t, []string{`{"a":1}`}, received, "the truncated line reached the adaptor")
+		assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+		assert.ErrorIs(t, info.StreamStatus.EndError, context.Canceled)
+		assert.False(t, info.StreamStatus.HasErrors())
+		assert.Equal(t, `data: {"a":1}`+"\n\n", recorder.Body.String())
+	}
+}
+
 // ---------- Ping tests ----------
 
+// The scanner's own pinger runs when no KeepAliveWriter streams the response,
+// such as a non-stream request whose upstream answered with SSE. A Claude
+// response gets Anthropic's ping event there too.
 func TestStreamScannerHandler_PingSentDuringSlowUpstream(t *testing.T) {
 	setting := operation_setting.GetGeneralSetting()
 	oldEnabled := setting.PingIntervalEnabled
@@ -389,44 +474,59 @@ func TestStreamScannerHandler_PingSentDuringSlowUpstream(t *testing.T) {
 		setting.PingIntervalSeconds = oldSeconds
 	})
 
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		for i := range 4 {
-			fmt.Fprintf(pw, "data: chunk_%d\n", i)
-			time.Sleep(400 * time.Millisecond)
-		}
-		fmt.Fprint(pw, "data: [DONE]\n")
-	}()
+	const (
+		comment = ": PING\n\n"
+		claude  = "event: ping\ndata: {\"type\": \"ping\"}\n\n"
+	)
+	for _, tc := range []struct {
+		format      types.RelayFormat
+		ping, other string
+	}{
+		{format: types.RelayFormatOpenAI, ping: comment, other: claude},
+		{format: types.RelayFormatClaude, ping: claude, other: comment},
+	} {
+		t.Run(string(tc.format), func(t *testing.T) {
+			pr, pw := io.Pipe()
+			go func() {
+				defer pw.Close()
+				for i := range 4 {
+					fmt.Fprintf(pw, "data: chunk_%d\n", i)
+					time.Sleep(400 * time.Millisecond)
+				}
+				fmt.Fprint(pw, "data: [DONE]\n")
+			}()
 
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	resp := &http.Response{Body: pr}
-	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+			resp := &http.Response{Body: pr}
+			info := &relaycommon.RelayInfo{RelayFormat: tc.format, ChannelMeta: &relaycommon.ChannelMeta{}}
 
-	var count atomic.Int64
-	done := make(chan struct{})
-	go func() {
-		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
-			count.Add(1)
+			var count atomic.Int64
+			done := make(chan struct{})
+			go func() {
+				StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+					count.Add(1)
+				})
+				close(done)
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for stream to finish")
+			}
+
+			assert.Equal(t, int64(4), count.Load())
+
+			body := recorder.Body.String()
+			pingCount := strings.Count(body, tc.ping)
+			assert.GreaterOrEqual(t, pingCount, 1,
+				"expected at least 1 ping during slow stream with 1s interval; got %d", pingCount)
+			assert.NotContains(t, body, tc.other)
 		})
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for stream to finish")
 	}
-
-	assert.Equal(t, int64(4), count.Load())
-
-	body := recorder.Body.String()
-	pingCount := strings.Count(body, ": PING")
-	assert.GreaterOrEqual(t, pingCount, 1,
-		"expected at least 1 ping during slow stream with 1s interval; got %d", pingCount)
 }
 
 func TestStreamScannerHandler_PingDisabledByRelayInfo(t *testing.T) {

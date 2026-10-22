@@ -28,6 +28,11 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if c != nil && c.Writer != nil && c.Request != nil && !c.IsWebsocket() && c.Writer.Written() {
 		return PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}
 	}
+	// The upstream request was cancelled together with the client; another
+	// channel would fail the same way and nobody would read its answer.
+	if ClientGone(c) {
+		return PolicyDecision{Action: "stop", Reason: "client_gone", Source: "client"}
+	}
 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		source := RequestPolicy(c).SessionModeSource
 		if source == "" {
@@ -61,6 +66,13 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 		return PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}
 	}
 	return PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "global"}
+}
+
+// ClientGone reports that the client of this request disconnected. Relay
+// requests to the upstream share its context, so a failure seen afterwards was
+// caused by the client leaving, not by the channel.
+func ClientGone(c *gin.Context) bool {
+	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
 }
 
 func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {

@@ -151,6 +151,47 @@ func TestStreamStatus_IsNormalEnd(t *testing.T) {
 	}
 }
 
+// A stream is interrupted when the upstream cut it before any terminal
+// outcome; the client leaving and every terminal outcome are not.
+func TestStreamStatus_Interrupted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		reason          StreamEndReason
+		expectsTerminal bool
+		mark            func(*StreamStatus)
+		interrupted     bool
+	}{
+		{name: "eof without required terminal", reason: StreamEndReasonEOF, expectsTerminal: true, interrupted: true},
+		{name: "handler stop without required terminal", reason: StreamEndReasonHandlerStop, expectsTerminal: true, interrupted: true},
+		{name: "done sentinel", reason: StreamEndReasonDone, expectsTerminal: true},
+		{name: "eof on a protocol without terminal", reason: StreamEndReasonEOF},
+		{name: "timeout", reason: StreamEndReasonTimeout, interrupted: true},
+		{name: "scanner error", reason: StreamEndReasonScannerErr, interrupted: true},
+		{name: "panic", reason: StreamEndReasonPanic, interrupted: true},
+		{name: "client gone", reason: StreamEndReasonClientGone, expectsTerminal: true},
+		{name: "ping failure", reason: StreamEndReasonPingFail, expectsTerminal: true},
+		{name: "completed", reason: StreamEndReasonEOF, expectsTerminal: true, mark: (*StreamStatus).MarkCompleted},
+		{name: "completed then timeout", reason: StreamEndReasonTimeout, mark: (*StreamStatus).MarkCompleted},
+		{name: "incomplete", reason: StreamEndReasonEOF, expectsTerminal: true, mark: func(s *StreamStatus) { s.MarkIncomplete("max_tokens") }},
+		{name: "cancelled", reason: StreamEndReasonEOF, expectsTerminal: true, mark: (*StreamStatus).MarkCancelled},
+		{name: "failed", reason: StreamEndReasonScannerErr, expectsTerminal: true, mark: func(s *StreamStatus) { s.MarkFailed("server_error", "", 500) }},
+	}
+	for _, tt := range tests {
+		s := NewStreamStatus()
+		if tt.expectsTerminal {
+			s.RequireTerminal()
+		}
+		if tt.mark != nil {
+			tt.mark(s)
+		}
+		s.SetEndReason(tt.reason, nil)
+		assert.Equal(t, tt.interrupted, s.Interrupted(), tt.name)
+	}
+	var nilStatus *StreamStatus
+	assert.False(t, nilStatus.Interrupted())
+}
+
 func TestStreamStatus_IsNormalEnd_NilSafe(t *testing.T) {
 	t.Parallel()
 	var s *StreamStatus

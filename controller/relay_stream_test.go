@@ -71,13 +71,14 @@ func TestRelayKeepAliveDuringImagePreparation(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.StatusCode)
 	require.Equal(t, "text/event-stream", response.Header.Get("Content-Type"))
 	reader := bufio.NewReader(response.Body)
+	// Anthropic's own ping event: Claude Code's stream idle watchdog counts
+	// events, not comments.
 	for range 2 {
-		line, readErr := reader.ReadString('\n')
-		require.NoError(t, readErr)
-		require.Equal(t, ": PING\n", line)
-		line, readErr = reader.ReadString('\n')
-		require.NoError(t, readErr)
-		require.Equal(t, "\n", line)
+		for _, want := range []string{"event: ping\n", "data: {\"type\": \"ping\"}\n", "\n"} {
+			line, readErr := reader.ReadString('\n')
+			require.NoError(t, readErr)
+			require.Equal(t, want, line)
+		}
 	}
 	select {
 	case <-imageRequested:
@@ -181,6 +182,7 @@ func TestRelayKeepAlivePreservesValidationErrors(t *testing.T) {
 	Relay(c, types.RelayFormatClaude)
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
 	require.Contains(t, recorder.Header().Get("Content-Type"), "application/json")
+	require.NotContains(t, recorder.Body.String(), "event: ping")
 	require.NotContains(t, recorder.Body.String(), ": PING")
 }
 
@@ -264,6 +266,7 @@ func TestRelayKeepAliveHonorsStreamSettings(t *testing.T) {
 			Relay(c, types.RelayFormatClaude)
 			require.Equal(t, http.StatusInternalServerError, recorder.Code)
 			require.Contains(t, recorder.Header().Get("Content-Type"), "application/json")
+			require.NotContains(t, recorder.Body.String(), "event: ping")
 			require.NotContains(t, recorder.Body.String(), ": PING")
 			var response map[string]any
 			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
@@ -273,7 +276,7 @@ func TestRelayKeepAliveHonorsStreamSettings(t *testing.T) {
 }
 
 func TestRelayStreamErrorAfterKeepAlive(t *testing.T) {
-	for _, format := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI} {
+	for _, format := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI, types.RelayFormatGemini} {
 		t.Run(string(format), func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)
@@ -292,9 +295,13 @@ func TestRelayStreamErrorAfterKeepAlive(t *testing.T) {
 			require.True(t, ok)
 			require.True(t, status.ResponseFailed(), "stream errors must not consume the successful-request rate limit")
 			require.Equal(t, http.StatusBadRequest, status.OutcomeSnapshot().ErrorStatus)
-			if format == types.RelayFormatClaude {
+			switch format {
+			case types.RelayFormatClaude:
 				require.Contains(t, recorder.Body.String(), "event: error\n")
-			} else {
+			case types.RelayFormatGemini:
+				require.Contains(t, recorder.Body.String(), `"code":400,`)
+				require.Contains(t, recorder.Body.String(), `"status":"INVALID_ARGUMENT"`)
+			default:
 				require.Contains(t, recorder.Body.String(), "data: [DONE]")
 			}
 		})

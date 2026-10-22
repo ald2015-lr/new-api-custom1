@@ -2,11 +2,15 @@ package channel
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +27,83 @@ func TestNewTaskAPIRequestInheritsClientCancellation(t *testing.T) {
 	cancel()
 
 	require.ErrorIs(t, upstream.Context().Err(), context.Canceled)
+}
+
+// fixedURLAdaptor sends relay requests to one URL; the relay helpers below
+// need nothing else from an adaptor.
+type fixedURLAdaptor struct {
+	Adaptor
+	url string
+}
+
+func (a *fixedURLAdaptor) GetRequestURL(*relaycommon.RelayInfo) (string, error) {
+	return a.url, nil
+}
+
+func (a *fixedURLAdaptor) SetupRequestHeader(*gin.Context, *http.Header, *relaycommon.RelayInfo) error {
+	return nil
+}
+
+// A client that disconnects must not leave its upstream request generating
+// (and billing) an answer nobody reads: JSON and multipart relay requests
+// follow the client's context.
+func TestRelayRequestsFollowClientCancellation(t *testing.T) {
+	service.InitHttpClient()
+	for _, tc := range []struct {
+		name string
+		do   func(Adaptor, *gin.Context, *relaycommon.RelayInfo, io.Reader) (*http.Response, error)
+	}{
+		{name: "api request", do: DoApiRequest},
+		{name: "form request", do: DoFormRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			received, upstreamClosed, testDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				// net/http notices a closed connection only after the body is read.
+				_, _ = io.ReadAll(r.Body)
+				close(received)
+				select {
+				case <-r.Context().Done():
+					close(upstreamClosed)
+				case <-testDone:
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			t.Cleanup(func() { close(testDone) })
+
+			clientContext, disconnect := context.WithCancel(context.Background())
+			defer disconnect()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(clientContext)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+			result := make(chan error, 1)
+			go func() {
+				resp, err := tc.do(&fixedURLAdaptor{url: upstream.URL}, c, info, strings.NewReader(`{"model":"slow"}`))
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				result <- err
+			}()
+
+			select {
+			case <-received:
+			case <-time.After(3 * time.Second):
+				t.Fatal("upstream did not receive the request")
+			}
+			disconnect()
+			select {
+			case err := <-result:
+				require.Error(t, err)
+			case <-time.After(3 * time.Second):
+				t.Fatal("the relay request outlived its client")
+			}
+			select {
+			case <-upstreamClosed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the upstream request stayed open after the client left")
+			}
+		})
+	}
 }
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {

@@ -279,17 +279,29 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		if streamResp.Response != nil {
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
-		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {
+		service.ObserveResponsesOutcome(info, &streamResp)
+		switch streamResp.Type {
+		case "error", "response.error", "response.failed", "response.cancelled", "response.canceled":
+			// Each ends the response before it is complete. The client
+			// dialects have no event for that, so the stream ends with an
+			// error instead of the finish the converter would make up.
 			upstreamFailed = true
+			streamErr = types.NewOpenAIError(fmt.Errorf("responses stream error: %s", streamResp.Type), types.ErrorCodeBadResponse, http.StatusInternalServerError)
 			if streamResp.Response != nil {
 				failedUsage = streamResp.Response.Usage
 				if oaiErr := streamResp.Response.GetOpenAIError(); oaiErr != nil && oaiErr.Type != "" {
 					streamErr = types.WithOpenAIError(*oaiErr, http.StatusInternalServerError)
-					stopStream(sr, streamErr)
-					return
 				}
 			}
-			streamErr = types.NewOpenAIError(fmt.Errorf("responses stream error: %s", streamResp.Type), types.ErrorCodeBadResponse, http.StatusInternalServerError)
+			if streamResp.Type == "error" && streamResp.Message != "" {
+				streamErr = types.WithOpenAIError(types.OpenAIError{Message: streamResp.Message, Code: streamResp.Code, Param: streamResp.Param}, http.StatusInternalServerError)
+			}
+			if streamResp.Type == "response.cancelled" || streamResp.Type == "response.canceled" {
+				// The status keeps the cancellation, which health does not
+				// count against the channel, as on the native Responses path.
+				sr.Stop(nil)
+				return
+			}
 			stopStream(sr, streamErr)
 			return
 		}
@@ -307,6 +319,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 	})
+	info.StreamStatus.RequireTerminal()
 
 	if streamErr != nil {
 		if !upstreamFailed || state.UsageText() == "" {
@@ -340,11 +353,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 		logger.LogError(c, common.LogText("responses stream failed after output was delivered, billing the delivered output: %s", streamErr.Error()))
 		streamErr.SetMessage(common.MessageWithRequestId(streamErr.Error(), c.GetString(common.RequestIdKey)))
-		if info.RelayFormat == types.RelayFormatClaude {
-			c.JSON(streamErr.StatusCode, gin.H{"type": "error", "error": streamErr.ToClaudeError(common.UpstreamAddresses(c)...)})
-		} else {
-			c.JSON(streamErr.StatusCode, gin.H{"error": streamErr.ToOpenAIError(common.UpstreamAddresses(c)...)})
-		}
+		helper.WriteStreamError(c, info.RelayFormat, streamErr, common.UpstreamAddresses(c)...)
 		return usage, nil
 	}
 
@@ -360,16 +369,20 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {
 		info.ClaudeConvertInfo.Usage = usage
 	}
-	finalResults, err := service.FinalizeStreamResponse(c, info, state)
-	if err != nil {
-		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
-	}
-	for _, result := range finalResults {
-		if !sendStreamResult(result) {
-			if streamErr != nil {
-				return nil, streamErr
+	// Finalizing a cut stream would close it with the finish events the
+	// upstream never sent; it ends with an error event instead.
+	if !info.StreamStatus.Interrupted() {
+		finalResults, err := service.FinalizeStreamResponse(c, info, state)
+		if err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+		}
+		for _, result := range finalResults {
+			if !sendStreamResult(result) {
+				if streamErr != nil {
+					return nil, streamErr
+				}
+				return usage, nil
 			}
-			return usage, nil
 		}
 	}
 	if info.RelayFormat == types.RelayFormatOpenAI && info.ShouldIncludeUsage && usage != nil {
@@ -382,6 +395,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 	}
 
+	if helper.ReportStreamInterruption(c, info) {
+		return usage, nil
+	}
 	if info.RelayFormat == types.RelayFormatOpenAI {
 		helper.Done(c)
 	}

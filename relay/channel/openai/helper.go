@@ -201,12 +201,15 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 			response.SetSystemFingerprint(systemFingerprint)
 			helper.ObjectData(c, response)
 		}
-		helper.Done(c)
+		if !helper.ReportStreamInterruption(c, info) {
+			helper.Done(c)
+		}
 
 	case types.RelayFormatClaude:
 		var streamResponse dto.ChatCompletionsStreamResponse
 		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
 			common.SysLog(common.LogText("error unmarshalling stream response: %s", err.Error()))
+			helper.ReportStreamInterruption(c, info)
 			return
 		}
 
@@ -222,8 +225,17 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 			common.SysLog(common.LogText("expected Claude stream responses, got %T", result.Value))
 			return
 		}
+		// A cut stream ends with an error event, never with a stop the
+		// upstream did not send.
+		interrupted := info.StreamStatus.Interrupted()
 		for _, resp := range claudeResponses {
+			if interrupted && (resp.Type == "message_delta" || resp.Type == "message_stop") {
+				continue
+			}
 			_ = helper.ClaudeData(c, *resp)
+		}
+		if helper.ReportStreamInterruption(c, info) {
+			return
 		}
 		info.ClaudeConvertInfo.Done = true
 
@@ -231,6 +243,7 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 		var streamResponse dto.ChatCompletionsStreamResponse
 		if err := common.Unmarshal(common.StringToByteSlice(lastStreamData), &streamResponse); err != nil {
 			common.SysLog(common.LogText("error unmarshalling stream response: %s", err.Error()))
+			helper.ReportStreamInterruption(c, info)
 			return
 		}
 
@@ -248,6 +261,11 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 		}
 		if err := sendGeminiStreamResults(c, results); err != nil {
 			common.SysLog(common.LogText("error sending final Gemini stream response: %s", err.Error()))
+			return
+		}
+		// Finalizing a cut stream would close it with a finishReason the
+		// upstream never sent.
+		if helper.ReportStreamInterruption(c, info) {
 			return
 		}
 

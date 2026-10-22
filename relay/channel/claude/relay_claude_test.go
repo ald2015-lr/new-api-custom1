@@ -2,8 +2,10 @@ package claude
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -497,4 +499,142 @@ func TestClaudeResponsePassesInputTransformationsThrough(t *testing.T) {
 		transformations + `,"usage":{"input_tokens":5,"output_tokens":1}}}`
 	require.Nil(t, HandleStreamResponseData(c, info, &ClaudeResponseInfo{Usage: &dto.Usage{}}, event))
 	assert.Contains(t, w.Body.String(), "data: "+event+"\n")
+}
+
+// A Claude upstream that closes without message_stop used to end silently
+// (Claude clients), with [DONE] (chat clients) or with response.completed
+// (Responses clients); each now gets one error event in its own dialect, and
+// a finished stream is relayed unchanged.
+func TestClaudeStreamHandlersReportCutUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	events := []string{
+		`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,
+	}
+	finish := []string{
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}
+	const message = "upstream stream ended before the response was complete (request id: claude-cut)"
+	run := func(t *testing.T, format types.RelayFormat, events []string) (*gin.Context, *relaycommon.RelayInfo, *dto.Usage, string) {
+		t.Helper()
+		var body strings.Builder
+		for _, event := range events {
+			body.WriteString("data: " + event + "\n\n")
+		}
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		c.Set(common.RequestIdKey, "claude-cut")
+		info := &relaycommon.RelayInfo{
+			RelayFormat:        format,
+			IsStream:           true,
+			ShouldIncludeUsage: true,
+			DisablePing:        true,
+			ChannelMeta:        &relaycommon.ChannelMeta{UpstreamModelName: "claude-sonnet-5"},
+		}
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body.String()))}
+		var usage *dto.Usage
+		var apiErr *types.NewAPIError
+		if format == types.RelayFormatOpenAIResponses {
+			usage, apiErr = ClaudeResponsesStreamHandler(c, resp, info)
+		} else {
+			usage, apiErr = ClaudeStreamHandler(c, resp, info)
+		}
+		require.Nil(t, apiErr)
+		return c, info, usage, recorder.Body.String()
+	}
+	requireCut := func(t *testing.T, info *relaycommon.RelayInfo, usage *dto.Usage) {
+		t.Helper()
+		assert.Equal(t, "upstream_stream_interrupted", info.StreamStatus.OutcomeSnapshot().ErrorCode)
+		require.NotNil(t, usage)
+		assert.Equal(t, 5, usage.PromptTokens, "the partial output is billed as before")
+		assert.Positive(t, usage.CompletionTokens)
+	}
+
+	t.Run("claude cut", func(t *testing.T) {
+		_, info, usage, got := run(t, types.RelayFormatClaude, events)
+		assert.Equal(t, 1, strings.Count(got, "event: error\n"))
+		assert.True(t, strings.HasSuffix(got, "data: "+events[2]+"\n\n\nevent: error\n"+`data: {"error":{"type":"api_error","message":"`+message+`"},"type":"error"}`+"\n\n\n"), got)
+		assert.NotContains(t, got, "message_stop")
+		requireCut(t, info, usage)
+	})
+
+	t.Run("claude complete", func(t *testing.T) {
+		_, info, _, got := run(t, types.RelayFormatClaude, append(slices.Clone(events), finish...))
+		assert.True(t, strings.HasSuffix(got, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\n"), got)
+		assert.NotContains(t, got, "event: error\n")
+		assert.Equal(t, string(relaycommon.ResponseOutcomeCompleted), info.StreamStatus.ResponseOutcome())
+	})
+
+	t.Run("openai cut", func(t *testing.T) {
+		_, info, usage, got := run(t, types.RelayFormatOpenAI, events)
+		assert.Equal(t, 1, strings.Count(got, `"error"`))
+		assert.True(t, strings.HasSuffix(got, `data: {"error":{"message":"`+message+`","type":"upstream_error","param":"","code":"upstream_stream_interrupted"}}`+"\n\ndata: [DONE]\n\n"), got)
+		assert.Less(t, strings.Index(got, `"usage":`), strings.Index(got, `{"error"`), "the usage chunk still precedes the error")
+		requireCut(t, info, usage)
+	})
+
+	t.Run("responses cut", func(t *testing.T) {
+		_, info, usage, got := run(t, types.RelayFormatOpenAIResponses, events)
+		assert.Equal(t, 1, strings.Count(got, "event: error\n"))
+		assert.True(t, strings.HasSuffix(got, "event: error\n"+`data: {"code":"upstream_stream_interrupted","message":"`+message+`","param":"","type":"error"}`+"\n\n"), got)
+		assert.NotContains(t, got, "response.completed")
+		requireCut(t, info, usage)
+	})
+
+	t.Run("responses complete", func(t *testing.T) {
+		_, _, _, got := run(t, types.RelayFormatOpenAIResponses, append(slices.Clone(events), finish...))
+		assert.Contains(t, got, "event: response.completed\n")
+		assert.NotContains(t, got, "event: error\n")
+	})
+
+	// An upstream error or a malformed event becomes the Responses failure
+	// events. The handler then returns no error, so the stream status must
+	// record the failure for health, the request policy, the consume log and
+	// the model rate limit. Stopping the stream after the events records no
+	// error of its own (a nil error used to crash the stream handler
+	// goroutine here).
+	for _, tc := range []struct {
+		name, last, message, code string
+	}{
+		{name: "responses in-band error", last: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, message: `"message":"Overloaded"`, code: "overloaded_error"},
+		{name: "responses malformed event", last: "{not json", message: `"code":"server_error"`, code: "server_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, info, usage, got := run(t, types.RelayFormatOpenAIResponses, append(slices.Clone(events), tc.last))
+			assert.Equal(t, 1, strings.Count(got, "event: response.failed\n"))
+			assert.Contains(t, got, tc.message)
+			assert.NotContains(t, got, "response.completed")
+			assert.False(t, info.StreamStatus.HasErrors(), info.StreamStatus.Summary())
+			assert.NotEqual(t, relaycommon.StreamEndReasonPanic, info.StreamStatus.EndReason)
+			assert.True(t, info.StreamStatus.ResponseFailed())
+			assert.Equal(t, tc.code, info.StreamStatus.OutcomeSnapshot().ErrorCode)
+			published, _ := common.GetContextKeyType[*relaycommon.StreamStatus](c, constant.ContextKeyResponseStreamStatus)
+			assert.Same(t, info.StreamStatus, published, "the model rate limit reads the failure from the context")
+			require.NotNil(t, usage)
+			assert.Equal(t, 5, usage.PromptTokens, "the partial output is billed as before")
+		})
+	}
+
+	t.Run("gemini cut", func(t *testing.T) {
+		_, info, usage, got := run(t, types.RelayFormatGemini, events)
+		assert.Equal(t, 1, strings.Count(got, `"error"`))
+		assert.True(t, strings.HasSuffix(got, `data: {"error":{"code":502,"message":"`+message+`","status":"UNAVAILABLE"}}`+"\n\n"), got)
+		assert.Contains(t, got, `"text":"hello"`)
+		assert.NotContains(t, got, `"finishReason":"STOP"`, "no finish the upstream never sent")
+		requireCut(t, info, usage)
+	})
+
+	t.Run("gemini complete", func(t *testing.T) {
+		_, info, _, got := run(t, types.RelayFormatGemini, append(slices.Clone(events), finish...))
+		assert.Contains(t, got, `"finishReason":"STOP"`)
+		assert.NotContains(t, got, `"error"`)
+		assert.Equal(t, string(relaycommon.ResponseOutcomeCompleted), info.StreamStatus.ResponseOutcome())
+	})
 }

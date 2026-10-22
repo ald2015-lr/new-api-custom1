@@ -235,6 +235,11 @@ func StringData(c *gin.Context, str string) error {
 }
 
 func PingData(c *gin.Context) error {
+	return pingData(c, sseKeepAlive)
+}
+
+// pingData writes one keepalive frame between two stream events.
+func pingData(c *gin.Context, frame string) error {
 	if c == nil || c.Writer == nil {
 		return errors.New("context or writer is nil")
 	}
@@ -244,7 +249,7 @@ func PingData(c *gin.Context) error {
 	}
 
 	ExtendWriteDeadline(c)
-	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
+	if _, err := c.Writer.Write([]byte(frame)); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}
 	return FlushWriter(c)

@@ -147,7 +147,8 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | 新文件 `model/channel_quota_limit.go`、`controller/channel_quota_limit.go`，以及 `model/{main,channel,channel_cache,ability}.go`、`service/channel_select.go`、`controller/relay.go`、`router/channel-router.go`、`i18n/` 里的小钩子；前端 `web/src/features/channels/*` | 渠道限额（见第十节）；新增 `channel_quota_limits` 表 |
 | 新文件 `setting/operation_setting/group_billing_setting.go`、`service/free_group.go`，以及 `service/{billing,quota,task_billing}.go`、`controller/pricing.go`、`model/option.go` 里的小钩子；前端 `features/system-settings/billing`、`features/pricing`、`features/usage-logs` | 不扣费（免费）分组（见第十一节） |
 | `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
-| 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go` 与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式发 `: PING`、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
+| 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go` 与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式按客户端协议发心跳（Claude 发 `event: ping`，Responses 在第一个事件之后发 `event: keepalive`，其余发 `: PING`）、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
+| `relay/channel/api_request.go`（`DoApiRequest` / `DoFormRequest` 用 `http.NewRequestWithContext`）、`service/relay_error.go`（`ClientGone`，`DecideRelayRetry` 的 `client_gone`）、`service/request_policy.go`、`controller/relay.go`（客户端已断开时不调用 `processChannelError`）、`relay/helper/stream_scanner.go`（读上游出错时先看客户端是否已断开）、`relay/responses_websocket.go`（WebSocket 连接上游失败时同样跳过 `ProcessChannelError`）、`relay/channel/{ollama/stream.go,coze/relay-coze.go,zhipu/relay-zhipu.go,cloudflare/relay_cloudflare.go,openai/audio.go}`（自己读上游的处理器：客户端断开后按已收到的文本结算、不记 ERR，TTS 非流式退款）；前端 `features/system-settings/request-policies/policy-label.ts` | 客户端断开时取消上游请求，不重试、不算渠道错误、退还预扣额度（见第十三节） |
 | 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`；前端 `features/pricing/lib/model-variants.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`features/system-settings/models/model-square-*` | 模型广场按基础模型合并变体（见第十四节） |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
@@ -283,6 +284,7 @@ for i in $(seq 1 150); do curl -s -o /dev/null -w "%{http_code}\n" https://<你�
 |---|---|---|
 | 思考链 → 正文 → 思考链 → 正文 … | 上游渠道在流传输中途返回错误事件（Claude 的 `overloaded_error` 等）时，网关按 500 走**换渠道重试**，但没有检查"已经给客户端发过内容"，于是把第二份完整回答（从思考链开始）**拼接到同一个 HTTP 响应里**，重试几次就重复几次 | 只要已向客户端写出过字节，一律不再重试 |
 | 回复中途报错 | 重试耗尽或不可重试时，网关把 JSON 错误体 `c.JSON(...)` **直接拼到已经开始的 SSE 流后面**，客户端 SDK 解析失败 | 改为按协议发送流内错误事件：OpenAI 格式 `data: {"error":…}` + `[DONE]`，Claude 格式 `event: error`，客户端能正确显示错误信息 |
+| 回复被截断，客户端却当成已经答完 | 上游（中转站空闲超时、Cloudflare、Kiro 封号等）在发出结束事件前断开时，网关仍按正常结束收尾：OpenAI 补 usage 和 `[DONE]`，Claude 既没有 `message_stop` 也没有错误，Responses 没有 `response.completed`；Responses 上游发出 `error` 或 `response.cancelled` 事件后，转成 Chat / Claude 格式的流同样补一个正常结束；Gemini 流里的 `{"error":…}` 被直接丢弃 | 在结束符前补发一条客户端协议的流内错误（code `upstream_stream_interrupted`，502），日志记一行 `stream interrupted: upstream ended before completion (reason=…)`，消费日志的 `stream_status.response_status` 为 `failed`；已输出的部分照常计费，也不会重试。Responses 上游的 `error` / `response.cancelled` 事件也作为流内错误发给 Chat / Claude 客户端（`error` 带上游的错误信息）。Gemini 流内错误按上游给的状态码和信息报给客户端 |
 | Gemini 渠道思考和正文混在一起、正文跑进思考框 | Gemini 同一个 chunk 里同时有 thought 和答案时，整个 chunk 被标成 `reasoning_content` | thought 进 `reasoning_content`，答案进 `content` |
 | 上游以裸 `[DONE]` 结束时报错 | 解析器把裸 `[DONE]` 切成 `]` 交给适配器 | 正确识别为结束 |
 | 生成很久后最后一个 chunk 发不出 | 30 秒写超时只在循环内续期，收尾写入可能撞上过期的超时 | 每次写入都续期 |
@@ -293,8 +295,8 @@ for i in $(seq 1 150); do curl -s -o /dev/null -w "%{http_code}\n" https://<你�
 ```bash
 # 以前出问题的请求会有这一行；修复后，已开始输出的流不会再出现它
 docker compose logs new-api 2>&1 | grep '重试：'
-# 流中途出错时的记录（配合 request id 看 received= 是否大于 0）
-docker compose logs new-api 2>&1 | grep -E 'relay error:|stream ended: reason='
+# 流中途出错时的记录（配合 request id 看 received= 是否大于 0）；上游流被截断时是 stream interrupted:
+docker compose logs new-api 2>&1 | grep -E 'relay error:|stream ended: reason=|stream interrupted:'
 ```
 
 如果 `重试：` 仍然频繁出现（针对还没输出内容的请求，这是正常重试），说明某个渠道经常在建连阶段就失败，去后台看渠道的错误日志。
@@ -438,10 +440,14 @@ WHERE us.user_id = <用户ID> AND us.status = 'active' AND us.end_time > UNIX_TI
 
 | 请求类型 | 发送内容 | 客户端看到的 |
 |---|---|---|
-| 流式（SSE） | `: PING` 注释行 | 标准 SSE 解析器（OpenAI / Anthropic 官方 SDK 等）会忽略注释行，实测正常 |
+| 流式 · Claude 格式（`/v1/messages`） | `event: ping` + `data: {"type": "ping"}` 事件，和 Anthropic 官方 API 自己发的一字不差 | Anthropic 官方 SDK（Python / Node）在流的任何位置都会跳过它。Claude Code 从 2.1.196 起有「5 分钟收不到事件就断开重发」的空闲看门狗，它只认事件、不认注释行，所以以前的 `: PING` 保不住它；2.1.222 修了「设置了自定义 `ANTHROPIC_BASE_URL` 时，收到 ping 仍按空闲超时断开」的问题，用户要升级到 2.1.222 或更新 |
+| 流式 · Responses 格式（`/v1/responses`，Codex） | 第一个事件（`response.created`）之前：`: PING` 注释行；之后：`event: keepalive` + `data: {"type":"keepalive"}` 事件 | Codex 每收到一个 data 事件就重新开始 300 秒空闲计时（注释行不算），不认识的事件类型直接跳过；OpenAI 官方 Node SDK 本身就定义了这个 `keepalive` 事件；Python SDK 把它原样交给调用方（`event.type == "keepalive"`），按 `type` 分支的代码不受影响。第一个事件之前仍发注释行，因为 Python / Node 两个官方 SDK 的 `client.responses.stream()` 在 `response.created` 之前收到任何事件都会直接报错 |
+| 流式 · 其他（chat/completions、图片流式） | `: PING` 注释行 | 标准 SSE 解析器（OpenAI 官方 SDK 等）会忽略注释行，实测正常 |
 | 非流式（JSON） | 在 JSON 正文前发换行符 `\n` | JSON 允许前导空白，`json.loads` / `JSON.parse` / 各官方 SDK 都能正常解析 |
 
-只在「静默满 N 秒」时才发，正常出字的流不会多出心跳；流式心跳只插在两个事件之间，不会把一个事件拆开。
+只在「静默满 N 秒」时才发，正常出字的流不会多出心跳；流式心跳只插在两个事件之间，不会把一个事件拆开。心跳事件和注释行一样不算正文：只发过心跳时仍会换渠道重试。
+
+**Codex 仍可能断开的一种情况：** 上游在 `response.created` 之前就沉默超过 300 秒（上游排队，或第一个渠道一直不回响应头、拖到超时才换渠道）。这一段只能发注释行（原因见上表），Codex 会按空闲超时断开重连。遇到这种情况，让用户在 Codex 的 `~/.codex/config.toml` 里对应的 `[model_providers.<名字>]` 下加 `stream_idle_timeout_ms = 900000`（毫秒）；Claude Code 对应的是环境变量 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`。
 
 **适用范围：**
 - 流式：OpenAI 格式（chat/completions、responses、图片流式）、Claude 格式；
@@ -484,6 +490,14 @@ nginx -T 2>/dev/null | grep -nE "proxy_pass|proxy_(read|send|connect)_timeout|pr
 - 用户等了约 60 秒就报错：多半是某层 nginx 还是默认 60 秒；约 100–125 秒：Cloudflare；约 300 / 600 秒：Google 默认截止时间或客户端自己的超时。
 - `STREAMING_TIMEOUT` 的单位是秒，写 `1800000` 等于约 20.8 天，想要 30 分钟应写 `1800`。
 
+**客户端断开后，上游请求随之取消：** 以前只有流式请求、而且要等上游开始返回之后，客户端断开才会关掉上游连接；非流式请求（以及上游还没返回响应头的那段时间）里客户端走了，上游照样把整段回答生成完，用户还会被扣费。例如 Claude Code 的非流式回退每 300 秒重发一次，被放弃的那几次都在上游跑完、都计了费。现在客户端一断开（关页面、点停止、客户端超时重发），new-api 立刻取消对应的上游请求，流式和非流式都一样：
+- 不换渠道重试（请求策略记录里是 `client_gone`），不记渠道错误日志、不触发自动禁用，也不计入模型健康统计；
+- 上游还没开始返回就断开的：预扣额度全额退还，用户不扣费；流式已经在接收上游输出的：和以前一样按已收到的部分结算；
+- 日志里是 INFO 级别的 `upstream request cancelled, client disconnected:`、`relay stopped, client disconnected:`，流式是 `stream ended: reason=client_gone`，不会再报成 `scanner error` 或渠道错误；
+- `RELAY_RESPONSE_HEADER_TIMEOUT`（默认 1800 秒）和上面的心跳都不变。
+
+计费上的取舍：上游一般仍会按断开前已经生成的 token 向运营方收费，而用户不为放弃的请求付钱，这部分由运营方承担；换来的是上游不再把没人要的回答整段生成完（以前这部分上游全额收费）。前面如果有 nginx，别开 `proxy_ignore_client_abort on`，否则 nginx 不会把客户端断开传给 new-api。
+
 **注意：** 和其他后台设置一样，一旦点过保存，就以数据库里的值为准（代码默认值是：总开关关、间隔 60 秒、非流式关）。
 
 **上线后怎么确认生效（把 `<令牌>`、`<模型>` 换成实际值，挑一个首字较慢的模型）：**
@@ -493,6 +507,11 @@ nginx -T 2>/dev/null | grep -nE "proxy_pass|proxy_(read|send|connect)_timeout|pr
 curl -N https://<你的域名>/v1/chat/completions \
   -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
   -d '{"model":"<模型>","stream":true,"messages":[{"role":"user","content":"写一首长诗"}]}'
+
+# Claude 格式：首字出来之前应每隔 N 秒看到 "event: ping" 和 "data: {"type": "ping"}" 两行
+curl -N https://<你的域名>/v1/messages \
+  -H "x-api-key: <令牌>" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
+  -d '{"model":"<模型>","max_tokens":4096,"stream":true,"messages":[{"role":"user","content":"写一首长诗"}]}'
 
 # 非流式：等待期间每隔 N 秒收到一个空行，最后是完整 JSON
 curl -N https://<你的域名>/v1/chat/completions \

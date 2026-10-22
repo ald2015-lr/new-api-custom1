@@ -186,7 +186,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 						writeMutex.Lock()
 						defer writeMutex.Unlock()
 						ExtendWriteDeadline(c)
-						err = PingData(c)
+						// This ticker cannot tell whether the client has seen
+						// an event yet, so a Responses stream keeps comments.
+						err = pingData(c, sseKeepAliveFrame(info.RelayFormat, false))
 					}()
 					if err != nil {
 						logger.LogError(c, common.LogText("ping data error: %s", err.Error()))
@@ -257,6 +259,13 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				return
 			case <-ctx.Done():
 				return
+			case <-c.Request.Context().Done():
+				// The upstream request follows the client's context, and the
+				// read it cancels hands back the half-received last line as a
+				// token. Nobody is listening, and an adaptor would take the
+				// truncated line for a broken upstream.
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+				return
 			default:
 			}
 
@@ -297,7 +306,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		}
 
 		if err := scanner.Err(); err != nil {
-			if err != io.EOF {
+			if requestErr := c.Request.Context().Err(); requestErr != nil {
+				// The upstream request follows the client's context, so a client
+				// that left also breaks this read, often before the select below
+				// sees it. It must not count as an upstream failure.
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, requestErr)
+			} else if err != io.EOF {
 				logger.LogError(c, common.LogText("scanner error: %s", err.Error()))
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
 			}
@@ -318,7 +332,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	cleanup()
-	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
+	// A client that left is not a failure of the stream.
+	clientGone := info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone
+	if (info.StreamStatus.IsNormalEnd() || clientGone) && !info.StreamStatus.HasErrors() {
 		logger.LogInfo(c, common.LogText("stream ended: %s", info.StreamStatus.Summary()))
 	} else {
 		logger.LogError(c, common.LogText("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))

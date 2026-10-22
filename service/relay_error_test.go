@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -218,6 +219,9 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			RequestPolicy(c).SessionModeSource = "global"
 		}, want: PolicyDecision{Action: "stop", Reason: "strict_session", Source: "global"}},
 		{name: "nil error", retries: 1, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
+		{name: "client gone stops even channel errors", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 1, setup: func(c *gin.Context) {
+			c.Request = cancelledClientRequest()
+		}, want: PolicyDecision{Action: "stop", Reason: "client_gone", Source: "client"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -229,6 +233,38 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			assert.Equal(t, tc.want.Action == "retry", ShouldRetryRelayError(c, tc.err, tc.retries))
 		})
 	}
+}
+
+// cancelledClientRequest is a relay request whose client already disconnected.
+func cancelledClientRequest() *http.Request {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+}
+
+// The upstream request is cancelled with its client, so the failure that
+// follows says nothing about the channel: it requests no disable, even for a
+// status that otherwise would.
+func TestRecordPolicyFailureForClientGoneLeavesHealthUnchanged(t *testing.T) {
+	previousAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previousAutoDisable })
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = cancelledClientRequest()
+	c.Set("auto_ban", true)
+	state := RequestPolicy(c)
+	state.BeginAttempt(&model.Channel{Id: 7}, "default")
+	apiErr := types.NewOpenAIError(errors.New("invalid credential"), types.ErrorCodeBadResponseStatusCode, http.StatusUnauthorized)
+	require.True(t, ShouldDisableChannel(apiErr), "with the client present this status disables the channel")
+
+	RecordPolicyFailure(c, 7, apiErr, DecideRelayRetry(c, apiErr, 1))
+
+	events := state.Events()
+	require.Len(t, events, 3)
+	assert.Equal(t, PolicyDecision{Action: "failure", Reason: "client_gone", Source: "client"}, events[1].Decision)
+	assert.Equal(t, "client", events[1].ErrorSource)
+	assert.Equal(t, PolicyDecision{Action: "stop", Reason: "client_gone", Source: "client"}, events[2].Decision)
+	assert.Equal(t, "unchanged", events[2].Health)
 }
 
 func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {

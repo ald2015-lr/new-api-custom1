@@ -49,14 +49,14 @@ type keepAliveFixture struct {
 	recorder *httptest.ResponseRecorder
 }
 
-func newKeepAliveFixture(t *testing.T, sse bool) *keepAliveFixture {
+func newKeepAliveFixture(t *testing.T, relayFormat types.RelayFormat, sse bool) *keepAliveFixture {
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Header("X-Oneapi-Request-Id", "request-1")
 	under := c.Writer
-	w := newKeepAliveWriter(c.Request.Context(), under, sse, time.Second)
+	w := newKeepAliveWriter(c.Request.Context(), under, relayFormat, sse, time.Second)
 	c.Writer = w
 	t.Cleanup(w.Stop)
 	return &keepAliveFixture{c: c, under: under, w: w, recorder: recorder}
@@ -72,7 +72,7 @@ func (f *keepAliveFixture) wire() (*http.Response, string) {
 
 func TestKeepAliveWriterJSONWhitespaceKeepsResponseRetryable(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		f := newKeepAliveFixture(t, false)
+		f := newKeepAliveFixture(t, types.RelayFormatOpenAI, false)
 		// Headers set after install belong to the handler's response; the
 		// keepalive commit must not read them.
 		f.c.Header("Content-Length", "13")
@@ -115,45 +115,74 @@ func TestKeepAliveWriterJSONWhitespaceKeepsResponseRetryable(t *testing.T) {
 	})
 }
 
+// Each SSE dialect gets the keepalive its clients' idle watchdogs count, and
+// none of them is response payload.
 func TestKeepAliveWriterSSEPingsOnlyBetweenEvents(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		f := newKeepAliveFixture(t, true)
+	const (
+		comment   = ": PING\n\n"
+		claude    = "event: ping\ndata: {\"type\": \"ping\"}\n\n"
+		responses = "event: keepalive\ndata: {\"type\":\"keepalive\"}\n\n"
+	)
+	for _, tc := range []struct {
+		format types.RelayFormat
+		// before the handler's first event, and between its events
+		before, between string
+	}{
+		{format: types.RelayFormatOpenAI, before: comment, between: comment},
+		{format: types.RelayFormatClaude, before: claude, between: claude},
+		// The OpenAI SDK stream helpers reject any event ahead of
+		// response.created.
+		{format: types.RelayFormatOpenAIResponses, before: comment, between: responses},
+	} {
+		t.Run(string(tc.format), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newKeepAliveFixture(t, tc.format, true)
 
-		time.Sleep(time.Second)
-		synctest.Wait()
-		wire, body := f.wire()
-		assert.Equal(t, ": PING\n\n", body)
-		assert.Equal(t, "text/event-stream", wire.Header.Get("Content-Type"))
-		assert.False(t, f.w.Written())
+				time.Sleep(time.Second)
+				synctest.Wait()
+				wire, body := f.wire()
+				assert.Equal(t, tc.before, body)
+				assert.Equal(t, "text/event-stream", wire.Header.Get("Content-Type"))
+				assert.False(t, f.w.Written(), "keepalive events must leave the request retryable")
+				assert.Equal(t, -1, f.w.Size())
 
-		// ResponseChunkData and ClaudeChunkData send the event line and its
-		// data line as separate writes.
-		f.c.Render(-1, common.CustomEvent{Data: "event: response.created\n"})
-		time.Sleep(5 * time.Second)
-		synctest.Wait()
-		_, body = f.wire()
-		assert.Equal(t, ": PING\n\nevent: response.created\n", body)
+				time.Sleep(time.Second)
+				synctest.Wait()
+				_, body = f.wire()
+				assert.Equal(t, tc.before+tc.before, body)
+				assert.False(t, f.w.Written())
 
-		f.c.Render(-1, common.CustomEvent{Data: `data: {"type":"response.created"}`})
-		time.Sleep(time.Second / 2)
-		synctest.Wait()
-		events := ": PING\n\nevent: response.created\ndata: {\"type\":\"response.created\"}\n\n"
-		_, body = f.wire()
-		assert.Equal(t, events, body, "keepalive waits for a whole idle interval")
+				// ResponseChunkData and ClaudeChunkData send the event line and
+				// its data line as separate writes.
+				f.c.Render(-1, common.CustomEvent{Data: "event: response.created\n"})
+				time.Sleep(5 * time.Second)
+				synctest.Wait()
+				_, body = f.wire()
+				assert.Equal(t, tc.before+tc.before+"event: response.created\n", body)
 
-		time.Sleep(time.Second / 2)
-		synctest.Wait()
-		_, body = f.wire()
-		assert.Equal(t, events+": PING\n\n", body)
-		assert.True(t, f.w.Written())
-		assert.Equal(t, http.StatusOK, f.w.Status())
-	})
+				f.c.Render(-1, common.CustomEvent{Data: `data: {"type":"response.created"}`})
+				time.Sleep(time.Second / 2)
+				synctest.Wait()
+				events := tc.before + tc.before + "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+				_, body = f.wire()
+				assert.Equal(t, events, body, "keepalive waits for a whole idle interval")
+
+				time.Sleep(time.Second / 2)
+				synctest.Wait()
+				_, body = f.wire()
+				assert.Equal(t, events+tc.between, body)
+				assert.True(t, f.w.Written())
+				assert.Equal(t, len(events)-2*len(tc.before), f.w.Size(), "keepalive bytes are not payload")
+				assert.Equal(t, http.StatusOK, f.w.Status())
+			})
+		})
+	}
 }
 
 func TestKeepAliveWriterStopsForGood(t *testing.T) {
 	t.Run("stop joins before the next interval", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			f := newKeepAliveFixture(t, false)
+			f := newKeepAliveFixture(t, types.RelayFormatOpenAI, false)
 			f.c.Header("X-Pending", "kept")
 			f.c.Status(http.StatusTooManyRequests)
 			f.w.Stop()
@@ -176,7 +205,7 @@ func TestKeepAliveWriterStopsForGood(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)
 			ctx, cancel := context.WithCancel(context.Background())
-			w := newKeepAliveWriter(ctx, c.Writer, true, time.Second)
+			w := newKeepAliveWriter(ctx, c.Writer, types.RelayFormatClaude, true, time.Second)
 			cancel()
 			time.Sleep(5 * time.Second)
 			synctest.Wait()
@@ -197,7 +226,7 @@ func TestKeepAliveWriterOverConnection(t *testing.T) {
 	engine := gin.New()
 	engine.POST("/", func(c *gin.Context) {
 		c.Header("X-Oneapi-Request-Id", "request-1")
-		w := newKeepAliveWriter(c.Request.Context(), c.Writer, false, 10*time.Millisecond)
+		w := newKeepAliveWriter(c.Request.Context(), c.Writer, types.RelayFormatOpenAI, false, 10*time.Millisecond)
 		c.Writer = w
 		defer w.Finalize()
 

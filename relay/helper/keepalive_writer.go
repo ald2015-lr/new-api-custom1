@@ -42,15 +42,40 @@ import (
 const (
 	// An SSE comment line, skipped by every SSE parser.
 	sseKeepAlive = ": PING\n\n"
+	// Anthropic's own keepalive event, byte for byte. Every Anthropic SDK
+	// skips it wherever it appears, and Claude Code's stream idle watchdog
+	// counts it, which it does not do for a comment.
+	claudeKeepAlive = "event: ping\ndata: {\"type\": \"ping\"}\n\n"
+	// The Responses keepalive event type that the OpenAI Node SDK accepts.
+	// Codex restarts its stream idle timeout on every data event, never on a
+	// comment, and skips event types it does not handle.
+	responsesKeepAlive = "event: keepalive\ndata: {\"type\":\"keepalive\"}\n\n"
 	// Leading whitespace, skipped by every JSON parser.
 	jsonKeepAlive = "\n"
 )
 
 var sseEventEnd = [2]byte{'\n', '\n'}
 
+// sseKeepAliveFrame is the keepalive that a stream in the client's dialect
+// takes between two events. A client whose idle watchdog counts events needs
+// an event there, not a comment. The Responses event waits for the stream's
+// first event, though: the stream helpers of the OpenAI Python and Node SDKs
+// fail on any event that comes before response.created.
+func sseKeepAliveFrame(relayFormat types.RelayFormat, afterFirstEvent bool) string {
+	switch {
+	case relayFormat == types.RelayFormatClaude:
+		return claudeKeepAlive
+	case relayFormat == types.RelayFormatOpenAIResponses && afterFirstEvent:
+		return responsesKeepAlive
+	default:
+		return sseKeepAlive
+	}
+}
+
 // KeepAliveWriter keeps a client that waits on a slow upstream from timing
 // out, the way OpenRouter does: after every interval without output it sends
-// an SSE comment to a stream, or whitespace ahead of a JSON body.
+// an SSE keepalive in the client's dialect to a stream, or whitespace ahead
+// of a JSON body.
 //
 // Keepalive bytes are not the response. Written stays false until the handler
 // writes, so the relay may still retry another channel and the next attempt's
@@ -65,6 +90,7 @@ var sseEventEnd = [2]byte{'\n', '\n'}
 type KeepAliveWriter struct {
 	under           gin.ResponseWriter
 	sse             bool
+	relayFormat     types.RelayFormat
 	interval        time.Duration
 	shadow          http.Header
 	keepAliveHeader http.Header
@@ -127,7 +153,7 @@ func InstallKeepAlive(c *gin.Context, relayFormat types.RelayFormat, info *relay
 	if !allowed {
 		return nil
 	}
-	return installKeepAlive(c, info.IsStream, settings.PingIntervalSeconds)
+	return installKeepAlive(c, relayFormat, info.IsStream, settings.PingIntervalSeconds)
 }
 
 // InstallJSONKeepAlive keeps a non-stream request alive with whitespace ahead
@@ -139,10 +165,10 @@ func InstallJSONKeepAlive(c *gin.Context) *KeepAliveWriter {
 	if !settings.PingIntervalEnabled || !settings.NonStreamPingEnabled {
 		return nil
 	}
-	return installKeepAlive(c, false, settings.PingIntervalSeconds)
+	return installKeepAlive(c, "", false, settings.PingIntervalSeconds)
 }
 
-func installKeepAlive(c *gin.Context, sse bool, seconds int) *KeepAliveWriter {
+func installKeepAlive(c *gin.Context, relayFormat types.RelayFormat, sse bool, seconds int) *KeepAliveWriter {
 	interval := time.Duration(seconds) * time.Second
 	if interval <= 0 {
 		interval = DefaultPingInterval
@@ -152,12 +178,12 @@ func installKeepAlive(c *gin.Context, sse bool, seconds int) *KeepAliveWriter {
 	// replaces c.Request.Body. Handlers get their own copy so the two never
 	// share that struct, as they already do behind the RequestId middleware.
 	c.Request = c.Request.WithContext(c.Request.Context())
-	w := newKeepAliveWriter(c.Request.Context(), c.Writer, sse, interval)
+	w := newKeepAliveWriter(c.Request.Context(), c.Writer, relayFormat, sse, interval)
 	c.Writer = w
 	return w
 }
 
-func newKeepAliveWriter(ctx context.Context, under gin.ResponseWriter, sse bool, interval time.Duration) *KeepAliveWriter {
+func newKeepAliveWriter(ctx context.Context, under gin.ResponseWriter, relayFormat types.RelayFormat, sse bool, interval time.Duration) *KeepAliveWriter {
 	// Middleware headers such as the request id and CORS are already set and
 	// must survive a keepalive commit; anything describing a body must not.
 	keepAliveHeader := under.Header().Clone()
@@ -174,6 +200,7 @@ func newKeepAliveWriter(ctx context.Context, under gin.ResponseWriter, sse bool,
 	w := &KeepAliveWriter{
 		under:           under,
 		sse:             sse,
+		relayFormat:     relayFormat,
 		interval:        interval,
 		shadow:          under.Header().Clone(),
 		keepAliveHeader: keepAliveHeader,
@@ -276,8 +303,9 @@ func (w *KeepAliveWriter) tick() (time.Duration, bool) {
 	if idle < w.interval {
 		return w.interval - idle, true
 	}
-	// Between an "event:" line and its "data:" line, a comment would dispatch
-	// an empty event and orphan the data.
+	// Between an "event:" line and its "data:" line, a keepalive would
+	// dispatch an empty event or take over the event's name, and orphan the
+	// data.
 	if w.size > 0 && w.tail != sseEventEnd {
 		return w.interval, true
 	}
@@ -288,7 +316,8 @@ func (w *KeepAliveWriter) tick() (time.Duration, bool) {
 	}
 	frame := jsonKeepAlive
 	if w.sse {
-		frame = sseKeepAlive
+		// Past the guards above, the handler's bytes are whole SSE events.
+		frame = sseKeepAliveFrame(w.relayFormat, w.payload)
 	}
 	// Bound the write so a stalled client cannot block Stop, then restore the
 	// handler's own deadline: a leftover keepalive deadline would cut off a

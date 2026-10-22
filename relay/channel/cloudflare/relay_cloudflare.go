@@ -54,6 +54,10 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 		var response dto.ChatCompletionsStreamResponse
 		err := json.Unmarshal([]byte(data), &response)
 		if err != nil {
+			if service.ClientGone(c) {
+				// The cancelled read left a truncated last line.
+				break
+			}
 			logger.LogError(c, common.LogText("error_unmarshalling_stream_response: %s", err.Error()))
 			continue
 		}
@@ -68,16 +72,22 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 			isFirst = false
 			info.FirstResponseTime = time.Now()
 		}
-		if err != nil {
+		if err != nil && !service.ClientGone(c) {
 			logger.LogError(c, common.LogText("error_rendering_stream_response: %s", err.Error()))
 		}
 	}
 
+	// A client that left cancelled the upstream read and receives nothing more.
+	clientGone := service.ClientGone(c)
 	if err := scanner.Err(); err != nil {
-		logger.LogError(c, common.LogText("error_scanning_stream_response: %s", err.Error()))
+		if clientGone {
+			logger.LogInfo(c, common.LogText("cloudflare stream stopped, client disconnected: %s", err.Error()))
+		} else {
+			logger.LogError(c, common.LogText("error_scanning_stream_response: %s", err.Error()))
+		}
 	}
 	usage := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
-	if info.ShouldIncludeUsage {
+	if info.ShouldIncludeUsage && !clientGone {
 		response := helper.GenerateFinalUsageResponse(id, info.StartTime.Unix(), info.UpstreamModelName, *usage)
 		err := helper.ObjectData(c, response)
 		if err != nil {
