@@ -415,6 +415,7 @@
   "error handling stream format: %s": "转换并发送流数据出错: %s",
   "error marshalling chats: %s": "序列化聊天配置出错: %s",
   "error marshalling model ratio: %s": "序列化模型倍率出错: %s",
+  "error marshalling model request rate limits: %s": "序列化模型请求限流规则出错: %s",
   "error marshalling stream response: %s": "序列化流式响应出错: %s",
   "error marshalling topup group ratio: %s": "序列化充值分组倍率出错: %s",
   "error marshalling user groups: %s": "序列化用户分组出错: %s",

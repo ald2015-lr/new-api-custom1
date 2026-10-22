@@ -121,6 +121,7 @@ func productionPluginRouteHandlers(generation *jsplugin.RoutingGeneration, bindi
 		middleware.ModelRequestRateLimit(),
 		middleware.PrepareTaskPluginRoute(),
 		middleware.Distribute(),
+		middleware.PerModelRequestRateLimit(),
 		controller.RelayTask,
 	}
 }

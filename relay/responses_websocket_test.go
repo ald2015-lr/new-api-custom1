@@ -542,7 +542,7 @@ func TestResponsesWSMessageSizeLimit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ResponsesWebSocketHelper(c, server, func(*http.Request, string, func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+		ResponsesWebSocketHelper(c, server, func(*http.Request, string, string, func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
 			admitted.Store(true)
 			return nil
 		})

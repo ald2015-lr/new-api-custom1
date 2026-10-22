@@ -37,7 +37,8 @@ const responsesWSWriteTimeout = 30 * time.Second
 
 // ResponsesWSRequestRunner executes the existing authentication and rate-limit
 // middleware around one complete request, without a second HTTP connection.
-type ResponsesWSRequestRunner func(*http.Request, string, func(*gin.Context) *types.NewAPIError) *types.NewAPIError
+// modelName is the model the event asks for, which the per-model limit counts.
+type ResponsesWSRequestRunner func(request *http.Request, requestID string, modelName string, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError
 
 type responsesWSCreateEvent struct {
 	Type     string            `json:"type"`
@@ -219,7 +220,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 	request.Body = io.NopCloser(bytes.NewReader(message))
 	request.ContentLength = int64(len(message))
 	request.Header.Set("Content-Type", "application/json")
-	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
+	apiErr = s.runner(request, requestID, create.Request.Model, func(c *gin.Context) *types.NewAPIError {
 		if parseErr != nil {
 			return newResponsesWSInvalidRequestError(parseErr)
 		}

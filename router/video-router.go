@@ -18,6 +18,7 @@ func SetVideoRouter(router *gin.Engine) {
 		middleware.TaskPluginEndpointOnly(middleware.ModelRequestRateLimit()),
 		middleware.PrepareTaskPluginEndpoint(),
 		middleware.Distribute(),
+		middleware.TaskPluginEndpointOnly(middleware.PerModelRequestRateLimit()),
 		func(c *gin.Context) {
 			controller.RelayTaskPluginEndpoint(c, controller.RelayTask)
 		},

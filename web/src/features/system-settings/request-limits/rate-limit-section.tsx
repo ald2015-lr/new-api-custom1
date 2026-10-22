@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import type { TFunction } from 'i18next'
 import { Code2, Palette } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
@@ -45,6 +46,8 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { getModelRateLimitRulesError } from './model-rate-limit-rules'
+import { ModelRateLimitVisualEditor } from './model-rate-limit-visual-editor'
 import { RateLimitVisualEditor } from './rate-limit-visual-editor'
 
 const isValidJSON = (value: string | undefined) => {
@@ -66,7 +69,7 @@ const isValidJSON = (value: string | undefined) => {
   }
 }
 
-const createRateLimitSchema = (t: (key: string) => string) =>
+const createRateLimitSchema = (t: TFunction) =>
   z.object({
     ModelRequestRateLimitEnabled: z.boolean(),
     ModelRequestRateLimitDurationMinutes: z.number().min(0),
@@ -78,6 +81,12 @@ const createRateLimitSchema = (t: (key: string) => string) =>
       .refine(isValidJSON, {
         message: t('Invalid JSON format or values out of allowed range'),
       }),
+    ModelRequestRateLimitModel: z.string().superRefine((value, ctx) => {
+      const error = getModelRateLimitRulesError(value)
+      if (error) {
+        ctx.addIssue({ code: 'custom', message: t(error.key, error.params) })
+      }
+    }),
   })
 
 type RateLimitFormValues = z.infer<ReturnType<typeof createRateLimitSchema>>
@@ -86,10 +95,35 @@ type RateLimitSectionProps = {
   defaultValues: RateLimitFormValues
 }
 
+type EditorModeToggleProps = {
+  visual: boolean
+  onToggle: () => void
+}
+
+function EditorModeToggle(props: EditorModeToggleProps) {
+  const { t } = useTranslation()
+  return (
+    <Button type='button' variant='outline' size='sm' onClick={props.onToggle}>
+      {props.visual ? (
+        <>
+          <Code2 className='mr-2 h-4 w-4' />
+          {t('JSON Mode')}
+        </>
+      ) : (
+        <>
+          <Palette className='mr-2 h-4 w-4' />
+          {t('Visual Mode')}
+        </>
+      )}
+    </Button>
+  )
+}
+
 export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const [useVisualEditor, setUseVisualEditor] = useState(true)
+  const [useModelVisualEditor, setUseModelVisualEditor] = useState(true)
 
   const rateLimitSchema = createRateLimitSchema(t)
 
@@ -247,24 +281,10 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
               <FormItem>
                 <div className='flex items-center justify-between'>
                   <FormLabel>{t('Group-based rate limits')}</FormLabel>
-                  <Button
-                    type='button'
-                    variant='outline'
-                    size='sm'
-                    onClick={() => setUseVisualEditor(!useVisualEditor)}
-                  >
-                    {useVisualEditor ? (
-                      <>
-                        <Code2 className='mr-2 h-4 w-4' />
-                        {t('JSON Mode')}
-                      </>
-                    ) : (
-                      <>
-                        <Palette className='mr-2 h-4 w-4' />
-                        {t('Visual Mode')}
-                      </>
-                    )}
-                  </Button>
+                  <EditorModeToggle
+                    visual={useVisualEditor}
+                    onToggle={() => setUseVisualEditor(!useVisualEditor)}
+                  />
                 </div>
                 <FormControl>
                   {useVisualEditor ? (
@@ -307,6 +327,72 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
                         <li>
                           {t(
                             'Group config overrides global limits, shares the same period'
+                          )}
+                        </li>
+                      </ul>
+                    </div>
+                  </FormDescription>
+                )}
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='ModelRequestRateLimitModel'
+            render={({ field }) => (
+              <FormItem role='group' aria-label={t('Model-based rate limits')}>
+                <div className='flex items-center justify-between'>
+                  <FormLabel>{t('Model-based rate limits')}</FormLabel>
+                  <EditorModeToggle
+                    visual={useModelVisualEditor}
+                    onToggle={() =>
+                      setUseModelVisualEditor(!useModelVisualEditor)
+                    }
+                  />
+                </div>
+                <FormDescription>
+                  {t(
+                    'Limits each user separately for one model, matched by the exact model name the client sends, including any [...] prefix. 0 = no limit. These limits apply in addition to the global and group limits, so the stricter one takes effect first.'
+                  )}
+                </FormDescription>
+                <FormControl>
+                  {useModelVisualEditor ? (
+                    <ModelRateLimitVisualEditor
+                      value={field.value}
+                      onChange={field.onChange}
+                    />
+                  ) : (
+                    <JsonCodeEditor
+                      value={field.value}
+                      onChange={field.onChange}
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      textareaRef={field.ref}
+                      placeholder={`{\n  "gpt-4o": {"duration_minutes": 1, "total_count": 60, "success_count": 30}\n}`}
+                      aria-invalid={Boolean(
+                        form.formState.errors.ModelRequestRateLimitModel
+                      )}
+                    />
+                  )}
+                </FormControl>
+                {!useModelVisualEditor && (
+                  <FormDescription>
+                    <div className='space-y-1 text-xs'>
+                      <p className='font-semibold'>{t('Format:')}</p>
+                      <ul className='list-inside list-disc space-y-0.5 pl-2'>
+                        <li>
+                          {t('JSON object:')}{' '}
+                          {`{"modelName": {"duration_minutes": minutes, "total_count": maxRequests, "success_count": maxSuccess}}`}
+                        </li>
+                        <li>
+                          {t('Example:')}{' '}
+                          {`{"gpt-4o": {"duration_minutes": 1, "total_count": 60, "success_count": 30}}`}
+                        </li>
+                        <li>
+                          {t(
+                            'duration_minutes 1 to 1,440; total_count and success_count 0 to 100,000,000, 0 = unlimited'
                           )}
                         </li>
                       </ul>

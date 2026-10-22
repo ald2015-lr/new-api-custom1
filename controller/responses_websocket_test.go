@@ -142,7 +142,7 @@ func TestResponsesWSRequestRunnerRefreshesBillingContextAndCleansBody(t *testing
 	handshake.Header.Set("X-Forwarded-For", "198.51.100.99")
 	var storage common.BodyStorage
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"first"}`))
-	require.Nil(t, runner(request, "ws-first", func(c *gin.Context) *types.NewAPIError {
+	require.Nil(t, runner(request, "ws-first", "", func(c *gin.Context) *types.NewAPIError {
 		assert.Equal(t, user.Id, c.GetInt("id"))
 		assert.Equal(t, 100, c.GetInt("token_quota"))
 		assert.Equal(t, "203.0.113.8", c.ClientIP())
@@ -170,7 +170,7 @@ func TestResponsesWSRequestRunnerRefreshesBillingContextAndCleansBody(t *testing
 		"group": "updated", "setting": `{"billing_preference":"wallet_only"}`,
 	}).Error)
 	request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"second"}`))
-	require.Nil(t, runner(request, "ws-second", func(c *gin.Context) *types.NewAPIError {
+	require.Nil(t, runner(request, "ws-second", "", func(c *gin.Context) *types.NewAPIError {
 		assert.Equal(t, 2, c.GetInt("token_quota"))
 		assert.True(t, c.GetBool("token_model_limit_enabled"))
 		modelLimits, _ := c.Get("token_model_limit")
@@ -216,10 +216,10 @@ func TestResponsesWSRequestRunnerRejectsRevokedCredentials(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			user, token := setupResponsesWSRequestTest(t)
 			runner, _ := newResponsesWSTestRunner(t, token)
-			require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "before", func(*gin.Context) *types.NewAPIError { return nil }))
+			require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "before", "", func(*gin.Context) *types.NewAPIError { return nil }))
 			tc.update(t, user, token)
 			called := false
-			apiError := runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "after", func(*gin.Context) *types.NewAPIError {
+			apiError := runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "after", "", func(*gin.Context) *types.NewAPIError {
 				called = true
 				return nil
 			})
@@ -241,13 +241,39 @@ func TestResponsesWSRequestRunnerUsesExistingMemoryRateLimit(t *testing.T) {
 	runner, _ := newResponsesWSTestRunner(t, token)
 	called := 0
 	handle := func(*gin.Context) *types.NewAPIError { called++; return nil }
-	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "first", handle))
-	apiError := runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "limited", handle)
+	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "first", "", handle))
+	apiError := runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "limited", "", handle)
 	require.NotNil(t, apiError)
 	assert.Equal(t, http.StatusTooManyRequests, apiError.StatusCode)
 	message := i18n.Translate("", i18n.MsgRateLimitTotalReached, map[string]any{"Minutes": 1, "Max": 1})
 	assert.Equal(t, common.MessageWithRequestId(message, "limited"), apiError.Error())
 	assert.Equal(t, 1, called)
+}
+
+// Each response.create event runs the per-model limit of the model it names,
+// like an HTTP request after channel selection.
+func TestResponsesWSRequestRunnerAppliesPerModelRateLimit(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	_, token := setupResponsesWSRequestTest(t)
+	setting.ModelRequestRateLimitEnabled = true
+	setting.ModelRequestRateLimitDurationMinutes = 1
+	setting.ModelRequestRateLimitCount = 0
+	setting.ModelRequestRateLimitSuccessCount = 100
+	previousModels := setting.ModelRequestRateLimitModel2JSONString()
+	t.Cleanup(func() { require.NoError(t, setting.UpdateModelRequestRateLimitModelByJSONString(previousModels)) })
+	require.NoError(t, setting.UpdateModelRequestRateLimitModelByJSONString(`{"gpt-5.1": {"duration_minutes": 2, "total_count": 1, "success_count": 0}}`))
+	runner, _ := newResponsesWSTestRunner(t, token)
+	called := 0
+	handle := func(*gin.Context) *types.NewAPIError { called++; return nil }
+
+	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "first", "gpt-5.1", handle))
+	apiError := runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "limited", "gpt-5.1", handle)
+	require.NotNil(t, apiError)
+	assert.Equal(t, http.StatusTooManyRequests, apiError.StatusCode)
+	message := i18n.Translate("", i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": "gpt-5.1", "Minutes": 2, "Max": 1})
+	assert.Equal(t, common.MessageWithRequestId(message, "limited"), apiError.Error())
+	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "other model", "gpt-5.1-mini", handle))
+	assert.Equal(t, 2, called)
 }
 
 func TestResponsesWSRequestRunnerSharesRedisSuccessLimitWithHTTP(t *testing.T) {
@@ -263,8 +289,8 @@ func TestResponsesWSRequestRunnerSharesRedisSuccessLimitWithHTTP(t *testing.T) {
 	setting.ModelRequestRateLimitSuccessCount = 1
 	runner, _ := newResponsesWSTestRunner(t, token)
 	failed := types.NewErrorWithStatusCode(errors.New("invalid input"), types.ErrorCodeInvalidRequest, http.StatusBadRequest)
-	assert.Same(t, failed, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "failed", func(*gin.Context) *types.NewAPIError { return failed }))
-	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "successful", func(*gin.Context) *types.NewAPIError { return nil }))
+	assert.Same(t, failed, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "failed", "", func(*gin.Context) *types.NewAPIError { return failed }))
+	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "successful", "", func(*gin.Context) *types.NewAPIError { return nil }))
 	engine := gin.New()
 	called := false
 	engine.POST("/v1/responses", middleware.TokenAuth(), middleware.ModelRequestRateLimit(), func(c *gin.Context) { called = true })

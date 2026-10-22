@@ -23,6 +23,7 @@ type responsesWSRequestContextKey struct{}
 
 type responsesWSRequestState struct {
 	requestID string
+	modelName string
 	handle    func(*gin.Context) *types.NewAPIError
 	apiError  *types.NewAPIError
 }
@@ -37,8 +38,11 @@ var responsesWSRequestEngine = sync.OnceValue(func() *gin.Engine {
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
 		c.Set(common.RequestIdKey, state.requestID)
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+		// The event names its model before channel selection, which is where
+		// the HTTP routes learn it, so the per-model limit reads it from here.
+		common.SetContextKey(c, constant.ContextKeyOriginalModel, state.modelName)
 		c.Next()
-	}, middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.ModelRequestRateLimit(), func(c *gin.Context) {
+	}, middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.ModelRequestRateLimit(), middleware.PerModelRequestRateLimit(), func(c *gin.Context) {
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
 		state.apiError = state.handle(c)
 		if state.apiError != nil {
@@ -81,8 +85,8 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 		headers.Del(name)
 	}
 	remoteAddr := net.JoinHostPort(c.ClientIP(), "0")
-	return func(request *http.Request, requestID string, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
-		state := &responsesWSRequestState{requestID: requestID, handle: handle}
+	return func(request *http.Request, requestID string, modelName string, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+		state := &responsesWSRequestState{requestID: requestID, modelName: modelName, handle: handle}
 		ctx := context.WithValue(request.Context(), responsesWSRequestContextKey{}, state)
 		ctx = context.WithValue(ctx, common.RequestIdKey, requestID)
 		request = request.Clone(ctx)
