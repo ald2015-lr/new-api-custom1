@@ -278,7 +278,7 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
             control={form.control}
             name='ModelRequestRateLimitGroup'
             render={({ field }) => (
-              <FormItem>
+              <FormItem data-settings-form-span='full'>
                 <div className='flex items-center justify-between'>
                   <FormLabel>{t('Group-based rate limits')}</FormLabel>
                   <EditorModeToggle
@@ -342,7 +342,11 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
             control={form.control}
             name='ModelRequestRateLimitModel'
             render={({ field }) => (
-              <FormItem role='group' aria-label={t('Model-based rate limits')}>
+              <FormItem
+                data-settings-form-span='full'
+                role='group'
+                aria-label={t('Model-based rate limits')}
+              >
                 <div className='flex items-center justify-between'>
                   <FormLabel>{t('Model-based rate limits')}</FormLabel>
                   <EditorModeToggle
@@ -352,9 +356,34 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
                     }
                   />
                 </div>
+                {/* The one description of the field, which the editor's
+                    aria-describedby names, so the JSON format hint is part
+                    of it. It renders a <p>: only phrasing markup inside. */}
                 <FormDescription>
                   {t(
-                    'Limits each user separately for one model, matched by the exact model name the client sends, including any [...] prefix. 0 = no limit. These limits apply in addition to the global and group limits, so the stricter one takes effect first.'
+                    'Limits each user separately for one model. A rule matches the model name the client sends, including any [...] prefix; a variant with @ modifiers or a suffix such as -thinking counts under the rule of its base model unless it has a rule of its own. 0 = no limit. These limits apply in addition to the global and group limits, so the stricter one takes effect first.'
+                  )}
+                  {!useModelVisualEditor && (
+                    <span className='mt-2 block space-y-1 text-xs'>
+                      <span className='block font-semibold'>
+                        {t('Format:')}
+                      </span>
+                      <span className='block list-inside list-disc space-y-0.5 pl-2'>
+                        <span className='list-item'>
+                          {t('JSON object:')}{' '}
+                          {`{"modelName": {"duration_minutes": minutes, "total_count": maxRequests, "success_count": maxSuccess}}`}
+                        </span>
+                        <span className='list-item'>
+                          {t('Example:')}{' '}
+                          {`{"gpt-4o": {"duration_minutes": 1, "total_count": 60, "success_count": 30}}`}
+                        </span>
+                        <span className='list-item'>
+                          {t(
+                            'duration_minutes 1 to 1,440; total_count and success_count 0 to 100,000,000, 0 = unlimited'
+                          )}
+                        </span>
+                      </span>
+                    </span>
                   )}
                 </FormDescription>
                 <FormControl>
@@ -377,28 +406,6 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
                     />
                   )}
                 </FormControl>
-                {!useModelVisualEditor && (
-                  <FormDescription>
-                    <div className='space-y-1 text-xs'>
-                      <p className='font-semibold'>{t('Format:')}</p>
-                      <ul className='list-inside list-disc space-y-0.5 pl-2'>
-                        <li>
-                          {t('JSON object:')}{' '}
-                          {`{"modelName": {"duration_minutes": minutes, "total_count": maxRequests, "success_count": maxSuccess}}`}
-                        </li>
-                        <li>
-                          {t('Example:')}{' '}
-                          {`{"gpt-4o": {"duration_minutes": 1, "total_count": 60, "success_count": 30}}`}
-                        </li>
-                        <li>
-                          {t(
-                            'duration_minutes 1 to 1,440; total_count and success_count 0 to 100,000,000, 0 = unlimited'
-                          )}
-                        </li>
-                      </ul>
-                    </div>
-                  </FormDescription>
-                )}
                 <FormMessage />
               </FormItem>
             )}

@@ -23,7 +23,7 @@ type responsesWSRequestContextKey struct{}
 
 type responsesWSRequestState struct {
 	requestID string
-	modelName string
+	admit     func(*gin.Context) *types.NewAPIError
 	handle    func(*gin.Context) *types.NewAPIError
 	apiError  *types.NewAPIError
 }
@@ -38,23 +38,32 @@ var responsesWSRequestEngine = sync.OnceValue(func() *gin.Engine {
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
 		c.Set(common.RequestIdKey, state.requestID)
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		// The event names its model before channel selection, which is where
-		// the HTTP routes learn it, so the per-model limit reads it from here.
-		common.SetContextKey(c, constant.ContextKeyOriginalModel, state.modelName)
 		c.Next()
-	}, middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.ModelRequestRateLimit(), middleware.PerModelRequestRateLimit(), func(c *gin.Context) {
+	}, middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.ModelRequestRateLimit(), func(c *gin.Context) {
+		// Admission takes the place of Distribute on the HTTP routes: what it
+		// rejects never reaches the per-model limit, and it names the model
+		// that limit counts.
 		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
-		state.apiError = state.handle(c)
-		if state.apiError != nil {
-			status := state.apiError.StatusCode
-			if status < http.StatusBadRequest {
-				status = http.StatusInternalServerError
-			}
-			c.Status(status)
+		if state.apiError = state.admit(c); state.apiError != nil {
+			c.AbortWithStatus(responsesWSFailureStatus(state.apiError))
+		}
+	}, middleware.PerModelRequestRateLimit(), func(c *gin.Context) {
+		state := c.Request.Context().Value(responsesWSRequestContextKey{}).(*responsesWSRequestState)
+		if state.apiError = state.handle(c); state.apiError != nil {
+			c.Status(responsesWSFailureStatus(state.apiError))
 		}
 	})
 	return engine
 })
+
+// responsesWSFailureStatus is the HTTP status the rate limits record for an
+// event that failed with apiError.
+func responsesWSFailureStatus(apiError *types.NewAPIError) int {
+	if apiError.StatusCode < http.StatusBadRequest {
+		return http.StatusInternalServerError
+	}
+	return apiError.StatusCode
+}
 
 type responsesWSResponseWriter struct {
 	header http.Header
@@ -85,8 +94,8 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 		headers.Del(name)
 	}
 	remoteAddr := net.JoinHostPort(c.ClientIP(), "0")
-	return func(request *http.Request, requestID string, modelName string, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
-		state := &responsesWSRequestState{requestID: requestID, modelName: modelName, handle: handle}
+	return func(request *http.Request, requestID string, admit, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+		state := &responsesWSRequestState{requestID: requestID, admit: admit, handle: handle}
 		ctx := context.WithValue(request.Context(), responsesWSRequestContextKey{}, state)
 		ctx = context.WithValue(ctx, common.RequestIdKey, requestID)
 		request = request.Clone(ctx)

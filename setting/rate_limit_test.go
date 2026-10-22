@@ -74,8 +74,9 @@ func TestUpdateModelRequestRateLimitModelKeepsRulesOnInvalidValue(t *testing.T) 
 	assert.Error(t, UpdateModelRequestRateLimitModelByJSONString(`{"gpt-4o": {"duration_minutes": 0, "total_count": 3}}`))
 	assert.Error(t, UpdateModelRequestRateLimitModelByJSONString(`not json`))
 
-	rule, found := GetModelRequestRateLimitRule("gpt-4o")
+	name, rule, found := FindModelRequestRateLimitRule("gpt-4o")
 	require.True(t, found)
+	assert.Equal(t, "gpt-4o", name)
 	assert.Equal(t, ModelRequestRateLimitRule{DurationMinutes: 2, TotalCount: 3, SuccessCount: 1}, rule)
 	assert.JSONEq(t, `{"gpt-4o": {"duration_minutes": 2, "total_count": 3, "success_count": 1}}`, ModelRequestRateLimitModel2JSONString())
 }

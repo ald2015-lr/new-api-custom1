@@ -168,7 +168,7 @@ export function ModelRateLimitDialog(props: ModelRateLimitDialogProps) {
                   {isEditMode
                     ? t('Model name cannot be changed when editing.')
                     : t(
-                        'The exact model name the client sends, including any [...] prefix.'
+                        'The model name the client sends, including any [...] prefix. Variants with @ modifiers or a suffix such as -thinking also count under it.'
                       )}
                 </FormDescription>
                 <FormMessage />

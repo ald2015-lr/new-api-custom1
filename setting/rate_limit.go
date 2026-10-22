@@ -41,9 +41,10 @@ var ModelRequestRateLimitModel = map[string]ModelRequestRateLimitRule{}
 var ModelRequestRateLimitMutex sync.RWMutex
 
 // ModelRequestRateLimitRule limits the requests each user sends to one model,
-// keyed by the exact model name the client sends. It applies in addition to
-// the global or group limit, so the stricter of the two rejects first. A zero
-// count does not limit.
+// keyed by model name. A request counts under the rule of the name it sends,
+// or else of that name's base model (see middleware.PerModelRequestRateLimit).
+// It applies in addition to the global or group limit, so the stricter of the
+// two rejects first. A zero count does not limit.
 type ModelRequestRateLimitRule struct {
 	DurationMinutes int `json:"duration_minutes"`
 	TotalCount      int `json:"total_count"`
@@ -128,12 +129,18 @@ func UpdateModelRequestRateLimitModelByJSONString(jsonStr string) error {
 	return nil
 }
 
-func GetModelRequestRateLimitRule(model string) (ModelRequestRateLimitRule, bool) {
+// FindModelRequestRateLimitRule returns the rule of the first of names that
+// has one, and that name.
+func FindModelRequestRateLimitRule(names ...string) (string, ModelRequestRateLimitRule, bool) {
 	ModelRequestRateLimitMutex.RLock()
 	defer ModelRequestRateLimitMutex.RUnlock()
 
-	rule, found := ModelRequestRateLimitModel[model]
-	return rule, found
+	for _, name := range names {
+		if rule, found := ModelRequestRateLimitModel[name]; found {
+			return name, rule, true
+		}
+	}
+	return "", ModelRequestRateLimitRule{}, false
 }
 
 func CheckModelRequestRateLimitModel(jsonStr string) error {

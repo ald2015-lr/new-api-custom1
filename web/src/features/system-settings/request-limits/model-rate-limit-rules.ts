@@ -38,8 +38,70 @@ export type ModelRateLimitRulesError = {
   params?: Record<string, string | number>
 }
 
-// The backend decodes a missing or null field as 0 and rejects any other
-// value that is not an integer.
+// The characters Go's strings.TrimSpace removes (unicode.IsSpace), as a
+// RegExp character class. Unlike JS trim(), it keeps U+FEFF and removes U+0085.
+const GO_SPACE = String.raw`\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000`
+const SURROUNDING_GO_SPACE = new RegExp(`^[${GO_SPACE}]|[${GO_SPACE}]$`)
+
+// A JSON number the backend can decode into an int: no fraction or exponent,
+// although JSON.parse reads 1.0 or 1e1 as whole numbers.
+const INTEGER_LITERAL = /^-?(?:0|[1-9]\d*)$/
+
+// The same check over the raw text, for browsers whose JSON.parse does not
+// give a reviver the source of a value.
+const NON_INTEGER_RULE_FIELD =
+  /"(?:duration_minutes|total_count|success_count)"\s*:\s*-?\d+(?:\.|[eE])/i
+
+const RULE_FIELDS = [
+  'duration_minutes',
+  'total_count',
+  'success_count',
+] as const
+type RuleField = (typeof RULE_FIELDS)[number]
+
+/**
+ * JSON.parse that turns a number written with a fraction or an exponent into
+ * NaN, so it reads as a value the backend cannot decode.
+ */
+function parseRulesJson(value: string): unknown {
+  let sourceUnavailable = false
+  const parsed: unknown = JSON.parse(
+    value,
+    (_key: string, field: unknown, context?: { source?: string }) => {
+      if (typeof field !== 'number') return field
+      if (context?.source === undefined) {
+        sourceUnavailable = true
+        return field
+      }
+      return INTEGER_LITERAL.test(context.source) ? field : Number.NaN
+    }
+  )
+  if (sourceUnavailable && NON_INTEGER_RULE_FIELD.test(value)) return null
+  return parsed
+}
+
+// The backend matches a key to a rule field ignoring case; of several keys
+// for one field the last one wins. A missing or null field decodes as 0, and
+// any other value that is not an integer is rejected.
+function readRuleFields(
+  rule: Record<string, unknown>
+): Record<RuleField, number | null> {
+  const values: Record<RuleField, unknown> = {
+    duration_minutes: undefined,
+    total_count: undefined,
+    success_count: undefined,
+  }
+  for (const [key, value] of Object.entries(rule)) {
+    const field = RULE_FIELDS.find((name) => name === key.toLowerCase())
+    if (field) values[field] = value
+  }
+  return {
+    duration_minutes: readRuleNumber(values.duration_minutes),
+    total_count: readRuleNumber(values.total_count),
+    success_count: readRuleNumber(values.success_count),
+  }
+}
+
 function readRuleNumber(value: unknown): number | null {
   if (value === undefined || value === null) return 0
   return typeof value === 'number' && Number.isInteger(value) ? value : null
@@ -54,7 +116,7 @@ export function parseModelRateLimitRules(
 ): ModelRateLimitRule[] | null {
   let parsed: unknown
   try {
-    parsed = JSON.parse(value)
+    parsed = parseRulesJson(value)
   } catch {
     return null
   }
@@ -63,18 +125,20 @@ export function parseModelRateLimitRules(
   const rules: ModelRateLimitRule[] = []
   for (const [modelName, rule] of Object.entries(parsed)) {
     if (rule !== null && !isObjectRecord(rule)) return null
-    const fields = rule ?? {}
-    const durationMinutes = readRuleNumber(fields.duration_minutes)
-    const totalCount = readRuleNumber(fields.total_count)
-    const successCount = readRuleNumber(fields.success_count)
+    const fields = readRuleFields(rule ?? {})
     if (
-      durationMinutes === null ||
-      totalCount === null ||
-      successCount === null
+      fields.duration_minutes === null ||
+      fields.total_count === null ||
+      fields.success_count === null
     ) {
       return null
     }
-    rules.push({ modelName, durationMinutes, totalCount, successCount })
+    rules.push({
+      modelName,
+      durationMinutes: fields.duration_minutes,
+      totalCount: fields.total_count,
+      successCount: fields.success_count,
+    })
   }
   return rules
 }
@@ -110,7 +174,7 @@ export function getModelRateLimitRulesError(
     const model = rule.modelName
     if (
       model === '' ||
-      model !== model.trim() ||
+      SURROUNDING_GO_SPACE.test(model) ||
       [...model].length > MODEL_RATE_LIMIT_MAX_NAME_LENGTH
     ) {
       return {
@@ -140,21 +204,25 @@ export function getModelRateLimitRulesError(
   return null
 }
 
-function parseRuleObject(value: string): Record<string, unknown> {
+function parseRuleObject(value: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(value)
-    return isObjectRecord(parsed) ? parsed : {}
+    return isObjectRecord(parsed) ? parsed : null
   } catch {
-    return {}
+    return null
   }
 }
 
-/** Adds or replaces the rule of rule.modelName, keeping the other entries. */
+/**
+ * Adds or replaces the rule of rule.modelName, keeping the other entries. A
+ * value that is not a JSON object is returned unchanged rather than replaced.
+ */
 export function upsertModelRateLimitRule(
   value: string,
   rule: ModelRateLimitRule
 ): string {
   const parsed = parseRuleObject(value)
+  if (!parsed) return value
   parsed[rule.modelName] = {
     duration_minutes: rule.durationMinutes,
     total_count: rule.totalCount,
@@ -163,11 +231,13 @@ export function upsertModelRateLimitRule(
   return JSON.stringify(parsed, null, 2)
 }
 
+/** Removes the rule of modelName. A value that is not a JSON object is returned unchanged. */
 export function removeModelRateLimitRule(
   value: string,
   modelName: string
 ): string {
   const parsed = parseRuleObject(value)
+  if (!parsed) return value
   delete parsed[modelName]
   return JSON.stringify(parsed, null, 2)
 }

@@ -37,8 +37,11 @@ const responsesWSWriteTimeout = 30 * time.Second
 
 // ResponsesWSRequestRunner executes the existing authentication and rate-limit
 // middleware around one complete request, without a second HTTP connection.
-// modelName is the model the event asks for, which the per-model limit counts.
-type ResponsesWSRequestRunner func(request *http.Request, requestID string, modelName string, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError
+// admit runs after the user's global limit and before the per-model limit,
+// where Distribute runs on HTTP: it rejects an event that cannot be served on
+// this connection and records the model the per-model limit counts. handle
+// then serves the admitted event.
+type ResponsesWSRequestRunner func(request *http.Request, requestID string, admit, handle func(*gin.Context) *types.NewAPIError) *types.NewAPIError
 
 type responsesWSCreateEvent struct {
 	Type     string            `json:"type"`
@@ -220,10 +223,12 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 	request.Body = io.NopCloser(bytes.NewReader(message))
 	request.ContentLength = int64(len(message))
 	request.Header.Set("Content-Type", "application/json")
-	apiErr = s.runner(request, requestID, create.Request.Model, func(c *gin.Context) *types.NewAPIError {
+	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
 		if parseErr != nil {
 			return newResponsesWSInvalidRequestError(parseErr)
 		}
+		return s.admitModel(c, create.Request.Model)
+	}, func(c *gin.Context) *types.NewAPIError {
 		c.Request.Body = io.NopCloser(bytes.NewReader(create.Body))
 		c.Request.ContentLength = int64(len(create.Body))
 		callErr := s.runCall(c, state, create)
@@ -235,6 +240,27 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 	}
 }
 
+// admitModel accepts an event for modelName on this connection: the event
+// names a model, the connection stays on the model it was established for,
+// and the token may use the model. Like Distribute on HTTP it then records the
+// model as the original model, so the per-model rate limit counts only events
+// that get this far. Unlike HTTP, channel selection comes after that limit:
+// the connection selects a channel only for its first event.
+func (s *responsesWSSession) admitModel(c *gin.Context, modelName string) *types.NewAPIError {
+	if modelName == "" {
+		return newResponsesWSInvalidRequestError(errors.New("model is required"))
+	}
+	if s.lockedModel != "" && modelName != s.lockedModel {
+		return newResponsesWSInvalidRequestError(fmt.Errorf("responses websocket connection is locked to model %q", s.lockedModel))
+	}
+	if apiErr := checkResponsesWSModelAccess(c, modelName); apiErr != nil {
+		return apiErr
+	}
+	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
+	return nil
+}
+
+// runCall serves an event that admitModel accepted.
 func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState, create responsesWSCreateRequest) (apiErr *types.NewAPIError) {
 	policy := service.RequestPolicy(c)
 	modelName := create.Request.Model
@@ -257,16 +283,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			apiErr = RefundFailedRequestBilling(c, info, apiErr)
 		}
 	}()
-	if modelName == "" {
-		return newResponsesWSInvalidRequestError(errors.New("model is required"))
-	}
-	if s.lockedModel != "" && modelName != s.lockedModel {
-		return newResponsesWSInvalidRequestError(fmt.Errorf("responses websocket connection is locked to model %q", s.lockedModel))
-	}
-	if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
-		return apiErr
-	}
-	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 

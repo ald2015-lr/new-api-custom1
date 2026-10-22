@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +17,9 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +50,35 @@ func TestModelRedisRateLimitUsesUTCRegardlessOfLocalTimezone(t *testing.T) {
 
 var modelRateLimitTestUsers atomic.Int64
 
+type modelRateLimitRedisFixture struct {
+	server *miniredis.Miniredis
+	client *redis.Client
+}
+
+// The token bucket of common/limiter binds to the first Redis client it is
+// given for the rest of the process, so every model limiter test runs on this
+// one server and client, which stay open.
+var startModelRateLimitRedis = sync.OnceValues(func() (modelRateLimitRedisFixture, error) {
+	server, err := miniredis.Run()
+	if err != nil {
+		return modelRateLimitRedisFixture{}, err
+	}
+	return modelRateLimitRedisFixture{server: server, client: redis.NewClient(&redis.Options{Addr: server.Addr()})}, nil
+})
+
+// useModelRateLimitRedis switches the model limiter to the shared Redis
+// server, emptied, until the test ends.
+func useModelRateLimitRedis(t *testing.T) *miniredis.Miniredis {
+	t.Helper()
+	fixture, err := startModelRateLimitRedis()
+	require.NoError(t, err)
+	fixture.server.FlushAll()
+	previousRedisEnabled, previousRedisClient := common.RedisEnabled, common.RDB
+	common.RedisEnabled, common.RDB = true, fixture.client
+	t.Cleanup(func() { common.RedisEnabled, common.RDB = previousRedisEnabled, previousRedisClient })
+	return fixture.server
+}
+
 func TestModelRateLimitStreamFailuresDoNotConsumeSuccessLimit(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	for _, backend := range []string{"memory", "redis"} {
@@ -56,7 +88,7 @@ func TestModelRateLimitStreamFailuresDoNotConsumeSuccessLimit(t *testing.T) {
 				limit := modelRateLimit{subject: subject, durationMinutes: 1, totalMaxCount: totalLimit, successMaxCount: 1}
 				handler := memoryRateLimitHandler(&inMemoryRateLimiter, limit)
 				if backend == "redis" {
-					useRateLimitMiniRedis(t)
+					useModelRateLimitRedis(t)
 					handler = redisRateLimitHandler(limit)
 				}
 				router := gin.New()
@@ -169,8 +201,6 @@ func TestModelRateLimitCountsConfiguredGroupsSeparately(t *testing.T) {
 		{"b", http.StatusOK}, {"b", http.StatusTooManyRequests},
 		{"c", http.StatusOK}, {"d", http.StatusTooManyRequests},
 	}
-	// The Redis token bucket binds to the first Redis client it sees and another
-	// test already drives it, so the total limit runs on the memory backend only.
 	for _, tc := range []struct {
 		backend, limit string
 		counts         [2]int // [total, success] for groups a and b and for the global limit
@@ -178,10 +208,11 @@ func TestModelRateLimitCountsConfiguredGroupsSeparately(t *testing.T) {
 		{"memory", "success", [2]int{0, 1}},
 		{"redis", "success", [2]int{0, 1}},
 		{"memory", "total", [2]int{1, 1000}},
+		{"redis", "total", [2]int{1, 1000}},
 	} {
 		t.Run(tc.backend+"/"+tc.limit, func(t *testing.T) {
 			if tc.backend == "redis" {
-				useRateLimitMiniRedis(t)
+				useModelRateLimitRedis(t)
 			}
 			setting.ModelRequestRateLimitCount, setting.ModelRequestRateLimitSuccessCount = tc.counts[0], tc.counts[1]
 			setting.ModelRequestRateLimitGroup = map[string][2]int{"a": tc.counts, "b": tc.counts}
@@ -230,16 +261,17 @@ func setModelRateLimitRules(t *testing.T, rules map[string]setting.ModelRequestR
 	require.NoError(t, setting.UpdateModelRequestRateLimitModelByJSONString(string(data)))
 }
 
-// newModelRuleTestRouter serves GET /?user=&model=[&outcome=failed] behind the
-// global limiter, Distribute's record of the requested model, and the
-// per-model limiter, like the relay routes.
+// newModelRuleTestRouter serves GET /?user=&model=[&outcome=failed][&group=]
+// behind the global limiter, Distribute's record of the requested model, and
+// the per-model limiter, like the relay routes. The token group is vip unless
+// the request names another.
 func newModelRuleTestRouter() *gin.Engine {
 	router := gin.New()
 	router.GET("/", func(c *gin.Context) {
 		userID, _ := strconv.Atoi(c.Query("user"))
 		c.Set("id", userID)
 		c.Set(common.RequestIdKey, "req-model-rule")
-		common.SetContextKey(c, constant.ContextKeyTokenGroup, "vip")
+		common.SetContextKey(c, constant.ContextKeyTokenGroup, c.DefaultQuery("group", "vip"))
 	}, ModelRequestRateLimit(), func(c *gin.Context) {
 		c.Set(string(constant.ContextKeyOriginalModel), c.Query("model"))
 	}, PerModelRequestRateLimit(), func(c *gin.Context) {
@@ -284,14 +316,13 @@ func TestPerModelRateLimitCountsEachUserAndModelSeparately(t *testing.T) {
 	}{
 		{"memory", setting.ModelRequestRateLimitRule{DurationMinutes: 2, TotalCount: 1}, i18n.MsgModelRateLimitTotalReached},
 		{"memory", setting.ModelRequestRateLimitRule{DurationMinutes: 2, SuccessCount: 1}, i18n.MsgModelRateLimitReached},
-		// The Redis token bucket binds to the first Redis client it sees, so
-		// total counts run on the memory backend only (see above).
+		{"redis", setting.ModelRequestRateLimitRule{DurationMinutes: 2, TotalCount: 1}, i18n.MsgModelRateLimitTotalReached},
 		{"redis", setting.ModelRequestRateLimitRule{DurationMinutes: 2, SuccessCount: 1}, i18n.MsgModelRateLimitReached},
 	} {
 		t.Run(fmt.Sprintf("%s/%s", tc.backend, tc.messageKey), func(t *testing.T) {
 			useModelRateLimitSettings(t)
 			if tc.backend == "redis" {
-				useRateLimitMiniRedis(t)
+				useModelRateLimitRedis(t)
 			}
 			setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: tc.rule})
 			limitedUser := 7200000 + int(modelRateLimitTestUsers.Add(1))
@@ -322,13 +353,15 @@ func TestModelRateLimitStricterOfGroupAndModelRuleRejectsFirst(t *testing.T) {
 		{"model total", "memory", [2]int{3, 1000}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, TotalCount: 1}, i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": model, "Minutes": 1, "Max": 1}},
 		{"group success", "memory", [2]int{0, 1}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, SuccessCount: 3}, i18n.MsgRateLimitReached, map[string]any{"Minutes": 1, "Max": 1}},
 		{"model success", "memory", [2]int{0, 3}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, SuccessCount: 1}, i18n.MsgModelRateLimitReached, map[string]any{"Model": model, "Minutes": 1, "Max": 1}},
+		{"group total", "redis", [2]int{1, 1000}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, TotalCount: 3}, i18n.MsgRateLimitTotalReached, map[string]any{"Minutes": 1, "Max": 1}},
+		{"model total", "redis", [2]int{3, 1000}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, TotalCount: 1}, i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": model, "Minutes": 1, "Max": 1}},
 		{"group success", "redis", [2]int{0, 1}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, SuccessCount: 3}, i18n.MsgRateLimitReached, map[string]any{"Minutes": 1, "Max": 1}},
 		{"model success", "redis", [2]int{0, 3}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, SuccessCount: 1}, i18n.MsgModelRateLimitReached, map[string]any{"Model": model, "Minutes": 1, "Max": 1}},
 	} {
 		t.Run(tc.backend+"/"+tc.name, func(t *testing.T) {
 			useModelRateLimitSettings(t)
 			if tc.backend == "redis" {
-				useRateLimitMiniRedis(t)
+				useModelRateLimitRedis(t)
 			}
 			setting.ModelRequestRateLimitGroup = map[string][2]int{"vip": tc.group}
 			setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: tc.rule})
@@ -347,7 +380,7 @@ func TestPerModelRateLimitSuccessCountIgnoresFailedRequests(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			useModelRateLimitSettings(t)
 			if backend == "redis" {
-				useRateLimitMiniRedis(t)
+				useModelRateLimitRedis(t)
 			}
 			setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: {DurationMinutes: 1, SuccessCount: 1}})
 			userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
@@ -363,21 +396,142 @@ func TestPerModelRateLimitSuccessCountIgnoresFailedRequests(t *testing.T) {
 
 // A model rule counts within its own window, not the global one: a success
 // two minutes ago still counts for a three-minute rule although the global
-// window is one minute, and the Redis key lives as long as the rule's window.
+// window is one minute, and its Redis keys live as long as the rule's window,
+// also when the rule rejects.
 func TestPerModelRateLimitUsesTheRuleWindowInRedis(t *testing.T) {
 	const model = "gpt-4o"
 	useModelRateLimitSettings(t)
-	redisServer, _ := useRateLimitMiniRedis(t)
+	redisServer := useModelRateLimitRedis(t)
 	setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: {DurationMinutes: 3, SuccessCount: 1}})
 	router := newModelRuleTestRouter()
 
 	limitedUser := 7200000 + int(modelRateLimitTestUsers.Add(1))
-	limitedKey := fmt.Sprintf("rateLimit:%s:%d:model:%s", ModelRequestRateLimitSuccessCountMark, limitedUser, model)
+	limitedKey := fmt.Sprintf("rateLimit:MRRLS:MRRLM:%d:model:%s", limitedUser, model)
 	_, err := redisServer.Push(limitedKey, time.Now().UTC().Add(-2*time.Minute).Format(modelRateLimitTimeFormat))
 	require.NoError(t, err)
 	requireRateLimitMessage(t, modelRuleRequest(router, limitedUser, model, ""), i18n.MsgModelRateLimitReached, map[string]any{"Model": model, "Minutes": 3, "Max": 1})
+	assert.Equal(t, 3*time.Minute, redisServer.TTL(limitedKey))
 
 	otherUser := 7200000 + int(modelRateLimitTestUsers.Add(1))
 	require.Equal(t, http.StatusOK, modelRuleRequest(router, otherUser, model, "").Code)
-	assert.Equal(t, 3*time.Minute, redisServer.TTL(fmt.Sprintf("rateLimit:%s:%d:model:%s", ModelRequestRateLimitSuccessCountMark, otherUser, model)))
+	assert.Equal(t, 3*time.Minute, redisServer.TTL(fmt.Sprintf("rateLimit:MRRLS:MRRLM:%d:model:%s", otherUser, model)))
+}
+
+// The token bucket of a total count keeps no expiry of its own. A bucket idle
+// for its whole window is full again, so its key expires then and a removed
+// rule leaves nothing behind; the global bucket expires with the global window.
+func TestModelRateLimitTotalCountKeysExpireWithTheirWindow(t *testing.T) {
+	const model = "gpt-4o"
+	useModelRateLimitSettings(t)
+	redisServer := useModelRateLimitRedis(t)
+	setting.ModelRequestRateLimitCount = 5
+	setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: {DurationMinutes: 2, TotalCount: 5}})
+	userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+
+	require.Equal(t, http.StatusOK, modelRuleRequest(newModelRuleTestRouter(), userID, model, "").Code)
+	assert.Equal(t, 2*time.Minute, redisServer.TTL(fmt.Sprintf("rateLimit:MRRLM:%d:model:%s", userID, model)))
+	assert.Equal(t, time.Minute, redisServer.TTL(fmt.Sprintf("rateLimit:%d", userID)))
+}
+
+// A model rule's subject "<user>:model:<name>" is also the subject of a group
+// named "model:<name>". Their counts stay apart: requests of that group to
+// other models do not use up the user's rule for the model.
+func TestPerModelRateLimitDoesNotShareCountsWithAGroupOfTheSameSubject(t *testing.T) {
+	const model = "gpt-4o"
+	for _, backend := range []string{"memory", "redis"} {
+		for _, tc := range []struct {
+			name  string
+			group [2]int // [total, success]
+			rule  setting.ModelRequestRateLimitRule
+		}{
+			{"success", [2]int{0, 100}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, SuccessCount: 1}},
+			{"total", [2]int{2, 1000}, setting.ModelRequestRateLimitRule{DurationMinutes: 1, TotalCount: 1}},
+		} {
+			t.Run(backend+"/"+tc.name, func(t *testing.T) {
+				useModelRateLimitSettings(t)
+				if backend == "redis" {
+					useModelRateLimitRedis(t)
+				}
+				setting.ModelRequestRateLimitGroup = map[string][2]int{"model:" + model: tc.group}
+				setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: tc.rule})
+				userID := strconv.Itoa(7200000 + int(modelRateLimitTestUsers.Add(1)))
+				router := newModelRuleTestRouter()
+
+				for _, requested := range []string{"other-model", model} {
+					query := url.Values{"user": {userID}, "model": {requested}, "group": {"model:" + model}}
+					assert.Equal(t, http.StatusOK, performRateLimitRequest(router, "/?"+query.Encode(), "127.0.0.1:1000").Code, requested)
+				}
+			})
+		}
+	}
+}
+
+// A variant of a model, named with @ modifiers or a legacy suffix, reaches the
+// same channels as the model, so it counts under the model's rule and the
+// rejection names that rule. A [...] line tag stays part of the name.
+func TestPerModelRateLimitCountsModelVariantsUnderTheModelsRule(t *testing.T) {
+	for _, tc := range []struct{ rule, variant string }{
+		{"gpt-4o", "gpt-4o@temperature:1"},
+		{"gpt-4o", "gpt-4o@effort:high@temperature:0.7"},
+		{"claude-opus-4-6", "claude-opus-4-6-thinking"},
+		{"[按次]claude-opus-4-6", "[按次]claude-opus-4-6@effort:high"},
+	} {
+		t.Run(tc.variant, func(t *testing.T) {
+			useModelRateLimitSettings(t)
+			setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{tc.rule: {DurationMinutes: 1, TotalCount: 1}})
+			userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+			router := newModelRuleTestRouter()
+
+			require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, tc.variant, "").Code)
+			requireRateLimitMessage(t, modelRuleRequest(router, userID, tc.rule, ""), i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": tc.rule, "Minutes": 1, "Max": 1})
+		})
+	}
+}
+
+// A variant with a rule of its own counts under that rule only.
+func TestPerModelRateLimitPrefersTheExactRuleOfAVariant(t *testing.T) {
+	const model, variant = "gpt-4o", "gpt-4o@temperature:1"
+	useModelRateLimitSettings(t)
+	setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+		model:   {DurationMinutes: 1, TotalCount: 1},
+		variant: {DurationMinutes: 1, TotalCount: 1},
+	})
+	userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+	router := newModelRuleTestRouter()
+
+	require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, variant, "").Code)
+	require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, model, "").Code)
+	requireRateLimitMessage(t, modelRuleRequest(router, userID, variant, ""), i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": variant, "Minutes": 1, "Max": 1})
+}
+
+func TestPerModelRateLimitDoesNotApplyWhileRateLimitingIsOff(t *testing.T) {
+	const model = "gpt-4o"
+	useModelRateLimitSettings(t)
+	setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: {DurationMinutes: 1, TotalCount: 1}})
+	setting.ModelRequestRateLimitEnabled = false
+	userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+	router := newModelRuleTestRouter()
+
+	assert.Equal(t, http.StatusOK, modelRuleRequest(router, userID, model, "").Code)
+	assert.Equal(t, http.StatusOK, modelRuleRequest(router, userID, model, "").Code)
+}
+
+// On the memory backend a rule's counts live in a limiter first initialized
+// with the rule's window. The shared limiter drops a key idle for the global
+// window (one minute here), which would forget requests still inside the
+// rule's seven minutes.
+func TestPerModelRateLimitKeepsMemoryCountsInALimiterOfTheRuleWindow(t *testing.T) {
+	const model = "gpt-4o"
+	useModelRateLimitSettings(t)
+	setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{model: {DurationMinutes: 7, TotalCount: 1}})
+	userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+	router := newModelRuleTestRouter()
+
+	require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, model, "").Code)
+	requireRateLimitMessage(t, modelRuleRequest(router, userID, model, ""), i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": model, "Minutes": 7, "Max": 1})
+	ruleLimiter, found := modelRuleMemoryLimiters.Load(7)
+	require.True(t, found)
+	totalKey := fmt.Sprintf("%s%d:model:%s", ModelRequestRateLimitCountMark, userID, model)
+	assert.False(t, ruleLimiter.(*common.InMemoryRateLimiter).Request(totalKey, 1, 7*60), "the rule window limiter holds the request")
+	assert.True(t, inMemoryRateLimiter.Request(totalKey, 1, 7*60), "the shared limiter holds no request of the rule")
 }

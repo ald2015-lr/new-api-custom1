@@ -542,7 +542,7 @@ func TestResponsesWSMessageSizeLimit(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ResponsesWebSocketHelper(c, server, func(*http.Request, string, string, func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+		ResponsesWebSocketHelper(c, server, func(*http.Request, string, func(*gin.Context) *types.NewAPIError, func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
 			admitted.Store(true)
 			return nil
 		})
@@ -557,6 +557,47 @@ func TestResponsesWSMessageSizeLimit(t *testing.T) {
 		t.Fatal("websocket request did not exit after oversized message")
 	}
 	assert.False(t, admitted.Load())
+}
+
+// The runner admits each response.create for the model the event names, flat
+// or wrapped in "response", which is the model the per-model limit counts.
+func TestResponsesWSAdmitsTheModelTheCreateEventNames(t *testing.T) {
+	for _, tc := range []struct{ name, event string }{
+		{"flat", `{"type":"response.create","model":"gpt-5.1","input":"hi"}`},
+		{"wrapped", `{"type":"response.create","response":{"model":"gpt-5.1","input":"hi"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server, cleanup := newTestWebSocketPair(t)
+			defer cleanup()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+			admitted := make(chan string, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ResponsesWebSocketHelper(c, server, func(request *http.Request, _ string, admit, _ func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+					event, _ := gin.CreateTestContext(httptest.NewRecorder())
+					event.Request = request
+					apiErr := admit(event)
+					admitted <- common.GetContextKeyString(event, constant.ContextKeyOriginalModel)
+					return apiErr
+				})
+			}()
+			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(tc.event)))
+			select {
+			case model := <-admitted:
+				assert.Equal(t, "gpt-5.1", model)
+			case <-time.After(5 * time.Second):
+				t.Fatal("the runner did not admit the event")
+			}
+			_ = client.Close()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("websocket session did not end after the client closed")
+			}
+		})
+	}
 }
 
 func TestResponsesWSShutdownInterruptsBusyWriter(t *testing.T) {

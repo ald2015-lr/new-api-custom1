@@ -49,10 +49,13 @@ export function ModelRateLimitVisualEditor(
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editData, setEditData] = useState<ModelRateLimitRule | null>(null)
 
-  const rules = useMemo(
-    () => parseModelRateLimitRules(props.value) ?? [],
+  // null when the backend could not read the rules either: they are left to
+  // JSON mode, so adding a model cannot replace the ones the table cannot show.
+  const parsedRules = useMemo(
+    () => parseModelRateLimitRules(props.value),
     [props.value]
   )
+  const rules = useMemo(() => parsedRules ?? [], [parsedRules])
 
   const filteredRules = useMemo(() => {
     if (!searchText) return rules
@@ -61,6 +64,17 @@ export function ModelRateLimitVisualEditor(
       rule.modelName.toLowerCase().includes(lowerSearch)
     )
   }, [rules, searchText])
+
+  let emptyContent = t(
+    'No model-based rate limits configured. Click "Add model" to get started.'
+  )
+  if (parsedRules === null) {
+    emptyContent = t(
+      'These rules cannot be shown in visual mode. Fix them in JSON mode.'
+    )
+  } else if (searchText) {
+    emptyContent = t('No models match your search')
+  }
 
   const formatCount = (count: number) =>
     count === 0 ? t('Unlimited') : formatNumber(count, locale)
@@ -87,7 +101,11 @@ export function ModelRateLimitVisualEditor(
             className='pl-9'
           />
         </div>
-        <Button type='button' onClick={handleAdd}>
+        <Button
+          type='button'
+          onClick={handleAdd}
+          disabled={parsedRules === null}
+        >
           <Plus className='mr-2 h-4 w-4' />
           {t('Add model')}
         </Button>
@@ -96,13 +114,7 @@ export function ModelRateLimitVisualEditor(
       <StaticDataTable
         data={filteredRules}
         getRowKey={(rule) => rule.modelName}
-        emptyContent={
-          searchText
-            ? t('No models match your search')
-            : t(
-                'No model-based rate limits configured. Click "Add model" to get started.'
-              )
-        }
+        emptyContent={emptyContent}
         columns={[
           {
             id: 'model',

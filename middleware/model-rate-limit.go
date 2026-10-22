@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -23,7 +24,11 @@ import (
 const (
 	ModelRequestRateLimitCountMark        = "MRRL"
 	ModelRequestRateLimitSuccessCountMark = "MRRLS"
-	modelRateLimitTimeFormat              = "2006-01-02T15:04:05.000Z"
+	// ModelRequestRateLimitModelMark namespaces the Redis keys of per-model
+	// rules. Their subject "<uid>:model:<name>" is also the subject of a group
+	// named "model:<name>", whose keys must stay apart.
+	ModelRequestRateLimitModelMark = "MRRLM"
+	modelRateLimitTimeFormat       = "2006-01-02T15:04:05.000Z"
 )
 
 // modelRuleMemoryLimiters holds one in-memory limiter per per-model rule
@@ -118,12 +123,16 @@ func recordRedisRequest(ctx context.Context, rdb *redis.Client, key string, maxC
 // Redis限流处理器
 func redisRateLimitHandler(limit modelRateLimit) gin.HandlerFunc {
 	duration := rateLimitDurationSeconds(limit.durationMinutes)
+	keySubject := limit.subject
+	if limit.model != "" {
+		keySubject = ModelRequestRateLimitModelMark + ":" + limit.subject
+	}
 	return func(c *gin.Context) {
 		ctx := context.Background()
 		rdb := common.RDB
 
 		// 1. 检查成功请求数限制
-		successKey := fmt.Sprintf("rateLimit:%s:%s", ModelRequestRateLimitSuccessCountMark, limit.subject)
+		successKey := fmt.Sprintf("rateLimit:%s:%s", ModelRequestRateLimitSuccessCountMark, keySubject)
 		allowed, err := checkRedisRateLimit(ctx, rdb, successKey, limit.successMaxCount, duration)
 		if err != nil {
 			fmt.Println(common.LogText("failed to check the successful request limit: %s", err.Error()))
@@ -137,7 +146,7 @@ func redisRateLimitHandler(limit modelRateLimit) gin.HandlerFunc {
 
 		//2.检查总请求数限制并记录总请求（当totalMaxCount为0时会自动跳过，使用令牌桶限流器
 		if limit.totalMaxCount > 0 {
-			totalKey := fmt.Sprintf("rateLimit:%s", limit.subject)
+			totalKey := fmt.Sprintf("rateLimit:%s", keySubject)
 			// 初始化
 			tb := limiter.New(ctx, rdb)
 			allowed, err = tb.Allow(
@@ -153,6 +162,10 @@ func redisRateLimitHandler(limit modelRateLimit) gin.HandlerFunc {
 				abortWithOpenAiMessage(c, http.StatusInternalServerError, "rate_limit_check_failed")
 				return
 			}
+			// The bucket script sets no expiry. A bucket idle for a whole window
+			// has refilled to capacity, the same as a missing key, so the key
+			// expires then and a removed rule leaves no key behind.
+			rdb.Expire(ctx, totalKey, time.Duration(duration)*time.Second)
 
 			if !allowed {
 				abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.totalReachedMessage(c))
@@ -255,14 +268,21 @@ func ModelRequestRateLimit() func(c *gin.Context) {
 // name before any model mapping, and inside ModelRequestRateLimit: a request
 // must pass both, so the stricter limit rejects first. Each user's requests to
 // a ruled model are counted on their own, within the rule's own window.
+//
+// A variant of a model, named with @ modifiers or a legacy suffix such as
+// -thinking, reaches the same channels as the model, so it counts under the
+// model's rule unless it has a rule of its own. Names are matched like the
+// token model limit (TokenModelLimitAllows): the exact name, then the
+// wildcard-normalized name, then the routing name. The routing name keeps a
+// [...] line tag, so a tagged line keeps its own rule.
 func PerModelRequestRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !setting.ModelRequestRateLimitEnabled {
 			c.Next()
 			return
 		}
-		modelName := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
-		rule, found := setting.GetModelRequestRateLimitRule(modelName)
+		requested := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
+		modelName, rule, found := setting.FindModelRequestRateLimitRule(requested, ratio_setting.FormatMatchingModelName(requested), ratio_setting.RoutingMatchModelName(requested))
 		if !found {
 			c.Next()
 			return
