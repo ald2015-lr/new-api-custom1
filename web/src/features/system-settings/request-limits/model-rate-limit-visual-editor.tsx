@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 
 import { StaticDataTable } from '@/components/data-table/static/static-data-table'
 import { StaticRowActions } from '@/components/data-table/static/static-row-actions'
+import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toIntlLocale } from '@/i18n/languages'
@@ -29,6 +30,7 @@ import { formatNumber } from '@/lib/format'
 
 import { ModelRateLimitDialog } from './model-rate-limit-dialog'
 import {
+  formatModelRateLimitPattern,
   parseModelRateLimitRules,
   removeModelRateLimitRule,
   upsertModelRateLimitRule,
@@ -79,6 +81,28 @@ export function ModelRateLimitVisualEditor(
   const formatCount = (count: number) =>
     count === 0 ? t('Unlimited') : formatNumber(count, locale)
 
+  // A prefix or suffix rule shows its pattern, such as "[按次]*", with its
+  // match mode and how it counts the models it matches.
+  const renderModelCell = (rule: ModelRateLimitRule) => {
+    const pattern = formatModelRateLimitPattern(rule)
+    if (rule.match === 'exact') return pattern
+    return (
+      <span className='flex flex-wrap items-center gap-1.5'>
+        <span>{pattern}</span>
+        <StatusBadge
+          label={rule.match === 'prefix' ? t('Prefix') : t('Suffix')}
+          variant='info'
+          copyable={false}
+        />
+        <StatusBadge
+          label={rule.shared ? t('Counted together') : t('Counted per model')}
+          variant='neutral'
+          copyable={false}
+        />
+      </span>
+    )
+  }
+
   const handleEdit = (rule: ModelRateLimitRule) => {
     setEditData(rule)
     setDialogOpen(true)
@@ -120,7 +144,7 @@ export function ModelRateLimitVisualEditor(
             id: 'model',
             header: t('Model Name'),
             cellClassName: 'font-medium',
-            cell: (rule) => rule.modelName,
+            cell: renderModelCell,
           },
           {
             id: 'duration',

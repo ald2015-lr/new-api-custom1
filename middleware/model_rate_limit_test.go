@@ -535,3 +535,229 @@ func TestPerModelRateLimitKeepsMemoryCountsInALimiterOfTheRuleWindow(t *testing.
 	assert.False(t, ruleLimiter.(*common.InMemoryRateLimiter).Request(totalKey, 1, 7*60), "the rule window limiter holds the request")
 	assert.True(t, inMemoryRateLimiter.Request(totalKey, 1, 7*60), "the shared limiter holds no request of the rule")
 }
+
+// A prefix rule such as "[按次]" limits every model of the line. Counting
+// each model on its own, a user who used up one model can still call the
+// others, and the @ modifier variants of a model count as that model, while a
+// tagged -thinking name is a model of its own; counting them together, the
+// first model uses up the rule for all of them. Models the rule does not
+// match are not limited.
+func TestPerModelPrefixRuleCountsEachModelOrAllModelsTogether(t *testing.T) {
+	const (
+		modelA = "[按次]claude-opus-4-6"
+		modelB = "[按次]gpt-5"
+	)
+	type step struct {
+		model      string
+		messageKey string // empty when the request passes
+	}
+	for _, backend := range []string{"memory", "redis"} {
+		for _, tc := range []struct {
+			name   string
+			shared bool
+			steps  []step
+		}{
+			{"each model", false, []step{
+				{modelA, ""},
+				{modelB, ""},
+				// A tagged name keeps its legacy suffix in its routing
+				// name, so it is a model of its own.
+				{modelA + "-thinking", ""},
+				{modelA + "@effort:high", i18n.MsgModelRuleTotalReached},
+				{"claude-opus-4-6", ""},
+			}},
+			{"all models together", true, []step{
+				{modelA, ""},
+				{modelB, i18n.MsgModelRuleSharedTotalReached},
+				{"claude-opus-4-6", ""},
+			}},
+		} {
+			t.Run(backend+"/"+tc.name, func(t *testing.T) {
+				useModelRateLimitSettings(t)
+				if backend == "redis" {
+					useModelRateLimitRedis(t)
+				}
+				setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+					"[按次]": {DurationMinutes: 1, TotalCount: 1, Match: setting.ModelRateLimitMatchPrefix, Shared: tc.shared},
+				})
+				userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+				otherUser := 7200000 + int(modelRateLimitTestUsers.Add(1))
+				router := newModelRuleTestRouter()
+
+				for _, s := range tc.steps {
+					response := modelRuleRequest(router, userID, s.model, "")
+					if s.messageKey == "" {
+						assert.Equal(t, http.StatusOK, response.Code, s.model)
+						continue
+					}
+					requireRateLimitMessage(t, response, s.messageKey, map[string]any{"Model": s.model, "Rule": "[按次]*", "Minutes": 1, "Max": 1})
+				}
+				assert.Equal(t, http.StatusOK, modelRuleRequest(router, otherUser, modelA, "").Code)
+			})
+		}
+	}
+}
+
+// A suffix rule matches the name the client sends, that name without its @
+// modifiers, or its routing name, so a variant with @ modifiers counts under
+// it as its model, counting each model on its own or all of them together.
+// That holds for a Claude -thinking model too, whose routing name drops the
+// suffix: claude-opus-4-6-thinking routes to claude-opus-4-6. The base model
+// itself does not end with the suffix and is not limited.
+func TestPerModelSuffixRuleCountsModelVariants(t *testing.T) {
+	for _, backend := range []string{"memory", "redis"} {
+		for _, tc := range []struct {
+			name          string
+			first, second string // the second request is rejected
+			base          string
+		}{
+			{"variant then model", "qwen3-max-thinking@effort:high", "qwen3-max-thinking", "qwen3-max"},
+			{"Claude model twice", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-opus-4-6"},
+			{"Claude model then variant", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking@effort:high", "claude-opus-4-6"},
+		} {
+			for _, shared := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/shared=%t", backend, tc.name, shared), func(t *testing.T) {
+					useModelRateLimitSettings(t)
+					if backend == "redis" {
+						useModelRateLimitRedis(t)
+					}
+					setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+						"-thinking": {DurationMinutes: 2, TotalCount: 1, Match: setting.ModelRateLimitMatchSuffix, Shared: shared},
+					})
+					userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+					router := newModelRuleTestRouter()
+					messageKey := i18n.MsgModelRuleTotalReached
+					if shared {
+						messageKey = i18n.MsgModelRuleSharedTotalReached
+					}
+
+					require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, tc.first, "").Code)
+					requireRateLimitMessage(t, modelRuleRequest(router, userID, tc.second, ""), messageKey, map[string]any{"Model": tc.second, "Rule": "*-thinking", "Minutes": 2, "Max": 1})
+					assert.Equal(t, http.StatusOK, modelRuleRequest(router, userID, tc.base, "").Code)
+				})
+			}
+		}
+	}
+}
+
+// An exact rule and a pattern rule that both match a request both count it,
+// so whichever allows fewer requests rejects first, with its own message.
+func TestPerModelRateLimitStricterOfExactAndPatternRuleRejectsFirst(t *testing.T) {
+	const model = "gpt-4o"
+	for _, backend := range []string{"memory", "redis"} {
+		for _, tc := range []struct {
+			name       string
+			exact      int // total counts
+			pattern    int
+			messageKey string
+			params     map[string]any
+		}{
+			{"exact", 1, 3, i18n.MsgModelRateLimitTotalReached, map[string]any{"Model": model, "Minutes": 1, "Max": 1}},
+			{"pattern", 3, 1, i18n.MsgModelRuleSharedTotalReached, map[string]any{"Model": model, "Rule": "gpt-*", "Minutes": 1, "Max": 1}},
+		} {
+			t.Run(backend+"/"+tc.name, func(t *testing.T) {
+				useModelRateLimitSettings(t)
+				if backend == "redis" {
+					useModelRateLimitRedis(t)
+				}
+				setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+					model:  {DurationMinutes: 1, TotalCount: tc.exact},
+					"gpt-": {DurationMinutes: 1, TotalCount: tc.pattern, Match: setting.ModelRateLimitMatchPrefix, Shared: true},
+				})
+				userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+				router := newModelRuleTestRouter()
+
+				require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, model, "").Code)
+				requireRateLimitMessage(t, modelRuleRequest(router, userID, model, ""), tc.messageKey, tc.params)
+			})
+		}
+	}
+}
+
+// A pattern rule's success count, like an exact rule's, ignores failed
+// requests and rejects once successes reach it.
+func TestPerModelPatternRuleSuccessCountIgnoresFailedRequests(t *testing.T) {
+	for _, backend := range []string{"memory", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			useModelRateLimitSettings(t)
+			if backend == "redis" {
+				useModelRateLimitRedis(t)
+			}
+			setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+				"[按次]": {DurationMinutes: 1, SuccessCount: 1, Match: setting.ModelRateLimitMatchPrefix, Shared: true},
+			})
+			userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+			router := newModelRuleTestRouter()
+
+			assert.Equal(t, http.StatusBadGateway, modelRuleRequest(router, userID, "[按次]a", "failed").Code)
+			assert.Equal(t, http.StatusBadGateway, modelRuleRequest(router, userID, "[按次]b", "failed").Code)
+			assert.Equal(t, http.StatusOK, modelRuleRequest(router, userID, "[按次]a", "").Code)
+			requireRateLimitMessage(t, modelRuleRequest(router, userID, "[按次]b", ""), i18n.MsgModelRuleSharedReached, map[string]any{"Model": "[按次]b", "Rule": "[按次]*", "Minutes": 1, "Max": 1})
+		})
+	}
+}
+
+// A request that a later rule rejects records no success under the rules
+// checked before it, as a model rule's rejection records none under the
+// global limit.
+func TestPerModelRateLimitRejectionByALaterRuleRecordsNoSuccess(t *testing.T) {
+	const model = "gpt-4o"
+	for _, backend := range []string{"memory", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			useModelRateLimitSettings(t)
+			var redisServer *miniredis.Miniredis
+			if backend == "redis" {
+				redisServer = useModelRateLimitRedis(t)
+			}
+			setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+				model:  {DurationMinutes: 1, SuccessCount: 5},
+				"gpt-": {DurationMinutes: 1, TotalCount: 1, Match: setting.ModelRateLimitMatchPrefix},
+			})
+			userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+			router := newModelRuleTestRouter()
+
+			require.Equal(t, http.StatusOK, modelRuleRequest(router, userID, model, "").Code)
+			requireRateLimitMessage(t, modelRuleRequest(router, userID, model, ""), i18n.MsgModelRuleTotalReached, map[string]any{"Model": model, "Rule": "gpt-*", "Minutes": 1, "Max": 1})
+
+			if backend == "redis" {
+				successes, err := redisServer.List(fmt.Sprintf("rateLimit:MRRLS:MRRLM:%d:model:%s", userID, model))
+				require.NoError(t, err)
+				assert.Len(t, successes, 1)
+				return
+			}
+			ruleLimiter, found := modelRuleMemoryLimiters.Load(1)
+			require.True(t, found)
+			// Four of the five successes are left: the rejected request holds none.
+			successKey := fmt.Sprintf("%s%d:model:%s", ModelRequestRateLimitSuccessCountMark, userID, model)
+			for range 4 {
+				reservation := ruleLimiter.(*common.InMemoryRateLimiter).Reserve(successKey, 5, 60)
+				require.NotNil(t, reservation)
+				reservation.Complete(true)
+			}
+			assert.Nil(t, ruleLimiter.(*common.InMemoryRateLimiter).Reserve(successKey, 5, 60))
+		})
+	}
+}
+
+// The Redis keys of a pattern rule live as long as the rule's window, in the
+// namespace of model rules, both for a count of all matching models and for
+// the count of each model, which its routing name keys.
+func TestPerModelPatternRuleRedisKeysExpireWithTheRuleWindow(t *testing.T) {
+	useModelRateLimitSettings(t)
+	redisServer := useModelRateLimitRedis(t)
+	setModelRateLimitRules(t, map[string]setting.ModelRequestRateLimitRule{
+		"[按次]":      {DurationMinutes: 3, TotalCount: 5, SuccessCount: 5, Match: setting.ModelRateLimitMatchPrefix, Shared: true},
+		"-thinking": {DurationMinutes: 4, TotalCount: 5, SuccessCount: 5, Match: setting.ModelRateLimitMatchSuffix},
+	})
+	userID := 7200000 + int(modelRateLimitTestUsers.Add(1))
+
+	require.Equal(t, http.StatusOK, modelRuleRequest(newModelRuleTestRouter(), userID, "[按次]qwen3-thinking@effort:high", "").Code)
+	shared := fmt.Sprintf("MRRLM:%d:model-prefix:[按次]", userID)
+	each := fmt.Sprintf("MRRLM:%d:model-suffix-each:9:-thinking:[按次]qwen3-thinking", userID)
+	for key, ttl := range map[string]time.Duration{
+		"rateLimit:" + shared: 3 * time.Minute, "rateLimit:MRRLS:" + shared: 3 * time.Minute,
+		"rateLimit:" + each: 4 * time.Minute, "rateLimit:MRRLS:" + each: 4 * time.Minute,
+	} {
+		assert.Equal(t, ttl, redisServer.TTL(key), key)
+	}
+}

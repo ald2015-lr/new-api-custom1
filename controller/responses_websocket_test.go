@@ -289,6 +289,32 @@ func TestResponsesWSRequestRunnerAppliesPerModelRateLimit(t *testing.T) {
 	assert.Equal(t, 2, called)
 }
 
+// A prefix rule limits each response.create event of every model it matches,
+// as it limits HTTP requests.
+func TestResponsesWSRequestRunnerAppliesPrefixModelRateLimit(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	_, token := setupResponsesWSRequestTest(t)
+	setting.ModelRequestRateLimitEnabled = true
+	setting.ModelRequestRateLimitDurationMinutes = 1
+	setting.ModelRequestRateLimitCount = 0
+	setting.ModelRequestRateLimitSuccessCount = 100
+	previousModels := setting.ModelRequestRateLimitModel2JSONString()
+	t.Cleanup(func() { require.NoError(t, setting.UpdateModelRequestRateLimitModelByJSONString(previousModels)) })
+	require.NoError(t, setting.UpdateModelRequestRateLimitModelByJSONString(`{"[按次]": {"duration_minutes": 2, "total_count": 1, "success_count": 0, "match": "prefix", "shared": true}}`))
+	runner, _ := newResponsesWSTestRunner(t, token)
+	called := 0
+	handle := func(*gin.Context) *types.NewAPIError { called++; return nil }
+
+	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "first", admitResponsesWSModel("[按次]gpt-5.1"), handle))
+	apiError := runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "limited", admitResponsesWSModel("[按次]gpt-5.1-mini"), handle)
+	require.NotNil(t, apiError)
+	assert.Equal(t, http.StatusTooManyRequests, apiError.StatusCode)
+	message := i18n.Translate("", i18n.MsgModelRuleSharedTotalReached, map[string]any{"Model": "[按次]gpt-5.1-mini", "Rule": "[按次]*", "Minutes": 2, "Max": 1})
+	assert.Equal(t, common.MessageWithRequestId(message, "limited"), apiError.Error())
+	require.Nil(t, runner(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), "untagged", admitResponsesWSModel("gpt-5.1"), handle))
+	assert.Equal(t, 2, called)
+}
+
 // An event the connection or its token rejects never reaches the per-model
 // limit, as on HTTP, where Distribute rejects such a request first: events for
 // another model than the one the connection is locked to keep getting 400 and

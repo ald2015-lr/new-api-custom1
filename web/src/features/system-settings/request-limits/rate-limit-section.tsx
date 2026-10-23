@@ -362,6 +362,9 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
                 <FormDescription>
                   {t(
                     'Limits each user separately for one model. A rule matches the model name the client sends, including any [...] prefix; a variant with @ modifiers or a suffix such as -thinking counts under the rule of its base model unless it has a rule of its own. 0 = no limit. These limits apply in addition to the global and group limits, so the stricter one takes effect first.'
+                  )}{' '}
+                  {t(
+                    'A prefix or suffix rule, such as [按次] or -thinking, matches every model whose name starts or ends with it, and counts each of those models on its own unless it counts them all together. When several rules match a request, all of them apply and the strictest takes effect first.'
                   )}
                   {!useModelVisualEditor && (
                     <span className='mt-2 block space-y-1 text-xs'>
@@ -381,6 +384,15 @@ export function RateLimitSection({ defaultValues }: RateLimitSectionProps) {
                           {t(
                             'duration_minutes 1 to 1,440; total_count and success_count 0 to 100,000,000, 0 = unlimited'
                           )}
+                        </span>
+                        <span className='list-item'>
+                          {t(
+                            'Optional match: "exact" (default), "prefix" or "suffix"; shared: true counts all models a prefix or suffix rule matches together'
+                          )}
+                        </span>
+                        <span className='list-item'>
+                          {t('Example:')}{' '}
+                          {`{"[按次]": {"duration_minutes": 1, "total_count": 8, "success_count": 8, "match": "prefix", "shared": false}}`}
                         </span>
                       </span>
                     </span>

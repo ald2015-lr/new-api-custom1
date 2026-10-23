@@ -24,12 +24,26 @@ export const MODEL_RATE_LIMIT_MAX_COUNT = 100_000_000
 export const MODEL_RATE_LIMIT_MAX_MODELS = 1000
 export const MODEL_RATE_LIMIT_MAX_NAME_LENGTH = 255
 
-/** One ModelRequestRateLimitModel entry: a limit per user for one model. */
+/** How a rule's key matches model names (setting.ModelRateLimitMatch*). */
+export const MODEL_RATE_LIMIT_MATCHES = ['exact', 'prefix', 'suffix'] as const
+export type ModelRateLimitMatch = (typeof MODEL_RATE_LIMIT_MATCHES)[number]
+
+/**
+ * One ModelRequestRateLimitModel entry: a limit per user for the models its
+ * key matches. shared counts all models of a prefix or suffix rule together.
+ */
 export type ModelRateLimitRule = {
   modelName: string
+  match: ModelRateLimitMatch
+  shared: boolean
   durationMinutes: number
   totalCount: number
   successCount: number
+}
+
+/** A rule as saved, whose match is any string ('' when it has none). */
+type StoredModelRateLimitRule = Omit<ModelRateLimitRule, 'match'> & {
+  match: string
 }
 
 /** A backend validation message key and its params. */
@@ -56,6 +70,8 @@ const RULE_FIELDS = [
   'duration_minutes',
   'total_count',
   'success_count',
+  'match',
+  'shared',
 ] as const
 type RuleField = (typeof RULE_FIELDS)[number]
 
@@ -81,25 +97,33 @@ function parseRulesJson(value: string): unknown {
 }
 
 // The backend matches a key to a rule field ignoring case; of several keys
-// for one field the last one wins. A missing or null field decodes as 0, and
-// any other value that is not an integer is rejected.
+// for one field the last one wins. A missing or null field decodes as its zero
+// value (0, '' or false), and a value of another type is rejected: returns
+// null then.
 function readRuleFields(
+  modelName: string,
   rule: Record<string, unknown>
-): Record<RuleField, number | null> {
-  const values: Record<RuleField, unknown> = {
-    duration_minutes: undefined,
-    total_count: undefined,
-    success_count: undefined,
-  }
+): StoredModelRateLimitRule | null {
+  const values: Partial<Record<RuleField, unknown>> = {}
   for (const [key, value] of Object.entries(rule)) {
     const field = RULE_FIELDS.find((name) => name === key.toLowerCase())
     if (field) values[field] = value
   }
-  return {
-    duration_minutes: readRuleNumber(values.duration_minutes),
-    total_count: readRuleNumber(values.total_count),
-    success_count: readRuleNumber(values.success_count),
+  const durationMinutes = readRuleNumber(values.duration_minutes)
+  const totalCount = readRuleNumber(values.total_count)
+  const successCount = readRuleNumber(values.success_count)
+  const match = readRuleString(values.match)
+  const shared = readRuleBoolean(values.shared)
+  if (
+    durationMinutes === null ||
+    totalCount === null ||
+    successCount === null ||
+    match === null ||
+    shared === null
+  ) {
+    return null
   }
+  return { modelName, match, shared, durationMinutes, totalCount, successCount }
 }
 
 function readRuleNumber(value: unknown): number | null {
@@ -107,13 +131,28 @@ function readRuleNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) ? value : null
 }
 
+function readRuleString(value: unknown): string | null {
+  if (value === undefined || value === null) return ''
+  return typeof value === 'string' ? value : null
+}
+
+function readRuleBoolean(value: unknown): boolean | null {
+  if (value === undefined || value === null) return false
+  return typeof value === 'boolean' ? value : null
+}
+
+/** The match mode a saved match names: none is exact; null when unknown. */
+function toModelRateLimitMatch(match: string): ModelRateLimitMatch | null {
+  if (match === '') return 'exact'
+  return MODEL_RATE_LIMIT_MATCHES.find((mode) => mode === match) ?? null
+}
+
 /**
- * Reads the stored option. Returns null when the backend could not decode
- * it: not a JSON object, a rule that is not an object, or a non-integer field.
+ * Reads the stored option as the backend decodes it. Returns null when the
+ * backend could not decode it: not a JSON object, a rule that is not an
+ * object, or a field of the wrong type, such as a non-integer count.
  */
-export function parseModelRateLimitRules(
-  value: string
-): ModelRateLimitRule[] | null {
+function readStoredRules(value: string): StoredModelRateLimitRule[] | null {
   let parsed: unknown
   try {
     parsed = parseRulesJson(value)
@@ -122,25 +161,55 @@ export function parseModelRateLimitRules(
   }
   if (!isObjectRecord(parsed)) return null
 
-  const rules: ModelRateLimitRule[] = []
+  const rules: StoredModelRateLimitRule[] = []
   for (const [modelName, rule] of Object.entries(parsed)) {
     if (rule !== null && !isObjectRecord(rule)) return null
-    const fields = readRuleFields(rule ?? {})
-    if (
-      fields.duration_minutes === null ||
-      fields.total_count === null ||
-      fields.success_count === null
-    ) {
-      return null
-    }
-    rules.push({
-      modelName,
-      durationMinutes: fields.duration_minutes,
-      totalCount: fields.total_count,
-      successCount: fields.success_count,
-    })
+    const fields = readRuleFields(modelName, rule ?? {})
+    if (fields === null) return null
+    rules.push(fields)
   }
   return rules
+}
+
+/**
+ * Reads the stored option for the visual editor. Returns null when the
+ * backend could not decode it, or when a rule has a match mode the editor
+ * cannot show.
+ */
+export function parseModelRateLimitRules(
+  value: string
+): ModelRateLimitRule[] | null {
+  const stored = readStoredRules(value)
+  if (stored === null) return null
+  const rules: ModelRateLimitRule[] = []
+  for (const rule of stored) {
+    const match = toModelRateLimitMatch(rule.match)
+    if (match === null) return null
+    rules.push({ ...rule, match })
+  }
+  return rules
+}
+
+/**
+ * Whether a prefix rule's key ends with "*" or a suffix rule's key starts
+ * with it, the way the table shows those rules ("[按次]*", "*-thinking"). The
+ * match mode is what makes a key match many models; in the key, "*" is a
+ * literal character, so such a rule would match no model.
+ */
+export function hasModelRateLimitPatternStar(
+  modelName: string,
+  match: ModelRateLimitMatch
+): boolean {
+  if (match === 'prefix') return modelName.endsWith('*')
+  if (match === 'suffix') return modelName.startsWith('*')
+  return false
+}
+
+/** How the table names a rule: "[按次]*" for a prefix, "*-thinking" for a suffix. */
+export function formatModelRateLimitPattern(rule: ModelRateLimitRule): string {
+  if (rule.match === 'prefix') return `${rule.modelName}*`
+  if (rule.match === 'suffix') return `*${rule.modelName}`
+  return rule.modelName
 }
 
 function isCountInRange(count: number): boolean {
@@ -154,7 +223,7 @@ function isCountInRange(count: number): boolean {
 export function getModelRateLimitRulesError(
   value: string
 ): ModelRateLimitRulesError | null {
-  const rules = parseModelRateLimitRules(value)
+  const rules = readStoredRules(value)
   if (rules === null) {
     return {
       key: 'Model rate limits must be a JSON object that maps model names to rules',
@@ -180,6 +249,31 @@ export function getModelRateLimitRulesError(
       return {
         key: 'Model names in model rate limits must have 1 to {{max}} characters and no leading or trailing spaces: "{{model}}"',
         params: { max: MODEL_RATE_LIMIT_MAX_NAME_LENGTH, model },
+      }
+    }
+    const match = toModelRateLimitMatch(rule.match)
+    if (match === null) {
+      return {
+        key: 'The match of the rate limit for model {{model}} must be exact, prefix or suffix',
+        params: { model },
+      }
+    }
+    if (match === 'exact' && rule.shared) {
+      return {
+        key: 'The rate limit for model {{model}} can count matching models together only with prefix or suffix match',
+        params: { model },
+      }
+    }
+    if (match === 'prefix' && hasModelRateLimitPatternStar(model, match)) {
+      return {
+        key: 'The prefix {{model}} of a model rate limit must not end with *: a prefix rule already matches every model whose name starts with it',
+        params: { model },
+      }
+    }
+    if (match === 'suffix' && hasModelRateLimitPatternStar(model, match)) {
+      return {
+        key: 'The suffix {{model}} of a model rate limit must not start with *: a suffix rule already matches every model whose name ends with it',
+        params: { model },
       }
     }
     if (
@@ -216,6 +310,8 @@ function parseRuleObject(value: string): Record<string, unknown> | null {
 /**
  * Adds or replaces the rule of rule.modelName, keeping the other entries. A
  * value that is not a JSON object is returned unchanged rather than replaced.
+ * An exact rule is saved without match and shared, as rules were saved before
+ * match modes existed; a prefix or suffix rule names both.
  */
 export function upsertModelRateLimitRule(
   value: string,
@@ -223,11 +319,16 @@ export function upsertModelRateLimitRule(
 ): string {
   const parsed = parseRuleObject(value)
   if (!parsed) return value
-  parsed[rule.modelName] = {
+  const stored: Record<string, unknown> = {
     duration_minutes: rule.durationMinutes,
     total_count: rule.totalCount,
     success_count: rule.successCount,
   }
+  if (rule.match !== 'exact') {
+    stored.match = rule.match
+    stored.shared = rule.shared
+  }
+  parsed[rule.modelName] = stored
   return JSON.stringify(parsed, null, 2)
 }
 

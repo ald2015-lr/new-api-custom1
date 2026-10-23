@@ -16,6 +16,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -42,29 +43,43 @@ var modelRuleMemoryLimiters sync.Map
 // subject: the global or group limit, or a per-model rule.
 type modelRateLimit struct {
 	subject string
-	// model is set for a per-model rule, whose rejections name it.
-	model           string
+	// model is set for a per-model rule, whose rejections name it: the key of
+	// an exact rule, or the requested model for a prefix or suffix rule.
+	model string
+	// rule is the pattern of a prefix or suffix rule, such as "[按次]*" or
+	// "*-thinking", which its rejections name, and shared whether it counts
+	// all the models it matches together.
+	rule            string
+	shared          bool
 	durationMinutes int
 	totalMaxCount   int
 	successMaxCount int
 }
 
 func (l modelRateLimit) totalReachedMessage(c *gin.Context) string {
-	params := map[string]any{"Minutes": l.durationMinutes, "Max": l.totalMaxCount}
-	if l.model == "" {
-		return i18n.T(c, i18n.MsgRateLimitTotalReached, params)
+	key := i18n.MsgRateLimitTotalReached
+	switch {
+	case l.rule != "" && l.shared:
+		key = i18n.MsgModelRuleSharedTotalReached
+	case l.rule != "":
+		key = i18n.MsgModelRuleTotalReached
+	case l.model != "":
+		key = i18n.MsgModelRateLimitTotalReached
 	}
-	params["Model"] = l.model
-	return i18n.T(c, i18n.MsgModelRateLimitTotalReached, params)
+	return i18n.T(c, key, map[string]any{"Minutes": l.durationMinutes, "Max": l.totalMaxCount, "Model": l.model, "Rule": l.rule})
 }
 
 func (l modelRateLimit) successReachedMessage(c *gin.Context) string {
-	params := map[string]any{"Minutes": l.durationMinutes, "Max": l.successMaxCount}
-	if l.model == "" {
-		return i18n.T(c, i18n.MsgRateLimitReached, params)
+	key := i18n.MsgRateLimitReached
+	switch {
+	case l.rule != "" && l.shared:
+		key = i18n.MsgModelRuleSharedReached
+	case l.rule != "":
+		key = i18n.MsgModelRuleReached
+	case l.model != "":
+		key = i18n.MsgModelRateLimitReached
 	}
-	params["Model"] = l.model
-	return i18n.T(c, i18n.MsgModelRateLimitReached, params)
+	return i18n.T(c, key, map[string]any{"Minutes": l.durationMinutes, "Max": l.successMaxCount, "Model": l.model, "Rule": l.rule})
 }
 
 // 检查Redis中的请求限制
@@ -122,99 +137,110 @@ func recordRedisRequest(ctx context.Context, rdb *redis.Client, key string, maxC
 
 // Redis限流处理器
 func redisRateLimitHandler(limit modelRateLimit) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		enforceRedisRateLimit(c, limit, c.Next)
+	}
+}
+
+// enforceRedisRateLimit checks limit on Redis, runs next when it allows the
+// request and then records a success.
+func enforceRedisRateLimit(c *gin.Context, limit modelRateLimit, next func()) {
 	duration := rateLimitDurationSeconds(limit.durationMinutes)
 	keySubject := limit.subject
-	if limit.model != "" {
+	if limit.model != "" || limit.rule != "" {
 		keySubject = ModelRequestRateLimitModelMark + ":" + limit.subject
 	}
-	return func(c *gin.Context) {
-		ctx := context.Background()
-		rdb := common.RDB
+	ctx := context.Background()
+	rdb := common.RDB
 
-		// 1. 检查成功请求数限制
-		successKey := fmt.Sprintf("rateLimit:%s:%s", ModelRequestRateLimitSuccessCountMark, keySubject)
-		allowed, err := checkRedisRateLimit(ctx, rdb, successKey, limit.successMaxCount, duration)
+	// 1. 检查成功请求数限制
+	successKey := fmt.Sprintf("rateLimit:%s:%s", ModelRequestRateLimitSuccessCountMark, keySubject)
+	allowed, err := checkRedisRateLimit(ctx, rdb, successKey, limit.successMaxCount, duration)
+	if err != nil {
+		fmt.Println(common.LogText("failed to check the successful request limit: %s", err.Error()))
+		abortWithOpenAiMessage(c, http.StatusInternalServerError, "rate_limit_check_failed")
+		return
+	}
+	if !allowed {
+		abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.successReachedMessage(c))
+		return
+	}
+
+	//2.检查总请求数限制并记录总请求（当totalMaxCount为0时会自动跳过，使用令牌桶限流器
+	if limit.totalMaxCount > 0 {
+		totalKey := fmt.Sprintf("rateLimit:%s", keySubject)
+		// 初始化
+		tb := limiter.New(ctx, rdb)
+		allowed, err = tb.Allow(
+			ctx,
+			totalKey,
+			limiter.WithCapacity(rateLimitCapacity(limit.totalMaxCount, duration)),
+			limiter.WithRate(int64(limit.totalMaxCount)),
+			limiter.WithRequested(duration),
+		)
+
 		if err != nil {
-			fmt.Println(common.LogText("failed to check the successful request limit: %s", err.Error()))
+			fmt.Println(common.LogText("failed to check the total request limit: %s", err.Error()))
 			abortWithOpenAiMessage(c, http.StatusInternalServerError, "rate_limit_check_failed")
 			return
 		}
+		// The bucket script sets no expiry. A bucket idle for a whole window
+		// has refilled to capacity, the same as a missing key, so the key
+		// expires then and a removed rule leaves no key behind.
+		rdb.Expire(ctx, totalKey, time.Duration(duration)*time.Second)
+
 		if !allowed {
-			abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.successReachedMessage(c))
+			abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.totalReachedMessage(c))
 			return
 		}
+	}
 
-		//2.检查总请求数限制并记录总请求（当totalMaxCount为0时会自动跳过，使用令牌桶限流器
-		if limit.totalMaxCount > 0 {
-			totalKey := fmt.Sprintf("rateLimit:%s", keySubject)
-			// 初始化
-			tb := limiter.New(ctx, rdb)
-			allowed, err = tb.Allow(
-				ctx,
-				totalKey,
-				limiter.WithCapacity(rateLimitCapacity(limit.totalMaxCount, duration)),
-				limiter.WithRate(int64(limit.totalMaxCount)),
-				limiter.WithRequested(duration),
-			)
+	// 4. 处理请求
+	next()
 
-			if err != nil {
-				fmt.Println(common.LogText("failed to check the total request limit: %s", err.Error()))
-				abortWithOpenAiMessage(c, http.StatusInternalServerError, "rate_limit_check_failed")
-				return
-			}
-			// The bucket script sets no expiry. A bucket idle for a whole window
-			// has refilled to capacity, the same as a missing key, so the key
-			// expires then and a removed rule leaves no key behind.
-			rdb.Expire(ctx, totalKey, time.Duration(duration)*time.Second)
-
-			if !allowed {
-				abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.totalReachedMessage(c))
-				return
-			}
-		}
-
-		// 4. 处理请求
-		c.Next()
-
-		// 5. 如果请求成功，记录成功请求
-		if modelRequestSucceeded(c) {
-			recordRedisRequest(ctx, rdb, successKey, limit.successMaxCount, duration)
-		}
+	// 5. 如果请求成功，记录成功请求
+	if modelRequestSucceeded(c) {
+		recordRedisRequest(ctx, rdb, successKey, limit.successMaxCount, duration)
 	}
 }
 
 // 内存限流处理器。Only the first Init of rateLimiter sets how long it keeps an
 // idle key, so per-model rules pass the limiter of their window.
 func memoryRateLimitHandler(rateLimiter *common.InMemoryRateLimiter, limit modelRateLimit) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		enforceMemoryRateLimit(c, rateLimiter, limit, c.Next)
+	}
+}
+
+// enforceMemoryRateLimit checks limit on rateLimiter, runs next when it
+// allows the request and then records a success.
+func enforceMemoryRateLimit(c *gin.Context, rateLimiter *common.InMemoryRateLimiter, limit modelRateLimit, next func()) {
 	rateLimiter.Init(time.Duration(limit.durationMinutes) * time.Minute)
 	duration := rateLimitDurationSeconds(limit.durationMinutes)
+	totalKey := ModelRequestRateLimitCountMark + limit.subject
+	successKey := ModelRequestRateLimitSuccessCountMark + limit.subject
 
-	return func(c *gin.Context) {
-		totalKey := ModelRequestRateLimitCountMark + limit.subject
-		successKey := ModelRequestRateLimitSuccessCountMark + limit.subject
+	// 1. 检查总请求数限制（当totalMaxCount为0时跳过）
+	if limit.totalMaxCount > 0 && !rateLimiter.Request(totalKey, limit.totalMaxCount, duration) {
+		abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.totalReachedMessage(c))
+		return
+	}
 
-		// 1. 检查总请求数限制（当totalMaxCount为0时跳过）
-		if limit.totalMaxCount > 0 && !rateLimiter.Request(totalKey, limit.totalMaxCount, duration) {
-			abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.totalReachedMessage(c))
+	var reservation *common.RateLimitReservation
+	if limit.successMaxCount > 0 {
+		reservation = rateLimiter.Reserve(successKey, limit.successMaxCount, duration)
+		if reservation == nil {
+			abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.successReachedMessage(c))
 			return
 		}
-
-		var reservation *common.RateLimitReservation
-		if limit.successMaxCount > 0 {
-			reservation = rateLimiter.Reserve(successKey, limit.successMaxCount, duration)
-			if reservation == nil {
-				abortWithOpenAiMessage(c, http.StatusTooManyRequests, limit.successReachedMessage(c))
-				return
-			}
-			defer reservation.Complete(false)
-		}
-
-		// 3. 处理请求
-		c.Next()
-
-		// 4. 如果请求成功，记录到实际的成功请求计数中
-		reservation.Complete(modelRequestSucceeded(c))
+		defer reservation.Complete(false)
 	}
+
+	// 3. 处理请求
+	next()
+
+	// 4. 如果请求成功，记录到实际的成功请求计数中
+	reservation.Complete(modelRequestSucceeded(c))
 }
 
 func modelRequestSucceeded(c *gin.Context) bool {
@@ -263,18 +289,28 @@ func ModelRequestRateLimit() func(c *gin.Context) {
 	}
 }
 
-// PerModelRequestRateLimit enforces the ModelRequestRateLimitModel rule of the
-// model the client asked for. It runs after Distribute, which records that
+// PerModelRequestRateLimit enforces the ModelRequestRateLimitModel rules of
+// the model the client asked for. It runs after Distribute, which records that
 // name before any model mapping, and inside ModelRequestRateLimit: a request
-// must pass both, so the stricter limit rejects first. Each user's requests to
-// a ruled model are counted on their own, within the rule's own window.
+// must pass both, so the stricter limit rejects first. Each user's requests
+// are counted on their own, within each rule's own window.
 //
-// A variant of a model, named with @ modifiers or a legacy suffix such as
-// -thinking, reaches the same channels as the model, so it counts under the
-// model's rule unless it has a rule of its own. Names are matched like the
-// token model limit (TokenModelLimitAllows): the exact name, then the
-// wildcard-normalized name, then the routing name. The routing name keeps a
-// [...] line tag, so a tagged line keeps its own rule.
+// An exact rule matches like the token model limit (TokenModelLimitAllows):
+// the exact name, then the wildcard-normalized name, then the routing name, so
+// a variant named with @ modifiers or a legacy suffix such as -thinking, which
+// reaches the same channels as its model, counts under the model's rule
+// unless it has a rule of its own. The routing name keeps a [...] line tag, so
+// a tagged line keeps its own rule. A prefix or suffix rule matches when its
+// key starts or ends the requested name, that name without its @ modifiers,
+// or the routing name; "[按次]" matches every model of that line, and
+// "-thinking" matches claude-opus-4-6-thinking@effort:high, whose routing
+// name claude-opus-4-6 has dropped the suffix.
+//
+// Every matching rule applies: the exact rule first, then the prefix and
+// suffix rules by key, each with its own window and counts. The first one
+// that is used up rejects the request. Like a model rule after the global
+// limit, the rules checked before it have then counted the request in their
+// totals, and none records a success.
 func PerModelRequestRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !setting.ModelRequestRateLimitEnabled {
@@ -282,25 +318,76 @@ func PerModelRequestRateLimit() gin.HandlerFunc {
 			return
 		}
 		requested := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
-		modelName, rule, found := setting.FindModelRequestRateLimitRule(requested, ratio_setting.FormatMatchingModelName(requested), ratio_setting.RoutingMatchModelName(requested))
-		if !found {
+		routing := ratio_setting.RoutingMatchModelName(requested)
+		matches := setting.FindModelRequestRateLimitRules(requested, ratio_setting.FormatMatchingModelName(requested), hostreasoning.ModelNameWithoutModifiers(requested), routing)
+		if len(matches) == 0 {
 			c.Next()
 			return
 		}
-		limit := modelRateLimit{
-			subject:         strconv.Itoa(c.GetInt("id")) + ":model:" + modelName,
-			model:           modelName,
-			durationMinutes: rule.DurationMinutes,
-			totalMaxCount:   rule.TotalCount,
-			successMaxCount: rule.SuccessCount,
+		userID := strconv.Itoa(c.GetInt("id"))
+		limits := make([]modelRateLimit, len(matches))
+		for i, match := range matches {
+			limits[i] = modelRuleLimit(userID, requested, routing, match)
 		}
-		if common.RedisEnabled {
-			redisRateLimitHandler(limit)(c)
-			return
-		}
-		rateLimiter, _ := modelRuleMemoryLimiters.LoadOrStore(rule.DurationMinutes, new(common.InMemoryRateLimiter))
-		memoryRateLimitHandler(rateLimiter.(*common.InMemoryRateLimiter), limit)(c)
+		enforceModelRuleLimits(c, limits)
 	}
+}
+
+// modelRuleLimit is the limit a per-model rule sets for a user's request for
+// model requested, whose routing name is routing. Its subject, which follows
+// the user id, is
+//
+//	<uid>:model:<key>                                  exact rule
+//	<uid>:model-prefix:<key>                           prefix rule counting its models together
+//	<uid>:model-suffix:<key>                           suffix rule counting its models together
+//	<uid>:model-prefix-each:<len(key)>:<key>:<routing>  prefix rule counting each model on its own
+//	<uid>:model-suffix-each:<len(key)>:<key>:<routing>  suffix rule counting each model on its own
+//
+// The word after the user id tells the kinds apart, and the byte length of the
+// key keeps a key that contains ":" from running into the model name, so no
+// two rules or models share a count. Counting each model by its routing name
+// counts the @ modifier variants of a model together, as an exact rule does.
+// The exact subject is the one rules had before match modes existed, so their
+// counts carry over. Redis keys of all of them are namespaced with
+// ModelRequestRateLimitModelMark, apart from group subjects "<uid>:<group>".
+func modelRuleLimit(userID, requested, routing string, match setting.ModelRequestRateLimitMatch) modelRateLimit {
+	limit := modelRateLimit{
+		subject:         userID + ":model:" + match.Key,
+		model:           match.Key,
+		durationMinutes: match.Rule.DurationMinutes,
+		totalMaxCount:   match.Rule.TotalCount,
+		successMaxCount: match.Rule.SuccessCount,
+	}
+	if !match.Rule.IsPattern() {
+		return limit
+	}
+	kind, pattern := "model-prefix", match.Key+"*"
+	if match.Rule.Match == setting.ModelRateLimitMatchSuffix {
+		kind, pattern = "model-suffix", "*"+match.Key
+	}
+	limit.model, limit.rule, limit.shared = requested, pattern, match.Rule.Shared
+	if match.Rule.Shared {
+		limit.subject = userID + ":" + kind + ":" + match.Key
+	} else {
+		limit.subject = userID + ":" + kind + "-each:" + strconv.Itoa(len(match.Key)) + ":" + match.Key + ":" + routing
+	}
+	return limit
+}
+
+// enforceModelRuleLimits enforces limits in order, each one around the next,
+// and runs the rest of the handler chain inside the last.
+func enforceModelRuleLimits(c *gin.Context, limits []modelRateLimit) {
+	if len(limits) == 0 {
+		c.Next()
+		return
+	}
+	next := func() { enforceModelRuleLimits(c, limits[1:]) }
+	if common.RedisEnabled {
+		enforceRedisRateLimit(c, limits[0], next)
+		return
+	}
+	rateLimiter, _ := modelRuleMemoryLimiters.LoadOrStore(limits[0].durationMinutes, new(common.InMemoryRateLimiter))
+	enforceMemoryRateLimit(c, rateLimiter.(*common.InMemoryRateLimiter), limits[0], next)
 }
 
 func rateLimitDurationSeconds(durationMinutes int) int64 {

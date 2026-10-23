@@ -120,6 +120,26 @@ func TestBaseModelNameStripsModifiers(t *testing.T) {
 	require.Equal(t, "qwen3-max", BaseModelName("qwen3-max@thinking:on@temperature:0.2"))
 }
 
+// Only the @ modifiers go: a legacy alias such as Claude's -thinking stays,
+// although BaseModelName strips it too.
+func TestModelNameWithoutModifiersKeepsLegacySuffixes(t *testing.T) {
+	claudeSettings := model_setting.GetClaudeSettings()
+	oldClaude := claudeSettings.ThinkingAdapterEnabled
+	claudeSettings.ThinkingAdapterEnabled = true
+	t.Cleanup(func() { claudeSettings.ThinkingAdapterEnabled = oldClaude })
+
+	for in, want := range map[string]string{
+		"claude-opus-4-6-thinking@effort:high":     "claude-opus-4-6-thinking",
+		"gpt-5-high@temperature:1":                 "gpt-5-high",
+		"[按次]claude-opus-4-6-thinking@effort:high": "[按次]claude-opus-4-6-thinking",
+		"qwen3-max@thinking:on@temperature:0.2":    "qwen3-max",
+		"claude-opus-4-6-thinking":                 "claude-opus-4-6-thinking",
+	} {
+		assert.Equal(t, want, ModelNameWithoutModifiers(in), in)
+	}
+	assert.Equal(t, "claude-opus-4-6", BaseModelName("claude-opus-4-6-thinking@effort:high"))
+}
+
 func TestExemptAtNameIsOpaqueForBillingIdentity(t *testing.T) {
 	settings := model_setting.GetGlobalSettings()
 	original := append([]string(nil), settings.ThinkingModelBlacklist...)
@@ -128,6 +148,7 @@ func TestExemptAtNameIsOpaqueForBillingIdentity(t *testing.T) {
 
 	const model = "opaque@sha256:deadbeef"
 	assert.Equal(t, model, BaseModelName(model))
+	assert.Equal(t, model, ModelNameWithoutModifiers(model))
 	assert.Empty(t, CanonicalBillingModelNames(model))
 	assert.Equal(t, "kimi-k2-thinking", BaseModelName("kimi-k2-thinking"))
 	assert.Empty(t, CanonicalBillingModelNames("kimi-k2-thinking"))

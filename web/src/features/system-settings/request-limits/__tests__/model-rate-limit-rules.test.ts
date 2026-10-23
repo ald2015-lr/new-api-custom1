@@ -19,9 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { afterEach, expect, test, vi } from 'vitest'
 
 import {
+  formatModelRateLimitPattern,
   getModelRateLimitRulesError,
+  parseModelRateLimitRules,
   removeModelRateLimitRule,
   upsertModelRateLimitRule,
+  type ModelRateLimitRule,
 } from '../model-rate-limit-rules'
 
 afterEach(() => {
@@ -99,6 +102,8 @@ test('adding or removing a rule leaves rules that are not valid JSON unchanged',
   const draft = '{"gpt-4o": {"duration_minutes": 1},}'
   const rule = {
     modelName: 'o3',
+    match: 'exact' as const,
+    shared: false,
     durationMinutes: 1,
     totalCount: 0,
     successCount: 0,
@@ -106,4 +111,155 @@ test('adding or removing a rule leaves rules that are not valid JSON unchanged',
 
   expect(upsertModelRateLimitRule(draft, rule)).toBe(draft)
   expect(removeModelRateLimitRule(draft, 'gpt-4o')).toBe(draft)
+})
+
+const badMatch =
+  'The match of the rate limit for model {{model}} must be exact, prefix or suffix'
+const badShared =
+  'The rate limit for model {{model}} can count matching models together only with prefix or suffix match'
+
+test.each([
+  [
+    'an unknown match',
+    '{"gpt-": {"duration_minutes": 1, "match": "contains"}}',
+    badMatch,
+  ],
+  [
+    'a match in another case',
+    '{"gpt-": {"duration_minutes": 1, "match": "Prefix"}}',
+    badMatch,
+  ],
+  [
+    'a shared rule without a match',
+    '{"gpt-": {"duration_minutes": 1, "shared": true}}',
+    badShared,
+  ],
+  [
+    'a shared exact rule',
+    '{"gpt-": {"duration_minutes": 1, "match": "exact", "shared": true}}',
+    badShared,
+  ],
+])('%s is rejected like the backend rejects it', (_name, value, key) => {
+  expect(getModelRateLimitRulesError(value)).toEqual({
+    key,
+    params: { model: 'gpt-' },
+  })
+})
+
+test.each([
+  [
+    'a match that is not a string',
+    '{"gpt-": {"duration_minutes": 1, "match": 1}}',
+  ],
+  [
+    'a shared value that is not a boolean',
+    '{"gpt-": {"duration_minutes": 1, "match": "prefix", "shared": "yes"}}',
+  ],
+])('%s cannot be decoded, like on the backend', (_name, value) => {
+  expect(getModelRateLimitRulesError(value)).toEqual({ key: notObject })
+})
+
+// The way the table shows a pattern rule, which as a key would match no
+// model.
+test.each([
+  [
+    'a prefix ending with *',
+    '{"[按次]*": {"duration_minutes": 1, "match": "prefix"}}',
+    'The prefix {{model}} of a model rate limit must not end with *: a prefix rule already matches every model whose name starts with it',
+    '[按次]*',
+  ],
+  [
+    'a suffix starting with *',
+    '{"*-thinking": {"duration_minutes": 1, "match": "suffix", "shared": true}}',
+    'The suffix {{model}} of a model rate limit must not start with *: a suffix rule already matches every model whose name ends with it',
+    '*-thinking',
+  ],
+])('%s is rejected like the backend rejects it', (_name, value, key, model) => {
+  expect(getModelRateLimitRulesError(value)).toEqual({
+    key,
+    params: { model },
+  })
+})
+
+// "*" is a literal character that wildcard-normalized names contain.
+test.each([
+  '{"gpt-4-gizmo-*": {"duration_minutes": 1}}',
+  '{"-thinking-*": {"duration_minutes": 1, "match": "suffix"}}',
+])('a * the match mode does not stand for is valid: %s', (value) => {
+  expect(getModelRateLimitRulesError(value)).toBeNull()
+})
+
+test('a prefix rule that counts its models together is valid', () => {
+  expect(
+    getModelRateLimitRulesError(
+      '{"[按次]": {"duration_minutes": 1, "total_count": 8, "MATCH": "prefix", "shared": true}}'
+    )
+  ).toBeNull()
+})
+
+test('a rule saved without a match reads as an exact rule', () => {
+  expect(
+    parseModelRateLimitRules(
+      '{"gpt-4o": {"duration_minutes": 1, "total_count": 5}}'
+    )
+  ).toEqual([
+    {
+      modelName: 'gpt-4o',
+      match: 'exact',
+      shared: false,
+      durationMinutes: 1,
+      totalCount: 5,
+      successCount: 0,
+    },
+  ])
+})
+
+test('a rule with an unknown match cannot be shown in the visual editor', () => {
+  expect(
+    parseModelRateLimitRules(
+      '{"gpt-": {"duration_minutes": 1, "match": "contains"}}'
+    )
+  ).toBeNull()
+})
+
+const prefixRule: ModelRateLimitRule = {
+  modelName: '[按次]',
+  match: 'prefix',
+  shared: false,
+  durationMinutes: 1,
+  totalCount: 8,
+  successCount: 8,
+}
+
+test('saving a prefix rule names its match and counting', () => {
+  expect(JSON.parse(upsertModelRateLimitRule('{}', prefixRule))).toEqual({
+    '[按次]': {
+      duration_minutes: 1,
+      total_count: 8,
+      success_count: 8,
+      match: 'prefix',
+      shared: false,
+    },
+  })
+})
+
+test('saving an exact rule keeps the shape rules had before match modes', () => {
+  const rule: ModelRateLimitRule = {
+    ...prefixRule,
+    modelName: 'gpt-4o',
+    match: 'exact',
+  }
+  expect(JSON.parse(upsertModelRateLimitRule('{}', rule))).toEqual({
+    'gpt-4o': { duration_minutes: 1, total_count: 8, success_count: 8 },
+  })
+})
+
+test.each([
+  ['prefix', '[按次]', '[按次]*'],
+  ['suffix', '-thinking', '*-thinking'],
+  ['exact', 'gpt-4o', 'gpt-4o'],
+] as const)('a %s rule for %s is shown as %s', (match, modelName, pattern) => {
+  expect(formatModelRateLimitPattern({ ...prefixRule, match, modelName })).toBe(
+    pattern
+  )
 })

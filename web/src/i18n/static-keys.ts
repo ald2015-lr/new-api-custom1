@@ -933,4 +933,10 @@ export const STATIC_I18N_KEYS = [
   'Model names in model rate limits must have 1 to {{max}} characters and no leading or trailing spaces: "{{model}}"',
   'The time window of the rate limit for model {{model}} must be 1 to {{max}} minutes',
   'The request counts of the rate limit for model {{model}} must be 0 to {{max}}',
+  'The match of the rate limit for model {{model}} must be exact, prefix or suffix',
+  'The rate limit for model {{model}} can count matching models together only with prefix or suffix match',
+  'The prefix {{model}} of a model rate limit must not end with *: a prefix rule already matches every model whose name starts with it',
+  'The suffix {{model}} of a model rate limit must not start with *: a suffix rule already matches every model whose name ends with it',
+  'Leave out the *: Prefix Match already matches every model whose name starts with the prefix.',
+  'Leave out the *: Suffix Match already matches every model whose name ends with the suffix.',
 ] as const

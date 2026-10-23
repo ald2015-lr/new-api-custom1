@@ -559,3 +559,219 @@ test('the rate limit tables scroll inside their fields instead of widening them'
   expect(getTableEditor(groupRules)).toHaveClass('min-w-0')
   expect(getTableEditor(modelRules)).toHaveClass('min-w-0')
 })
+
+const lineTagRules = JSON.stringify({
+  '[按次]': { duration_minutes: 1, total_count: 8, success_count: 8 },
+})
+
+test('adding a prefix rule that counts its models together saves its match and counting', async () => {
+  const user = userEvent.setup()
+  const modelRules = await renderSection()
+
+  await user.click(
+    within(modelRules).getByRole('button', { name: 'Add model' })
+  )
+  const dialog = await screen.findByRole('dialog')
+  await user.selectOptions(
+    within(dialog).getByRole('combobox', { name: 'Match mode' }),
+    'Prefix Match'
+  )
+  // "[[" types a literal "[" in user-event.
+  await user.type(
+    within(dialog).getByRole('textbox', { name: 'Prefix' }),
+    '[[按次]'
+  )
+  await user.selectOptions(
+    within(dialog).getByRole('combobox', { name: 'Counting' }),
+    'Count all matching models together'
+  )
+  await user.type(
+    within(dialog).getByRole('spinbutton', {
+      name: 'Max Requests (including failures)',
+    }),
+    '8'
+  )
+  await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+  await user.click(screen.getByRole('button', { name: 'Save rate limits' }))
+
+  await waitFor(() =>
+    expect(getSavedOption('ModelRequestRateLimitModel')).toEqual({
+      '[按次]': {
+        duration_minutes: 1,
+        total_count: 8,
+        success_count: 0,
+        match: 'prefix',
+        shared: true,
+      },
+    })
+  )
+})
+
+test('switching an exact line tag rule to prefix in the edit dialog keeps its counts', async () => {
+  const user = userEvent.setup()
+  const modelRules = await renderSection(lineTagRules)
+
+  const row = within(modelRules).getByRole('row', { name: /按次/ })
+  await user.click(within(row).getByRole('button', { name: 'Edit' }))
+  const dialog = await screen.findByRole('dialog')
+  await user.selectOptions(
+    within(dialog).getByRole('combobox', { name: 'Match mode' }),
+    'Prefix Match'
+  )
+  await user.click(within(dialog).getByRole('button', { name: 'Update' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+  await user.click(screen.getByRole('button', { name: 'Save rate limits' }))
+
+  await waitFor(() =>
+    expect(getSavedOption('ModelRequestRateLimitModel')).toEqual({
+      '[按次]': {
+        duration_minutes: 1,
+        total_count: 8,
+        success_count: 8,
+        match: 'prefix',
+        shared: false,
+      },
+    })
+  )
+})
+
+test('switching a shared prefix rule to exact in the edit dialog saves it as a plain exact rule', async () => {
+  const user = userEvent.setup()
+  const modelRules = await renderSection(
+    JSON.stringify({
+      'gpt-': {
+        duration_minutes: 1,
+        total_count: 8,
+        success_count: 0,
+        match: 'prefix',
+        shared: true,
+      },
+    })
+  )
+
+  const row = within(modelRules).getByRole('row', { name: /gpt-/ })
+  await user.click(within(row).getByRole('button', { name: 'Edit' }))
+  const dialog = await screen.findByRole('dialog')
+  await user.selectOptions(
+    within(dialog).getByRole('combobox', { name: 'Match mode' }),
+    'Exact Match'
+  )
+  await user.click(within(dialog).getByRole('button', { name: 'Update' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+  await user.click(screen.getByRole('button', { name: 'Save rate limits' }))
+
+  await waitFor(() =>
+    expect(getSavedOption('ModelRequestRateLimitModel')).toEqual({
+      'gpt-': { duration_minutes: 1, total_count: 8, success_count: 0 },
+    })
+  )
+})
+
+test('a shared exact rule in JSON mode shows the backend message and blocks saving', async () => {
+  const user = userEvent.setup()
+  const modelRules = await renderSection()
+
+  const textarea = await switchToJsonMode(modelRules)
+  fireEvent.input(textarea, {
+    target: {
+      value:
+        '{"gpt-4o": {"duration_minutes": 1, "total_count": 5, "shared": true}}',
+    },
+  })
+  await user.click(screen.getByRole('button', { name: 'Save rate limits' }))
+
+  expect(
+    await within(modelRules).findByText(
+      'The rate limit for model gpt-4o can count matching models together only with prefix or suffix match'
+    )
+  ).toBeVisible()
+  expect(api.put).not.toHaveBeenCalled()
+})
+
+test('a prefix rule shows its pattern, match mode and counting in the table', async () => {
+  const modelRules = await renderSection(
+    JSON.stringify({
+      '[按次]': {
+        duration_minutes: 1,
+        total_count: 8,
+        success_count: 8,
+        match: 'prefix',
+      },
+    })
+  )
+
+  const row = within(modelRules).getByRole('row', { name: /按次/ })
+  const modelCell = within(row).getAllByRole('cell')[0]
+  expect(within(modelCell).getByText('[按次]*')).toBeVisible()
+  expect(within(modelCell).getByText('Prefix')).toBeVisible()
+  expect(within(modelCell).getByText('Counted per model')).toBeVisible()
+})
+
+// "[[" types a literal "[" in user-event.
+test.each(['[[按次]', '[[按次]*'])(
+  'typing the bare line tag %s as an exact model name suggests a prefix rule',
+  async (typed) => {
+    const user = userEvent.setup()
+    const modelRules = await renderSection()
+
+    await user.click(
+      within(modelRules).getByRole('button', { name: 'Add model' })
+    )
+    const dialog = await screen.findByRole('dialog')
+    const nameInput = within(dialog).getByRole('textbox', {
+      name: 'Model Name',
+    })
+    await user.type(nameInput, typed)
+
+    expect(nameInput).toHaveAccessibleDescription(
+      expect.stringContaining(
+        'This looks like a line tag. An exact rule only limits the model named exactly this; to limit every model whose name starts with it, choose Prefix Match.'
+      )
+    )
+  }
+)
+
+// "[[" types a literal "[" in user-event.
+test.each([
+  [
+    'Prefix Match',
+    'Prefix',
+    '[[按次]*',
+    'Leave out the *: Prefix Match already matches every model whose name starts with the prefix.',
+  ],
+  [
+    'Suffix Match',
+    'Suffix',
+    '*-thinking',
+    'Leave out the *: Suffix Match already matches every model whose name ends with the suffix.',
+  ],
+])(
+  'adding a %s rule written with * keeps the dialog open with an error',
+  async (match, nameLabel, typed, message) => {
+    const user = userEvent.setup()
+    const modelRules = await renderSection()
+
+    await user.click(
+      within(modelRules).getByRole('button', { name: 'Add model' })
+    )
+    const dialog = await screen.findByRole('dialog')
+    await user.selectOptions(
+      within(dialog).getByRole('combobox', { name: 'Match mode' }),
+      match
+    )
+    const nameInput = within(dialog).getByRole('textbox', { name: nameLabel })
+    await user.type(nameInput, typed)
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }))
+
+    expect(await within(dialog).findByText(message)).toBeVisible()
+    expect(nameInput).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  }
+)

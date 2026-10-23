@@ -34,8 +34,11 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 
 import {
+  hasModelRateLimitPatternStar,
+  MODEL_RATE_LIMIT_MATCHES,
   MODEL_RATE_LIMIT_MAX_COUNT,
   MODEL_RATE_LIMIT_MAX_MINUTES,
   MODEL_RATE_LIMIT_MAX_NAME_LENGTH,
@@ -48,30 +51,50 @@ const countSchema = z
   .min(0, 'Must be from 0 to 100,000,000')
   .max(MODEL_RATE_LIMIT_MAX_COUNT, 'Must be from 0 to 100,000,000')
 
-const modelRateLimitDialogSchema = z.object({
-  modelName: z
-    .string()
-    .trim()
-    .min(1, 'Model name is required')
-    .refine(
-      (name) => [...name].length <= MODEL_RATE_LIMIT_MAX_NAME_LENGTH,
-      'Model name must be at most 255 characters'
-    ),
-  durationMinutes: z
-    .number()
-    .int('Must be a whole number')
-    .min(1, 'Must be from 1 to 1,440')
-    .max(MODEL_RATE_LIMIT_MAX_MINUTES, 'Must be from 1 to 1,440'),
-  totalCount: countSchema,
-  successCount: countSchema,
-})
+const modelRateLimitDialogSchema = z
+  .object({
+    modelName: z
+      .string()
+      .trim()
+      .min(1, 'Model name is required')
+      .refine(
+        (name) => [...name].length <= MODEL_RATE_LIMIT_MAX_NAME_LENGTH,
+        'Model name must be at most 255 characters'
+      ),
+    match: z.enum(MODEL_RATE_LIMIT_MATCHES),
+    shared: z.boolean(),
+    durationMinutes: z
+      .number()
+      .int('Must be a whole number')
+      .min(1, 'Must be from 1 to 1,440')
+      .max(MODEL_RATE_LIMIT_MAX_MINUTES, 'Must be from 1 to 1,440'),
+    totalCount: countSchema,
+    successCount: countSchema,
+  })
+  // "[按次]*" or "*-thinking", copied from the table, would match no model.
+  .superRefine((values, ctx) => {
+    if (!hasModelRateLimitPatternStar(values.modelName, values.match)) return
+    let message =
+      'Leave out the *: Suffix Match already matches every model whose name ends with the suffix.'
+    if (values.match === 'prefix') {
+      message =
+        'Leave out the *: Prefix Match already matches every model whose name starts with the prefix.'
+    }
+    ctx.addIssue({ code: 'custom', path: ['modelName'], message })
+  })
 
 type ModelRateLimitDialogFormValues = z.infer<typeof modelRateLimitDialogSchema>
 
 const MODEL_RATE_LIMIT_FORM_ID = 'model-rate-limit-form'
 
+// A name that is only a [...] line tag, such as "[按次]" or "[按次]*": as an
+// exact rule it matches no model of the line, which a prefix rule does.
+const BARE_LINE_TAG = /^\[[^\]]*\]\*?$/
+
 const emptyRule: ModelRateLimitRule = {
   modelName: '',
+  match: 'exact',
+  shared: false,
   durationMinutes: 1,
   totalCount: 0,
   successCount: 0,
@@ -98,6 +121,31 @@ export function ModelRateLimitDialog(props: ModelRateLimitDialogProps) {
     form.reset(props.editData ?? emptyRule)
   }, [props.editData, form, props.open])
 
+  const match = form.watch('match')
+  const modelName = form.watch('modelName')
+  const showLineTagHint =
+    match === 'exact' && BARE_LINE_TAG.test(modelName.trim())
+  let nameLabel = t('Model Name')
+  let namePlaceholder = t('e.g. gpt-4o, gemini-2.5-flash')
+  let nameHint = t(
+    'The model name the client sends, including any [...] prefix. Variants with @ modifiers or a suffix such as -thinking also count under it.'
+  )
+  if (match === 'prefix') {
+    nameLabel = t('Prefix')
+    namePlaceholder = '[按次]'
+    nameHint = t(
+      'e.g. [按次] matches every model whose name starts with [按次].'
+    )
+  } else if (match === 'suffix') {
+    nameLabel = t('Suffix')
+    namePlaceholder = '-thinking'
+    nameHint = t(
+      'e.g. -thinking matches every model whose name ends with -thinking.'
+    )
+  }
+
+  // An exact rule saves without its counting (see upsertModelRateLimitRule),
+  // so a rule switched from prefix or suffix to exact drops it.
   const handleSubmit = (values: ModelRateLimitDialogFormValues) => {
     if (props.editData) {
       // The name is locked while editing: save under the key of the rule
@@ -106,6 +154,7 @@ export function ModelRateLimitDialog(props: ModelRateLimitDialogProps) {
       props.onOpenChange(false)
       return
     }
+    // One key is one rule, whatever its match mode.
     if (props.existingModelNames.includes(values.modelName)) {
       form.setError('modelName', {
         message: 'This model already has a rate limit',
@@ -160,28 +209,91 @@ export function ModelRateLimitDialog(props: ModelRateLimitDialogProps) {
         >
           <FormField
             control={form.control}
+            name='match'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Match mode')}</FormLabel>
+                <FormControl>
+                  <NativeSelect className='w-full' {...field}>
+                    <NativeSelectOption value='exact'>
+                      {t('Exact Match')}
+                    </NativeSelectOption>
+                    <NativeSelectOption value='prefix'>
+                      {t('Prefix Match')}
+                    </NativeSelectOption>
+                    <NativeSelectOption value='suffix'>
+                      {t('Suffix Match')}
+                    </NativeSelectOption>
+                  </NativeSelect>
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
             name='modelName'
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{t('Model Name')}</FormLabel>
+                <FormLabel>{nameLabel}</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder={t('e.g. gpt-4o, gemini-2.5-flash')}
+                    placeholder={namePlaceholder}
                     {...field}
                     disabled={isEditMode}
                   />
                 </FormControl>
+                {/* One description, which the input's aria-describedby
+                    names, so the line tag hint is read with the field. */}
                 <FormDescription>
                   {isEditMode
                     ? t('Model name cannot be changed when editing.')
-                    : t(
-                        'The model name the client sends, including any [...] prefix. Variants with @ modifiers or a suffix such as -thinking also count under it.'
+                    : nameHint}
+                  {showLineTagHint && (
+                    <span className='text-warning mt-1 block'>
+                      {t(
+                        'This looks like a line tag. An exact rule only limits the model named exactly this; to limit every model whose name starts with it, choose Prefix Match.'
                       )}
+                    </span>
+                  )}
                 </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
           />
+
+          {match !== 'exact' && (
+            <FormField
+              control={form.control}
+              name='shared'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Counting')}</FormLabel>
+                  <FormControl>
+                    <NativeSelect
+                      className='w-full'
+                      name={field.name}
+                      ref={field.ref}
+                      onBlur={field.onBlur}
+                      value={field.value ? 'shared' : 'separate'}
+                      onChange={(e) =>
+                        field.onChange(e.target.value === 'shared')
+                      }
+                    >
+                      <NativeSelectOption value='separate'>
+                        {t('Count each model separately')}
+                      </NativeSelectOption>
+                      <NativeSelectOption value='shared'>
+                        {t('Count all matching models together')}
+                      </NativeSelectOption>
+                    </NativeSelect>
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          )}
 
           <FormField
             control={form.control}

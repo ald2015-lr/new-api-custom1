@@ -23,6 +23,12 @@ const (
 	MsgRateLimitTotalReached      = "rate_limit.total_reached"
 	MsgModelRateLimitReached      = "rate_limit.model_reached"
 	MsgModelRateLimitTotalReached = "rate_limit.model_total_reached"
+	// Prefix and suffix rules, which name the requested model and the rule's
+	// pattern, counting each model on its own or all of them together.
+	MsgModelRuleReached            = "rate_limit.model_rule_reached"
+	MsgModelRuleTotalReached       = "rate_limit.model_rule_total_reached"
+	MsgModelRuleSharedReached      = "rate_limit.model_rule_shared_reached"
+	MsgModelRuleSharedTotalReached = "rate_limit.model_rule_shared_total_reached"
 
 	MsgDistributorInvalidRequest               = "distributor.invalid_request"
 	MsgDistributorInvalidChannelId             = "distributor.invalid_channel_id"

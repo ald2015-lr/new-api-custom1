@@ -74,10 +74,7 @@ func ParseLegacyModelSuffix(modelName string, allowClaudeThinkingAlias bool, all
 // Malformed legacy aliases stay intact so request conversion can report the
 // precise validation error later.
 func BaseModelName(modelName string) string {
-	if model_setting.ShouldPreserveThinkingSuffix(modelName) {
-		return modelName
-	}
-	base := kitreasoning.ParseModelModifiers(modelName).Base
+	base := ModelNameWithoutModifiers(modelName)
 	if model_setting.ShouldPreserveThinkingSuffix(base) {
 		return base
 	}
@@ -93,6 +90,16 @@ func BaseModelName(modelName string) string {
 		return legacyBase
 	}
 	return base
+}
+
+// ModelNameWithoutModifiers strips only the explicit @ modifiers, the first
+// step of BaseModelName, and keeps any legacy alias such as -thinking. Names
+// on the thinking-suffix blacklist stay verbatim, including @ tails.
+func ModelNameWithoutModifiers(modelName string) string {
+	if model_setting.ShouldPreserveThinkingSuffix(modelName) {
+		return modelName
+	}
+	return kitreasoning.ParseModelModifiers(modelName).Base
 }
 
 func splitModelNamespace(modelName string) (string, string) {
