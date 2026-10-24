@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { BonusGrantSource } from './types'
+
 // ============================================================================
 // Wallet Constants
 // ============================================================================
@@ -64,3 +66,13 @@ export const DEFAULT_DISCOUNT_RATE = 1.0
  * Default minimum topup amount
  */
 export const DEFAULT_MIN_TOPUP = 1
+
+/**
+ * i18n label keys of expiring reward sources (registered in static-keys.ts)
+ */
+export const BONUS_SOURCE_LABELS: Record<BonusGrantSource, string> = {
+  checkin_free: 'Check-in reward',
+  checkin_paid: 'Paid check-in reward',
+  invitee: 'Invitation bonus',
+  inviter: 'Invite reward',
+}

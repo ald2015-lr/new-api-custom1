@@ -338,6 +338,9 @@ func migrateDB() error {
 	if err := migrateOptionPrimaryKey(DB); err != nil {
 		common.SysError(common.LogText("failed to migrate options primary key: %s", err.Error()))
 	}
+	if err := addUserBonusColumns(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -377,6 +380,8 @@ func migrateDB() error {
 		&AuthzRole{},
 		&UserAccessToken{},
 		&ChannelQuotaLimit{},
+		&BonusGrant{},
+		&InviteReward{},
 	)
 	if err != nil {
 		return err
@@ -400,6 +405,38 @@ func migrateDB() error {
 		}
 	}
 	return nil
+}
+
+// userBonusColumns are the users columns of the expiring bonus ledger.
+var userBonusColumns = []string{
+	"wallet_spent_quota",
+	"wallet_used_at",
+	"bonus_spent_cursor",
+	"bonus_settled_at",
+	"bonus_settled_from",
+	"bonus_settled_paid",
+}
+
+// addUserBonusColumns adds the missing bonus ledger columns of an existing
+// users table in one ALTER TABLE on MySQL and PostgreSQL: MySQL 5.7 and
+// PostgreSQL < 11 rebuild the table for every ADD COLUMN with a default, so
+// AutoMigrate's one statement per column would rebuild it once per column.
+// AutoMigrate then finds the columns in place. SQLite adds a column without a
+// rebuild and is left to AutoMigrate.
+func addUserBonusColumns() error {
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || !DB.Migrator().HasTable(&User{}) {
+		return nil
+	}
+	var additions []string
+	for _, column := range userBonusColumns {
+		if !DB.Migrator().HasColumn(&User{}, column) {
+			additions = append(additions, "ADD COLUMN "+column+" bigint NOT NULL DEFAULT 0")
+		}
+	}
+	if len(additions) == 0 {
+		return nil
+	}
+	return DB.Exec("ALTER TABLE users " + strings.Join(additions, ", ")).Error
 }
 
 func migrateLOGDB() error {

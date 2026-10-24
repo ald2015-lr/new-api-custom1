@@ -40,6 +40,8 @@ interface TransferDialogProps {
   onConfirm: (amount: number) => Promise<boolean>
   availableQuota: number
   transferring: boolean
+  /** Part of the invitation balance expires; those rewards go first */
+  hasExpiringRewards?: boolean
 }
 
 export function TransferDialog({
@@ -48,6 +50,7 @@ export function TransferDialog({
   onConfirm,
   availableQuota,
   transferring,
+  hasExpiringRewards,
 }: TransferDialogProps) {
   const { t } = useTranslation()
   const currencyConfig = useSystemConfigStore((state) => state.config.currency)
@@ -56,21 +59,29 @@ export function TransferDialog({
       ? currencyConfig.quotaPerUnit
       : DEFAULT_CURRENCY_CONFIG.quotaPerUnit
   )
+  // The server also accepts the whole balance when it is below the minimum,
+  // and in that case nothing else.
+  const wholeBalanceOnly = availableQuota > 0 && availableQuota < minimumQuota
   const minimumAmount = quotaUnitsToDollars(minimumQuota)
   const maximumAmount = quotaUnitsToDollars(availableQuota)
-  const [amount, setAmount] = useState(minimumAmount)
-  const transferQuota = parseQuotaFromDollars(amount)
+  const initialAmount = wholeBalanceOnly ? maximumAmount : minimumAmount
+  const [amount, setAmount] = useState(initialAmount)
+  // Sent as is, so display rounding cannot leave part of the balance behind.
+  const transferQuota = wholeBalanceOnly
+    ? availableQuota
+    : parseQuotaFromDollars(amount)
   const canTransfer =
-    Number.isFinite(amount) &&
-    transferQuota >= minimumQuota &&
-    transferQuota <= availableQuota
+    wholeBalanceOnly ||
+    (Number.isFinite(amount) &&
+      transferQuota >= minimumQuota &&
+      transferQuota <= availableQuota)
 
   useEffect(() => {
     if (open) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setAmount(minimumAmount)
+      setAmount(initialAmount)
     }
-  }, [minimumAmount, open])
+  }, [initialAmount, open])
 
   const handleConfirm = async () => {
     if (!canTransfer) return
@@ -119,6 +130,11 @@ export function TransferDialog({
           <div className='text-2xl font-semibold'>
             {formatQuota(availableQuota)}
           </div>
+          {hasExpiringRewards && (
+            <p className='text-muted-foreground text-xs'>
+              {t('Expiring rewards are transferred first')}
+            </p>
+          )}
         </div>
 
         <div className='space-y-3'>
@@ -133,14 +149,24 @@ export function TransferDialog({
             type='number'
             value={amount}
             onChange={(e) => setAmount(Number(e.target.value))}
+            readOnly={wholeBalanceOnly}
             min={minimumAmount}
             max={maximumAmount}
             step={minimumAmount}
             className='font-mono text-lg'
           />
-          <p className='text-muted-foreground text-xs'>
-            {t('Minimum:')} {formatQuota(minimumQuota)}
-          </p>
+          {wholeBalanceOnly ? (
+            <p className='text-muted-foreground text-xs'>
+              {t(
+                'Below the {{min}} minimum, the whole invitation balance is transferred at once.',
+                { min: formatQuota(minimumQuota) }
+              )}
+            </p>
+          ) : (
+            <p className='text-muted-foreground text-xs'>
+              {t('Minimum:')} {formatQuota(minimumQuota)}
+            </p>
+          )}
         </div>
       </div>
     </Dialog>

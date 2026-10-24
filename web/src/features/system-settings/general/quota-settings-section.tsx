@@ -50,11 +50,18 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
 import { useUpdateOption } from '../hooks/use-update-option'
+import {
+  quotaThresholdSchema,
+  rewardExpireDaysSchema,
+} from '../utils/reward-fields'
 
 const quotaSchema = z.object({
   QuotaForNewUser: z.coerce.number().min(0),
   QuotaForInviter: z.coerce.number().min(0),
   QuotaForInvitee: z.coerce.number().min(0),
+  InviteRechargeThresholdQuota: quotaThresholdSchema(),
+  InviteRewardExpireDays: rewardExpireDaysSchema(),
+  InviteRewardExpireOnlyWhenUnused: z.boolean(),
   TopUpLink: z.string(),
   quota_setting: z.object({
     enable_free_model_pre_consume: z.boolean(),
@@ -278,6 +285,90 @@ export function QuotaSettingsSection({
                 </FormItem>
               )}
             />
+
+            <FormField
+              control={form.control}
+              name='InviteRechargeThresholdQuota'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Invite reward recharge threshold')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      step={1}
+                      value={field.value ?? ''}
+                      onChange={handleNumberChange(field.onChange)}
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Both invitation rewards are granted once the invitee has recharged this much in total; 0 = granted at registration ({{formattedQuota}})',
+                      {
+                        formattedQuota: formatQuotaInputValue(field.value),
+                      }
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='InviteRewardExpireDays'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Invitation reward expiry (days)')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      max={3650}
+                      step={1}
+                      value={field.value ?? ''}
+                      onChange={handleNumberChange(field.onChange)}
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>{t('0 = never expire')}</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <SettingsFormGridItem span='full'>
+              <FormField
+                control={form.control}
+                name='InviteRewardExpireOnlyWhenUnused'
+                render={({ field }) => (
+                  <SettingsSwitchItem>
+                    <SettingsSwitchContent>
+                      <FormLabel>
+                        {t('Invitation rewards expire only when unused')}
+                      </FormLabel>
+                      <FormDescription>
+                        {t(
+                          'Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.'
+                        )}
+                      </FormDescription>
+                    </SettingsSwitchContent>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        disabled={updateOption.isPending}
+                      />
+                    </FormControl>
+                  </SettingsSwitchItem>
+                )}
+              />
+            </SettingsFormGridItem>
 
             <SettingsFormGridItem span='full'>
               <FormField

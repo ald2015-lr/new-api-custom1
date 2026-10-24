@@ -132,8 +132,22 @@ var TelegramBotToken = ""
 var TelegramBotName = ""
 
 var QuotaForNewUser = 0
-var QuotaForInviter = 0
+
+// QuotaForInviter defaults to half a unit on fresh installs; migrateDB pins
+// the previous implicit 0 for existing deployments that never saved it.
+var QuotaForInviter = int(QuotaPerUnit / 2)
 var QuotaForInvitee = 0
+
+// InviteRechargeThresholdQuota is the cumulative recharge (quota) an invitee
+// must reach before both invite rewards are granted; 0 grants them at sign-up.
+var InviteRechargeThresholdQuota = 0
+
+// InviteRewardExpireDays is how long granted invite rewards last; 0 = never.
+var InviteRewardExpireDays = 30
+
+// InviteRewardExpireOnlyWhenUnused makes invite rewards expire only after
+// InviteRewardExpireDays without any use; every use restarts the period.
+var InviteRewardExpireOnlyWhenUnused = false
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false

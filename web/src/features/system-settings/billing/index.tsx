@@ -26,8 +26,11 @@ import {
 
 const defaultBillingSettings: BillingSettings = {
   QuotaForNewUser: 0,
-  QuotaForInviter: 0,
+  QuotaForInviter: 250000,
   QuotaForInvitee: 0,
+  InviteRechargeThresholdQuota: 0,
+  InviteRewardExpireDays: 30,
+  InviteRewardExpireOnlyWhenUnused: false,
   TopUpLink: '',
   'quota_setting.enable_free_model_pre_consume': true,
   'quota_setting.trust_quota_usd': 10,
@@ -114,6 +117,11 @@ const defaultBillingSettings: BillingSettings = {
   'checkin_setting.enabled': false,
   'checkin_setting.min_quota': 1000,
   'checkin_setting.max_quota': 10000,
+  'checkin_setting.paid_threshold_quota': 1000000,
+  'checkin_setting.paid_multiplier': 2,
+  'checkin_setting.free_expire_days': 30,
+  'checkin_setting.paid_expire_days': 30,
+  'checkin_setting.expire_only_when_unused': false,
 }
 
 export function BillingSettings() {

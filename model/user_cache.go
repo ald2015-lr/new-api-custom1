@@ -156,6 +156,9 @@ func cacheDecrUserQuota(userId int, delta int64) error {
 // 余额。预扣以缓存值为准（存在期间），授信不能绕过它，否则新到账的额度在
 // 缓存过期前不可用；缓存未命中无需处理，下次读取会从已提交的数据库余额水合。
 // 同时失效累计充值缓存，使分组充值门槛立即反映本次授信。
+// 它是所有 creditTopUpQuota 调用方（在线充值、管理员补单、兑换码）共同的提交后
+// 节点，因此也在这里检查被邀请人的累计充值是否达到邀请奖励门槛；失败只记日志，
+// 不影响支付回调。
 func syncCreditUserQuotaCache(userId int, quota int, operation string) {
 	if quota <= 0 {
 		return
@@ -163,6 +166,9 @@ func syncCreditUserQuotaCache(userId int, quota int, operation string) {
 	InvalidateUserTopupTotalCache(userId)
 	if err := cacheIncrUserQuota(userId, int64(quota)); err != nil {
 		common.SysLog(common.LogText("failed to sync %s credit to user quota cache: %s", operation, err.Error()))
+	}
+	if err := GrantInviteRewardIfQualified(userId); err != nil {
+		common.SysError(common.LogText("failed to grant the invite reward of user %d: %s", userId, err.Error()))
 	}
 }
 

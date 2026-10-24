@@ -27,7 +27,8 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatQuota } from '@/lib/format'
 
-import type { UserWalletData } from '../types'
+import type { SelfBonusSummary, UserWalletData } from '../types'
+import { BonusGrantList } from './bonus-grants-card'
 
 interface AffiliateRewardsCardProps {
   user: UserWalletData | null
@@ -35,6 +36,8 @@ interface AffiliateRewardsCardProps {
   onTransfer: () => void
   complianceConfirmed?: boolean
   loading?: boolean
+  /** Expiring invite rewards and invites still waiting for a recharge */
+  bonus?: SelfBonusSummary | null
 }
 
 export function AffiliateRewardsCard({
@@ -43,6 +46,7 @@ export function AffiliateRewardsCard({
   onTransfer,
   complianceConfirmed = true,
   loading,
+  bonus,
 }: AffiliateRewardsCardProps) {
   const { t } = useTranslation()
   if (loading) {
@@ -61,6 +65,42 @@ export function AffiliateRewardsCard({
   }
 
   const hasRewards = (user?.aff_quota ?? 0) > 0
+  const affGrants = bonus?.aff_grants ?? []
+  const pendingInviteCount = bonus?.pending_invites.count ?? 0
+  const inviteThreshold = bonus?.invite.threshold_quota ?? 0
+  const ownReward = bonus?.own_invite_reward
+  let ownRewardNotice = ''
+  if (ownReward?.status === 'pending' && ownReward.invitee_quota > 0) {
+    ownRewardNotice =
+      ownReward.threshold_quota > 0
+        ? t(
+            'Your invitation bonus of {{quota}} is granted once your total recharge reaches {{threshold}}.',
+            {
+              quota: formatQuota(ownReward.invitee_quota),
+              threshold: formatQuota(ownReward.threshold_quota),
+            }
+          )
+        : t('Your invitation bonus of {{quota}} is pending.', {
+            quota: formatQuota(ownReward.invitee_quota),
+          })
+  }
+  let pendingInviteNotice = ''
+  if (pendingInviteCount > 0) {
+    pendingInviteNotice =
+      inviteThreshold > 0
+        ? `${t(
+            '{{count}} invited users have not reached the recharge threshold yet',
+            { count: pendingInviteCount }
+          )} ${t(
+            'You get the reward for each of them once they have recharged {{threshold}} in total.',
+            { threshold: formatQuota(inviteThreshold) }
+          )}`
+        : t('{{count}} invite rewards are waiting to be granted', {
+            count: pendingInviteCount,
+          })
+  }
+  const hasInviteDetails =
+    affGrants.length > 0 || pendingInviteNotice !== '' || ownRewardNotice !== ''
 
   return (
     <Card data-card-hover='false' className='bg-muted/20 py-0'>
@@ -130,6 +170,30 @@ export function AffiliateRewardsCard({
             )}
           </p>
         ) : null}
+        {hasInviteDetails && (
+          <div className='space-y-3 border-t pt-3 lg:col-span-3'>
+            {pendingInviteNotice && (
+              <p className='text-muted-foreground text-xs'>
+                {pendingInviteNotice}
+              </p>
+            )}
+            {ownRewardNotice && (
+              <p className='text-muted-foreground text-xs'>{ownRewardNotice}</p>
+            )}
+            {affGrants.length > 0 && (
+              <div className='space-y-2'>
+                <h4 className='text-xs font-semibold'>
+                  {t('Expiring invite rewards')}
+                </h4>
+                <BonusGrantList
+                  grants={affGrants}
+                  totalCount={bonus?.aff_totals.count ?? affGrants.length}
+                  use='transfer'
+                />
+              </div>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   )

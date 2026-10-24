@@ -48,7 +48,11 @@ import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
 import { getCheckinStatus, performCheckin } from '../api'
-import type { CheckinRecord } from '../types'
+import type { CheckinRecord, CheckinResponse } from '../types'
+import {
+  CheckinRewardResult,
+  CheckinRewardRuleItems,
+} from './checkin-reward-details'
 
 interface CheckinCalendarCardProps {
   checkinEnabled: boolean
@@ -71,6 +75,7 @@ export function CheckinCalendarCard({
   const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0)
   const [initialLoaded, setInitialLoaded] = useState(false)
   const [collapsed, setCollapsed] = useState<boolean>(false)
+  const [lastResult, setLastResult] = useState<CheckinResponse | null>(null)
 
   const currentMonthStr = useMemo(() => {
     const y = currentMonth.getFullYear()
@@ -149,6 +154,7 @@ export function CheckinCalendarCard({
           toast.success(
             `${t('Check-in successful! Received')} ${formatQuotaWithCurrency(res.data.quota_awarded)}`
           )
+          setLastResult(res.data)
           refetch()
           setTurnstileModalVisible(false)
         } else {
@@ -333,6 +339,7 @@ export function CheckinCalendarCard({
               {checkinButtonLabel}
             </Button>
           </div>
+          {lastResult && <CheckinRewardResult result={lastResult} />}
         </div>
 
         {!collapsed ? (
@@ -477,6 +484,9 @@ export function CheckinCalendarCard({
                       {t('Rewards will be added directly to your balance')}
                     </li>
                     <li>{t('Do not repeat check-in; only once per day')}</li>
+                    {checkinData && (
+                      <CheckinRewardRuleItems status={checkinData} />
+                    )}
                   </ul>
                 </div>
               </div>

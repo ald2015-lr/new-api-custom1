@@ -164,3 +164,75 @@ func TestUpdateOptionMapAppliesModelSquareSetting(t *testing.T) {
 	assert.Equal(t, rules, config.GlobalConfig.ExportAllConfigs()[rulesKey])
 	assert.Equal(t, bases, config.GlobalConfig.ExportAllConfigs()[basesKey])
 }
+
+func TestValidateOptionValueBonusSettings(t *testing.T) {
+	invalid := map[string][]string{
+		"checkin_setting.paid_threshold_quota":    {"", "-1", "1.5", fmt.Sprint(int64(common.MaxWalletQuota) + 1)},
+		"InviteRechargeThresholdQuota":            {"-1", "abc"},
+		"checkin_setting.paid_multiplier":         {"", "0.5", "100.5", "NaN", "Inf", "two", "1.125", "1.001"},
+		"checkin_setting.free_expire_days":        {"-1", "3651", "1.5"},
+		"checkin_setting.paid_expire_days":        {"3651"},
+		"InviteRewardExpireDays":                  {"-1", "x"},
+		"checkin_setting.expire_only_when_unused": {"yes", "1", ""},
+		"InviteRewardExpireOnlyWhenUnused":        {"TRUE"},
+	}
+	for key, values := range invalid {
+		for _, value := range values {
+			assert.Error(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+	valid := map[string][]string{
+		"checkin_setting.paid_threshold_quota":    {"0", "1000000", fmt.Sprint(int64(common.MaxWalletQuota))},
+		"InviteRechargeThresholdQuota":            {"0", "500000"},
+		"checkin_setting.paid_multiplier":         {"1", "1.5", "1.25", "1.15", "100"},
+		"checkin_setting.free_expire_days":        {"0", "30", "3650"},
+		"InviteRewardExpireDays":                  {"0", "3650"},
+		"checkin_setting.expire_only_when_unused": {"true", "false"},
+		"InviteRewardExpireOnlyWhenUnused":        {"true", "false"},
+	}
+	for key, values := range valid {
+		for _, value := range values {
+			assert.NoError(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+}
+
+// The invite reward options are plain options and the check-in fields are
+// read through the config manager, so a saved value takes effect at once.
+func TestBonusOptionsApplyWhenSaved(t *testing.T) {
+	threshold, days, sliding := common.InviteRechargeThresholdQuota, common.InviteRewardExpireDays, common.InviteRewardExpireOnlyWhenUnused
+	checkin := *operation_setting.GetCheckinSetting()
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	t.Cleanup(func() {
+		common.OptionMap = originalMap
+		common.InviteRechargeThresholdQuota, common.InviteRewardExpireDays, common.InviteRewardExpireOnlyWhenUnused = threshold, days, sliding
+		*operation_setting.GetCheckinSetting() = checkin
+	})
+
+	for key, value := range map[string]string{
+		"InviteRechargeThresholdQuota":            "500000",
+		"InviteRewardExpireDays":                  "7",
+		"InviteRewardExpireOnlyWhenUnused":        "true",
+		"checkin_setting.paid_multiplier":         "1.5",
+		"checkin_setting.paid_threshold_quota":    "0",
+		"checkin_setting.paid_expire_days":        "14",
+		"checkin_setting.expire_only_when_unused": "true",
+	} {
+		require.NoError(t, updateOptionMap(key, value))
+	}
+
+	assert.Equal(t, 500000, common.InviteRechargeThresholdQuota)
+	assert.Equal(t, 7, common.InviteRewardExpireDays)
+	assert.True(t, common.InviteRewardExpireOnlyWhenUnused)
+	setting := operation_setting.GetCheckinSetting()
+	assert.Equal(t, 1.5, setting.PaidMultiplier)
+	assert.Zero(t, setting.PaidThresholdQuota)
+	assert.Equal(t, 14, operation_setting.CheckinExpireDays(true))
+	assert.True(t, setting.ExpireOnlyWhenUnused)
+	assert.True(t, operation_setting.IsPaidCheckinUser(1), "a threshold of 0 means any recharge")
+	assert.False(t, operation_setting.IsPaidCheckinUser(0))
+	exported := config.GlobalConfig.ExportAllConfigs()
+	assert.Equal(t, "1.5", exported["checkin_setting.paid_multiplier"])
+	assert.Equal(t, "true", exported["checkin_setting.expire_only_when_unused"])
+}

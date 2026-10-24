@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -27,14 +26,26 @@ func GetCheckinStatus(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	recharged, err := model.GetUserRechargeQuota(userId)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"enabled":   setting.Enabled,
-			"min_quota": setting.MinQuota,
-			"max_quota": setting.MaxQuota,
-			"stats":     stats,
+			"enabled":                 setting.Enabled,
+			"min_quota":               setting.MinQuota,
+			"max_quota":               setting.MaxQuota,
+			"paid_threshold_quota":    setting.PaidThresholdQuota,
+			"paid_multiplier":         setting.PaidMultiplier,
+			"free_expire_days":        setting.FreeExpireDays,
+			"paid_expire_days":        setting.PaidExpireDays,
+			"expire_only_when_unused": setting.ExpireOnlyWhenUnused,
+			"recharged_quota":         recharged,
+			"is_paid_user":            operation_setting.IsPaidCheckinUser(recharged),
+			"stats":                   stats,
 		},
 	})
 }
@@ -49,14 +60,21 @@ func DoCheckin(c *gin.Context) {
 
 	userId := c.GetInt("id")
 
-	checkin, err := model.UserCheckin(userId)
+	result, err := model.UserCheckin(userId)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	model.RecordLog(userId, model.LogTypeSystem, common.NewMessage("Daily check-in, received {{quota}}", map[string]any{"quota": logger.FormatQuota(checkin.QuotaAwarded)}))
+	model.RecordLog(userId, model.LogTypeSystem, result.LogMessage())
 	common.ApiSuccessT(c, "Check-in successful", gin.H{
-		"quota_awarded": checkin.QuotaAwarded,
-		"checkin_date":  checkin.CheckinDate,
+		"quota_awarded":           result.Checkin.QuotaAwarded,
+		"base_quota":              result.BaseQuota,
+		"checkin_date":            result.Checkin.CheckinDate,
+		"paid_multiplier_applied": result.PaidMultiplierApplied,
+		"paid_multiplier":         result.PaidMultiplier,
+		"is_paid_user":            result.IsPaidUser,
+		"expire_days":             result.ExpireDays,
+		"expires_at":              result.ExpiresAt,
+		"expire_only_when_unused": result.ExpireOnlyWhenUnused,
 	})
 }

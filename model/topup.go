@@ -117,6 +117,29 @@ func creditTopUpQuota(tx *gorm.DB, userId int, creditedQuota int, updates map[st
 	return ErrTopUpQuotaLimitExceeded
 }
 
+// topUpCreditedQuota is the wallet quota a successful top-up order credits,
+// the same rule the payment callbacks apply:
+//   - Stripe orders: Money is the USD amount after the group ratio, × QuotaPerUnit
+//   - Creem orders: Amount already is quota (as in RechargeCreem)
+//   - other orders (epay, Waffo, ...): Amount is in units, × QuotaPerUnit
+//
+// Old orders may have an empty payment_provider, so payment_method counts too.
+// Historical orders are valued at the current QuotaPerUnit.
+func topUpCreditedQuota(topUp *TopUp) (int, error) {
+	switch {
+	case topUp.PaymentProvider == PaymentProviderStripe || topUp.PaymentMethod == PaymentMethodStripe:
+		return common.WalletQuotaFromDecimalStrict(
+			decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+		)
+	case topUp.PaymentProvider == PaymentProviderCreem || topUp.PaymentMethod == PaymentMethodCreem:
+		return common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
+	default:
+		return common.WalletQuotaFromDecimalStrict(
+			decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
+		)
+	}
+}
+
 func (topUp *TopUp) Update() error {
 	var err error
 	err = DB.Save(topUp).Error
@@ -478,24 +501,9 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 			return common.NewMessage("Order is not pending payment and cannot be completed")
 		}
 
-		// 计算应充值额度（与各支付回调的入账口径一致）：
-		// - Stripe 订单：Money 代表经分组倍率换算后的美元数量，直接 * QuotaPerUnit
-		// - Creem 订单：Amount 已经是额度，原样入账（同 RechargeCreem）
-		// - 其他订单（如易支付）：Amount 为美元数量，* QuotaPerUnit
-		// 老订单的 payment_provider 可能为空，所以同时看 payment_method。
+		// 计算应充值额度（与各支付回调的入账口径一致）
 		var quotaErr error
-		switch {
-		case topUp.PaymentProvider == PaymentProviderStripe || topUp.PaymentMethod == PaymentMethodStripe:
-			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
-				decimal.NewFromFloat(topUp.Money).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
-			)
-		case topUp.PaymentProvider == PaymentProviderCreem || topUp.PaymentMethod == PaymentMethodCreem:
-			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(decimal.NewFromInt(topUp.Amount))
-		default:
-			quotaToAdd, quotaErr = common.WalletQuotaFromDecimalStrict(
-				decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)),
-			)
-		}
+		quotaToAdd, quotaErr = topUpCreditedQuota(topUp)
 		if quotaErr != nil || quotaToAdd <= 0 {
 			return ErrInvalidTopUpQuota
 		}

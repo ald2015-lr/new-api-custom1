@@ -803,8 +803,10 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 			return common.NewMessage("Insufficient balance")
 		}
 		if requiredQuota > 0 {
+			// Paying with the balance is wallet spending: it consumes expiring
+			// bonuses first and counts as a use of them.
 			if err := tx.Model(&User{}).Where("id = ?", userId).
-				Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
+				Updates(walletUsageDebitUpdates(requiredQuota)).Error; err != nil {
 				return err
 			}
 		}

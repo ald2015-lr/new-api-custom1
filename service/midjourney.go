@@ -99,7 +99,9 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		return true
 	}
 
-	if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
+	// The charge time of a legacy task is not reliably known, so the refund
+	// stays paid balance (never offsets later bonus usage).
+	if err := model.RefundUserQuota(task.UserId, quota, 0); err != nil {
 		logger.LogWarn(ctx, common.LogText("failed to refund Midjourney user quota, task %s: %s", task.MjId, err.Error()))
 		return false
 	}

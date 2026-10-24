@@ -163,7 +163,57 @@ func TestSubscriptionSettleOverageGoesToWalletWhenPlanAllows(t *testing.T) {
 			assert.Equal(t, tc.wantWallet, getUserQuota(t, userId))
 			assert.Equal(t, int64(1000), relayInfo.SubscriptionPostDelta, "only the part the subscription could cover")
 			assert.Equal(t, tc.wantOverage, relayInfo.SubscriptionWalletOverflow)
+			assert.Equal(t, tc.wantOverage, getWalletSpentQuota(t, userId), "only the overflow charged to the wallet is wallet usage")
 			assert.False(t, session.NeedsRefund(), "a settled session must not be refunded")
+		})
+	}
+}
+
+// A wallet session changes the wallet usage counter by exactly its net charge:
+// refunds of its own charges net out because they follow the request start.
+func TestWalletBillingSessionMovesWalletUsageByNetCharge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const walletQuota, preConsume = 1_000_000, 5000
+	cases := []struct {
+		name      string
+		finish    func(t *testing.T, session *BillingSession)
+		wantSpent int64
+	}{
+		{name: "settle below the reservation", wantSpent: 3000, finish: func(t *testing.T, session *BillingSession) {
+			require.NoError(t, session.Settle(3000))
+		}},
+		{name: "settle above the reservation", wantSpent: 8000, finish: func(t *testing.T, session *BillingSession) {
+			require.NoError(t, session.Settle(8000))
+		}},
+		{name: "refund", wantSpent: 0, finish: func(t *testing.T, session *BillingSession) {
+			require.NoError(t, session.funding.Refund())
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			userId := 870 + i
+			seedUser(t, userId, walletQuota)
+			relayInfo := &relaycommon.RelayInfo{
+				UserId:          userId,
+				RequestId:       fmt.Sprintf("req-wallet-usage-%d", i),
+				IsPlayground:    true,
+				ForcePreConsume: true,
+				OriginModelName: "gpt-test",
+				StartTime:       time.Now(),
+				UserSetting:     dto.UserSetting{BillingPreference: "wallet_only"},
+			}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			session, apiErr := NewBillingSession(ctx, relayInfo, preConsume)
+			require.Nil(t, apiErr)
+			require.Equal(t, BillingSourceWallet, relayInfo.BillingSource)
+			require.EqualValues(t, preConsume, getWalletSpentQuota(t, userId))
+
+			tc.finish(t, session)
+
+			assert.Equal(t, tc.wantSpent, getWalletSpentQuota(t, userId))
+			assert.Equal(t, walletQuota-int(tc.wantSpent), getUserQuota(t, userId))
 		})
 	}
 }

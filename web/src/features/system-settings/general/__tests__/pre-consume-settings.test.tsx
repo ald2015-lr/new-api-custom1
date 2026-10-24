@@ -44,6 +44,9 @@ function Fixture() {
             QuotaForNewUser: 0,
             QuotaForInviter: 0,
             QuotaForInvitee: 0,
+            InviteRechargeThresholdQuota: 0,
+            InviteRewardExpireDays: 30,
+            InviteRewardExpireOnlyWhenUnused: false,
             TopUpLink: '',
             quota_setting: {
               enable_free_model_pre_consume: true,

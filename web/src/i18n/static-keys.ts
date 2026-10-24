@@ -939,4 +939,9 @@ export const STATIC_I18N_KEYS = [
   'The suffix {{model}} of a model rate limit must not start with *: a suffix rule already matches every model whose name ends with it',
   'Leave out the *: Prefix Match already matches every model whose name starts with the prefix.',
   'Leave out the *: Suffix Match already matches every model whose name ends with the suffix.',
+  // Expiring reward sources (wallet BONUS_SOURCE_LABELS).
+  'Check-in reward',
+  'Paid check-in reward',
+  'Invitation bonus',
+  'Invite reward',
 ] as const

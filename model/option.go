@@ -150,6 +150,9 @@ func InitOptionMap() {
 	common.OptionMap["QuotaForNewUser"] = strconv.Itoa(common.QuotaForNewUser)
 	common.OptionMap["QuotaForInviter"] = strconv.Itoa(common.QuotaForInviter)
 	common.OptionMap["QuotaForInvitee"] = strconv.Itoa(common.QuotaForInvitee)
+	common.OptionMap["InviteRechargeThresholdQuota"] = strconv.Itoa(common.InviteRechargeThresholdQuota)
+	common.OptionMap["InviteRewardExpireDays"] = strconv.Itoa(common.InviteRewardExpireDays)
+	common.OptionMap["InviteRewardExpireOnlyWhenUnused"] = strconv.FormatBool(common.InviteRewardExpireOnlyWhenUnused)
 	common.OptionMap["QuotaRemindEnabled"] = strconv.FormatBool(common.QuotaRemindEnabled)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
@@ -241,6 +244,9 @@ func validateOptionValue(key string, value string) error {
 		return errLegacyRetireAtReadOnly
 	}
 	if err := operation_setting.ValidateQuotaOption(key, value); err != nil {
+		return err
+	}
+	if err := operation_setting.ValidateBonusOption(key, value); err != nil {
 		return err
 	}
 	if key == "EmailProvider" || key == "ResendApiKey" || key == "ResendFrom" {
@@ -666,6 +672,12 @@ func updateOptionMap(key string, value string) (err error) {
 		common.QuotaForInviter, _ = strconv.Atoi(value)
 	case "QuotaForInvitee":
 		common.QuotaForInvitee, _ = strconv.Atoi(value)
+	case "InviteRechargeThresholdQuota":
+		common.InviteRechargeThresholdQuota, _ = strconv.Atoi(value)
+	case "InviteRewardExpireDays":
+		common.InviteRewardExpireDays, _ = strconv.Atoi(value)
+	case "InviteRewardExpireOnlyWhenUnused":
+		common.InviteRewardExpireOnlyWhenUnused = value == "true"
 	case "QuotaRemindThreshold":
 		common.QuotaRemindThreshold, _ = strconv.Atoi(value)
 	case "PreConsumedQuota":

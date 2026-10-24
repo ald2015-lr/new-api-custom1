@@ -102,14 +102,15 @@ func cacheApplyTokenQuotaDelta(id int, key string, delta int64) (cacheQuotaResul
 	return quotaResultFromLua(result, err)
 }
 
-// persistUserQuotaDelta 把已在缓存侧预扣成功的增量落库；批量模式下入队，
+// persistUserWalletReserve 把已在缓存侧预扣成功的钱包用量落库；批量模式下入队，
 // 直写模式下要求行存在（用户已删除时报错，交由调用方补偿缓存）。
-func persistUserQuotaDelta(id int, delta int) error {
+// 与余额扣减同一条语句累加钱包用量（W）并记录最近使用时间，供赠送额度先用先扣。
+func persistUserWalletReserve(id int, quota int) error {
 	if common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeUserQuota, id, delta)
+		addWalletUsageDebitRecord(id, quota)
 		return nil
 	}
-	result := DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", delta))
+	result := DB.Model(&User{}).Where("id = ?", id).Updates(walletUsageDebitUpdates(quota))
 	if result.Error != nil {
 		return result.Error
 	}
@@ -140,10 +141,12 @@ func persistTokenQuotaDelta(id int, delta int) error {
 	return nil
 }
 
+// reserveUserQuotaDB is a conditional wallet USAGE debit: the same statement
+// raises the wallet usage counter and the last-use time (see DecreaseUserQuota).
 func reserveUserQuotaDB(id int, quota int) (bool, error) {
 	result := DB.Model(&User{}).
 		Where("id = ? AND quota >= ?", id, quota).
-		Update("quota", gorm.Expr("quota - ?", quota))
+		Updates(walletUsageDebitUpdates(quota))
 	return result.RowsAffected == 1, result.Error
 }
 
@@ -187,7 +190,7 @@ func TryReserveUserQuota(id int, quota int) (bool, error) {
 	if result == cacheQuotaInsufficient {
 		return false, nil
 	}
-	if err = persistUserQuotaDelta(id, -quota); err != nil {
+	if err = persistUserWalletReserve(id, quota); err != nil {
 		compensated, compensateErr := cacheApplyUserQuotaDelta(id, int64(quota))
 		if compensateErr != nil || compensated != cacheQuotaOK {
 			common.SysError(common.LogText("failed to compensate reserved user quota: result=%d error=%v", compensated, compensateErr))

@@ -121,6 +121,10 @@ type TaskPrivateData struct {
 	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
 	NodeName       string              `json:"node_name,omitempty"`       // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
 	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	// WalletChargedAt is a unix second at or before the wallet charge of the
+	// submit request; refunds pass it so that bonus accounting can tell whether
+	// the charge was already attributed to a bonus grant. 0 for legacy tasks.
+	WalletChargedAt int64 `json:"wallet_charged_at,omitempty"`
 	// ResponsesBackground records that the openai_responses create request
 	// asked for background:true. Every task is durable and survives client
 	// disconnect regardless; this only echoes the protocol-level request

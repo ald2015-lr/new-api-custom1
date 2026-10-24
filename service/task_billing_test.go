@@ -528,6 +528,13 @@ func getUserQuota(t *testing.T, id int) int {
 	return user.Quota
 }
 
+func getWalletSpentQuota(t *testing.T, id int) int64 {
+	t.Helper()
+	var user model.User
+	require.NoError(t, model.DB.Select("wallet_spent_quota").Where("id = ?", id).First(&user).Error)
+	return user.WalletSpentQuota
+}
+
 func getUserUsageAccounting(t *testing.T, id int) (int, int) {
 	t.Helper()
 	var user model.User
@@ -920,6 +927,36 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	assert.Equal(t, "test-model", log.ModelName)
 	assert.Zero(t, task.Quota)
 	assert.Zero(t, getTaskQuota(t, task.ID))
+}
+
+// A task refund lowers the wallet usage counter when the submit charge time
+// is recorded; a legacy task without it keeps the refund as paid balance.
+func TestRefundTaskQuotaWalletUsageFollowsChargeTime(t *testing.T) {
+	cases := []struct {
+		name      string
+		chargedAt int64
+		wantSpent int64
+	}{
+		{name: "charge time recorded", chargedAt: time.Now().Unix(), wantSpent: 0},
+		{name: "legacy task", chargedAt: 0, wantSpent: 3000},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			userID, channelID := 31+i, 41+i
+			seedUser(t, userID, 10000)
+			seedChannel(t, channelID)
+			require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", userID).Update("wallet_spent_quota", 3000).Error)
+			task := makeTask(userID, channelID, 3000, 0, BillingSourceWallet, 0)
+			task.PrivateData.WalletChargedAt = tc.chargedAt
+			require.NoError(t, model.DB.Create(task).Error)
+
+			assert.True(t, RefundTaskQuota(context.Background(), task, "task failed"))
+
+			assert.Equal(t, 13000, getUserQuota(t, userID))
+			assert.Equal(t, tc.wantSpent, getWalletSpentQuota(t, userID))
+		})
+	}
 }
 
 func TestRefundTaskQuota_Subscription(t *testing.T) {

@@ -278,6 +278,9 @@ export type BillingSettings = {
   QuotaForNewUser: number
   QuotaForInviter: number
   QuotaForInvitee: number
+  InviteRechargeThresholdQuota: number
+  InviteRewardExpireDays: number
+  InviteRewardExpireOnlyWhenUnused: boolean
   TopUpLink: string
   'quota_setting.enable_free_model_pre_consume': boolean
   'quota_setting.trust_quota_usd': number
@@ -366,6 +369,11 @@ export type BillingSettings = {
   'checkin_setting.enabled': boolean
   'checkin_setting.min_quota': number
   'checkin_setting.max_quota': number
+  'checkin_setting.paid_threshold_quota': number
+  'checkin_setting.paid_multiplier': number
+  'checkin_setting.free_expire_days': number
+  'checkin_setting.paid_expire_days': number
+  'checkin_setting.expire_only_when_unused': boolean
 }
 
 export type OperationsSettings = {

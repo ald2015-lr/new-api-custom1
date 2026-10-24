@@ -111,6 +111,12 @@ type User struct {
 	CreatedAt            int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
 	LastLoginAt          int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
 	AuthVersion          int64                      `json:"-" gorm:"type:bigint;not null;default:1;column:auth_version"`
+	WalletSpentQuota     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:wallet_spent_quota"` // W: net quota debited from the wallet for usage (expiring bonuses are consumed first)
+	WalletUsedAt         int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:wallet_used_at"`     // unix second of the last wallet usage debit
+	BonusSpentCursor     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_spent_cursor"` // part of W already attributed to bonus grants
+	BonusSettledAt       int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_at"`   // unix second of the last bonus settlement
+	BonusSettledFrom     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_from"` // start of the last settlement's window (the settlement before it)
+	BonusSettledPaid     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_paid"` // paid part of the last settlement not yet matched by a refund
 	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
 }
 
@@ -569,56 +575,76 @@ func HardDeleteUserById(id int) (int64, error) {
 	return user.HardDelete()
 }
 
-func inviteUser(inviterId int) error {
-	result := DB.Model(&User{}).Where("id = ?", inviterId).Updates(map[string]any{
-		"aff_count":   gorm.Expr("aff_count + ?", 1),
-		"aff_quota":   gorm.Expr("aff_quota + ?", common.QuotaForInviter),
-		"aff_history": gorm.Expr("aff_history + ?", common.QuotaForInviter),
-	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return nil
-}
-
+// TransferAffQuotaToQuota moves invitation balance into the wallet. Expiring
+// invite rewards are transferred first (earliest expiry first), then legacy
+// invitation balance; the transferred amount becomes ordinary wallet quota
+// that never expires and is not usage. A transfer is at least one unit
+// (QuotaPerUnit), or the whole invitation balance, so a balance below the
+// minimum, such as a single expiring invite reward, can still be moved.
 func (user *User) TransferAffQuotaToQuota(quota int) error {
-	// 检查quota是否小于最小额度
-	if float64(quota) < common.QuotaPerUnit {
-		return common.NewMessage("Minimum transfer quota is {{min}}!", map[string]any{"min": logger.FormatQuota(common.QuotaFromFloat(common.QuotaPerUnit))})
+	minimumText := logger.FormatQuota(common.QuotaFromFloat(common.QuotaPerUnit))
+	if quota <= 0 {
+		return common.NewMessage("Minimum transfer quota is {{min}}!", map[string]any{"min": minimumText})
 	}
+	belowMinimum := float64(quota) < common.QuotaPerUnit
 
-	// 开始数据库事务
-	tx := DB.Begin()
-	if tx.Error != nil {
-		return tx.Error
-	}
-	defer tx.Rollback() // 确保在函数退出时事务能回滚
-
-	// 加锁查询用户以确保数据一致性
-	err := lockForUpdate(tx).First(user, user.Id).Error
+	var affAfter, quotaAfter int64
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		// 加锁查询用户以确保数据一致性
+		acct, err := lockBonusAccount(tx, user.Id)
+		if err != nil {
+			return err
+		}
+		if acct.DeletedAt.Valid {
+			return gorm.ErrRecordNotFound
+		}
+		// 再次检查用户的AffQuota是否足够
+		if acct.AffQuota < int64(quota) {
+			return common.NewMessage("Invitation quota is insufficient!")
+		}
+		// Below the minimum only the whole balance may move; read under the
+		// row lock, so it cannot change before the UPDATE.
+		if belowMinimum && acct.AffQuota != int64(quota) {
+			if float64(acct.AffQuota) >= common.QuotaPerUnit {
+				return common.NewMessage("Minimum transfer quota is {{min}}!", map[string]any{"min": minimumText})
+			}
+			return common.NewMessage("An invitation balance below {{min}} can only be transferred in full ({{balance}})!", map[string]any{
+				"min":     minimumText,
+				"balance": logger.FormatQuota(int(acct.AffQuota)),
+			})
+		}
+		if err := consumeAffBonusTx(tx, user.Id, int64(quota), common.GetTimestamp()); err != nil {
+			return err
+		}
+		// Unscoped like every write under lockBonusAccount: the row is locked
+		// and checked above, and a soft-delete scope would make MySQL lock the
+		// deleted_at index after the primary key, the reverse of the order a
+		// plain scoped UPDATE of the same user takes.
+		result := tx.Unscoped().Model(&User{}).
+			Where("id = ? AND aff_quota >= ? AND quota <= ?", user.Id, quota, common.MaxWalletQuota-quota).
+			Updates(map[string]any{
+				"aff_quota": gorm.Expr("aff_quota - ?", quota),
+				"quota":     gorm.Expr("quota + ?", quota),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrWalletQuotaLimitExceeded
+		}
+		affAfter = acct.AffQuota - int64(quota)
+		quotaAfter = acct.Quota + int64(quota)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	// 再次检查用户的AffQuota是否足够
-	if user.AffQuota < quota {
-		return common.NewMessage("Invitation quota is insufficient!")
+	user.AffQuota = int(affAfter)
+	user.Quota = int(quotaAfter)
+	if err := cacheIncrUserQuota(user.Id, int64(quota)); err != nil {
+		common.SysLog(common.LogText("failed to sync invitation quota transfer to user quota cache: %s", err.Error()))
 	}
-
-	// 更新用户额度
-	user.AffQuota -= quota
-	user.Quota += quota
-
-	// 保存用户状态
-	if err := tx.Save(user).Error; err != nil {
-		return err
-	}
-
-	// 提交事务
-	return tx.Commit().Error
+	return nil
 }
 
 func (user *User) prepareForInsert(tx *gorm.DB) error {
@@ -718,15 +744,7 @@ func (user *User) finishInsert(inviterId int) {
 		RecordLog(user.Id, LogTypeSystem, common.NewMessage("New user sign-up bonus {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaForNewUser)}))
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
-		if common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
-			RecordLog(user.Id, LogTypeSystem, common.NewMessage("Invitation code bonus {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaForInvitee)}))
-		}
-		if common.QuotaForInviter > 0 {
-			//_ = IncreaseUserQuota(inviterId, common.QuotaForInviter)
-			RecordLog(inviterId, LogTypeSystem, common.NewMessage("Bonus for inviting a user {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaForInviter)}))
-			_ = inviteUser(inviterId)
-		}
+		HandleInviteRegistration(user.Id, inviterId)
 	}
 }
 
@@ -775,14 +793,7 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 		RecordLog(user.Id, LogTypeSystem, common.NewMessage("New user sign-up bonus {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaForNewUser)}))
 	}
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
-		if common.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, common.QuotaForInvitee, true)
-			RecordLog(user.Id, LogTypeSystem, common.NewMessage("Invitation code bonus {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaForInvitee)}))
-		}
-		if common.QuotaForInviter > 0 {
-			RecordLog(inviterId, LogTypeSystem, common.NewMessage("Bonus for inviting a user {{quota}}", map[string]any{"quota": logger.FormatQuota(common.QuotaForInviter)}))
-			_ = inviteUser(inviterId)
-		}
+		HandleInviteRegistration(user.Id, inviterId)
 	}
 }
 
@@ -841,6 +852,12 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 		"aff_quota",
 		"aff_history",
 		"auth_version",
+		"wallet_spent_quota",
+		"wallet_used_at",
+		"bonus_spent_cursor",
+		"bonus_settled_at",
+		"bonus_settled_from",
+		"bonus_settled_paid",
 	).Updates(newUser).Error; err != nil {
 		return err
 	}
@@ -1337,6 +1354,9 @@ func GetUserSetting(id int, fromDB bool) (settingMap dto.UserSetting, err error)
 	return userBase.GetSetting(), nil
 }
 
+// IncreaseUserQuota credits the wallet with quota that is NOT a usage refund
+// (it leaves the wallet usage counter untouched). Billing refunds of usage
+// charges must use RefundUserQuota instead, so expiring bonuses stay exact.
 func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota cannot be negative")
@@ -1384,9 +1404,97 @@ func increaseUserQuota(id int, quota int) (err error) {
 	return ErrWalletQuotaLimitExceeded
 }
 
+// RefundUserQuota returns a USAGE charge to the wallet. chargedAt is a unix
+// second at or before the moment the refunded charge was applied (0 when
+// unknown). A refund of a charge applied after the last bonus settlement also
+// lowers the wallet usage counter, so it nets exactly; a refund of a charge
+// that settlement may have attributed gives the bonus back (bookWalletRefundTx);
+// any other refund is paid balance and never offsets later bonus usage. In
+// batch mode the refund is booked at the flush, the same way. Non-usage
+// credits must use IncreaseUserQuota.
+func RefundUserQuota(id int, quota int, chargedAt int64) error {
+	if quota < 0 {
+		return errors.New("quota cannot be negative")
+	}
+	if quota == 0 {
+		return nil
+	}
+	if err := common.ValidateWalletQuota(quota); err != nil {
+		return err
+	}
+	if common.BatchUpdateEnabled {
+		if chargedAt > 0 {
+			addWalletRefundRecord(id, quota, chargedAt)
+		} else {
+			addNewRecord(BatchUpdateTypeUserQuota, id, quota)
+		}
+	} else if err := refundUserQuotaDB(id, quota, chargedAt); err != nil {
+		return err
+	}
+	gopool.Go(func() {
+		if err := cacheIncrUserQuota(id, int64(quota)); err != nil {
+			common.SysLog(common.LogText("failed to increase user quota: %s", err.Error()))
+		}
+	})
+	return nil
+}
+
+// refundUserQuotaDB writes a usage refund directly. The common case, a charge
+// applied after the last settlement, is one statement; a refund that may
+// cross a settlement is booked under the account lock.
+func refundUserQuotaDB(id int, quota int, chargedAt int64) error {
+	if chargedAt <= 0 {
+		return increaseUserQuota(id, quota)
+	}
+	result := DB.Model(&User{}).
+		Where("id = ? AND quota <= ? AND bonus_settled_at < ?", id, common.MaxWalletQuota-quota, chargedAt-bonusRefundSkewSeconds).
+		Updates(map[string]any{
+			"quota":              gorm.Expr("quota + ?", quota),
+			"wallet_spent_quota": gorm.Expr("wallet_spent_quota - ?", quota),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 1 {
+		return nil
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		acct, err := lockBonusAccount(tx, id)
+		if err != nil {
+			return err
+		}
+		if acct.DeletedAt.Valid {
+			return gorm.ErrRecordNotFound
+		}
+		if acct.Quota > common.MaxWalletQuota-int64(quota) {
+			return ErrWalletQuotaLimitExceeded
+		}
+		booking, err := bookWalletRefundTx(tx, acct, int64(quota), chargedAt, common.GetTimestamp())
+		if err != nil {
+			return err
+		}
+		updates := map[string]any{"quota": gorm.Expr("quota + ?", quota)}
+		if booking.spentDecrease > 0 {
+			updates["wallet_spent_quota"] = gorm.Expr("wallet_spent_quota - ?", booking.spentDecrease)
+		}
+		if booking.paidDecrease > 0 {
+			updates["bonus_settled_paid"] = gorm.Expr("bonus_settled_paid - ?", booking.paidDecrease)
+		}
+		return tx.Unscoped().Model(&User{}).Where("id = ?", id).Updates(updates).Error
+	})
+}
+
+// DecreaseUserQuota debits the wallet for USAGE: every caller must be billing.
+// The same statement raises the wallet usage counter and the last-use time,
+// so wallet bonuses are consumed first. A usage debit that bypasses this
+// function, TryReserveUserQuota or the batch flush is invisible to bonus
+// accounting and would let bonuses outlive their real use.
 func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota cannot be negative")
+	}
+	if quota == 0 {
+		return nil
 	}
 	gopool.Go(func() {
 		err := cacheDecrUserQuota(id, int64(quota))
@@ -1395,18 +1503,20 @@ func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 		}
 	})
 	if !db && common.BatchUpdateEnabled {
-		addNewRecord(BatchUpdateTypeUserQuota, id, -quota)
+		addWalletUsageDebitRecord(id, quota)
 		return nil
 	}
-	return decreaseUserQuota(id, quota)
+	return DB.Model(&User{}).Where("id = ?", id).Updates(walletUsageDebitUpdates(quota)).Error
 }
 
-func decreaseUserQuota(id int, quota int) (err error) {
-	err = DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota - ?", quota)).Error
-	if err != nil {
-		return err
+// walletUsageDebitUpdates is the column set of a wallet usage debit: the
+// balance goes down while the usage counter and last-use time move with it.
+func walletUsageDebitUpdates(quota int) map[string]any {
+	return map[string]any{
+		"quota":              gorm.Expr("quota - ?", quota),
+		"wallet_spent_quota": gorm.Expr("wallet_spent_quota + ?", quota),
+		"wallet_used_at":     common.GetTimestamp(),
 	}
-	return err
 }
 
 func DeltaUpdateUserQuota(id int, delta int) (err error) {
@@ -1469,21 +1579,90 @@ func updateUserUsedQuotaAndRequestCount(id int, quota int, count int) {
 	//}
 }
 
-func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) {
-	if quota == 0 && usedQuota == 0 && requestCount == 0 {
+// batchedUserDeltas is one user's share of a batch flush.
+type batchedUserDeltas struct {
+	quota        int // balance delta, refunds included
+	usedQuota    int
+	requestCount int
+	walletSpent  int // wallet usage debits (W)
+	walletUses   int // number of usage debits
+	refund       int // usage refunds with a known charge time
+	refundAt     int // earliest charge time among those refunds
+}
+
+// updateUserQuotaUsedQuotaAndRequestCount flushes one user's batched deltas.
+// Any debit counts as a use even when refunds net the flush to zero. Batched
+// wallet usage reaches the bonus ledger only through this flush. Refunds whose
+// charges all came after the last settlement lower W in the same single
+// UPDATE; otherwise the flush books them under the account lock exactly like
+// a direct refund, with the earliest charge time standing for all of them.
+func updateUserQuotaUsedQuotaAndRequestCount(id int, deltas batchedUserDeltas) {
+	if deltas == (batchedUserDeltas{}) {
 		return
 	}
 
-	err := DB.Model(&User{}).Where("id = ?", id).Updates(
-		map[string]any{
-			"quota":         gorm.Expr("quota + ?", quota),
-			"used_quota":    gorm.Expr("used_quota + ?", usedQuota),
-			"request_count": gorm.Expr("request_count + ?", requestCount),
-		},
-	).Error
+	updates := map[string]any{
+		"quota":         gorm.Expr("quota + ?", deltas.quota),
+		"used_quota":    gorm.Expr("used_quota + ?", deltas.usedQuota),
+		"request_count": gorm.Expr("request_count + ?", deltas.requestCount),
+	}
+	if deltas.walletUses > 0 {
+		updates["wallet_used_at"] = common.GetTimestamp()
+	}
+	query := DB.Model(&User{}).Where("id = ?", id)
+	if deltas.refund > 0 {
+		query = query.Where("bonus_settled_at < ?", int64(deltas.refundAt)-bonusRefundSkewSeconds)
+	}
+	if spent := deltas.walletSpent - deltas.refund; spent != 0 {
+		updates["wallet_spent_quota"] = gorm.Expr("wallet_spent_quota + ?", spent)
+	}
+	result := query.Updates(updates)
+	err := result.Error
+	if err == nil && deltas.refund > 0 && result.RowsAffected == 0 {
+		err = flushUserRefundsLocked(id, deltas)
+	}
 	if err != nil {
 		common.SysLog(common.LogText("failed to batch update user quota, used quota and request count: %s", err.Error()))
 	}
+}
+
+// flushUserRefundsLocked applies a flush whose refunds may cross a bonus
+// settlement. A missing or soft-deleted user is skipped, as the plain flush
+// UPDATE would.
+func flushUserRefundsLocked(id int, deltas batchedUserDeltas) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		acct, err := lockBonusAccount(tx, id)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if acct.DeletedAt.Valid {
+			return nil
+		}
+		now := common.GetTimestamp()
+		acct.WalletSpentQuota += int64(deltas.walletSpent)
+		booking, err := bookWalletRefundTx(tx, acct, int64(deltas.refund), int64(deltas.refundAt), now)
+		if err != nil {
+			return err
+		}
+		updates := map[string]any{
+			"quota":         gorm.Expr("quota + ?", deltas.quota),
+			"used_quota":    gorm.Expr("used_quota + ?", deltas.usedQuota),
+			"request_count": gorm.Expr("request_count + ?", deltas.requestCount),
+		}
+		if deltas.walletUses > 0 {
+			updates["wallet_used_at"] = now
+		}
+		if spent := int64(deltas.walletSpent) - booking.spentDecrease; spent != 0 {
+			updates["wallet_spent_quota"] = gorm.Expr("wallet_spent_quota + ?", spent)
+		}
+		if booking.paidDecrease > 0 {
+			updates["bonus_settled_paid"] = gorm.Expr("bonus_settled_paid - ?", booking.paidDecrease)
+		}
+		return tx.Unscoped().Model(&User{}).Where("id = ?", id).Updates(updates).Error
+	})
 }
 
 // GetUsernameById gets username from Redis first, falls back to DB if needed

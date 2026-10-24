@@ -228,6 +228,20 @@ export interface CheckinStats {
 export interface CheckinStatusResponse {
   /** Whether check-in feature is enabled */
   enabled: boolean
+  /** Cumulative recharge (quota) that makes a user a paid user; 0 = any recharge */
+  paid_threshold_quota: number
+  /** Multiplier applied to a paid user's reward (rounded down) */
+  paid_multiplier: number
+  /** Lifetime of a free user's reward in days; 0 = never expires */
+  free_expire_days: number
+  /** Lifetime of a paid user's reward in days; 0 = never expires */
+  paid_expire_days: number
+  /** Rewards expire only after the expiry days pass without any use */
+  expire_only_when_unused: boolean
+  /** The user's cumulative recharge (quota) */
+  recharged_quota: number
+  /** Whether the user currently counts as a paid user */
+  is_paid_user: boolean
   /** Check-in statistics */
   stats: CheckinStats
 }
@@ -236,6 +250,20 @@ export interface CheckinStatusResponse {
  * Check-in action response
  */
 export interface CheckinResponse {
-  /** Quota awarded for this check-in */
+  /** Quota awarded for this check-in, after the paid multiplier */
   quota_awarded: number
+  /** Random reward before the paid multiplier */
+  base_quota: number
+  /** Check-in date (YYYY-MM-DD) */
+  checkin_date: string
+  /** Whether the paid multiplier raised this reward */
+  paid_multiplier_applied: boolean
+  paid_multiplier: number
+  is_paid_user: boolean
+  /** Lifetime of this reward in days; 0 = never expires */
+  expire_days: number
+  /** Unix seconds of the current expiry deadline; 0 = never expires */
+  expires_at: number
+  /** The deadline moves forward with every use */
+  expire_only_when_unused: boolean
 }

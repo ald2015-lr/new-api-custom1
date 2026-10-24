@@ -39,6 +39,7 @@ import type {
   WaffoPaymentResponse,
   WaffoPancakePaymentRequest,
   WaffoPancakePaymentResponse,
+  SelfBonusResponse,
 } from './types'
 
 // ============================================================================
@@ -196,6 +197,14 @@ export async function transferAffiliateQuota(
   request: AffiliateTransferRequest
 ): Promise<AffiliateTransferResponse> {
   const res = await api.post('/api/user/aff_transfer', request)
+  return res.data
+}
+
+/**
+ * Get the current user's expiring rewards and pending invitation rewards
+ */
+export async function getSelfBonus(): Promise<SelfBonusResponse> {
+  const res = await api.get('/api/user/bonus')
   return res.data
 }
 

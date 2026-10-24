@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -25,6 +26,7 @@ import { useSystemConfig } from '@/hooks/use-system-config'
 import { getSelf } from '@/lib/api'
 
 import { AffiliateRewardsCard } from './components/affiliate-rewards-card'
+import { BonusGrantsCard } from './components/bonus-grants-card'
 import { BillingHistoryDialog } from './components/dialogs/billing-history-dialog'
 import { CreemConfirmDialog } from './components/dialogs/creem-confirm-dialog'
 import { PaymentConfirmDialog } from './components/dialogs/payment-confirm-dialog'
@@ -41,11 +43,14 @@ import {
   useCreemPayment,
   useWaffoPayment,
   useWaffoPancakePayment,
+  useSelfBonus,
+  SELF_BONUS_QUERY_KEY,
 } from './hooks'
 import {
   getDefaultPaymentType,
   getMinTopupAmount,
   dispatchSelectedPayment,
+  transferThenRefresh,
 } from './lib'
 import type {
   UserWalletData,
@@ -82,6 +87,8 @@ export function Wallet(props: WalletProps) {
 
   const { status } = useStatus()
   const { currency } = useSystemConfig()
+  const queryClient = useQueryClient()
+  const bonusQuery = useSelfBonus()
   const { topupInfo, presetAmounts, loading: topupLoading } = useTopupInfo()
 
   // Calculate effective exchange rate - when display type is USD, use rate of 1
@@ -128,6 +135,15 @@ export function Wallet(props: WalletProps) {
   useEffect(() => {
     fetchUser()
   }, [fetchUser])
+
+  // Top-ups, redemptions, transfers and balance purchases change both the
+  // balance and the expiring rewards (spent first, invite rewards granted).
+  const refreshBalances = useCallback(async () => {
+    await Promise.all([
+      fetchUser(),
+      queryClient.invalidateQueries({ queryKey: SELF_BONUS_QUERY_KEY }),
+    ])
+  }, [fetchUser, queryClient])
 
   useEffect(() => {
     if (props.initialShowHistory) {
@@ -207,7 +223,7 @@ export function Wallet(props: WalletProps) {
 
     if (success) {
       setConfirmDialogOpen(false)
-      await fetchUser()
+      await refreshBalances()
     }
   }
 
@@ -218,18 +234,13 @@ export function Wallet(props: WalletProps) {
     const success = await redeemCode(redemptionCode)
     if (success) {
       setRedemptionCode('')
-      await fetchUser()
+      await refreshBalances()
     }
   }
 
   // Handle transfer
-  const handleTransfer = async (amount: number) => {
-    const success = await transferQuota(amount)
-    if (success) {
-      await fetchUser()
-    }
-    return success
-  }
+  const handleTransfer = (amount: number) =>
+    transferThenRefresh(transferQuota, refreshBalances, amount)
 
   // Handle Creem product selection
   const handleCreemProductSelect = (product: CreemProduct) => {
@@ -245,7 +256,7 @@ export function Wallet(props: WalletProps) {
     if (success) {
       setCreemDialogOpen(false)
       setSelectedCreemProduct(null)
-      await fetchUser()
+      await refreshBalances()
     }
   }
 
@@ -289,6 +300,11 @@ export function Wallet(props: WalletProps) {
         <SectionPageLayout.Content>
           <div className='mx-auto flex w-full max-w-7xl flex-col gap-4 sm:gap-5'>
             <WalletStatsCard user={user} loading={userLoading} />
+
+            <BonusGrantsCard
+              bonus={bonusQuery.data}
+              loading={bonusQuery.isLoading}
+            />
 
             <div
               className={
@@ -335,7 +351,7 @@ export function Wallet(props: WalletProps) {
                 topupInfo={topupInfo}
                 onAvailabilityChange={handleSubscriptionAvailabilityChange}
                 userQuota={user?.quota}
-                onPurchaseSuccess={fetchUser}
+                onPurchaseSuccess={refreshBalances}
               />
             </div>
 
@@ -347,6 +363,7 @@ export function Wallet(props: WalletProps) {
                 topupInfo?.payment_compliance_confirmed !== false
               }
               loading={affiliateLoading}
+              bonus={bonusQuery.data}
             />
           </div>
         </SectionPageLayout.Content>
@@ -371,6 +388,7 @@ export function Wallet(props: WalletProps) {
         onConfirm={handleTransfer}
         availableQuota={user?.aff_quota ?? 0}
         transferring={transferring}
+        hasExpiringRewards={(bonusQuery.data?.aff_grants.length ?? 0) > 0}
       />
 
       <BillingHistoryDialog

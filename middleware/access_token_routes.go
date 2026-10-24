@@ -102,6 +102,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"POST /api/user/2fa/backup_codes":              accessTokenScopeRule("account_security:write"),
 	"GET /api/user/checkin":                        accessTokenScopeRule("wallet:read"),
 	"POST /api/user/checkin":                       accessTokenScopeRule("wallet:write"),
+	"GET /api/user/bonus":                          accessTokenScopeRule("wallet:read"),
 	"GET /api/user/oauth/bindings":                 accessTokenScopeRule("account_security:read"),
 	"DELETE /api/user/oauth/bindings/:provider_id": accessTokenScopeRule("account_security:write"),
 

@@ -287,3 +287,83 @@ export interface BillingHistoryResponse {
 export interface CompleteOrderRequest {
   trade_no: string
 }
+
+// ============================================================================
+// Expiring reward (bonus) types — GET /api/user/bonus
+// ============================================================================
+
+/** Where an expiring reward came from */
+export type BonusGrantSource =
+  | 'checkin_free'
+  | 'checkin_paid'
+  | 'invitee'
+  | 'inviter'
+
+/** An active expiring reward with an unspent remainder */
+export interface BonusGrant {
+  id: number
+  source: BonusGrantSource
+  amount: number
+  /** Unspent part; only this is deducted when the reward expires */
+  remaining: number
+  /** Unix seconds */
+  created_at: number
+  /** Unix seconds of the current deadline under the current rule */
+  expires_at: number
+  expire_days: number
+  /** The deadline moves forward with every use */
+  expire_only_when_unused: boolean
+}
+
+/** Every active reward of a pool with a remainder, also the unlisted ones */
+export interface BonusGrantTotals {
+  count: number
+  remaining: number
+}
+
+/** An invite whose invitee has not reached the recharge threshold yet */
+interface BonusPendingInvite {
+  id: number
+  created_at: number
+  inviter_quota: number
+}
+
+export interface SelfBonusSummary {
+  recharged_quota: number
+  checkin: {
+    enabled: boolean
+    paid_threshold_quota: number
+    paid_multiplier: number
+    is_paid_user: boolean
+    free_expire_days: number
+    paid_expire_days: number
+    expire_only_when_unused: boolean
+  }
+  invite: {
+    threshold_quota: number
+    expire_days: number
+    expire_only_when_unused: boolean
+  }
+  /**
+   * Expiring rewards in the wallet balance in the order they are spent, at
+   * most 100 of them
+   */
+  wallet_grants: BonusGrant[]
+  wallet_totals: BonusGrantTotals
+  /**
+   * Expiring rewards in the invitation balance in the order they are
+   * transferred, at most 100 of them
+   */
+  aff_grants: BonusGrant[]
+  aff_totals: BonusGrantTotals
+  /** The newest pending invites and their total count */
+  pending_invites: { count: number; items: BonusPendingInvite[] }
+  /** The user's own invitation-code bonus; null when they were not invited */
+  own_invite_reward: {
+    status: 'pending' | 'granted'
+    invitee_quota: number
+    threshold_quota: number
+  } | null
+}
+
+export type SelfBonusResponse = ApiResponse<SelfBonusSummary>

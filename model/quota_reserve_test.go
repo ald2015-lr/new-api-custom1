@@ -259,3 +259,141 @@ func TestTokenCacheInitPreservesLiveQuotaAndFenceBlocksStaleSnapshot(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, 100, cached.RemainQuota)
 }
+
+type walletLedger struct {
+	Quota            int
+	WalletSpentQuota int64
+	WalletUsedAt     int64
+	BonusSpentCursor int64
+	BonusSettledAt   int64
+}
+
+func getWalletLedger(t *testing.T, id int) walletLedger {
+	t.Helper()
+	var ledger walletLedger
+	require.NoError(t, DB.Model(&User{}).
+		Select("quota, wallet_spent_quota, wallet_used_at, bonus_spent_cursor, bonus_settled_at").
+		Where("id = ?", id).Take(&ledger).Error)
+	return ledger
+}
+
+// Every wallet usage debit raises the usage counter and the last-use time in
+// the statement that debits the wallet, whichever reservation path runs.
+func TestWalletUsageDebitsRecordUsage(t *testing.T) {
+	cases := []struct {
+		name  string
+		debit func(t *testing.T, userId int)
+	}{
+		{name: "direct debit", debit: func(t *testing.T, userId int) {
+			require.NoError(t, DecreaseUserQuota(userId, 300, false))
+		}},
+		{name: "reservation without redis", debit: func(t *testing.T, userId int) {
+			reserved, err := TryReserveUserQuota(userId, 300)
+			require.NoError(t, err)
+			require.True(t, reserved)
+		}},
+		{name: "reservation through the redis cache", debit: func(t *testing.T, userId int) {
+			useUserCacheMiniRedis(t)
+			_, err := GetUserCache(userId)
+			require.NoError(t, err)
+			reserved, err := TryReserveUserQuota(userId, 300)
+			require.NoError(t, err)
+			require.True(t, reserved)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			resetBatchUpdateTestState(t)
+			user := createReserveTestUser(t, 1000)
+			before := common.GetTimestamp()
+
+			tc.debit(t, user.Id)
+
+			ledger := getWalletLedger(t, user.Id)
+			assert.Equal(t, 700, ledger.Quota)
+			assert.EqualValues(t, 300, ledger.WalletSpentQuota)
+			assert.GreaterOrEqual(t, ledger.WalletUsedAt, before)
+		})
+	}
+}
+
+// A usage refund lowers the usage counter only when its charge came after the
+// last bonus settlement; otherwise it is paid balance. Refunds are never a use.
+func TestRefundUserQuotaClassifiesByChargeTime(t *testing.T) {
+	now := common.GetTimestamp()
+	cases := []struct {
+		name      string
+		chargedAt int64
+		wantSpent int64
+	}{
+		{name: "charge after the last settlement", chargedAt: now, wantSpent: 700},
+		{name: "charge before the last settlement", chargedAt: now - 3600, wantSpent: 1000},
+		{name: "charge time unknown", chargedAt: 0, wantSpent: 1000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			resetBatchUpdateTestState(t)
+			user := createReserveTestUser(t, 0)
+			require.NoError(t, DB.Model(&User{}).Where("id = ?", user.Id).Updates(map[string]any{
+				"wallet_spent_quota": 1000, "bonus_spent_cursor": 1000, "bonus_settled_at": now - 60,
+			}).Error)
+
+			require.NoError(t, RefundUserQuota(user.Id, 300, tc.chargedAt))
+
+			ledger := getWalletLedger(t, user.Id)
+			assert.Equal(t, 300, ledger.Quota)
+			assert.Equal(t, tc.wantSpent, ledger.WalletSpentQuota)
+			assert.Zero(t, ledger.WalletUsedAt)
+		})
+	}
+}
+
+func TestRefundUserQuotaErrorsMatchIncreaseUserQuota(t *testing.T) {
+	truncateTables(t)
+	resetBatchUpdateTestState(t)
+	user := createReserveTestUser(t, common.MaxWalletQuota-100)
+	now := common.GetTimestamp()
+
+	assert.ErrorIs(t, IncreaseUserQuota(user.Id, 200, true), ErrWalletQuotaLimitExceeded)
+	assert.ErrorIs(t, RefundUserQuota(user.Id, 200, now), ErrWalletQuotaLimitExceeded)
+	assert.ErrorIs(t, IncreaseUserQuota(user.Id+1000, 200, true), gorm.ErrRecordNotFound)
+	assert.ErrorIs(t, RefundUserQuota(user.Id+1000, 200, now), gorm.ErrRecordNotFound)
+	assert.Equal(t, common.MaxWalletQuota-100, getUserQuotaFromDB(t, user.Id))
+}
+
+// In batch mode a wallet debit and its usage delta land in the same flush; a
+// flush with a debit is a use even when a refund nets it to zero, a
+// refund-only flush is not.
+func TestBatchFlushMovesWalletUsageWithQuota(t *testing.T) {
+	truncateTables(t)
+	resetBatchUpdateTestState(t)
+	common.BatchUpdateEnabled = true
+	now := common.GetTimestamp()
+
+	netted := createReserveTestUser(t, 1000)
+	require.NoError(t, DecreaseUserQuota(netted.Id, 300, false))
+	require.NoError(t, RefundUserQuota(netted.Id, 300, now))
+	partial := createReserveTestUser(t, 1000)
+	require.NoError(t, DecreaseUserQuota(partial.Id, 200, false))
+	require.NoError(t, RefundUserQuota(partial.Id, 50, now))
+	refundOnly := createReserveTestUser(t, 1000)
+	require.NoError(t, RefundUserQuota(refundOnly.Id, 100, 0))
+	require.Equal(t, walletLedger{Quota: 1000}, getWalletLedger(t, partial.Id), "nothing is written before the flush")
+
+	batchUpdate()
+
+	ledger := getWalletLedger(t, netted.Id)
+	assert.Equal(t, 1000, ledger.Quota)
+	assert.Zero(t, ledger.WalletSpentQuota)
+	assert.GreaterOrEqual(t, ledger.WalletUsedAt, now)
+	ledger = getWalletLedger(t, partial.Id)
+	assert.Equal(t, 850, ledger.Quota)
+	assert.EqualValues(t, 150, ledger.WalletSpentQuota)
+	assert.GreaterOrEqual(t, ledger.WalletUsedAt, now)
+	ledger = getWalletLedger(t, refundOnly.Id)
+	assert.Equal(t, 1100, ledger.Quota)
+	assert.Zero(t, ledger.WalletSpentQuota)
+	assert.Zero(t, ledger.WalletUsedAt)
+}

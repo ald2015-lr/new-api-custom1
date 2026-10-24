@@ -127,7 +127,7 @@ func taskAdjustFunding(task *model.Task, delta int) error {
 	if delta > 0 {
 		return model.DecreaseUserQuota(task.UserId, delta, false)
 	}
-	return model.IncreaseUserQuota(task.UserId, -delta, false)
+	return model.RefundUserQuota(task.UserId, -delta, task.PrivateData.WalletChargedAt)
 }
 
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。

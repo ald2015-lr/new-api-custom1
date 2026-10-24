@@ -65,6 +65,10 @@ const BILLING_SECTIONS = [
           QuotaForNewUser: settings.QuotaForNewUser,
           QuotaForInviter: settings.QuotaForInviter,
           QuotaForInvitee: settings.QuotaForInvitee,
+          InviteRechargeThresholdQuota: settings.InviteRechargeThresholdQuota,
+          InviteRewardExpireDays: settings.InviteRewardExpireDays,
+          InviteRewardExpireOnlyWhenUnused:
+            settings.InviteRewardExpireOnlyWhenUnused,
           TopUpLink: settings.TopUpLink,
           quota_setting: {
             trust_quota_usd: settings['quota_setting.trust_quota_usd'],
@@ -227,6 +231,12 @@ const BILLING_SECTIONS = [
           enabled: settings['checkin_setting.enabled'],
           minQuota: settings['checkin_setting.min_quota'],
           maxQuota: settings['checkin_setting.max_quota'],
+          paidThresholdQuota: settings['checkin_setting.paid_threshold_quota'],
+          paidMultiplier: settings['checkin_setting.paid_multiplier'],
+          freeExpireDays: settings['checkin_setting.free_expire_days'],
+          paidExpireDays: settings['checkin_setting.paid_expire_days'],
+          expireOnlyWhenUnused:
+            settings['checkin_setting.expire_only_when_unused'],
         }}
       />
     ),

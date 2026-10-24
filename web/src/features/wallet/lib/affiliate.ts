@@ -27,3 +27,19 @@ export function generateAffiliateLink(affCode: string): string {
   if (typeof window === 'undefined') return ''
   return `${window.location.origin}/sign-up?aff=${affCode}`
 }
+
+/**
+ * Transfers invitation balance, then re-reads the balances whether or not the
+ * transfer went through: a rejected transfer usually means the balance on the
+ * page is stale (an invite reward was granted or expired since it loaded), and
+ * the transfer dialog must offer the current one.
+ */
+export async function transferThenRefresh(
+  transfer: (quota: number) => Promise<boolean>,
+  refresh: () => Promise<unknown>,
+  quota: number
+): Promise<boolean> {
+  const success = await transfer(quota)
+  await refresh()
+  return success
+}
