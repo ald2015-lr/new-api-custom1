@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel/advancedcustom"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -406,6 +407,11 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 
 	if channel.Type == constant.ChannelTypeCodex {
 		return service.FetchCodexChannelModels(channel)
+	}
+
+	if channel.Type == constant.ChannelTypeNovelAI {
+		// NovelAI has no model list API; its models are built in.
+		return normalizeModelNames(novelai.ModelList), nil
 	}
 
 	var url string

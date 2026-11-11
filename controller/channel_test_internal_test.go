@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -122,6 +123,25 @@ func TestNewAPIChannelRegistration(t *testing.T) {
 	assert.Equal(t, "New API", constant.GetChannelTypeName(constant.ChannelTypeNewAPI))
 	require.Greater(t, len(constant.ChannelBaseURLs), constant.ChannelTypeNewAPI)
 	assert.Empty(t, constant.ChannelBaseURLs[constant.ChannelTypeNewAPI])
+}
+
+// NovelAI is built-in type 64: its own API type and adaptor, NovelAI's image
+// host as the default base URL, the NovelAI native endpoint for every model,
+// and the official models offered without asking an upstream for a list.
+func TestNovelAIChannelRegistration(t *testing.T) {
+	apiType, ok := common.ChannelType2APIType(constant.ChannelTypeNovelAI)
+
+	require.True(t, ok)
+	assert.Equal(t, 64, constant.ChannelTypeNovelAI)
+	assert.Equal(t, constant.APITypeNovelAI, apiType)
+	assert.Equal(t, "NovelAI", constant.GetChannelTypeName(constant.ChannelTypeNovelAI))
+	assert.Equal(t, "https://image.novelai.net", constant.GetChannelBaseURL(constant.ChannelTypeNovelAI))
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeNovelAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, "nai-diffusion-4-5-full"))
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeNovelAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, "gpt-image-2"))
+	assert.Equal(t, novelai.ModelList, channelId2Models[constant.ChannelTypeNovelAI])
+	models, err := fetchChannelUpstreamModelIDs(&model.Channel{Type: constant.ChannelTypeNovelAI, Key: "pst-test"})
+	require.NoError(t, err)
+	assert.Equal(t, novelai.ModelList, models)
 }
 
 func TestResponsesCompactChannelSupport(t *testing.T) {
@@ -533,4 +553,57 @@ func TestHealthCheckIgnoresTestsThatNeverReachTheChannel(t *testing.T) {
 	})
 
 	assert.Equal(t, channelTestSummary{}, summary)
+}
+
+// A NovelAI channel test, manual or automatic, reads the account with the
+// channel key (GET /user/subscription), which spends no Anlas, and never
+// generates. A rejected key fails with NovelAI's 401, which the automatic
+// disable rules act on.
+func TestNovelAIChannelTestReadsTheAccountInsteadOfGenerating(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	originalAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = originalAutoDisable })
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer pst-valid" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"statusCode":401,"message":"Invalid accessToken."}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"tier":3,"active":true,"trainingStepsLeft":{"fixedTrainingStepsLeft":10000,"purchasedTrainingSteps":0}}`))
+	}))
+	t.Cleanup(server.Close)
+	user := model.User{Username: "novelai-tester", Status: common.UserStatusEnabled, Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+
+	for _, tc := range []struct {
+		key        string
+		wantStatus int
+	}{
+		{key: "pst-valid"},
+		{key: "pst-revoked", wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			paths = nil
+			channel := &model.Channel{Type: constant.ChannelTypeNovelAI, Key: tc.key, Name: "novelai", Status: common.ChannelStatusEnabled,
+				Group: "default", Models: "nai-diffusion-4-5-full", BaseURL: common.GetPointer(server.URL)}
+			require.NoError(t, db.Create(channel).Error)
+
+			result := testChannel(context.Background(), channel, user.Id, "", "", false)
+
+			require.NotNil(t, result.context, "the test reached the channel")
+			assert.Equal(t, []string{"GET /user/subscription"}, paths)
+			if tc.wantStatus == 0 {
+				require.NoError(t, result.localErr)
+				assert.Nil(t, result.newAPIError)
+				return
+			}
+			require.NotNil(t, result.newAPIError)
+			assert.Equal(t, tc.wantStatus, result.newAPIError.StatusCode)
+			assert.Equal(t, "NovelAI account answered HTTP 401: Invalid accessToken.", result.localErr.Error())
+			assert.True(t, service.ShouldDisableChannel(result.newAPIError))
+		})
+	}
 }

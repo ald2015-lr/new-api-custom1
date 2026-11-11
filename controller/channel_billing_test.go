@@ -181,3 +181,64 @@ func TestUpdateChannelNewAPIBalanceUsesTheSmallerRemainingQuota(t *testing.T) {
 		})
 	}
 }
+
+// A NovelAI balance is the account's Anlas, fixed plus purchased, stored as
+// the channel balance; an answer without a valid Anlas balance stores
+// nothing. Anlas are not USD, so a NovelAI channel at 0 Anlas is not disabled
+// as out of balance: its subscription may still cover generations.
+func TestUpdateChannelNovelAIBalanceStoresAnlas(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		want       float64
+		wantErr    string
+	}{
+		{name: "fixed and purchased Anlas", status: http.StatusOK, body: `{"tier":3,"active":true,"trainingStepsLeft":{"fixedTrainingStepsLeft":10000,"purchasedTrainingSteps":250}}`, want: 10250},
+		{name: "no Anlas", status: http.StatusOK, body: `{"tier":3,"active":true}`, wantErr: "NovelAI account response carries no valid Anlas balance"},
+		{name: "rejected key", status: http.StatusUnauthorized, body: `{"statusCode":401,"message":"Invalid accessToken."}`, wantErr: "NovelAI account answered HTTP 401: Invalid accessToken."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSub2APIBalanceTest(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/user/subscription", r.URL.Path)
+				assert.Equal(t, "Bearer pst-test", r.Header.Get("Authorization"))
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			channel := &model.Channel{Type: constant.ChannelTypeNovelAI, BaseURL: common.GetPointer(server.URL), Key: "pst-test", Name: "novelai"}
+			require.NoError(t, model.DB.Create(channel).Error)
+
+			result, err := updateChannelBalance(channel)
+
+			stored, getErr := model.GetChannelById(channel.Id, true)
+			require.NoError(t, getErr)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				assert.Zero(t, stored.BalanceUpdatedTime)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, result.Balance)
+			assert.Equal(t, tc.want, stored.Balance)
+			assert.NotZero(t, stored.BalanceUpdatedTime)
+		})
+	}
+
+	t.Run("0 Anlas keeps the channel enabled", func(t *testing.T) {
+		setupSub2APIBalanceTest(t)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"tier":3,"active":true,"trainingStepsLeft":{"fixedTrainingStepsLeft":0,"purchasedTrainingSteps":0}}`))
+		}))
+		defer server.Close()
+		channel := &model.Channel{Type: constant.ChannelTypeNovelAI, BaseURL: common.GetPointer(server.URL), Key: "pst-test", Name: "novelai", Status: common.ChannelStatusEnabled, Balance: 5, AutoBan: common.GetPointer(1)}
+		require.NoError(t, model.DB.Create(channel).Error)
+
+		require.NoError(t, updateAllChannelsBalance())
+
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		assert.Zero(t, stored.Balance)
+		assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	})
+}

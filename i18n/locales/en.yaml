@@ -53,6 +53,7 @@ novelai.field_repeated: "Field {{.Field}} must appear only once in the NovelAI r
 novelai.parameters_invalid: "Field parameters of the NovelAI request must be a JSON object"
 novelai.n_samples_invalid: "parameters.n_samples must be an integer between 1 and {{.Max}}"
 novelai.channel_unsupported: "The selected channel cannot serve NovelAI image generation"
+novelai.channel_native_only: "NovelAI channels serve only the NovelAI image API: POST /ai/generate-image and /ai/generate-image-stream"
 
 # Recharge-gated group messages
 group_access.topup_required: "Group {{.Group}} requires a cumulative top-up of at least {{.Required}} (current: {{.Current}})"

@@ -247,8 +247,13 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 		if channel.Type == constant.ChannelTypeTaskPlugin {
 			return &ModelPricingConversion{UnsupportedReason: "Task pricing must be converted manually using the task usage schema."}, nil
 		}
-		if slices.Contains(common.GetEndpointTypesByChannelType(channel.Type, name), constant.EndpointTypeOpenAIVideo) {
+		channelEndpoints := common.GetEndpointTypesByChannelType(channel.Type, name)
+		if slices.Contains(channelEndpoints, constant.EndpointTypeOpenAIVideo) {
 			return &ModelPricingConversion{UnsupportedReason: "Video pricing must be converted manually."}, nil
+		}
+		if fixedPrice && slices.Contains(channelEndpoints, constant.EndpointTypeNovelAI) {
+			// The NovelAI relay charges a per-call price for each image.
+			preview.BillingDetails.ImageCount = true
 		}
 		if channel.Status == common.ChannelStatusEnabled && channel.Type == constant.ChannelTypeOpenRouter && strings.Contains(strings.ToLower(name), "claude") && !fixedPrice {
 			defaultRatio, hasDefault := ratio_setting.GetDefaultModelRatioMap()[name]
@@ -307,7 +312,7 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 		}
 		for _, endpoint := range endpoints {
 			switch constant.EndpointType(endpoint) {
-			case constant.EndpointTypeImageGeneration:
+			case constant.EndpointTypeImageGeneration, constant.EndpointTypeNovelAI:
 				if fixedPrice {
 					preview.BillingDetails.ImageCount = true
 				}

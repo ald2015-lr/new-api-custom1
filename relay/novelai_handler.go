@@ -38,12 +38,14 @@ func (e *NovelAIUpstreamError) Error() string { return e.Err.Error() }
 
 func (e *NovelAIUpstreamError) Unwrap() error { return e.Err }
 
-// NovelAIImageHelper relays the NovelAI native generate-image endpoints. The
-// client body (JSON, or multipart with its original boundary) goes to the
-// channel base URL + the NovelAI path byte for byte, so model mapping and
-// parameter overrides do not apply. The call is billed like an OpenAI image
-// request: parameters.n_samples is reserved as the image count before each
-// attempt, and a successful response settles at the images it carries.
+// NovelAIImageHelper relays the NovelAI native generate-image endpoints, to a
+// NovelAI channel (NovelAI's official API) or to an OpenAI-type channel whose
+// base URL is a NovelAI-compatible forwarder. The client body (JSON, or
+// multipart with its original boundary) goes to the channel base URL + the
+// NovelAI path byte for byte, so model mapping and parameter overrides do not
+// apply. The call is billed like an OpenAI image request: parameters.n_samples
+// is reserved as the image count before each attempt, and a successful
+// response settles at the images it carries.
 //
 // Another channel is tried only when this one answered with an error status
 // (under the usual retry policy) or provably received nothing; once the
@@ -56,8 +58,10 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	// transport write SSE headers and pings into a binary response.
 	info.IsStream = false
 
-	// Only the OpenAI adaptor on a plain base URL builds the NovelAI path.
-	if info.ApiType != constant.APITypeOpenAI || info.ChannelType == constant.ChannelTypeAzure || info.ChannelType == constant.ChannelTypeCustom {
+	// A NovelAI channel, or the OpenAI adaptor on a plain base URL (a
+	// NovelAI-compatible forwarder), builds the NovelAI path.
+	forwarder := info.ApiType == constant.APITypeOpenAI && info.ChannelType != constant.ChannelTypeAzure && info.ChannelType != constant.ChannelTypeCustom
+	if info.ApiType != constant.APITypeNovelAI && !forwarder {
 		// Retryable: another channel of the model may serve it.
 		return types.NewError(errors.New(i18n.T(c, i18n.MsgNovelAIChannelUnsupported)), types.ErrorCodeInvalidRequest)
 	}

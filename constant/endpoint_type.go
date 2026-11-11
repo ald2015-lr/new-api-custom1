@@ -21,6 +21,11 @@ const (
 	EndpointTypeOpenAIVideo           = types.EndpointTypeOpenAIVideo
 )
 
+// EndpointTypeNovelAI is NovelAI's native image API (POST /ai/generate-image
+// and /ai/generate-image-stream), the only one a NovelAI channel serves. It is
+// host-only: the conversion kit converts no request to or from it.
+const EndpointTypeNovelAI EndpointType = "novelai"
+
 // Model names the distributor assigns to /v1/tools/search and /v1/tools/fetch,
 // whose bodies carry no model. Channels serve the endpoints by listing them.
 const (

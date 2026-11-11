@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -177,6 +178,22 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			localErr:    newAPIError,
 			newAPIError: newAPIError,
 		}
+	}
+
+	if channel.Type == constant.ChannelTypeNovelAI {
+		// A test generation would spend Anlas on every manual and automatic
+		// test, so a NovelAI channel is tested by reading its account with
+		// the selected key, which is free. A rejected key fails with the
+		// upstream status, which the automatic disable rules act on.
+		key := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		if _, accountErr := novelai.FetchSubscription(ctx, channel.GetBaseURL(), key, channel.GetSetting(), channel.GetHeaderOverride()); accountErr != nil {
+			return testResult{
+				context:     c,
+				localErr:    accountErr,
+				newAPIError: accountErr,
+			}
+		}
+		return testResult{context: c}
 	}
 
 	// Determine relay format based on endpoint type or request path

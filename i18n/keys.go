@@ -66,6 +66,7 @@ const (
 	MsgNovelAIParametersInvalid   = "novelai.parameters_invalid"
 	MsgNovelAINSamplesInvalid     = "novelai.n_samples_invalid"
 	MsgNovelAIChannelUnsupported  = "novelai.channel_unsupported"
+	MsgNovelAIChannelNativeOnly   = "novelai.channel_native_only"
 )
 
 // Emails and the name of the token created at registration, in the

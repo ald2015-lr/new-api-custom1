@@ -235,8 +235,18 @@ func (u *novelAIUpstream) respond(status int, contentType, body string) {
 // billed per image at the model's per-call price or tiered expression:
 // parameters.n_samples is bounded and reserved, a success settles at the
 // images the client received, and an upstream failure charges nothing and
-// reaches the client as upstream sent it.
+// reaches the client as upstream sent it. A NovelAI channel (NovelAI's
+// official API) and an OpenAI-type channel in front of a NovelAI-compatible
+// forwarder relay alike.
 func TestNovelAIImageRoutesRelayAndBillPerImage(t *testing.T) {
+	for _, channelType := range []int{constant.ChannelTypeOpenAI, constant.ChannelTypeNovelAI} {
+		t.Run(constant.GetChannelTypeName(channelType), func(t *testing.T) {
+			testNovelAIImageRoutes(t, channelType)
+		})
+	}
+}
+
+func testNovelAIImageRoutes(t *testing.T, channelType int) {
 	setupRelayRouterTestDB(t)
 	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
 	require.NoError(t, i18n.Init())
@@ -270,7 +280,7 @@ func TestNovelAIImageRoutesRelayAndBillPerImage(t *testing.T) {
 	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-user", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
 	require.NoError(t, model.DB.Create(&user).Error)
 	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaitestkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
-	channel := model.Channel{Name: "novelai-forwarder", Key: "sk-novelai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: "nai-diffusion-4-5-full,nai-diffusion-3", BaseURL: &baseURL}
+	channel := model.Channel{Name: "novelai-upstream", Key: "sk-novelai", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-5-full,nai-diffusion-3", BaseURL: &baseURL}
 	require.NoError(t, model.DB.Create(&channel).Error)
 	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-3"} {
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
@@ -576,7 +586,7 @@ func TestNovelAIImageRoutesRelayAndBillPerImage(t *testing.T) {
 				secondServer := httptest.NewServer(second)
 				t.Cleanup(secondServer.Close)
 				for priority, baseURL := range map[int64]string{10: tc.firstURL, 0: secondServer.URL} {
-					channel := model.Channel{Name: modelName, Key: "sk-novelai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: modelName, BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0)}
+					channel := model.Channel{Name: modelName, Key: "sk-novelai", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: modelName, BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0)}
 					if priority == 10 && tc.firstProxy != "" {
 						channel.Setting = common.GetPointer(`{"proxy":"` + tc.firstProxy + `"}`)
 					}
@@ -614,6 +624,98 @@ func TestNovelAIImageRoutesRelayAndBillPerImage(t *testing.T) {
 			})
 		}
 	})
+}
+
+// A NovelAI channel serves only the NovelAI native routes: NovelAI's own 201
+// zip passes through as sent, while an OpenAI-format request for one of its
+// models, converted or passed through, is rejected with a 400 before anything
+// reaches NovelAI, and charges nothing.
+func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-3":0.02}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+
+	upstream := &novelAIUpstream{}
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-official", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiofficialkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	// nai-diffusion-3 is served by a channel that passes request bodies through.
+	for modelName, setting := range map[string]string{"nai-diffusion-4-5-full": "", "nai-diffusion-3": `{"pass_through_body_enabled":true}`} {
+		channel := model.Channel{Name: "novelai-" + modelName, Key: "pst-novelai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default", Models: modelName, BaseURL: common.GetPointer(server.URL), Setting: common.GetPointer(setting)}
+		require.NoError(t, model.DB.Create(&channel).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: modelName, Group: "default", Enabled: true}).Error)
+	}
+	engine := gin.New()
+	SetRelayRouter(engine)
+	// /v1/images/generations is a host protocol route.
+	SetTaskPluginProtocolRouter(engine)
+	send := func(path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer novelaiofficialkey")
+		engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+	walletQuota := func() int {
+		quota, err := model.GetUserQuota(user.Id, true)
+		require.NoError(t, err)
+		return quota
+	}
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	entry, err := zipWriter.Create("image_0.png")
+	require.NoError(t, err)
+	_, err = entry.Write([]byte("\x89PNG\r\n\x1a\nimage"))
+	require.NoError(t, err)
+	require.NoError(t, zipWriter.Close())
+
+	upstream.respond(http.StatusCreated, "application/x-zip-compressed", archive.String())
+	recorder := send("/ai/generate-image", `{"input":"a cat","model":"nai-diffusion-4-5-full","action":"generate","parameters":{"n_samples":1}}`)
+	require.Equal(t, http.StatusCreated, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "application/x-zip-compressed", recorder.Header().Get("Content-Type"))
+	assert.Equal(t, archive.Bytes(), recorder.Body.Bytes())
+	assert.Equal(t, "/ai/generate-image", upstream.path)
+	assert.Equal(t, "Bearer pst-novelai", upstream.authorization)
+	assert.Equal(t, 10_000_000-10_000, walletQuota(), "one image at $0.02")
+
+	nativeOnly := i18n.Translate("", i18n.MsgNovelAIChannelNativeOnly)
+	for _, rejected := range []struct{ path, body string }{
+		{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}]}`},
+		{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat"}`},
+		{"/v1/chat/completions", `{"model":"nai-diffusion-3","messages":[{"role":"user","content":"a cat"}]}`},
+		{"/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"a cat"}`},
+	} {
+		t.Run(rejected.path+" "+rejected.body, func(t *testing.T) {
+			calls, before := upstream.calls, walletQuota()
+
+			recorder := send(rejected.path, rejected.body)
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			var payload map[string]map[string]any
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+			assert.Contains(t, payload["error"]["message"], nativeOnly)
+			assert.Equal(t, calls, upstream.calls, "nothing reaches NovelAI")
+			assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+		})
+	}
 }
 
 // NovelAI clients read the subscription before generating. new-api answers

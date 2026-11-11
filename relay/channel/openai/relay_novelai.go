@@ -52,6 +52,22 @@ var errNovelAIArchiveTooLarge = errors.New("the archive expands beyond the respo
 
 const novelAIWriteChunk = 32 << 10
 
+// SetNovelAIContentHeaders completes the headers channel.SetupApiRequestHeader
+// copied from a NovelAI generate-image request. A NovelAI JSON body may come
+// without a Content-Type, which the request validator reads as JSON: it goes
+// upstream typed application/json instead of with an empty Content-Type, so
+// upstream parses the body the way billing did. A request without an Accept
+// accepts any type, the zip NovelAI answers by default, so none is sent; an
+// empty Accept would name none.
+func SetNovelAIContentHeaders(c *gin.Context, header *http.Header) {
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "application/json")
+	}
+	if c.Request.Header.Get("Accept") == "" {
+		header.Del("Accept")
+	}
+}
+
 // NovelAIImageHandler relays a successful NovelAI generate-image response.
 //
 // Response format: /ai/generate-image answers as NovelAI does, with a zip of

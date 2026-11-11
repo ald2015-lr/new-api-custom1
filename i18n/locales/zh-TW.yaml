@@ -54,6 +54,7 @@ novelai.field_repeated: "NovelAI 請求中的欄位 {{.Field}} 只能出現一�
 novelai.parameters_invalid: "NovelAI 請求的 parameters 欄位必須是 JSON 物件"
 novelai.n_samples_invalid: "parameters.n_samples 必須是 1 到 {{.Max}} 之間的整數"
 novelai.channel_unsupported: "所選渠道不支援 NovelAI 圖片生成"
+novelai.channel_native_only: "NovelAI 渠道僅支援 NovelAI 圖片介面：POST /ai/generate-image 與 /ai/generate-image-stream"
 
 # 分組充值門檻訊息
 group_access.topup_required: "分組 {{.Group}} 需要累計充值滿 {{.Required}} 才能使用（目前累計 {{.Current}}）"
