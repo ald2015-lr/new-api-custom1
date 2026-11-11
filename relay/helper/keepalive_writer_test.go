@@ -21,6 +21,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -267,6 +268,47 @@ func TestKeepAliveWriterOverConnection(t *testing.T) {
 	var decoded map[string]any
 	require.NoError(t, common.Unmarshal(append([]byte{first}, rest...), &decoded), "whitespace plus the body must stay one JSON document")
 	assert.Equal(t, "completed", decoded["status"])
+}
+
+type flushErrorRecorder struct {
+	*httptest.ResponseRecorder
+	err     error
+	flushed func()
+}
+
+func (r *flushErrorRecorder) FlushError() error {
+	r.flushed()
+	return r.err
+}
+
+// FlushWriter looks for the connection's flush error under the writers in
+// front of it. On a stream a keepalive still pings, that flush must hold the
+// lock the keepalive writes take, and its error must reach the caller. The
+// stream write budget SetEventStreamHeaders puts in front must not hide the
+// keepalive writer either.
+func TestFlushWriterFlushesKeepAliveStreamUnderItsLock(t *testing.T) {
+	recorder := &flushErrorRecorder{ResponseRecorder: httptest.NewRecorder(), err: errors.New("broken pipe")}
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := newKeepAliveWriter(c.Request.Context(), c.Writer, types.RelayFormatOpenAI, true, time.Hour)
+	t.Cleanup(w.Stop)
+	c.Writer = w
+	SetEventStreamHeaders(c)
+	locked := false
+	recorder.flushed = func() {
+		locked = !w.mu.TryLock()
+		if !locked {
+			w.mu.Unlock()
+		}
+	}
+
+	err := StringData(c, `{"id":"chunk-1"}`)
+
+	assert.EqualError(t, err, "broken pipe")
+	assert.True(t, locked, "the flush must hold the keepalive writer's lock")
+	assert.True(t, KeepAliveStreaming(c))
+	assert.True(t, w.Written())
+	assert.Contains(t, recorder.Body.String(), `data: {"id":"chunk-1"}`)
 }
 
 func TestInstallKeepAliveFollowsClientFormat(t *testing.T) {

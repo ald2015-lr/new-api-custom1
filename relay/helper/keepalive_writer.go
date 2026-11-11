@@ -211,11 +211,28 @@ func newKeepAliveWriter(ctx context.Context, under gin.ResponseWriter, relayForm
 	return w
 }
 
+// keepAliveWriterOf finds the KeepAliveWriter guarding c's response. Once a
+// handler set SSE headers, it sits under the stream write budget that
+// SetEventStreamHeaders puts in front of c.Writer.
+func keepAliveWriterOf(c *gin.Context) (*KeepAliveWriter, bool) {
+	writer := c.Writer
+	for {
+		switch w := writer.(type) {
+		case *KeepAliveWriter:
+			return w, true
+		case *streamResponseWriter:
+			writer = w.ResponseWriter
+		default:
+			return nil, false
+		}
+	}
+}
+
 // KeepAliveActive reports whether a KeepAliveWriter guards c's response. It
 // then owns keepalive for the request; any other ping would count as
 // response bytes and stop retries.
 func KeepAliveActive(c *gin.Context) bool {
-	_, ok := c.Writer.(*KeepAliveWriter)
+	_, ok := keepAliveWriterOf(c)
 	return ok
 }
 
@@ -224,7 +241,7 @@ func KeepAliveActive(c *gin.Context) bool {
 // stream the upstream forced on a non-stream request still needs the stream
 // scanner's own pings.
 func KeepAliveStreaming(c *gin.Context) bool {
-	w, ok := c.Writer.(*KeepAliveWriter)
+	w, ok := keepAliveWriterOf(c)
 	return ok && w.sse
 }
 
@@ -232,7 +249,7 @@ func KeepAliveStreaming(c *gin.Context) bool {
 // wire before the handler wrote anything, and whether it committed an SSE
 // stream rather than a JSON body.
 func KeepAliveCommitted(c *gin.Context) (committed bool, sse bool) {
-	w, ok := c.Writer.(*KeepAliveWriter)
+	w, ok := keepAliveWriterOf(c)
 	if !ok {
 		return false, false
 	}
@@ -420,6 +437,28 @@ func (w *KeepAliveWriter) Flush() {
 	defer w.mu.Unlock()
 	w.commitLocked(false)
 	w.under.Flush()
+}
+
+// FlushError is what FlushWriter reaches first when it looks for the
+// connection's flush error. Reaching the connection through Unwrap instead
+// would flush its buffer while a keepalive writes into it.
+func (w *KeepAliveWriter) FlushError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.commitLocked(false)
+	var writer http.ResponseWriter = w.under
+	for {
+		if flusher, ok := writer.(interface{ FlushError() error }); ok {
+			return flusher.FlushError()
+		}
+		unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		writer = unwrapper.Unwrap()
+	}
+	w.under.Flush()
+	return nil
 }
 
 func (w *KeepAliveWriter) Status() int {

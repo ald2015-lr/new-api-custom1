@@ -81,7 +81,6 @@ func (writer *streamKeepAliveWriter) Written() bool {
 func (writer *streamKeepAliveWriter) ping() error {
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
-	ExtendWriteDeadline(writer.pingContext)
 	return PingData(writer.pingContext)
 }
 
@@ -156,6 +155,20 @@ func FlushWriter(c *gin.Context) (err error) {
 	}
 
 	flusher.Flush()
+	// Gin's http.Flusher wrapper discards the underlying FlushError result.
+	// Flush wrappers first so their buffers are preserved, then surface any
+	// stored write error from an error-aware writer underneath them.
+	var writer http.ResponseWriter = c.Writer
+	for {
+		if flusher, ok := writer.(interface{ FlushError() error }); ok {
+			return flusher.FlushError()
+		}
+		unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		writer = unwrapper.Unwrap()
+	}
 	return nil
 }
 
@@ -177,13 +190,13 @@ func SetEventStreamHeaders(c *gin.Context) {
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer = &streamResponseWriter{ResponseWriter: c.Writer}
 }
 
 func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
 	if requestContextDone(c) {
 		return nil
 	}
-	ExtendWriteDeadline(c)
 
 	jsonData, err := common.Marshal(resp)
 	if err != nil {
@@ -200,7 +213,6 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 	if requestContextDone(c) {
 		return
 	}
-	ExtendWriteDeadline(c)
 
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s\n", data)})
@@ -211,10 +223,15 @@ func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data st
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
-	ExtendWriteDeadline(c)
 
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
+	event := common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)}
+	if err := event.Render(c.Writer); err != nil {
+		return err
+	}
+	event.Data = fmt.Sprintf("data: %s", data)
+	if err := event.Render(c.Writer); err != nil {
+		return err
+	}
 	return FlushWriter(c)
 }
 
@@ -227,9 +244,6 @@ func StringData(c *gin.Context, str string) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	// Writes that happen after the upstream loop ended (final usage chunk,
-	// [DONE]) must not hit a write deadline armed for an earlier chunk.
-	ExtendWriteDeadline(c)
 	c.Render(-1, common.CustomEvent{Data: "data: " + str})
 	return FlushWriter(c)
 }
@@ -248,7 +262,6 @@ func pingData(c *gin.Context, frame string) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	ExtendWriteDeadline(c)
 	if _, err := c.Writer.Write([]byte(frame)); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}

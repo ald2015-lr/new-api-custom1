@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
@@ -21,7 +22,6 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 func buildUsageFromGeminiMetadata(metadata *dto.GeminiUsageMetadata, fallbackPromptTokens int) dto.Usage {
@@ -220,7 +220,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		// Gemini reports a failure inside an open stream as a bare error
 		// envelope; it ends the response like the same body sent as an HTTP
 		// error would.
-		if envelope := gjson.Get(data, "error"); envelope.IsObject() {
+		if envelope := ojson.Get(data, "error"); envelope.IsObject() {
 			var upstreamError types.OpenAIError
 			_ = common.UnmarshalJsonStr(envelope.Raw, &upstreamError)
 			statusCode := int(envelope.Get("code").Int())
@@ -239,7 +239,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			// finishReason, not a stream cut before its end.
 			info.StreamStatus.MarkCompleted()
 		}
-		info.ObserveResponseModel(gjson.Get(data, "modelVersion").Str)
+		info.ObserveResponseModel(ojson.Get(data, "modelVersion").Str)
 		for _, candidate := range geminiResponse.Candidates {
 			if candidate.FinishReason == nil || *candidate.FinishReason == "" || *candidate.FinishReason == "FINISH_REASON_UNSPECIFIED" {
 				continue
@@ -443,7 +443,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	info.ObserveResponseModel(gjson.GetBytes(responseBody, "modelVersion").Str)
+	info.ObserveResponseModel(ojson.GetBytes(responseBody, "modelVersion").Str)
 	var grounding geminiGroundingCounter
 	grounding.observe(&geminiResponse)
 	grounding.commit(info)
@@ -548,7 +548,13 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 	// Google has not yet clarified how embedding models will be billed
 	// refer to openai billing method to use input tokens billing
 	// https://platform.openai.com/docs/guides/embeddings#what-are-embeddings
-	usage := service.ResponseText2Usage(c, "", info.UpstreamModelName, info.GetEstimatePromptTokens())
+	var usage *dto.Usage
+	if upstream := geminiResponse.UsageMetadata.GeminiUsageMetadata(); upstream != nil {
+		upstreamUsage := buildUsageFromGeminiMetadata(upstream, info.GetEstimatePromptTokens())
+		usage = &upstreamUsage
+	} else {
+		usage = service.ResponseText2Usage(c, "", info.UpstreamModelName, info.GetEstimatePromptTokens())
+	}
 	openAIResponse.Usage = *usage
 
 	jsonResponse, jsonErr := common.Marshal(openAIResponse)

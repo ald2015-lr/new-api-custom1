@@ -22,10 +22,15 @@ import { combineBillingExpr } from '@/features/pricing/lib/billing-expr'
 import { isRequestPricedExpression } from '@/features/pricing/lib/dynamic-price'
 import { splitPluginBillingExprKey } from '@/features/pricing/lib/plugin-pricing'
 import type { PricingModel } from '@/features/pricing/types'
-import type { ModelRatioData } from '@/features/system-settings/models/model-pricing-core'
 import {
+  usesTaskModelPricing,
+  type ModelRatioData,
+} from '@/features/system-settings/models/model-pricing-core'
+import {
+  buildModelRow,
   buildModelSnapshots,
   type ModelPricingSnapshot,
+  type ModelRow,
 } from '@/features/system-settings/models/model-pricing-snapshots'
 
 import type { ModelPricingEntry } from './api'
@@ -54,7 +59,7 @@ export type PricingValues = Partial<
 }
 export type PricingOptions = Record<PricingKey, string>
 
-export type CacheWriteMode = 'none' | 'standard' | 'claude_ttl'
+export type CacheWriteMode = 'none' | 'standard' | 'claude_ttl' | 'openai_ttl'
 
 export type LegacyBillingDetails = {
   audio_input_price?: number
@@ -79,7 +84,12 @@ function modelPricingQuotaType(values: PricingValues): number {
 
 export function modelPricingDisplay(
   entry: Pick<ModelPricingEntry, 'model_name' | 'effective' | 'usage_schema'> &
-    Partial<Pick<ModelPricingEntry, 'configured' | 'cache_write_mode'>>
+    Partial<
+      Pick<
+        ModelPricingEntry,
+        'configured' | 'cache_write_mode' | 'plugin_variants'
+      >
+    >
 ): PricingModel {
   const values = entry.effective
   return {
@@ -100,6 +110,7 @@ export function modelPricingDisplay(
       !(
         entry.cache_write_mode === 'standard' ||
         entry.cache_write_mode === 'claude_ttl' ||
+        entry.cache_write_mode === 'openai_ttl' ||
         entry.configured?.CreateCacheRatio !== undefined
       )
         ? undefined
@@ -122,7 +133,13 @@ export function modelPricingDisplay(
       typeof values['billing_setting.billing_expr'] === 'string'
         ? values['billing_setting.billing_expr']
         : undefined,
-    billing_usage_schema: entry.usage_schema,
+    billing_usage_schema: usesTaskModelPricing(
+      pricingRow(entry.model_name, values),
+      entry.usage_schema,
+      entry.plugin_variants
+    )
+      ? entry.usage_schema
+      : undefined,
   }
 }
 
@@ -142,11 +159,16 @@ export function pricingOptions(
 ): PricingOptions {
   return Object.fromEntries(
     PRICING_KEYS.map((key) => {
+      // Form values also carry the raw option keys; the form field is the draft.
       let value = values[key]
-      if (key === 'billing_setting.billing_mode') value ??= values.BillingMode
-      if (key === 'billing_setting.billing_expr') value ??= values.BillingExpr
+      if (key === 'billing_setting.billing_mode') {
+        value = values.BillingMode ?? value
+      }
+      if (key === 'billing_setting.billing_expr') {
+        value = values.BillingExpr ?? value
+      }
       if (key === 'billing_setting.plugin_billing_expr') {
-        value ??= values.PluginBillingExpr
+        value = values.PluginBillingExpr ?? value
       }
       return [key, typeof value === 'string' ? value : '{}']
     })
@@ -167,6 +189,21 @@ export function pricingRows(options: PricingOptions): ModelPricingSnapshot[] {
     billingExpr: options['billing_setting.billing_expr'],
     pluginBillingExpr: options['billing_setting.plugin_billing_expr'],
   })
+}
+
+/** Models whose draft price differs from the saved one. */
+export function buildPriceChangeRows(
+  saved: PricingOptions,
+  draft: PricingOptions
+): ModelRow[] {
+  const savedByName = new Map(pricingRows(saved).map((row) => [row.name, row]))
+  const draftByName = new Map(pricingRows(draft).map((row) => [row.name, row]))
+  return [...new Set([...savedByName.keys(), ...draftByName.keys()])]
+    .map((name) =>
+      buildModelRow(name, savedByName.get(name), draftByName.get(name))
+    )
+    .filter((row) => row.isDraftChanged)
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function pricingRow(
