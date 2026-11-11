@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -47,11 +46,7 @@ const (
 // endpoints next to the image ones.
 func AccountBaseURL(baseURL string) string {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		baseURL = constant.GetChannelBaseURL(constant.ChannelTypeNovelAI)
-	}
-	parsed, err := url.Parse(baseURL)
-	if err == nil && strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), imageHost) {
+	if isNovelAIImageHost(baseURL) {
 		return accountBaseURL
 	}
 	return baseURL

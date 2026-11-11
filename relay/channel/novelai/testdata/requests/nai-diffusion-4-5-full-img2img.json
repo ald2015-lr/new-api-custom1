@@ -1,0 +1,58 @@
+{
+  "action": "img2img",
+  "input": "1girl, cat ears, very aesthetic, masterpiece, no text",
+  "model": "nai-diffusion-4-5-full",
+  "parameters": {
+    "add_original_image": true,
+    "autoSmea": false,
+    "cfg_rescale": 0,
+    "characterPrompts": [],
+    "color_correct": true,
+    "controlnet_strength": 1,
+    "deliberate_euler_ancestral_bug": false,
+    "dynamic_thresholding": false,
+    "extra_noise_seed": 1234567890,
+    "height": 832,
+    "image": "PNG 1216x832",
+    "image_format": "png",
+    "inpaintImg2ImgStrength": 1,
+    "legacy": false,
+    "legacy_uc": false,
+    "legacy_v3_extend": false,
+    "n_samples": 1,
+    "negative_prompt": "nsfw, lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, bad hands",
+    "noise": 0,
+    "noise_schedule": "karras",
+    "normalize_reference_strength_multiple": true,
+    "params_version": 4,
+    "prefer_brownian": true,
+    "qualityPresetId": "standard",
+    "sampler": "k_euler_ancestral",
+    "scale": 5,
+    "seed": 1234567890,
+    "skip_cfg_above_sigma": null,
+    "steps": 23,
+    "strength": 0.5,
+    "tag_hint_qt": 1,
+    "tag_hint_uc_preset": 2,
+    "ucPresetId": "heavy",
+    "use_coords": false,
+    "v4_negative_prompt": {
+      "caption": {
+        "base_caption": "nsfw, lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page, bad hands",
+        "char_captions": []
+      },
+      "legacy_uc": false
+    },
+    "v4_prompt": {
+      "caption": {
+        "base_caption": "1girl, cat ears, very aesthetic, masterpiece, no text",
+        "char_captions": []
+      },
+      "use_coords": false,
+      "use_order": true
+    },
+    "width": 1216
+  },
+  "use_new_shared_trial": true
+}

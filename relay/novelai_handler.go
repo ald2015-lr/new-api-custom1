@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -91,23 +90,11 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 
 	// NovelAI has no idempotency guarantee: a request that may have reached
 	// it may already have spent Anlas, so it is never sent a second time.
-	// Only a failure that proves nothing was sent stays retryable: one raised
-	// before the round trip (the transport reports its own failures as a
-	// *url.Error; a URL that does not parse is one too, with Op "parse"), or
-	// a connection that could not be made: a dial failure anywhere in the
-	// chain, which a SOCKS proxy wraps in its own "socks connect" error.
+	// Only a failure that proves nothing was sent stays retryable.
 	resp, err := adaptor.DoRequest(c, info, common.NewReplayableBodyReader(storage))
 	if err != nil {
 		apiErr := types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
-		var roundTripErr *url.Error
-		var dialErr *net.OpError
-		var dnsErr *net.DNSError
-		attempted := errors.As(err, &roundTripErr) && roundTripErr.Op != "parse"
-		notConnected := errors.As(err, &dnsErr)
-		for chain := err; !notConnected && errors.As(chain, &dialErr); chain = dialErr.Err {
-			notConnected = dialErr.Op == "dial" || dialErr.Op == "proxyconnect"
-		}
-		if attempted && !notConnected {
+		if novelai.RequestMayHaveReachedUpstream(err) {
 			types.ErrOptionWithSkipRetry()(apiErr)
 		}
 		return apiErr

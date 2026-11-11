@@ -1,0 +1,53 @@
+{
+  "action": "generate",
+  "input": "1girl, cat ears, very aesthetic, masterpiece, no text, -0.8::feet::, rating:general",
+  "model": "nai-diffusion-4-5-curated",
+  "parameters": {
+    "add_original_image": true,
+    "autoSmea": false,
+    "cfg_rescale": 0,
+    "characterPrompts": [],
+    "controlnet_strength": 1,
+    "deliberate_euler_ancestral_bug": false,
+    "dynamic_thresholding": false,
+    "height": 1024,
+    "image_format": "png",
+    "inpaintImg2ImgStrength": 1,
+    "legacy": false,
+    "legacy_uc": false,
+    "legacy_v3_extend": false,
+    "n_samples": 1,
+    "negative_prompt": "blurry, lowres, upscaled, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, halftone, multiple views, logo, too many watermarks, negative space, blank page, bad hands",
+    "noise_schedule": "karras",
+    "normalize_reference_strength_multiple": true,
+    "params_version": 4,
+    "prefer_brownian": true,
+    "qualityPresetId": "standard",
+    "sampler": "k_euler_ancestral",
+    "scale": 5,
+    "seed": 1234567890,
+    "skip_cfg_above_sigma": null,
+    "steps": 23,
+    "tag_hint_qt": 1,
+    "tag_hint_uc_preset": 2,
+    "ucPresetId": "heavy",
+    "use_coords": false,
+    "v4_negative_prompt": {
+      "caption": {
+        "base_caption": "blurry, lowres, upscaled, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, halftone, multiple views, logo, too many watermarks, negative space, blank page, bad hands",
+        "char_captions": []
+      },
+      "legacy_uc": false
+    },
+    "v4_prompt": {
+      "caption": {
+        "base_caption": "1girl, cat ears, very aesthetic, masterpiece, no text, -0.8::feet::, rating:general",
+        "char_captions": []
+      },
+      "use_coords": false,
+      "use_order": true
+    },
+    "width": 1024
+  },
+  "use_new_shared_trial": true
+}

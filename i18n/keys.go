@@ -67,6 +67,29 @@ const (
 	MsgNovelAINSamplesInvalid     = "novelai.n_samples_invalid"
 	MsgNovelAIChannelUnsupported  = "novelai.channel_unsupported"
 	MsgNovelAIChannelNativeOnly   = "novelai.channel_native_only"
+
+	// NovelAI channels converting OpenAI-format image requests
+	MsgNovelAIFieldUnsupported       = "novelai.field_unsupported"
+	MsgNovelAIFieldInvalid           = "novelai.field_invalid"
+	MsgNovelAIFieldRange             = "novelai.field_range"
+	MsgNovelAIFieldValue             = "novelai.field_value"
+	MsgNovelAIFieldRelayOwned        = "novelai.field_relay_owned"
+	MsgNovelAINSamplesMismatch       = "novelai.n_samples_mismatch"
+	MsgNovelAINTooLarge              = "novelai.n_too_large"
+	MsgNovelAISizeInvalid            = "novelai.size_invalid"
+	MsgNovelAIDimensionsInvalid      = "novelai.dimensions_invalid"
+	MsgNovelAIModelUnsupported       = "novelai.model_unsupported"
+	MsgNovelAIInpaintingNeedsMask    = "novelai.inpainting_needs_mask"
+	MsgNovelAIImageMissing           = "novelai.image_missing"
+	MsgNovelAIImageMultiple          = "novelai.image_multiple"
+	MsgNovelAIImageInvalid           = "novelai.image_invalid"
+	MsgNovelAIImageFetchFailed       = "novelai.image_fetch_failed"
+	MsgNovelAIMaskEmpty              = "novelai.mask_empty"
+	MsgNovelAITransparentUnsupported = "novelai.transparent_unsupported"
+	MsgNovelAICharactersTooMany      = "novelai.characters_too_many"
+	MsgNovelAIPassThroughUnsupported = "novelai.pass_through_unsupported"
+	MsgNovelAINoImage                = "novelai.no_image"
+	MsgNovelAIAccountBusy            = "novelai.account_busy"
 )
 
 // Emails and the name of the token created at registration, in the

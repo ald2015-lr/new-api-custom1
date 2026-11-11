@@ -140,6 +140,11 @@ type ChannelOtherSettings struct {
 	// rejection. Empty follows the default allow policy. Accepted values:
 	// "", "allow", "safe", "strict".
 	ToolLossPolicy string `json:"tool_loss_policy,omitempty"`
+	// NovelAIPresetsDisabled turns the NovelAI web client's prompt presets
+	// (quality tags and the UC preset) off by default for OpenAI-format
+	// requests on a NovelAI channel; a request can still ask for them with
+	// qualityToggle, qualityPresetId or ucPresetId.
+	NovelAIPresetsDisabled bool `json:"novelai_presets_disabled,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
