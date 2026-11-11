@@ -3,9 +3,12 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -16,8 +19,10 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -634,4 +639,124 @@ func TestNovelAIChannelTestReadsTheAccountInsteadOfGenerating(t *testing.T) {
 		assert.Equal(t, map[string]any{"status": float64(http.StatusUnauthorized), "message": "Invalid accessToken."}, response.MessageParams)
 		assert.Equal(t, "bad_response_status_code", response.ErrorCode)
 	})
+}
+
+// A forwarder in front of NovelAI answers chat with the image as Markdown
+// base64, 541,232 characters here, often without usage. Channel tests of it
+// logged "0 / 206,049": the test prompt was never estimated and the base64 was
+// counted as completion text. A forwarder that counts characters in a streamed
+// usage chunk logged "0 / 541,232". The fake mirrors the forwarder used to
+// reproduce the report: the model name picks the usage shape.
+func TestChannelTestCountsInlineImagesAsImages(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	models := []string{"nai-md-nousage", "nai-md-zerousage", "nai-md-lencount", "nai-md-usage"}
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	ratios, err := common.Marshal(map[string]float64{models[0]: 1, models[1]: 1, models[2]: 1, models[3]: 1})
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratios)))
+	originalLogConsume, originalCountToken, originalTimeout := common.LogConsumeEnabled, constant.CountToken, constant.StreamingTimeout
+	common.LogConsumeEnabled, constant.CountToken, constant.StreamingTimeout = true, true, 30
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, constant.CountToken, constant.StreamingTimeout = originalLogConsume, originalCountToken, originalTimeout
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios))
+	})
+
+	rng := rand.New(rand.NewPCG(1, 2))
+	payload := make([]byte, 405_900)
+	for i := range payload {
+		payload[i] = byte(rng.UintN(256))
+	}
+	content := "![image](data:image/png;base64," + base64.StdEncoding.EncodeToString(payload) + ")"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		if err := common.DecodeJson(r.Body, &request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var usage map[string]int
+		switch request.Model {
+		case "nai-md-zerousage":
+			usage = map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+		case "nai-md-lencount":
+			usage = map[string]int{"prompt_tokens": 0, "completion_tokens": len(content), "total_tokens": len(content)}
+		case "nai-md-usage":
+			usage = map[string]int{"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13}
+		}
+		if !request.Stream {
+			response := map[string]any{"id": "chatcmpl-x", "object": "chat.completion", "created": 1, "model": request.Model,
+				"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": content}, "finish_reason": "stop"}}}
+			if usage != nil {
+				response["usage"] = usage
+			}
+			body, _ := common.Marshal(response)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+			return
+		}
+		events := []map[string]any{
+			{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}},
+			{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": content}}}},
+			{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}},
+		}
+		if usage != nil {
+			events = append(events, map[string]any{"choices": []any{}, "usage": usage})
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range events {
+			event["id"], event["object"], event["created"], event["model"] = "chatcmpl-x", "chat.completion.chunk", 1, request.Model
+			body, _ := common.Marshal(event)
+			_, _ = w.Write([]byte("data: " + string(body) + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	user := model.User{Username: "forwarder-tester", Status: common.UserStatusEnabled, Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "sk-test", Name: "nai-forwarder", Status: common.ChannelStatusEnabled,
+		Group: "default", Models: strings.Join(models, ","), BaseURL: common.GetPointer(server.URL)}
+	require.NoError(t, db.Create(channel).Error)
+
+	// What a relay reserves for the test request ("hi").
+	estimateContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(estimateContext, constant.ContextKeyOriginalModel, models[0])
+	promptEstimate, err := service.CountRequestToken(estimateContext, buildTestRequest(models[0], "", channel, false).GetTokenCountMeta(),
+		&relaycommon.RelayInfo{RelayFormat: relaytypes.RelayFormatOpenAI})
+	require.NoError(t, err)
+	require.Positive(t, promptEstimate)
+
+	for _, tc := range []struct {
+		model          string
+		stream         bool
+		wantPrompt     int
+		wantCompletion int
+	}{
+		// No usage, or only zeros: was "0 / 206,049".
+		{model: "nai-md-nousage", wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		{model: "nai-md-nousage", stream: true, wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		{model: "nai-md-zerousage", wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		{model: "nai-md-zerousage", stream: true, wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		// Upstream's own completion count is kept; its missing prompt was "0".
+		{model: "nai-md-lencount", wantPrompt: promptEstimate, wantCompletion: len(content)},
+		{model: "nai-md-lencount", stream: true, wantPrompt: promptEstimate, wantCompletion: len(content)},
+		// Complete upstream usage is kept as it is.
+		{model: "nai-md-usage", wantPrompt: 12, wantCompletion: 1},
+		{model: "nai-md-usage", stream: true, wantPrompt: 12, wantCompletion: 1},
+	} {
+		t.Run(fmt.Sprintf("%s stream=%v", tc.model, tc.stream), func(t *testing.T) {
+			result := testChannel(context.Background(), channel, user.Id, tc.model, "", tc.stream)
+
+			require.NoError(t, result.localErr)
+			var log model.Log
+			require.NoError(t, db.Order("id desc").First(&log).Error)
+			assert.Equal(t, tc.model, log.ModelName)
+			assert.Equal(t, tc.stream, log.IsStream)
+			assert.Equal(t, tc.wantPrompt, log.PromptTokens)
+			assert.Equal(t, tc.wantCompletion, log.CompletionTokens)
+		})
+	}
 }
