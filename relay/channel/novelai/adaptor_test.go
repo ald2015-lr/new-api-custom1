@@ -13,10 +13,12 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -89,6 +91,9 @@ func TestAdaptorRequestURLs(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 	assert.Contains(t, adaptor.GetModelList(), "nai-diffusion-4-5-full-inpainting")
+	assert.Subset(t, adaptor.GetModelList(), []string{"nai-diffusion-5-full-inpainting", "nai-diffusion-5-full-medium-inpainting"})
+	// Every model the channel offers converts, and nothing else.
+	assert.ElementsMatch(t, ModelList, slices.Collect(maps.Keys(profiles)))
 }
 
 // The channel test and the balance read the account with GET
@@ -440,6 +445,12 @@ func TestBuildGenerationPassthroughPrecedence(t *testing.T) {
 	assert.Equal(t, false, parameters["add_original_image"], "a forwarded key replaces the relay's default")
 	assert.Equal(t, map[string]any{"a": float64(1)}, parameters["future_flag"])
 
+	for _, unset := range []string{"0", "-1", "null"} {
+		generation, parameters := buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Extras: map[string]json.RawMessage{"seed": raw(unset)}})
+		assert.True(t, generation.Seed >= 1 && generation.Seed <= MaxSeed, "seed %s draws one NovelAI takes: %d", unset, generation.Seed)
+		assert.Equal(t, float64(generation.Seed), parameters["seed"])
+	}
+
 	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-5-full", Parameters: map[string]json.RawMessage{
 		"noise_schedule": raw(`"exponential"`), "skip_cfg_above_sigma": raw("19"), "dynamic_thresholding": raw("true"),
 	}})
@@ -502,23 +513,26 @@ func TestBuildGenerationPassthroughPrecedence(t *testing.T) {
 // gives the same fields, with SDK bracket keys for parameters.
 func TestParseExtensions(t *testing.T) {
 	require.NoError(t, i18n.Init())
-	extras, parameters, apiErr := ParseExtensions(nil, map[string]json.RawMessage{
-		"negative": raw(`"alias"`), "negative_prompt": raw(`"canonical"`), "characters": raw(`[{"prompt":"a"}]`),
-		"uc_preset": raw(`"light"`), "steps": raw("28"), "user": raw(`"u-1"`), "moderation": raw(`"low"`),
-		"parameters": raw(`{"scale":6}`),
-	})
-	require.Nil(t, apiErr)
-	assert.Equal(t, map[string]json.RawMessage{
-		"negative_prompt": raw(`"canonical"`), "characterPrompts": raw(`[{"prompt":"a"}]`), "ucPresetId": raw(`"light"`), "steps": raw("28"),
-	}, extras)
-	assert.Equal(t, map[string]json.RawMessage{"scale": raw("6")}, parameters)
+	// Go visits a map in random order: the result must not depend on it.
+	for range 32 {
+		extras, parameters, apiErr := ParseExtensions(nil, map[string]json.RawMessage{
+			"negative": raw(`"alias"`), "negative_prompt": raw(`"canonical"`), "characters": raw(`[{"prompt":"a"}]`),
+			"uc_preset": raw(`"light"`), "steps": raw("28"), "user": raw(`"u-1"`), "moderation": raw(`"low"`),
+			"parameters": raw(`{"scale":6}`),
+		})
+		require.Nil(t, apiErr)
+		require.Equal(t, map[string]json.RawMessage{
+			"negative_prompt": raw(`"canonical"`), "characterPrompts": raw(`[{"prompt":"a"}]`), "ucPresetId": raw(`"light"`), "steps": raw("28"),
+		}, extras)
+		require.Equal(t, map[string]json.RawMessage{"scale": raw("6")}, parameters)
+	}
 
-	for _, key := range ambiguousKeys {
+	for _, key := range []string{"cfg", "SMEA", "DYN", "addition"} {
 		_, _, apiErr := ParseExtensions(nil, map[string]json.RawMessage{key: raw("5")})
 		require.NotNil(t, apiErr, key)
 		assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 	}
-	_, _, apiErr = ParseExtensions(nil, map[string]json.RawMessage{"parameters": raw(`[1]`)})
+	_, _, apiErr := ParseExtensions(nil, map[string]json.RawMessage{"parameters": raw(`[1]`)})
 	require.NotNil(t, apiErr)
 
 	fields := FormFields(map[string][]string{
@@ -634,10 +648,10 @@ func TestBuildGenerationEditImages(t *testing.T) {
 		return r >> 8
 	}
 	// OpenAI mask at half the image size: the square crop keeps columns
-	// 32-63, transparent up to column 41, which at 128x128 covers columns
-	// 0-39: blocks 0-4 white, block 5 (40-47) black.
+	// 32-63, transparent up to column 42, which at 128x128 covers columns
+	// 0-43: blocks 0-4 white, block 5 (40-47) half white, so black.
 	openAIMask := testImage(96, 32, func(x, y int) color.Color {
-		if x < 32+10 {
+		if x < 32+11 {
 			return color.NRGBA{}
 		}
 		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
@@ -657,6 +671,7 @@ func TestBuildGenerationEditImages(t *testing.T) {
 	assert.Equal(t, uint32(255), maskValue(mask, 0, 0))
 	assert.Equal(t, uint32(255), maskValue(mask, 39, 127))
 	assert.Equal(t, uint32(0), maskValue(mask, 40, 0), "an 8x8 block half white or less stays black")
+	assert.Equal(t, uint32(0), maskValue(mask, 43, 0))
 	assert.Equal(t, uint32(0), maskValue(mask, 127, 64))
 
 	// A black-and-white mask without transparency: white repaints.

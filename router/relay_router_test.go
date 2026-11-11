@@ -32,6 +32,8 @@ import (
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/tokenkit"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -820,6 +822,11 @@ func novelAIZip(t *testing.T, images ...[]byte) []byte {
 // and an answer without images after a 2xx is final.
 func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	setupRelayRouterTestDB(t)
+	// Refunds and quota cache updates finish on gopool workers, which read
+	// globals the fixture restores: wait for them before it does.
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+	})
 	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
 	require.NoError(t, i18n.Init())
 	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
@@ -957,7 +964,8 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, "nai-diffusion-4-5-full", log.ModelName)
 		assert.Equal(t, 20_000, log.Quota, "two images at $0.02")
 		assert.Contains(t, log.Content, "Image count 2")
-		assert.Equal(t, response.Usage.InputTokens, log.PromptTokens, "the final prompt's estimate")
+		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", sent.body["input"].(string)), log.PromptTokens, "the final prompt's estimate")
+		assert.Equal(t, log.PromptTokens, response.Usage.InputTokens)
 		assert.Zero(t, log.CompletionTokens)
 		assert.Equal(t, before-20_000, walletQuota())
 	})
