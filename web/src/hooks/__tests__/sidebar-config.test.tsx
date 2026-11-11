@@ -45,12 +45,18 @@ afterEach(() => {
   useAuthStore.getState().auth.reset()
 })
 
-function sidebarFor(admin?: object, user?: object, canConfigure = true) {
+function sidebarFor(
+  admin?: object,
+  user?: object,
+  canConfigure = true,
+  headerNav?: object
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
   client.setQueryData(['status'], {
     SidebarModulesAdmin: admin ? JSON.stringify(admin) : '',
+    HeaderNavModules: headerNav ? JSON.stringify(headerNav) : '',
   })
   useAuthStore.getState().auth.setUser({
     id: 1,
@@ -179,4 +185,43 @@ describe('audit log sidebar entry', () => {
     expect(titles).not.toContain('Usage Logs')
     expect(titles).toContain('Audit Logs')
   })
+})
+
+describe('model square sidebar entry', () => {
+  it('default header navigation shows Model Square after Dashboard, linking to /pricing', () => {
+    const { result } = sidebarFor()
+    const items =
+      result.current.find((group) => group.id === 'general')?.items ?? []
+    const dashboardIndex = items.findIndex((item) => item.title === 'Dashboard')
+    expect(items[dashboardIndex + 1]).toMatchObject({
+      title: 'Model Square',
+      url: '/pricing',
+    })
+  })
+
+  it('a login-only Model Square stays in the sidebar of signed-in users', () => {
+    const { result } = sidebarFor(undefined, undefined, true, {
+      pricing: { enabled: true, requireAuth: true },
+    })
+    expect(
+      result.current
+        .flatMap((group) => group.items)
+        .some((item) => item.title === 'Model Square')
+    ).toBe(true)
+  })
+
+  it.each([
+    { pricing: { enabled: false, requireAuth: false } },
+    { pricing: false },
+  ])(
+    'disabling Model Square in header navigation hides the sidebar entry (%j)',
+    (headerNav) => {
+      const { result } = sidebarFor(undefined, undefined, true, headerNav)
+      expect(
+        result.current
+          .flatMap((group) => group.items)
+          .some((item) => item.title === 'Model Square')
+      ).toBe(false)
+    }
+  )
 })

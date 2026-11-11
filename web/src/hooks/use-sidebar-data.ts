@@ -32,6 +32,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  Store,
   Ticket,
   User,
   Users,
@@ -39,7 +40,9 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import type { SidebarData } from '@/components/layout/types'
+import type { NavItem, SidebarData } from '@/components/layout/types'
+import { useStatus } from '@/hooks/use-status'
+import { getModuleAccessFromStatus } from '@/lib/nav-modules'
 import { ROLE } from '@/lib/roles'
 
 /**
@@ -50,6 +53,18 @@ import { ROLE } from '@/lib/roles'
  */
 export function useSidebarData(): SidebarData {
   const { t } = useTranslation()
+  const { status } = useStatus()
+
+  // The model square lives at /pricing, outside the console. Its header link
+  // is hidden below the lg breakpoint, so phones reach it from here. The entry
+  // follows the same Model Square switch as the header: /pricing redirects
+  // home when that switch is off.
+  const modelSquare: NavItem[] = getModuleAccessFromStatus(
+    status as Record<string, unknown> | null,
+    'pricing'
+  ).enabled
+    ? [{ title: t('Model Square'), url: '/pricing', icon: Store }]
+    : []
 
   return {
     navGroups: [
@@ -83,6 +98,7 @@ export function useSidebarData(): SidebarData {
             url: '/dashboard/models',
             icon: LayoutDashboard,
           },
+          ...modelSquare,
           {
             title: t('API Keys'),
             url: '/keys',
