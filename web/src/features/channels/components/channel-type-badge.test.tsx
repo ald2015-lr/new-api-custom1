@@ -24,7 +24,7 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getTaskPluginOptions } from '../api'
-import { CHANNEL_TYPE_TASK_PLUGIN } from '../constants'
+import { CHANNEL_TYPE_NOVELAI, CHANNEL_TYPE_TASK_PLUGIN } from '../constants'
 import { ChannelTypeLogo, TaskPluginChannelBadge } from './channel-type-badge'
 
 vi.mock('../api', () => ({ getTaskPluginOptions: vi.fn() }))
@@ -98,4 +98,6 @@ test('unbound task channels use a neutral icon while regular providers keep thei
   expect(screen.queryByTestId('OpenAI.Color')).not.toBeInTheDocument()
   rerender(<ChannelTypeLogo type={1} />)
   expect(screen.getByTestId('OpenAI.Color')).toBeInTheDocument()
+  rerender(<ChannelTypeLogo type={CHANNEL_TYPE_NOVELAI} />)
+  expect(screen.getByTestId('NovelAI.Color')).toBeInTheDocument()
 })
