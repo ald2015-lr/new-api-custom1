@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -682,7 +683,8 @@ func (w *failingWriter) Write(p []byte) (int, error) {
 // length. A body that cannot be counted, a client that leaves or an upstream
 // that fails mid-body keeps the reserved quantity, under a per-image price and
 // under an image_count expression alike. The client receives the upstream
-// status, headers and bytes unchanged.
+// status, headers and bytes unchanged. A client that leaves is no perf-metrics
+// health sample, as on the relay streams, while a completed body is a success.
 func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const requested = 4
@@ -692,8 +694,11 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 		name, contentType string
 		body              []byte
 		// upstream and client failures; the body is still forwarded up to them
-		upstreamFailsAfterBody, clientLeaves bool
-		want                                 int
+		upstreamFailsAfterBody bool
+		// how the client leaves mid-body: a write to it fails, or its request
+		// context ends the upstream read
+		clientLeaves string
+		want         int
 	}{
 		{name: "zip counts its png entries", contentType: "application/zip", body: images, want: 2},
 		{name: "zip is recognized without its media type", contentType: "application/octet-stream", body: images, want: 2},
@@ -703,7 +708,8 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 		{name: "msgpack stream events keep the reservation", contentType: "application/x-msgpack", body: []byte("\x82\xaaevent_type\xa5final\xa5image\xc4\x01x"), want: requested},
 		{name: "corrupt zip keeps the reservation", contentType: "application/zip", body: images[:24], want: requested},
 		{name: "upstream failing after the body keeps the reservation", contentType: "application/zip", body: images, upstreamFailsAfterBody: true, want: requested},
-		{name: "client leaving mid-body keeps the reservation", contentType: "application/zip", body: images, clientLeaves: true, want: requested},
+		{name: "client leaving mid-body keeps the reservation", contentType: "application/zip", body: images, clientLeaves: "write fails", want: requested},
+		{name: "client leaving between upstream reads keeps the reservation", contentType: "application/zip", body: images, clientLeaves: "read ends", want: requested},
 	}
 	for _, tc := range tests {
 		for _, pricing := range []string{"per-image price", "image_count expression"} {
@@ -713,9 +719,15 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 				if tc.upstreamFailsAfterBody {
 					body = io.MultiReader(body, iotest.ErrReader(errors.New("connection reset by peer")))
 				}
-				if tc.clientLeaves {
+				switch tc.clientLeaves {
+				case "write fails":
 					body = io.MultiReader(bytes.NewReader(tc.body[:16]), bytes.NewReader(tc.body[16:]))
 					c.Writer = &failingWriter{ResponseWriter: c.Writer}
+				case "read ends":
+					ctx, cancel := context.WithCancel(c.Request.Context())
+					t.Cleanup(cancel)
+					c.Request = c.Request.WithContext(ctx)
+					body = io.MultiReader(bytes.NewReader(tc.body[:16]), clientLeavingReader{cancel: cancel})
 				}
 				resp.Body = io.NopCloser(body)
 				resp.ContentLength = int64(len(tc.body))
@@ -737,10 +749,15 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 				assert.Equal(t, `attachment; filename="images.zip"`, recorder.Header().Get("Content-Disposition"))
 				assert.Equal(t, strconv.Itoa(len(tc.body)), recorder.Header().Get("Content-Length"))
 				assert.Empty(t, recorder.Header().Get("X-Upstream-Internal"))
-				if tc.clientLeaves {
+				outcome := perfmetrics.ClassifyRelayOutcome(c.Request.Context(), info, apiErr)
+				if tc.clientLeaves != "" {
 					assert.Equal(t, tc.body[:16], recorder.Body.Bytes())
+					assert.Equal(t, perfmetrics.OutcomeIgnored, outcome)
 				} else {
 					assert.Equal(t, tc.body, recorder.Body.Bytes())
+				}
+				if tc.clientLeaves == "" && !tc.upstreamFailsAfterBody {
+					assert.Equal(t, perfmetrics.OutcomeSuccess, outcome)
 				}
 				if pricing == "per-image price" {
 					assert.Equal(t, float64(tc.want), info.PriceData.OtherRatios()["n"])
@@ -775,7 +792,8 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 	// leaves once upstream has started the body pays the reserved count: the
 	// images exist. Before the first body byte (a stall the client or its
 	// proxy gave up on, or a stream that has not generated anything), and on
-	// an upstream failure with the client still there, the attempt fails.
+	// an upstream failure with the client still there, the attempt fails. A
+	// client that leaves is no perf-metrics sample either way.
 	for _, tc := range []struct {
 		name, accept string
 		mode         int
@@ -810,6 +828,9 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 			usage, apiErr := NovelAIImageHandler(c, info, resp)
 
 			assert.Empty(t, recorder.Body.Bytes())
+			if tc.clientLeaves {
+				assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(ctx, info, apiErr))
+			}
 			if !tc.billed {
 				assert.Nil(t, usage)
 				require.NotNil(t, apiErr)

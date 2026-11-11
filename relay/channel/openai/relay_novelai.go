@@ -167,6 +167,7 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 					info.SetFirstResponseTime()
 					c.Writer.WriteHeader(resp.StatusCode)
 					if err := forward(converted); err != nil {
+						novelAIClientLeft(info, err)
 						logger.LogWarn(c, common.LogText("NovelAI response stopped after %d bytes, billing the reserved %d images: %s", written, info.RequestedImageCount(), err.Error()))
 						return &dto.Usage{}, nil
 					}
@@ -197,6 +198,7 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				writeNovelAIResponseHeader(c, resp)
 			}
 			if err := forward(data); err != nil {
+				novelAIClientLeft(info, err)
 				logger.LogWarn(c, common.LogText("NovelAI response stopped after %d bytes, billing the reserved %d images: %s", written, info.RequestedImageCount(), err.Error()))
 				return &dto.Usage{}, nil
 			}
@@ -219,6 +221,10 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if written == 0 {
 			// Every byte read is forwarded, so nothing of the body arrived.
 			return novelAIReadFailed(c, info, false, readErr)
+		}
+		if c.Request.Context().Err() != nil {
+			// The client left, which also ended the upstream read.
+			novelAIClientLeft(info, readErr)
 		}
 		logger.LogWarn(c, common.LogText("NovelAI response stopped after %d bytes, billing the reserved %d images: %s", written, info.RequestedImageCount(), readErr.Error()))
 		return &dto.Usage{}, nil
@@ -243,10 +249,22 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 // stream endpoint opens with its headers before it generates anything.
 func novelAIReadFailed(c *gin.Context, info *relaycommon.RelayInfo, bodyStarted bool, err error) (*dto.Usage, *types.NewAPIError) {
 	if bodyStarted && c.Request.Context().Err() != nil {
+		novelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
 		return &dto.Usage{}, nil
 	}
 	return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+}
+
+// novelAIClientLeft records that the client left before it received the whole
+// response. Billing keeps the reserved quantity either way; the client-gone
+// end reason lets perf metrics, as on the relay streams, take the request for
+// a cancellation instead of a success sample cut short at the abort.
+func novelAIClientLeft(info *relaycommon.RelayInfo, err error) {
+	if info.StreamStatus == nil {
+		info.StreamStatus = relaycommon.NewStreamStatus()
+	}
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
 }
 
 // novelAIResponseReader reads a NovelAI response body and fails a read once
