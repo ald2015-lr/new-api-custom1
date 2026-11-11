@@ -493,3 +493,44 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "A channel test task is already running or queued")
 }
+
+func TestRunChannelTestWorkersCountsAPanickingTestAsFailed(t *testing.T) {
+	originalInterval := common.RequestInterval
+	common.RequestInterval = 0
+	t.Cleanup(func() { common.RequestInterval = originalInterval })
+
+	channels := []*model.Channel{
+		{Id: 1, Status: common.ChannelStatusEnabled},
+		{Id: 2, Status: common.ChannelStatusEnabled},
+	}
+	var summary channelTestSummary
+	require.NotPanics(t, func() {
+		summary = runChannelTestWorkers(context.Background(), channels, 1, func(_ context.Context, channel *model.Channel) channelTestSummary {
+			if channel.Id == 2 {
+				panic("adaptor bug")
+			}
+			return channelTestSummary{Tested: 1, Succeeded: 1}
+		}, nil)
+	})
+
+	assert.Equal(t, channelTestSummary{Tested: 2, Succeeded: 1, Failed: 1}, summary)
+}
+
+// A test that stops before building its request (here an unsupported channel
+// type; in production also a failed test-user lookup on a stalled database)
+// must not reach the disable path, which used to dereference the missing
+// request context and crash the process.
+func TestHealthCheckIgnoresTestsThatNeverReachTheChannel(t *testing.T) {
+	originalAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = originalAutoDisable })
+
+	autoBan := 1
+	channel := &model.Channel{Id: 1, Type: constant.ChannelTypeMidjourney, Status: common.ChannelStatusEnabled, AutoBan: &autoBan}
+	var summary channelTestSummary
+	require.NotPanics(t, func() {
+		summary = testChannelForHealthCheck(context.Background(), channel, 1, true, -1)
+	})
+
+	assert.Equal(t, channelTestSummary{}, summary)
+}

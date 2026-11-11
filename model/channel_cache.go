@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -32,8 +33,13 @@ func InitChannelCache() {
 	}
 	newChannelId2channel := make(map[int]*Channel)
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
+	// A failed query must not rebuild the cache from empty or partial data:
+	// keep serving the previous cache until the next sync succeeds.
 	var channels []*Channel
-	DB.Find(&channels)
+	if err := DB.Find(&channels).Error; err != nil {
+		common.SysError(common.LogText("failed to load channels, keeping the previous channel cache: %s", err.Error()))
+		return
+	}
 	for _, channel := range channels {
 		newChannelId2channel[channel.Id] = channel
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
@@ -43,7 +49,10 @@ func InitChannelCache() {
 		}
 	}
 	var abilities []*Ability
-	DB.Find(&abilities)
+	if err := DB.Find(&abilities).Error; err != nil {
+		common.SysError(common.LogText("failed to load abilities, keeping the previous channel cache: %s", err.Error()))
+		return
+	}
 	groups := make(map[string]bool)
 	for _, ability := range abilities {
 		groups[ability.Group] = true
@@ -58,6 +67,11 @@ func InitChannelCache() {
 		}
 		groups := strings.SplitSeq(channel.Group, ",")
 		for group := range groups {
+			// The channels and abilities are read separately, so a channel
+			// can carry a group no ability lists yet (edited in between).
+			if newGroup2model2channels[group] == nil {
+				newGroup2model2channels[group] = make(map[string][]int)
+			}
 			models := channel.GetModels()
 			for _, model := range models {
 				if _, ok := newGroup2model2channels[group][model]; !ok {
@@ -78,7 +92,21 @@ func InitChannelCache() {
 		}
 	}
 
+	swapChannelCache(newGroup2model2channels, newChannelId2channel, newChannel2advancedCustomConfig)
+	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
+	// GetPricing (holding updatePricingLock) nests channelSyncLock.RLock via
+	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before
+	// invalidating the pricing cache, otherwise the reversed order deadlocks.
+	InvalidatePricingCache()
+	rebuildTaskAliasView()
+	common.SysLog(common.LogText("channels synced from database"))
+}
+
+// swapChannelCache installs a freshly built cache. The deferred unlock keeps
+// channelSyncLock from staying held if anything here panics.
+func swapChannelCache(newGroup2model2channels map[string]map[string][]int, newChannelId2channel map[int]*Channel, newChannel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig) {
 	channelSyncLock.Lock()
+	defer channelSyncLock.Unlock()
 	group2model2channels = newGroup2model2channels
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
@@ -96,22 +124,26 @@ func InitChannelCache() {
 	}
 	channelsIDM = newChannelId2channel
 	channel2advancedCustomConfig = newChannel2advancedCustomConfig
-	channelSyncLock.Unlock()
-	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
-	// GetPricing (holding updatePricingLock) nests channelSyncLock.RLock via
-	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before
-	// invalidating the pricing cache, otherwise the reversed order deadlocks.
-	InvalidatePricingCache()
-	rebuildTaskAliasView()
-	common.SysLog(common.LogText("channels synced from database"))
 }
 
 func SyncChannelCache(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
 		common.SysLog(common.LogText("syncing channels from database"))
-		InitChannelCache()
+		syncChannelCacheOnce(InitChannelCache)
 	}
+}
+
+// syncChannelCacheOnce runs one periodic sync. A panic is logged and the
+// previous cache stays in use: this loop runs in its own goroutine, where an
+// unrecovered panic would exit the whole process.
+func syncChannelCacheOnce(sync func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			common.SysError(common.LogText("channel cache sync panicked, keeping the previous channel cache: %v\n%s", r, string(debug.Stack())))
+		}
+	}()
+	sync()
 }
 
 func GetRandomSatisfiedChannel(

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -927,6 +928,14 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	if ctx.Err() != nil {
 		return summary
 	}
+	// No request context means the test stopped before reaching the channel:
+	// an unsupported channel type, or a local failure such as a failed
+	// database lookup of the test user. It says nothing about the channel, so
+	// it is not counted and must not disable or enable it (the disable path
+	// would also dereference the missing context and crash the process).
+	if result.context == nil {
+		return summary
+	}
 
 	summary.Tested++
 
@@ -967,6 +976,19 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 
 	channel.UpdateResponseTime(milliseconds)
 	return summary
+}
+
+// runChannelTestRecovered runs one channel test inside a worker goroutine,
+// outside gin's recovery: a panic in the relay pipeline is logged and counted
+// as a failed test instead of exiting the whole process.
+func runChannelTestRecovered(ctx context.Context, channel *model.Channel, run func(context.Context, *model.Channel) channelTestSummary) (summary channelTestSummary) {
+	defer func() {
+		if r := recover(); r != nil {
+			common.SysError(common.LogText("channel #%d test panicked: %v\n%s", channel.Id, r, string(debug.Stack())))
+			summary = channelTestSummary{Tested: 1, Failed: 1}
+		}
+	}()
+	return run(ctx, channel)
 }
 
 // runChannelTestWorkers executes independent channel tests with bounded
@@ -1013,7 +1035,7 @@ func runChannelTestWorkers(
 
 					result := channelTestSummary{}
 					if channel != nil && channel.Status != common.ChannelStatusManuallyDisabled {
-						result = run(ctx, channel)
+						result = runChannelTestRecovered(ctx, channel, run)
 					}
 
 					results <- result
