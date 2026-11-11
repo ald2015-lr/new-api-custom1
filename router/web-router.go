@@ -60,8 +60,9 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 				return
 			}
 			// /ai/ is NovelAI's API prefix: only its billed routes are
-			// served, any other path is an API miss.
-			if strings.HasPrefix(requestPath, "/v1") || strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/assets") || strings.HasPrefix(requestPath, "/ai/") {
+			// served, any other path is an API miss. So is /ai itself, where
+			// the trailing-slash redirect sends /ai/.
+			if strings.HasPrefix(requestPath, "/v1") || strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/assets") || requestPath == "/ai" || strings.HasPrefix(requestPath, "/ai/") {
 				c.Header("Cache-Control", "no-store")
 				controller.RelayNotFound(c)
 				return
