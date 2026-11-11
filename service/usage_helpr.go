@@ -24,7 +24,8 @@ func ResponseText2Usage(c *gin.Context, responseText string, modeName string, pr
 	common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 	usage := &dto.Usage{}
 	usage.PromptTokens = promptTokens
-	usage.CompletionTokens = tokenkit.Estimate(modeName, responseText)
+	text, images := StripInlineImages(responseText)
+	usage.CompletionTokens = tokenkit.Estimate(modeName, text) + len(images)*InlineImageCompletionTokens
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	return usage
 }

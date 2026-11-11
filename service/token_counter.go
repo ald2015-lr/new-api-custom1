@@ -97,10 +97,16 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 	model := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	tkm := 0
 
+	var inlineImages []string
 	if meta.TokenType == types.TokenTypeTextNumber {
 		tkm += utf8.RuneCountInString(meta.CombineText)
 	} else {
-		tkm += tokenkit.Count(model, meta.CombineText)
+		// An earlier assistant reply that returned its image as Markdown base64
+		// comes back in the history as text; the image is counted below like an
+		// image_url part, not as hundreds of thousands of base64 text tokens.
+		var text string
+		text, inlineImages = StripInlineImages(meta.CombineText)
+		tkm += tokenkit.Count(model, text)
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
@@ -167,8 +173,89 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 		}
 	}
 
+	for _, dataURL := range inlineImages {
+		token, err := getImageToken(c, &types.FileMeta{FileType: types.FileTypeImage, Source: types.NewBase64FileSource(dataURL, "")}, model, info.IsStream)
+		if err != nil {
+			// Text that only looks like an image must not fail the request; it
+			// is priced as an image of unknown size.
+			token = tokenkit.ImageTokens(model, tokenkit.Image{})
+		}
+		tkm += token
+	}
+
 	common.SetContextKey(c, constant.ContextKeyPromptTokens, tkm)
 	return tkm, nil
+}
+
+// InlineImageCompletionTokens is what one image returned inside response text
+// as a base64 data URL counts as when the completion is counted locally because
+// upstream reported no usage. 1290 is Gemini's documented output size of one
+// generated image up to 1024x1024
+// (https://ai.google.dev/gemini-api/docs/image-generation). Counting the base64
+// as text cost 0.38 to 0.68 tokens per character instead: about 206,000 to
+// 369,000 tokens for one 400 KB PNG.
+const InlineImageCompletionTokens = 1290
+
+// minInlineImagePayload is the shortest base64 payload counted as an image. A
+// shorter data URL, such as an icon in generated HTML or CSS, costs fewer
+// tokens as text (2,048 base64 characters count about 780 to 1,390) than as an
+// image, and a generated image is far larger.
+const minInlineImagePayload = 2048
+
+// StripInlineImages removes the images written into text as base64 data URLs,
+// either as Markdown images (![alt](data:image/png;base64,...)), the form
+// new-api and NovelAI forwarders use for image output in chat, or as bare
+// data:image/...;base64,... runs. It returns the remaining text and the data
+// URLs it removed, so that each image is counted as an image rather than as
+// its base64 text. A data URL whose base64 payload is shorter than
+// minInlineImagePayload stays in the text.
+func StripInlineImages(text string) (string, []string) {
+	const scheme = "data:image/"
+	if !strings.Contains(text, scheme) {
+		return text, nil
+	}
+	var rest strings.Builder
+	var images []string
+	for {
+		at := strings.Index(text, scheme)
+		if at < 0 {
+			break
+		}
+		// data:image/<subtype>[;<parameter>...];base64,<payload>
+		comma := at + len(scheme)
+		for comma < len(text) && (isASCIIAlphanumeric(text[comma]) || strings.IndexByte(".+-;=", text[comma]) >= 0) {
+			comma++
+		}
+		end := comma + 1
+		for end < len(text) && (isASCIIAlphanumeric(text[end]) || strings.IndexByte("+/=", text[end]) >= 0) {
+			end++
+		}
+		if comma == len(text) || text[comma] != ',' || !strings.HasSuffix(text[at:comma], ";base64") || end-comma-1 < minInlineImagePayload {
+			rest.WriteString(text[:at+len(scheme)])
+			text = text[at+len(scheme):]
+			continue
+		}
+		images = append(images, text[at:end])
+
+		// A Markdown image ![alt](<data URL>) is removed with its URL.
+		start := at
+		if before, ok := strings.CutSuffix(strings.TrimRight(text[:at], " \t"), "]("); ok {
+			alt := strings.LastIndex(before, "![")
+			after := strings.TrimLeft(text[end:], " \t")
+			if alt >= 0 && !strings.ContainsAny(before[alt+2:], "]\n") && strings.HasPrefix(after, ")") {
+				start = alt
+				end = len(text) - len(after) + 1
+			}
+		}
+		rest.WriteString(text[:start])
+		text = text[end:]
+	}
+	rest.WriteString(text)
+	return rest.String(), images
+}
+
+func isASCIIAlphanumeric(b byte) bool {
+	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
 
 func CountTokenRealtime(info *relaycommon.RelayInfo, request dto.RealtimeEvent, model string) (int, int, error) {

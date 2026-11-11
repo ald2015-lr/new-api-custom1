@@ -313,7 +313,21 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	//logInfo.ApiKey = ""
 	common.SysLog(common.LogText("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
 
-	priceData, err := helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
+	// The test prompt is estimated as a relay estimates it, so a test against an
+	// upstream that reports no usage, or no prompt tokens, logs the prompt
+	// instead of 0.
+	tokenMeta := request.GetTokenCountMeta()
+	promptTokens, err := service.EstimateRequestToken(c, tokenMeta, info)
+	if err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewError(err, types.ErrorCodeCountTokenFailed),
+		}
+	}
+	info.SetEstimatePromptTokens(promptTokens)
+
+	priceData, err := helper.ModelPriceHelper(c, info, promptTokens, tokenMeta)
 	if err != nil {
 		return testResult{
 			context:     c,
