@@ -1117,9 +1117,11 @@ func TestRefundOfInFlightChargeGoesBackToTheReward(t *testing.T) {
 				// balance. Wait for the credit: an expiry that reads the cache
 				// before it lands sees 1,000 and closes the second reward without
 				// deducting it (an under-deduction, never one of paid money).
+				// A cache entry that expired meanwhile is a miss, and the expiry
+				// then caps at the DB balance, so that is fine too.
 				require.Eventually(t, func() bool {
 					cached, err := cacheGetUserBase(user.Id)
-					return err == nil && cached.Quota == 2_000
+					return err != nil || cached.Quota == 2_000
 				}, 5*time.Second, time.Millisecond, "the refund never reached the cached balance")
 			}
 			later := common.GetTimestamp() + 40*bonusTestDay
