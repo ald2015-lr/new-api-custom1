@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/relay"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,17 @@ func SetRelayRouter(router *gin.Engine) {
 				controller.RetrieveModel(c, constant.ChannelTypeOpenAI)
 			}
 		})
+	}
+
+	// NovelAI account endpoints, answered by new-api for the calling token
+	// (see controller.GetNovelAISubscription); /v1 serves clients whose
+	// NovelAI base URL ends in /v1.
+	for _, prefix := range []string{"", "/v1"} {
+		novelAIUserRouter := router.Group(prefix)
+		novelAIUserRouter.Use(middleware.RouteTag("relay"))
+		novelAIUserRouter.Use(middleware.TokenAuth())
+		novelAIUserRouter.GET(relayconstant.NovelAIUserSubscriptionPath, controller.GetNovelAISubscription)
+		novelAIUserRouter.GET(relayconstant.NovelAIUserDataPath, controller.GetNovelAIUserData)
 	}
 
 	geminiRouter := router.Group("/v1beta/models")
@@ -131,6 +143,9 @@ func SetRelayRouter(router *gin.Engine) {
 			controller.Relay(c, types.RelayFormatOpenAIImage)
 		})
 
+		// NovelAI native image routes, for clients whose NovelAI base URL ends in /v1
+		registerNovelAIImageRoutes(httpRouter)
+
 		// embedding related routes
 		httpRouter.POST("/embeddings", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatEmbedding)
@@ -180,6 +195,17 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter.DELETE("/models/:model", controller.RelayNotImplemented)
 	}
 
+	// NovelAI native image routes at NovelAI's own paths, behind the same
+	// chain as the /v1 relay routes. Other /ai/* paths stay unregistered and
+	// answer 404, so nothing reaches an upstream unbilled.
+	novelAIRouter := router.Group("")
+	novelAIRouter.Use(middleware.RouteTag("relay"))
+	novelAIRouter.Use(middleware.SystemPerformanceCheck())
+	novelAIRouter.Use(middleware.TokenAuth())
+	novelAIRouter.Use(middleware.ModelRequestRateLimit())
+	novelAIRouter.Use(middleware.Distribute(), middleware.PerModelRequestRateLimit())
+	registerNovelAIImageRoutes(novelAIRouter)
+
 	relayMjRouter := router.Group("/mj")
 	relayMjRouter.Use(middleware.RouteTag("relay"))
 	relayMjRouter.Use(middleware.SystemPerformanceCheck())
@@ -211,6 +237,14 @@ func SetRelayRouter(router *gin.Engine) {
 		// Gemini API 路径格式: /v1beta/models/{model_name}:{action}
 		relayGeminiRouter.POST("/models/*path", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatGemini)
+		})
+	}
+}
+
+func registerNovelAIImageRoutes(group *gin.RouterGroup) {
+	for _, path := range []string{relayconstant.NovelAIGenerateImagePath, relayconstant.NovelAIGenerateImageStreamPath} {
+		group.POST(path, func(c *gin.Context) {
+			controller.Relay(c, relayconstant.RelayFormatNovelAI)
 		})
 	}
 }

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,8 @@ func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 		err = relay.AlphaSearchHelper(c, info)
 	case relayconstant.RelayModeToolsSearch, relayconstant.RelayModeToolsFetch:
 		err = relay.DeepSeekToolsHelper(c, info)
+	case relayconstant.RelayModeNovelAIGenerateImage, relayconstant.RelayModeNovelAIGenerateImageStream:
+		err = relay.NovelAIImageHelper(c, info)
 	default:
 		err = relay.TextHelper(c, info)
 	}
@@ -107,6 +110,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			} else {
 				logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			}
+			// Taken before SetMessage replaces the wrapped error.
+			var novelAIUpstream *relay.NovelAIUpstreamError
+			if relayFormat == relayconstant.RelayFormatNovelAI {
+				errors.As(newAPIError, &novelAIUpstream)
+			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			upstreamURLs := common.UpstreamAddresses(c)
 			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() {
@@ -141,6 +149,24 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				c.JSON(newAPIError.StatusCode, gin.H{
 					"type":  "error",
 					"error": newAPIError.ToClaudeError(upstreamURLs...),
+				})
+			case relayconstant.RelayFormatNovelAI:
+				// An upstream failure reaches the client as upstream sent it
+				// (under the channel's status code mapping); new-api's own
+				// errors use the NovelAI error shape.
+				if novelAIUpstream != nil {
+					// c.Data keeps a Content-Type already set, such as the
+					// JSON default above, so the upstream one is set first.
+					contentType := cmp.Or(novelAIUpstream.ContentType, "application/json; charset=utf-8")
+					c.Header("Content-Type", contentType)
+					c.Data(newAPIError.StatusCode, contentType, novelAIUpstream.Body)
+					break
+				}
+				// The message set above, request id included, for every
+				// error type.
+				c.JSON(newAPIError.StatusCode, gin.H{
+					"statusCode": newAPIError.StatusCode,
+					"message":    newAPIError.MaskSensitiveError(upstreamURLs...),
 				})
 			default:
 				c.JSON(newAPIError.StatusCode, gin.H{

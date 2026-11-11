@@ -88,7 +88,7 @@ func TestWebRouterMissingChunkIs404NotIndexHTML(t *testing.T) {
 func TestWebRouterAPIMissesAreJSON404WithoutCache(t *testing.T) {
 	engine := newWebRouterTest(t)
 
-	for _, path := range []string{"/api/nope", "/v1/nope", "/assets/old.js"} {
+	for _, path := range []string{"/api/nope", "/v1/nope", "/assets/old.js", "/ai/upscale", "/v1/ai/upscale"} {
 		response := performWebRequest(engine, path, "192.0.2.12:1234", nil)
 		assert.Equal(t, http.StatusNotFound, response.Code, path)
 		assert.Contains(t, response.Header().Get("Cache-Control"), "no-store", path)
