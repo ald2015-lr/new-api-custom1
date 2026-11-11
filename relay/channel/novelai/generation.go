@@ -104,6 +104,8 @@ type Generation struct {
 	Height int
 	// NSamples is the number of images NovelAI is asked for.
 	NSamples int
+	// Steps is the number of sampling steps, which a stream previews.
+	Steps int
 	// Seed is the seed of the first image; NovelAI uses Seed+i for image i.
 	Seed int64
 	// Prompt is the final positive prompt (input), presets included.
@@ -502,6 +504,7 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		Width:       width,
 		Height:      height,
 		NSamples:    nSamples,
+		Steps:       int(steps),
 		Seed:        seed,
 		Prompt:      prompt,
 		ImageFormat: imageFormat,

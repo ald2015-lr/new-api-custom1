@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -29,6 +31,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -74,14 +77,42 @@ func TestAdaptorRequestURLs(t *testing.T) {
 	}
 
 	converted := &Adaptor{generation: &Generation{}}
-	for _, relayMode := range []int{relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits} {
-		requestURL, err := converted.GetRequestURL(&relaycommon.RelayInfo{RelayMode: relayMode, ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "http://10.0.0.2:3585/"}})
+	streamed := &Adaptor{generation: &Generation{}, streamed: true}
+	for _, relayMode := range []int{relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits, relayconstant.RelayModeChatCompletions} {
+		info := &relaycommon.RelayInfo{RelayMode: relayMode, ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "http://10.0.0.2:3585/", ApiKey: "pst-key"}}
+		requestURL, err := converted.GetRequestURL(info)
 		require.NoError(t, err)
 		assert.Equal(t, "http://10.0.0.2:3585/ai/generate-image", requestURL)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+		c.Request.Header.Set("Accept", "application/json")
+		header := http.Header{}
+		require.NoError(t, converted.SetupRequestHeader(c, &header, info))
+		assert.Equal(t, "application/json", header.Get("Content-Type"))
+		assert.Empty(t, header.Values("Accept"), "NovelAI answers its default zip")
+		assert.Equal(t, "Bearer pst-key", header.Get("Authorization"))
+
+		if relayMode == relayconstant.RelayModeChatCompletions {
+			// Chat asks NovelAI for the whole answer, whatever its stream.
+			continue
+		}
+		// An images stream on a model that streams asks for NovelAI's events.
+		requestURL, err = streamed.GetRequestURL(info)
+		require.NoError(t, err)
+		assert.Equal(t, "http://10.0.0.2:3585/ai/generate-image-stream", requestURL)
+		header = http.Header{}
+		require.NoError(t, streamed.SetupRequestHeader(c, &header, info))
+		assert.Equal(t, "text/event-stream", header.Get("Accept"))
 	}
+	stream := (&Generation{Body: map[string]any{"parameters": map[string]any{"steps": 23}}}).RequestBody(true)
+	assert.Equal(t, "sse", stream["parameters"].(map[string]any)["stream"])
+	_, err := adaptor.ConvertOpenAIRequest(nil, &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeCompletions}, &dto.GeneralOpenAIRequest{})
+	var completionErr *types.NewAPIError
+	require.ErrorAs(t, err, &completionErr)
+	assert.Equal(t, i18n.Translate("", i18n.MsgNovelAIChannelNativeOnly), completionErr.Error())
 
 	// Pass-through bodies skip the conversions, so the URL refuses too.
-	_, err := adaptor.GetRequestURL(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesGenerations, ChannelMeta: &relaycommon.ChannelMeta{}})
+	_, err = adaptor.GetRequestURL(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesGenerations, ChannelMeta: &relaycommon.ChannelMeta{}})
 	var apiErr *types.NewAPIError
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
@@ -874,4 +905,582 @@ func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 	require.NoError(t, err, "a closed response frees the slot")
 	require.NoError(t, second.Body.Close())
 	assert.Equal(t, int32(2), requests.Load())
+}
+
+// sseEvents is NovelAI's /ai/generate-image-stream answer in SSE mode.
+func sseEvents(t *testing.T, events ...map[string]any) string {
+	t.Helper()
+	var body strings.Builder
+	for _, event := range events {
+		fmt.Fprintf(&body, "event: %s\ndata: %s\n\n", event["event_type"], mustMarshal(t, event))
+	}
+	return body.String()
+}
+
+// streamedEvent is one event an OpenAI image stream client received.
+type streamedEvent struct {
+	name string
+	data map[string]any
+}
+
+// streamedEvents splits an SSE response into its events; a data-only event
+// (an error chunk, [DONE]) has no name.
+func streamedEvents(t *testing.T, body string) []streamedEvent {
+	t.Helper()
+	var events []streamedEvent
+	for block := range strings.SplitSeq(body, "\n\n") {
+		var event streamedEvent
+		for line := range strings.SplitSeq(block, "\n") {
+			if name, ok := strings.CutPrefix(line, "event: "); ok {
+				event.name = name
+			}
+			if data, ok := strings.CutPrefix(line, "data: "); ok {
+				if data == "[DONE]" {
+					event.data = map[string]any{"[DONE]": true}
+					continue
+				}
+				require.NoError(t, common.UnmarshalJsonStr(data, &event.data), data)
+			}
+		}
+		if event.data != nil {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+// imageStreamContext is a stream: true images request whose NovelAI answer
+// is body, reserved at count images per call.
+func imageStreamContext(t *testing.T, body, contentType string, count int) (*gin.Context, *httptest.ResponseRecorder, *http.Response, *relaycommon.RelayInfo) {
+	t.Helper()
+	savedTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = savedTimeout })
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(body))}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: true, RelayFormat: types.RelayFormatOpenAIImage}
+	info.PriceData.UsePrice = true
+	info.PriceData.AddOtherRatio("n", float64(count))
+	return c, recorder, resp, info
+}
+
+// cancelAfterWriter is a client that leaves once it received needle.
+type cancelAfterWriter struct {
+	gin.ResponseWriter
+	needle string
+	cancel context.CancelFunc
+}
+
+func (w *cancelAfterWriter) Write(data []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(data)
+	if strings.Contains(string(data), w.needle) {
+		w.cancel()
+	}
+	return n, err
+}
+
+func (w *cancelAfterWriter) WriteString(data string) (int, error) {
+	return w.Write([]byte(data))
+}
+
+// failingWriter is a client whose connection broke.
+type failingWriter struct {
+	gin.ResponseWriter
+	attempts int
+}
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	w.attempts++
+	return 0, errors.New("broken pipe")
+}
+
+func (w *failingWriter) WriteString(data string) (int, error) {
+	return w.Write([]byte(data))
+}
+
+// An images stream relays NovelAI's SSE as OpenAI's events: at most
+// partial_images previews of sample 0, evenly spaced over the steps (here 4
+// steps and 2 partials: after steps 2 and 3), reported with their own format
+// and size; one completed event per final in sample order whatever order
+// NovelAI finished them in, with the seed of each image and the usage on the
+// last only; no [DONE]. The billed count becomes the completed events once
+// NovelAI ended the stream: an error event after 200, a duplicate final or a
+// stream that ends early bills the images delivered (those after a missing
+// one included) and ends with an error chunk; an error before any image
+// fails the request, which bills nothing; a client that leaves keeps the
+// reservation. V3, which cannot stream, answers whole and gets completed
+// events only, named for edits on /v1/images/edits.
+func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	red := testImage(16, 16, solid(color.NRGBA{R: 255, A: 255}))
+	blue := testImage(16, 16, solid(color.NRGBA{B: 255, A: 255}))
+	encode := base64.StdEncoding.EncodeToString
+	// preview is a JPEG whose size names its sample and step: (8 + sample)
+	// x (step + 1).
+	preview := func(sample, step int) string {
+		var buffer bytes.Buffer
+		require.NoError(t, jpeg.Encode(&buffer, image.NewRGBA(image.Rect(0, 0, 8+sample, step+1)), nil))
+		return encode(buffer.Bytes())
+	}
+	intermediate := func(sample, step int) map[string]any {
+		return map[string]any{"event_type": "intermediate", "samp_ix": sample, "step_ix": step, "gen_id": 7, "sigma": 1.5, "image": preview(sample, step)}
+	}
+	final := func(sample int, data []byte) map[string]any {
+		return map[string]any{"event_type": "final", "samp_ix": sample, "gen_id": 7, "image": encode(data)}
+	}
+	failure := map[string]any{"event_type": "error", "code": 500, "message": "Error generating image, an internal error occurred"}
+	generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 2, Extras: map[string]json.RawMessage{"steps": raw("4"), "seed": raw("100")}})
+	require.Nil(t, apiErr)
+	output := ImageOutput{OutputFormat: formatPNG, Background: "opaque", PartialImages: 2, Quality: "auto", Event: "image_generation"}
+	promptTokens := generation.Usage().PromptTokens
+	completed := func(t *testing.T, event streamedEvent, want []byte, seed float64, last bool) {
+		t.Helper()
+		assert.Equal(t, "image_generation.completed", event.name)
+		assert.Equal(t, event.name, event.data["type"])
+		got, err := base64.StdEncoding.DecodeString(event.data["b64_json"].(string))
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+		assert.Equal(t, seed, event.data["seed"])
+		assert.Equal(t, "png", event.data["output_format"])
+		assert.Equal(t, "1024x1024", event.data["size"])
+		assert.Equal(t, "auto", event.data["quality"])
+		assert.Equal(t, "opaque", event.data["background"])
+		usage := event.data["usage"].(map[string]any)
+		if last {
+			assert.Equal(t, float64(promptTokens), usage["input_tokens"])
+			assert.Equal(t, float64(promptTokens), usage["total_tokens"])
+		} else {
+			assert.Zero(t, usage["input_tokens"], "the usage counts once, on the last image")
+		}
+		assert.Zero(t, usage["output_tokens"])
+	}
+	errorChunk := func(t *testing.T, events []streamedEvent, message string) {
+		t.Helper()
+		require.GreaterOrEqual(t, len(events), 2)
+		chunk := events[len(events)-2]
+		assert.Empty(t, chunk.name)
+		require.Contains(t, chunk.data, "error")
+		assert.Contains(t, chunk.data["error"].(map[string]any)["message"], message)
+		assert.Equal(t, map[string]any{"[DONE]": true}, events[len(events)-1].data)
+	}
+
+	t.Run("partials from sample 0, completed in sample order", func(t *testing.T) {
+		body := sseEvents(t, intermediate(0, 0), intermediate(1, 0), intermediate(0, 1), intermediate(1, 1), intermediate(1, 2), intermediate(0, 2), intermediate(0, 3), final(1, blue), final(0, red))
+		c, recorder, resp, info := imageStreamContext(t, body, "text/event-stream", 2)
+
+		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
+
+		require.Nil(t, apiErr)
+		assert.Equal(t, promptTokens, usage.PromptTokens)
+		assert.Zero(t, usage.CompletionTokens)
+		assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+		events := streamedEvents(t, recorder.Body.String())
+		require.Len(t, events, 4, recorder.Body.String())
+		for i, event := range events[:2] {
+			assert.Equal(t, "image_generation.partial_image", event.name)
+			assert.Equal(t, float64(i), event.data["partial_image_index"])
+			assert.Equal(t, preview(0, i+1), event.data["b64_json"], "sample 0 after steps 2 and 3")
+			assert.Equal(t, "jpeg", event.data["output_format"], "the preview's own format")
+			assert.Equal(t, fmt.Sprintf("8x%d", i+2), event.data["size"], "the preview's own size")
+		}
+		completed(t, events[2], red, 100, false)
+		completed(t, events[3], blue, 101, true)
+		assert.NotContains(t, recorder.Body.String(), "[DONE]", "OpenAI image streams send no [DONE]")
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
+		assert.Contains(t, []relaycommon.StreamEndReason{relaycommon.StreamEndReasonDone, relaycommon.StreamEndReasonEOF}, info.StreamStatus.EndReason)
+		assert.False(t, info.StreamStatus.ResponseFailed())
+	})
+
+	// The stream of a forwarder that labels it otherwise is still read as one.
+	t.Run("no partials unless asked", func(t *testing.T) {
+		body := sseEvents(t, intermediate(0, 0), intermediate(0, 1), intermediate(0, 2), final(0, red), final(1, blue))
+		c, recorder, resp, info := imageStreamContext(t, body, "application/octet-stream", 2)
+		withoutPartials := output
+		withoutPartials.PartialImages = 0
+
+		_, apiErr := imagesStreamResponse(c, resp, info, generation, withoutPartials)
+
+		require.Nil(t, apiErr)
+		events := streamedEvents(t, recorder.Body.String())
+		require.Len(t, events, 2)
+		completed(t, events[0], red, 100, false)
+		completed(t, events[1], blue, 101, true)
+	})
+
+	// An image sent in order before the failure went out as not the last,
+	// without the usage; one held back for a missing sample goes out last,
+	// with it.
+	for _, tc := range []struct {
+		name      string
+		events    []map[string]any
+		want      [][]byte
+		seeds     []float64
+		withUsage bool
+		message   string
+	}{
+		{"an error event after 200 bills the images delivered", []map[string]any{final(0, red), failure}, [][]byte{red}, []float64{100}, false, "Error generating image, an internal error occurred"},
+		{"a stream that ends early bills the images that arrived", []map[string]any{intermediate(0, 0), final(1, blue)}, [][]byte{blue}, []float64{101}, true, "ended after 1 of 2 images"},
+		{"a duplicate final breaks the stream", []map[string]any{final(0, red), final(0, blue)}, [][]byte{red}, []float64{100}, false, "already finished"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, recorder, resp, info := imageStreamContext(t, sseEvents(t, tc.events...), "text/event-stream", 2)
+
+			usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			events := streamedEvents(t, recorder.Body.String())
+			require.Len(t, events, len(tc.want)+2, recorder.Body.String())
+			for i, want := range tc.want {
+				completed(t, events[i], want, tc.seeds[i], tc.withUsage && i == len(tc.want)-1)
+			}
+			errorChunk(t, events, tc.message)
+			assert.Equal(t, float64(len(tc.want)), info.PriceData.OtherRatios()["n"])
+			assert.True(t, info.StreamStatus.ResponseFailed())
+		})
+	}
+
+	t.Run("an error before any image fails the request", func(t *testing.T) {
+		c, recorder, resp, info := imageStreamContext(t, sseEvents(t, intermediate(0, 0), failure), "text/event-stream", 2)
+
+		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
+
+		require.NotNil(t, apiErr)
+		assert.Nil(t, usage)
+		assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+		assert.True(t, types.IsSkipRetryError(apiErr), "NovelAI accepted the job")
+		assert.Contains(t, apiErr.Error(), "Error generating image, an internal error occurred")
+		assert.NotContains(t, recorder.Body.String(), "completed")
+	})
+
+	t.Run("a client that leaves keeps the reservation", func(t *testing.T) {
+		c, _, resp, info := imageStreamContext(t, sseEvents(t, final(0, red), final(1, blue)), "text/event-stream", 2)
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		t.Cleanup(cancel)
+		c.Request = c.Request.WithContext(ctx)
+		c.Writer = &cancelAfterWriter{ResponseWriter: c.Writer, needle: "completed", cancel: cancel}
+
+		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
+
+		require.Nil(t, apiErr)
+		require.NotNil(t, usage)
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
+	})
+
+	// NovelAI may still generate what a broken stream (a transport error, a
+	// timeout) was charged for: the reservation stays, and the client learns
+	// the stream was cut.
+	t.Run("a broken stream keeps the reservation", func(t *testing.T) {
+		c, recorder, resp, info := imageStreamContext(t, "", "text/event-stream", 2)
+		resp.Body = io.NopCloser(io.MultiReader(strings.NewReader(sseEvents(t, final(0, red))), iotest.ErrReader(errors.New("connection reset by peer"))))
+
+		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
+
+		require.Nil(t, apiErr)
+		require.NotNil(t, usage)
+		events := streamedEvents(t, recorder.Body.String())
+		require.Len(t, events, 3, recorder.Body.String())
+		completed(t, events[0], red, 100, false)
+		errorChunk(t, events, "upstream stream ended before the response was complete")
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
+		assert.Equal(t, relaycommon.StreamEndReasonScannerErr, info.StreamStatus.EndReason)
+	})
+
+	// A client whose connection broke is a client that left, even when
+	// NovelAI's stream ended before the failed write, and nothing more is
+	// written to it.
+	for _, event := range []map[string]any{intermediate(0, 3), final(0, red)} {
+		t.Run(fmt.Sprintf("a failed write of a %s event keeps the reservation", event["event_type"]), func(t *testing.T) {
+			c, _, _, info := imageStreamContext(t, "", "text/event-stream", 2)
+			writer := &failingWriter{ResponseWriter: c.Writer}
+			c.Writer = writer
+			info.StreamStatus = relaycommon.NewStreamStatus()
+			stream := &imageStream{c: c, info: info, generation: generation, output: output, usage: generation.Usage(),
+				received: make([]bool, generation.NSamples), pending: map[int]renderedImage{}}
+
+			stream.handle(string(mustMarshal(t, event)), &helper.StreamResult{})
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+			usage, apiErr := stream.finish()
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
+			assert.Equal(t, 1, writer.attempts, "one failed write, no retry")
+		})
+	}
+
+	t.Run("V3 answers whole: completed events from the zip", func(t *testing.T) {
+		v3, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-3", Prompt: "a cat", N: 3, Image: red, Extras: map[string]json.RawMessage{"seed": raw("100")}})
+		require.Nil(t, apiErr)
+		require.False(t, v3.Streamable)
+		var archive bytes.Buffer
+		writer := zip.NewWriter(&archive)
+		for i, data := range [][]byte{red, blue} {
+			entry, err := writer.Create(fmt.Sprintf("image_%d.png", i))
+			require.NoError(t, err)
+			_, err = entry.Write(data)
+			require.NoError(t, err)
+		}
+		require.NoError(t, writer.Close())
+		// NovelAI returned two of the three images reserved.
+		c, recorder, resp, info := imageStreamContext(t, archive.String(), "application/zip", 3)
+		edit := output
+		edit.Event = "image_edit"
+
+		usage, apiErr := imagesStreamResponse(c, resp, info, v3, edit)
+
+		require.Nil(t, apiErr)
+		assert.Equal(t, v3.Usage().PromptTokens, usage.PromptTokens)
+		events := streamedEvents(t, recorder.Body.String())
+		require.Len(t, events, 2, recorder.Body.String())
+		for i, event := range events {
+			assert.Equal(t, "image_edit.completed", event.name)
+			assert.Equal(t, v3.Size(), event.data["size"])
+			assert.Equal(t, float64(100+i), event.data["seed"])
+		}
+		assert.Zero(t, events[0].data["usage"].(map[string]any)["input_tokens"])
+		assert.Equal(t, float64(v3.Usage().PromptTokens), events[1].data["usage"].(map[string]any)["input_tokens"])
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "billed per image received")
+		assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	})
+}
+
+// chatContext is a chat completion whose raw body is body.
+func chatContext(t *testing.T, body string) (*gin.Context, *httptest.ResponseRecorder, *dto.GeneralOpenAIRequest) {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	request := &dto.GeneralOpenAIRequest{}
+	require.NoError(t, common.UnmarshalBodyReusable(c, request))
+	return c, recorder, request
+}
+
+// A chat completion generates from the text of the last user message only,
+// its text parts joined by newlines; the system prompt and the history,
+// which carries earlier images as base64, are left out. An image in that
+// message makes it img2img; n is the number of images and size the canvas.
+// NovelAI's extension keys come from the top level or extra_body, the top
+// level first.
+func TestChatGenerationIntent(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	source := testImage(32, 32, solid(color.NRGBA{G: 255, A: 255}))
+	dataURL := DataURL(source, formatPNG)
+	history := `{"role":"system","content":"You draw."},{"role":"user","content":"a dog"},{"role":"assistant","content":"![image](` + dataURL + `)"}`
+	for _, tc := range []struct {
+		name   string
+		body   string
+		prompt string
+		image  bool
+		n      int
+		size   string
+		extras map[string]string
+	}{
+		{"string content", `{"model":"nai-diffusion-4-5-full","messages":[` + history + `,{"role":"user","content":"1girl, smile"}]}`, "1girl, smile", false, 1, "", map[string]string{}},
+		{"text parts and an image", `{"model":"nai-diffusion-4-5-full","messages":[` + history + `,{"role":"user","content":[{"type":"text","text":"1girl"},{"type":"image_url","image_url":{"url":"` + dataURL + `"}},{"type":"text","text":"smile"}]}]}`, "1girl\nsmile", true, 1, "", map[string]string{}},
+		{"n, size, extension keys and extra_body", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"n":2,"size":"832x1216","seed":7,"steps":10,"extra_body":{"steps":20,"negative_prompt":"bad hands"},"temperature":0.5}`, "a cat", false, 2, "832x1216", map[string]string{"seed": "7", "steps": "10", "negative_prompt": `"bad hands"`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, request := chatContext(t, tc.body)
+
+			intent, apiErr := chatGenerationIntent(c, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}, request)
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, "nai-diffusion-4-5-full", intent.Model)
+			assert.Equal(t, tc.prompt, intent.Prompt)
+			assert.Equal(t, tc.n, intent.N)
+			assert.Equal(t, tc.size, intent.Size)
+			assert.Equal(t, formatPNG, intent.ImageFormat)
+			if tc.image {
+				assert.Equal(t, source, intent.Image)
+			} else {
+				assert.Nil(t, intent.Image)
+			}
+			extras := map[string]string{}
+			for key, value := range intent.Extras {
+				extras[key] = string(value)
+			}
+			assert.Equal(t, tc.extras, extras)
+		})
+	}
+
+	for _, tc := range []struct {
+		name, body, message string
+	}{
+		{"no user message", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"system","content":"a cat"}]}`, i18n.Translate("", i18n.MsgNovelAIChatPromptMissing)},
+		{"two images", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + dataURL + `"}},{"type":"image_url","image_url":"` + dataURL + `"}]}]}`, "the request carries 2"},
+		{"n above the image limit", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"n":129}`, "n must be between 1 and 128"},
+		{"a negative n", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"n":-1}`, "n must be between 1 and 128"},
+		{"an ambiguous key in extra_body", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"extra_body":{"cfg":5}}`, "cfg is not supported"},
+		{"an image that is not one", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,bm90IGFuIGltYWdl"}}]}]}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, request := chatContext(t, tc.body)
+
+			intent, apiErr := chatGenerationIntent(c, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}, request)
+			if apiErr == nil {
+				// An image is checked once the generation decodes it.
+				_, apiErr = BuildGeneration(c, intent)
+			}
+
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.Contains(t, apiErr.Error(), tc.message)
+		})
+	}
+}
+
+// A chat completion answers with the images as Markdown PNG data URLs (a
+// WebP NovelAI sent is transcoded: some chat clients drop other formats):
+// without stream, one assistant message; with stream, a role chunk, one
+// chunk per whole image, the stop chunk, the usage chunk unless the client
+// turned it off, and [DONE]. The usage is the prompt estimate with no
+// completion tokens, and the billed count the images sent. A 2xx without
+// images is a final 502, which on a stream follows the role chunk.
+func TestChatResponse(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	red := testImage(16, 16, solid(color.NRGBA{R: 255, A: 255}))
+	webp, err := base64.StdEncoding.DecodeString("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==")
+	require.NoError(t, err)
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for i, data := range [][]byte{red, webp} {
+		entry, err := writer.Create(fmt.Sprintf("image_%d.png", i))
+		require.NoError(t, err)
+		_, err = entry.Write(data)
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+	generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 2})
+	require.Nil(t, apiErr)
+	promptTokens := generation.Usage().PromptTokens
+	respond := func(t *testing.T, stream, includeUsage bool, body []byte) (*httptest.ResponseRecorder, *relaycommon.RelayInfo, *dto.Usage, *types.NewAPIError) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set(common.RequestIdKey, "req-1")
+		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "nai-diffusion-4-5-full"}, IsStream: stream, ShouldIncludeUsage: includeUsage}
+		info.PriceData.UsePrice = true
+		info.PriceData.AddOtherRatio("n", 3)
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/zip"}}, Body: io.NopCloser(bytes.NewReader(body))}
+		usage, apiErr := chatResponse(c, resp, info, generation)
+		return recorder, info, usage, apiErr
+	}
+	// markdownPNGs reads the Markdown images of content back as PNGs.
+	markdownPNGs := func(t *testing.T, content string) [][]byte {
+		t.Helper()
+		var images [][]byte
+		for part := range strings.SplitSeq(content, "\n\n") {
+			encoded, ok := strings.CutPrefix(part, "![image](data:image/png;base64,")
+			require.True(t, ok, part[:min(len(part), 40)])
+			encoded, ok = strings.CutSuffix(encoded, ")")
+			require.True(t, ok)
+			data, err := base64.StdEncoding.DecodeString(encoded)
+			require.NoError(t, err)
+			require.Equal(t, formatPNG, SniffImageFormat(data))
+			images = append(images, data)
+		}
+		return images
+	}
+
+	t.Run("non-stream: one message with every image", func(t *testing.T) {
+		recorder, info, usage, apiErr := respond(t, false, true, archive.Bytes())
+
+		require.Nil(t, apiErr)
+		assert.Equal(t, &dto.Usage{PromptTokens: promptTokens, TotalTokens: promptTokens}, usage)
+		assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+		var response struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Model   string `json:"model"`
+			Choices []struct {
+				Index        int    `json:"index"`
+				FinishReason string `json:"finish_reason"`
+				Message      struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		assert.Equal(t, "chatcmpl-req-1", response.ID)
+		assert.Equal(t, "chat.completion", response.Object)
+		assert.Equal(t, "nai-diffusion-4-5-full", response.Model)
+		require.Len(t, response.Choices, 1)
+		assert.Equal(t, "stop", response.Choices[0].FinishReason)
+		assert.Equal(t, "assistant", response.Choices[0].Message.Role)
+		images := markdownPNGs(t, response.Choices[0].Message.Content)
+		require.Len(t, images, 2)
+		assert.Equal(t, red, images[0])
+		assert.Equal(t, [3]int{promptTokens, 0, promptTokens}, [3]int{response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens})
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "billed per image received")
+	})
+
+	for _, includeUsage := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stream, include_usage %t", includeUsage), func(t *testing.T) {
+			recorder, info, usage, apiErr := respond(t, true, includeUsage, archive.Bytes())
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, promptTokens, usage.PromptTokens)
+			assert.Zero(t, usage.CompletionTokens)
+			assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+			events := streamedEvents(t, recorder.Body.String())
+			wantEvents := 6
+			if !includeUsage {
+				wantEvents = 5
+			}
+			require.Len(t, events, wantEvents, recorder.Body.String())
+			for _, event := range events[:len(events)-1] {
+				assert.Equal(t, "chat.completion.chunk", event.data["object"])
+				assert.Equal(t, "chatcmpl-req-1", event.data["id"])
+				assert.Equal(t, "nai-diffusion-4-5-full", event.data["model"])
+			}
+			delta := func(i int) map[string]any {
+				return events[i].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+			}
+			assert.Equal(t, map[string]any{"role": "assistant", "content": ""}, delta(0))
+			first, second := delta(1)["content"].(string), delta(2)["content"].(string)
+			assert.Equal(t, [][]byte{red}, markdownPNGs(t, first), "one whole image per chunk")
+			require.True(t, strings.HasPrefix(second, "\n\n"))
+			assert.Len(t, markdownPNGs(t, strings.TrimPrefix(second, "\n\n")), 1)
+			assert.Equal(t, "stop", events[3].data["choices"].([]any)[0].(map[string]any)["finish_reason"])
+			if includeUsage {
+				chunkUsage := events[4].data["usage"].(map[string]any)
+				assert.Equal(t, float64(promptTokens), chunkUsage["prompt_tokens"])
+				assert.Zero(t, chunkUsage["completion_tokens"])
+				assert.Empty(t, events[4].data["choices"])
+			}
+			assert.Equal(t, map[string]any{"[DONE]": true}, events[len(events)-1].data)
+			assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
+			assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+		})
+	}
+
+	t.Run("a 2xx without images is final", func(t *testing.T) {
+		for _, stream := range []bool{false, true} {
+			recorder, info, usage, apiErr := respond(t, stream, true, []byte(`{"statusCode":500,"message":"Error generating image"}`))
+
+			require.NotNil(t, apiErr)
+			assert.Nil(t, usage)
+			assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.Equal(t, 3.0, info.PriceData.OtherRatios()["n"], "the failed request is refunded, not settled")
+			if stream {
+				events := streamedEvents(t, recorder.Body.String())
+				require.Len(t, events, 1, "the role chunk went out first")
+			} else {
+				assert.Empty(t, recorder.Body.String())
+			}
+		}
+	})
 }

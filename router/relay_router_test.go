@@ -634,10 +634,11 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 }
 
 // A NovelAI channel serves image generation only: on the NovelAI native
-// routes NovelAI's own 201 zip passes through as sent, while a chat request
-// for one of its models, or a search on a model the channel lists, is
-// rejected with a 400 before anything reaches NovelAI, and charges nothing
-// (TestNovelAIChannelConvertsOpenAIImages covers the OpenAI images routes).
+// routes NovelAI's own 201 zip passes through as sent, while a search on a
+// model the channel lists, or a chat request on a channel that passes
+// bodies through (which the conversion needs), is rejected with a 400
+// before anything reaches NovelAI, and charges nothing
+// (TestNovelAIChannelConvertsOpenAIImages covers the OpenAI routes).
 func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 	setupRelayRouterTestDB(t)
 	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
@@ -707,11 +708,10 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 	assert.Equal(t, 10_000_000-10_000, walletQuota(), "one image at $0.02")
 
 	nativeOnly := i18n.Translate("", i18n.MsgNovelAIChannelNativeOnly)
-	for _, rejected := range []struct{ path, body string }{
-		{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}]}`},
-		{"/v1/chat/completions", `{"model":"nai-diffusion-3","messages":[{"role":"user","content":"a cat"}]}`},
-		{"/v1/alpha/search", `{"model":"nai-diffusion-4-5-full","query":"a cat"}`},
-		{"/v1/tools/search", `{"query":"a cat"}`},
+	for _, rejected := range []struct{ path, body, message string }{
+		{"/v1/chat/completions", `{"model":"nai-diffusion-3","messages":[{"role":"user","content":"a cat"}]}`, i18n.Translate("", i18n.MsgNovelAIPassThroughUnsupported)},
+		{"/v1/alpha/search", `{"model":"nai-diffusion-4-5-full","query":"a cat"}`, nativeOnly},
+		{"/v1/tools/search", `{"query":"a cat"}`, nativeOnly},
 	} {
 		t.Run(rejected.path+" "+rejected.body, func(t *testing.T) {
 			calls, before := upstream.calls, walletQuota()
@@ -721,7 +721,7 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 			var payload map[string]map[string]any
 			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-			assert.Contains(t, payload["error"]["message"], nativeOnly)
+			assert.Contains(t, payload["error"]["message"], rejected.message)
 			assert.Equal(t, calls, upstream.calls, "nothing reaches NovelAI")
 			assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
 		})
@@ -737,9 +737,9 @@ type novelAIImagesUpstream struct {
 }
 
 type novelAIRecordedRequest struct {
-	path, authorization, contentType string
-	acceptSent                       bool
-	body                             map[string]any
+	path, authorization, contentType, accept string
+	acceptSent                               bool
+	body                                     map[string]any
 }
 
 type novelAIQueuedResponse struct {
@@ -754,7 +754,7 @@ func (u *novelAIImagesUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request
 	_ = common.Unmarshal(body, &decoded)
 	u.mu.Lock()
 	_, acceptSent := r.Header["Accept"]
-	u.requests = append(u.requests, novelAIRecordedRequest{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), acceptSent, decoded})
+	u.requests = append(u.requests, novelAIRecordedRequest{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Content-Type"), r.Header.Get("Accept"), acceptSent, decoded})
 	response := novelAIQueuedResponse{status: http.StatusInternalServerError, contentType: "application/json", body: []byte(`{"statusCode":500,"message":"no response queued"}`)}
 	if len(u.responses) > 0 {
 		response, u.responses = u.responses[0], u.responses[1:]
@@ -842,8 +842,12 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
 		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
 	})
+	// The streams' idle timeout, which the server's startup sets.
+	streamingTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = streamingTimeout })
 	// $0.02 per image, and $0.06 per image as an expression.
-	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-5-curated":0.02,"nai-diffusion-3":0.02,"nai-diffusion-4-full":0.02}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-5-curated":0.02,"nai-diffusion-3":0.02,"nai-diffusion-4-full":0.02,"nai-diffusion-furry-3":0.02,"nai-diffusion-4-curated-preview":0.02}`))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 		"billing_setting.billing_mode": `{"nai-diffusion-5-full":"tiered_expr"}`,
 		"billing_setting.billing_expr": `{"nai-diffusion-5-full":"tier(\"image\", fixed(0.06)) * image_count"}`,
@@ -857,9 +861,9 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	require.NoError(t, model.DB.Create(&user).Error)
 	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiopenaikey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
 	channel := model.Channel{Name: "novelai-official", Key: "pst-openai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full,nai-diffusion-5-curated", BaseURL: common.GetPointer(server.URL)}
+		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full,nai-diffusion-5-curated,nai-diffusion-furry-3", BaseURL: common.GetPointer(server.URL)}
 	require.NoError(t, model.DB.Create(&channel).Error)
-	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-5-full", "nai-diffusion-5-curated"} {
+	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-5-full", "nai-diffusion-5-curated", "nai-diffusion-furry-3"} {
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
 	}
 	// This channel makes NovelAI's prompt presets opt-in.
@@ -1108,6 +1112,306 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, "img2img", upstream.last().body["action"])
 	})
 
+	encode := base64.StdEncoding.EncodeToString
+	// sse is NovelAI's /ai/generate-image-stream answer.
+	sse := func(events ...map[string]any) []byte {
+		var body strings.Builder
+		for _, event := range events {
+			data, err := common.Marshal(event)
+			require.NoError(t, err)
+			fmt.Fprintf(&body, "event: %s\ndata: %s\n\n", event["event_type"], data)
+		}
+		return []byte(body.String())
+	}
+	type streamedEvent struct {
+		name string
+		data map[string]any
+	}
+	// streamEvents reads an SSE response; [DONE] reads as {"[DONE]": true}.
+	streamEvents := func(recorder *httptest.ResponseRecorder) []streamedEvent {
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+		var events []streamedEvent
+		for block := range strings.SplitSeq(recorder.Body.String(), "\n\n") {
+			var event streamedEvent
+			for line := range strings.SplitSeq(block, "\n") {
+				if name, ok := strings.CutPrefix(line, "event: "); ok {
+					event.name = name
+				}
+				if data, ok := strings.CutPrefix(line, "data: "); ok {
+					if data == "[DONE]" {
+						event.data = map[string]any{"[DONE]": true}
+						continue
+					}
+					require.NoError(t, common.UnmarshalJsonStr(data, &event.data), data)
+				}
+			}
+			if event.data != nil {
+				events = append(events, event)
+			}
+		}
+		return events
+	}
+
+	t.Run("stream generation relays NovelAI's events, billed per completed image", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "text/event-stream", sse(
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 10, "image": encode(blue)},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 11, "image": encode(blue)},
+			map[string]any{"event_type": "final", "samp_ix": 0, "image": encode(red)},
+			map[string]any{"event_type": "final", "samp_ix": 1, "image": encode(blue)},
+		))
+		before := walletQuota()
+
+		events := streamEvents(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"a cat","n":2,"stream":true,"partial_images":1,"quality":"high"}`)))
+
+		require.Len(t, events, 3)
+		assert.Equal(t, []string{"image_generation.partial_image", "image_generation.completed", "image_generation.completed"}, []string{events[0].name, events[1].name, events[2].name})
+		assert.Equal(t, float64(0), events[0].data["partial_image_index"])
+		assert.Equal(t, encode(red), events[1].data["b64_json"])
+		assert.Equal(t, "high", events[1].data["quality"])
+		assert.Equal(t, "1024x1024", events[1].data["size"])
+		sent := upstream.last()
+		assert.Equal(t, "/ai/generate-image-stream", sent.path)
+		assert.Equal(t, "text/event-stream", sent.accept)
+		assert.Equal(t, "sse", sent.body["parameters"].(map[string]any)["stream"])
+		log := lastLog()
+		assert.Equal(t, 20_000, log.Quota, "two images at $0.02")
+		assert.Contains(t, log.Content, "Image count 2")
+		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", sent.body["input"].(string)), log.PromptTokens)
+		assert.Zero(t, log.CompletionTokens)
+		assert.Equal(t, float64(log.PromptTokens), events[2].data["usage"].(map[string]any)["input_tokens"], "the usage on the last image")
+		assert.Zero(t, events[1].data["usage"].(map[string]any)["input_tokens"])
+		assert.Equal(t, before-20_000, walletQuota())
+	})
+
+	t.Run("a stream error after 200 bills the images delivered, before any image nothing", func(t *testing.T) {
+		failure := map[string]any{"event_type": "error", "code": 500, "message": "Error generating image, an internal error occurred"}
+		upstream.queue(http.StatusOK, "text/event-stream", sse(map[string]any{"event_type": "final", "samp_ix": 0, "image": encode(red)}, failure))
+		before := walletQuota()
+
+		events := streamEvents(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"a cat","n":2,"stream":true}`)))
+
+		require.Len(t, events, 3)
+		assert.Equal(t, "image_generation.completed", events[0].name)
+		assert.Contains(t, events[1].data["error"].(map[string]any)["message"], "Error generating image, an internal error occurred")
+		assert.Equal(t, map[string]any{"[DONE]": true}, events[2].data)
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, before-10_000, walletQuota())
+
+		upstream.queue(http.StatusOK, "text/event-stream", sse(failure))
+		before, logged := walletQuota(), lastLog().Id
+
+		recorder := send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"a cat","stream":true}`))
+
+		require.Equal(t, http.StatusBadGateway, recorder.Code, recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), "Error generating image, an internal error occurred")
+		assert.Equal(t, logged, lastLog().Id, "nothing is billed")
+		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("a V3 stream edit answers whole, as image_edit events", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for key, value := range map[string]string{"model": "nai-diffusion-furry-3", "prompt": "a fox", "stream": "true", "partial_images": "2"} {
+			require.NoError(t, writer.WriteField(key, value))
+		}
+		part, err := writer.CreateFormFile("image", "source.png")
+		require.NoError(t, err)
+		_, err = part.Write(novelAIPNG(t, 64, 64, color.NRGBA{G: 200, A: 255}))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		events := streamEvents(send("/v1/images/edits", writer.FormDataContentType(), body.Bytes()))
+
+		require.Len(t, events, 1, "V3 has no previews")
+		assert.Equal(t, "image_edit.completed", events[0].name)
+		assert.Equal(t, "image_edit.completed", events[0].data["type"])
+		assert.Equal(t, encode(red), events[0].data["b64_json"])
+		sent := upstream.last()
+		assert.Equal(t, "/ai/generate-image", sent.path, "V3 cannot stream")
+		assert.Equal(t, "img2img", sent.body["action"])
+		assert.NotContains(t, sent.body["parameters"], "stream")
+		assert.False(t, sent.acceptSent)
+		assert.Equal(t, float64(lastLog().PromptTokens), events[0].data["usage"].(map[string]any)["input_tokens"])
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+	})
+
+	// chatContent reads the Markdown PNGs of an assistant message.
+	chatContent := func(content string) [][]byte {
+		var images [][]byte
+		for part := range strings.SplitSeq(strings.TrimPrefix(content, "\n\n"), "\n\n") {
+			encoded, ok := strings.CutPrefix(part, "![image](data:image/png;base64,")
+			require.True(t, ok, part[:min(len(part), 40)])
+			data, err := base64.StdEncoding.DecodeString(strings.TrimSuffix(encoded, ")"))
+			require.NoError(t, err)
+			images = append(images, data)
+		}
+		return images
+	}
+
+	t.Run("chat generates from the last user message and its image, Markdown PNGs billed per image", func(t *testing.T) {
+		upstream.queue(http.StatusCreated, "application/zip", novelAIZip(t, red, blue))
+		before := walletQuota()
+		// The history carries an earlier image as Markdown base64.
+		body := `{"model":"nai-diffusion-4-5-full","n":2,"temperature":0.7,"negative_prompt":"bad hands","messages":[` +
+			`{"role":"system","content":"You draw."},{"role":"user","content":"a dog"},{"role":"assistant","content":"![image](data:image/png;base64,` + encode(source) + `)"},` +
+			`{"role":"user","content":[{"type":"text","text":"1girl, cat ears"},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + encode(source) + `"}}]}]}`
+
+		recorder := send("/v1/chat/completions", "application/json", []byte(body))
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		var response struct {
+			Object  string `json:"object"`
+			Model   string `json:"model"`
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+				Message      struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				TotalTokens      int `json:"total_tokens"`
+			} `json:"usage"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		assert.Equal(t, "chat.completion", response.Object)
+		assert.Equal(t, "nai-diffusion-4-5-full", response.Model)
+		require.Len(t, response.Choices, 1)
+		assert.Equal(t, "assistant", response.Choices[0].Message.Role)
+		assert.Equal(t, "stop", response.Choices[0].FinishReason)
+		assert.Equal(t, [][]byte{red, blue}, chatContent(response.Choices[0].Message.Content))
+		sent := upstream.last()
+		assert.Equal(t, "/ai/generate-image", sent.path)
+		assert.False(t, sent.acceptSent)
+		assert.Equal(t, "img2img", sent.body["action"])
+		assert.Equal(t, "1girl, cat ears, very aesthetic, masterpiece, no text", sent.body["input"], "the last user message, not the history")
+		parameters := sent.body["parameters"].(map[string]any)
+		assert.Equal(t, float64(2), parameters["n_samples"])
+		assert.Contains(t, parameters["negative_prompt"], ", bad hands")
+		assert.NotEmpty(t, parameters["image"])
+		log := lastLog()
+		assert.Equal(t, "nai-diffusion-4-5-full", log.ModelName)
+		assert.Equal(t, 20_000, log.Quota, "two images at $0.02: the n multiplier counts once")
+		assert.Contains(t, log.Content, "Image count 2")
+		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", sent.body["input"].(string)), log.PromptTokens, "the final prompt's estimate, not the history's")
+		assert.Zero(t, log.CompletionTokens, "the images are not counted as text")
+		assert.Equal(t, [3]int{log.PromptTokens, 0, log.PromptTokens}, [3]int{response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens})
+		assert.Equal(t, before-20_000, walletQuota())
+	})
+
+	t.Run("chat stream settles by expression, one chunk per image", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red, blue))
+		before := walletQuota()
+
+		events := streamEvents(send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-5-full","stream":true,"stream_options":{"include_usage":true},"n":2,"messages":[{"role":"user","content":"a fox"}]}`)))
+
+		require.Len(t, events, 6)
+		delta := func(i int) map[string]any {
+			return events[i].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+		}
+		assert.Equal(t, "assistant", delta(0)["role"])
+		assert.Equal(t, [][]byte{red}, chatContent(delta(1)["content"].(string)))
+		assert.Equal(t, [][]byte{blue}, chatContent(delta(2)["content"].(string)))
+		assert.Equal(t, "stop", events[3].data["choices"].([]any)[0].(map[string]any)["finish_reason"])
+		log := lastLog()
+		assert.Equal(t, float64(log.PromptTokens), events[4].data["usage"].(map[string]any)["prompt_tokens"])
+		assert.Zero(t, events[4].data["usage"].(map[string]any)["completion_tokens"])
+		assert.Equal(t, map[string]any{"[DONE]": true}, events[5].data)
+		assert.Equal(t, "/ai/generate-image", upstream.last().path, "chat asks NovelAI for the whole answer")
+		assert.Equal(t, 60_000, log.Quota, "two images at $0.06")
+		var other map[string]any
+		require.NoError(t, common.Unmarshal([]byte(log.Other), &other))
+		assert.Equal(t, float64(2), other["image_count"])
+		assert.Equal(t, "tiered_expr", other["billing_mode"])
+		assert.Contains(t, log.Content, "Image count 2")
+		assert.Zero(t, log.CompletionTokens)
+		assert.Equal(t, before-60_000, walletQuota())
+	})
+
+	t.Run("a one-image chat stream without usage costs one call", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		before := walletQuota()
+
+		events := streamEvents(send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","stream":true,"stream_options":{"include_usage":false},"messages":[{"role":"user","content":"a fox"}]}`)))
+
+		require.Len(t, events, 4, "role, image, stop, [DONE]")
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	// A chat's images are reserved before NovelAI is asked for them, so a
+	// wallet that covers one image cannot be charged for two afterwards.
+	t.Run("a chat reserves its images before the send", func(t *testing.T) {
+		poor := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-poor", AffCode: "novelai-poor", Status: common.UserStatusEnabled, Group: "default", Quota: 15_000}
+		require.NoError(t, model.DB.Create(&poor).Error)
+		require.NoError(t, model.DB.Create(&model.Token{UserId: poor.Id, Key: "novelaipoorkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+		chat := func(n int) *httptest.ResponseRecorder {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":"nai-diffusion-4-5-full","n":%d,"messages":[{"role":"user","content":"a fox"}]}`, n)))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer novelaipoorkey")
+			engine.ServeHTTP(recorder, request)
+			return recorder
+		}
+		poorQuota := func() int {
+			quota, err := model.GetUserQuota(poor.Id, true)
+			require.NoError(t, err)
+			return quota
+		}
+		calls := upstream.calls()
+
+		recorder := chat(2)
+
+		assert.NotEqual(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, calls, upstream.calls(), "NovelAI is not asked for images the wallet cannot pay")
+		assert.Eventually(t, func() bool { return poorQuota() == 15_000 }, 5*time.Second, 10*time.Millisecond)
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		require.Equal(t, http.StatusOK, chat(1).Code)
+		assert.Eventually(t, func() bool { return poorQuota() == 5_000 }, 5*time.Second, 10*time.Millisecond)
+	})
+
+	// A chat whose NovelAI attempt reserved its images and failed before
+	// NovelAI took it is retried on another channel as a plain chat call.
+	t.Run("a chat retried on another channel is billed as one call there", func(t *testing.T) {
+		retryTimes := common.RetryTimes
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = retryTimes })
+		forwarder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"nai-diffusion-4-curated-preview","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`))
+		}))
+		t.Cleanup(forwarder.Close)
+		for priority, channelType := range map[int64]int{10: constant.ChannelTypeNovelAI, 0: constant.ChannelTypeOpenAI} {
+			baseURL := server.URL
+			if channelType == constant.ChannelTypeOpenAI {
+				baseURL = forwarder.URL
+			}
+			retried := model.Channel{Name: "novelai-retry", Key: "pst-retry", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-curated-preview", BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0)}
+			require.NoError(t, model.DB.Create(&retried).Error)
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: retried.Id, Model: "nai-diffusion-4-curated-preview", Group: "default", Enabled: true, Priority: &priority}).Error)
+		}
+		upstream.queue(http.StatusTooManyRequests, "application/json", []byte(`{"statusCode":429,"message":"Concurrent generation is locked"}`))
+		calls, before := upstream.calls(), walletQuota()
+
+		recorder := send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-4-curated-preview","n":2,"messages":[{"role":"user","content":"a fox"}]}`))
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), `"content":"done"`)
+		assert.Equal(t, calls+1, upstream.calls(), "NovelAI was tried first")
+		log := lastLog()
+		assert.Equal(t, 10_000, log.Quota, "one call at $0.02, not the two images NovelAI was asked for")
+		assert.NotContains(t, log.Content, "Image count")
+		assert.Eventually(t, func() bool { return walletQuota() == before-10_000 }, 5*time.Second, 10*time.Millisecond)
+	})
+
 	t.Run("requests NovelAI cannot serve are rejected before sending and charge nothing", func(t *testing.T) {
 		calls, before := upstream.calls(), walletQuota()
 		for _, tc := range []struct {
@@ -1121,12 +1425,15 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","svg":{"model":"x"}}`, "svg is not supported"},
 			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","cfg":5}`, "cfg is not supported"},
 			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","parameters":{"n_samples":2}}`, "parameters.n_samples must equal n (1)"},
-			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","stream":true}`, "stream is not supported"},
+			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","stream":true,"partial_images":4}`, "partial_images must be between 0 and 3"},
 			{"/v1/images/edits", `{"model":"nai-diffusion-4-5-full","prompt":"a cat"}`, "no image to edit"},
 			{"/v1/images/edits", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","images":[{"file_id":"file-1"}]}`, "file_id is not supported"},
 			{"/v1/images/edits", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","images":[{"image_url":"data:image/png;base64,` + base64.StdEncoding.EncodeToString(source) + `"},{"image_url":"data:image/png;base64,` + base64.StdEncoding.EncodeToString(source) + `"}]}`, "the request carries 2"},
 			{"/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"a cat"}`, i18n.Translate("", i18n.MsgNovelAIPassThroughUnsupported)},
-			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}]}`, i18n.Translate("", i18n.MsgNovelAIChannelNativeOnly)},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-3","messages":[{"role":"user","content":"a cat"}]}`, i18n.Translate("", i18n.MsgNovelAIPassThroughUnsupported)},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"system","content":"a cat"}]}`, i18n.Translate("", i18n.MsgNovelAIChatPromptMissing)},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"n":5}`, "n must be at most 4 for 1024x1024 images"},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"extra_body":{"SMEA":true}}`, "SMEA is not supported"},
 		} {
 			recorder := send(tc.path, "application/json", []byte(tc.body))
 			require.Equal(t, http.StatusBadRequest, recorder.Code, tc.body+" -> "+recorder.Body.String())

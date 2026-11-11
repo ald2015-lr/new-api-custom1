@@ -24,6 +24,16 @@ import (
 
 func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
+	// An attempt on a NovelAI channel reserves the images of the chat
+	// (service.PrepareChatImageBilling); an attempt on any other channel
+	// bills the call once again.
+	info.BillingImageCount = nil
+	if info.ImageRequestCount > 0 {
+		if apiErr := service.PrepareChatImageBilling(c, info, 1); apiErr != nil {
+			return apiErr
+		}
+		info.ImageRequestCount = 0
+	}
 
 	textReq, ok := info.Request.(*dto.GeneralOpenAIRequest)
 	if !ok {
@@ -178,10 +188,16 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	var containAudioTokens = usage.(*dto.Usage).CompletionTokenDetails.AudioTokens > 0 || usage.(*dto.Usage).PromptTokensDetails.AudioTokens > 0
 	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
 
+	// A chat answered with generated images (a NovelAI channel) is billed
+	// per image, which the log shows as on the image routes.
+	var logContent []*common.Message
+	if info.ImageRequestCount > 0 {
+		logContent = append(logContent, common.NewMessage("Image count {{count}}", map[string]any{"count": settledImageCount(info)}))
+	}
 	if containAudioTokens && containsAudioRatios {
-		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), nil)
+		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), logContent)
 	} else {
-		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
 	}
 	return nil
 }

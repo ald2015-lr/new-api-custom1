@@ -54,7 +54,7 @@ novelai.field_repeated: "NovelAI 请求中的字段 {{.Field}} 只能出现一�
 novelai.parameters_invalid: "NovelAI 请求的 parameters 字段必须是 JSON 对象"
 novelai.n_samples_invalid: "parameters.n_samples 必须是 1 到 {{.Max}} 之间的整数"
 novelai.channel_unsupported: "所选渠道不支持 NovelAI 图片生成"
-novelai.channel_native_only: "NovelAI 渠道仅支持图片生成：POST /ai/generate-image、/ai/generate-image-stream、/v1/images/generations 和 /v1/images/edits"
+novelai.channel_native_only: "NovelAI 渠道仅支持图片生成：POST /ai/generate-image、/ai/generate-image-stream、/v1/images/generations、/v1/images/edits 和 /v1/chat/completions"
 novelai.field_unsupported: "NovelAI 渠道不支持 {{.Field}}"
 novelai.field_invalid: "{{.Field}} 的值无效"
 novelai.field_range: "{{.Field}} 必须在 {{.Min}} 到 {{.Max}} 之间"
@@ -76,6 +76,9 @@ novelai.characters_too_many: "模型 {{.Model}} 最多接受 {{.Max}} 个角色�
 novelai.pass_through_unsupported: "NovelAI 渠道会转换 OpenAI 格式的请求，不能透传请求体"
 novelai.no_image: "NovelAI 没有返回图片"
 novelai.account_busy: "该渠道的 NovelAI 账户正在进行另一次生成，请稍后再试"
+novelai.stream_failed: "NovelAI 中止了生成：{{.Error}}"
+novelai.stream_incomplete: "NovelAI 的流在 {{.Total}} 张图片中只返回了 {{.Count}} 张后结束"
+novelai.chat_prompt_missing: "对话中没有可作为图片提示词的用户消息"
 
 # 分组充值门槛消息
 group_access.topup_required: "分组 {{.Group}} 需要累计充值满 {{.Required}} 才能使用（当前累计 {{.Current}}）"

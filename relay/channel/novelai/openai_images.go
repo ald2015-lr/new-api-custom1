@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +37,13 @@ type ImageOutput struct {
 	// PartialImages is the number of partial images a stream asks for, 0
 	// to 3.
 	PartialImages int
+	// Quality is what stream events echo as quality: the request's when it
+	// is one OpenAI's events define, otherwise auto. NovelAI has no quality
+	// setting.
+	Quality string
+	// Event names the stream events: image_generation, or image_edit on
+	// /v1/images/edits.
+	Event string
 }
 
 // rejectedImageFields are OpenAI image fields NovelAI has nothing for.
@@ -102,8 +110,13 @@ func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request 
 	} else if partials != nil {
 		output.PartialImages = int(*partials)
 	}
-	if request.Stream != nil && *request.Stream {
-		return GenerationIntent{}, output, badRequest(c, i18n.MsgNovelAIFieldUnsupported, map[string]any{"Field": "stream"})
+	output.Quality = "auto"
+	if slices.Contains([]string{"low", "medium", "high"}, request.Quality) {
+		output.Quality = request.Quality
+	}
+	output.Event = "image_generation"
+	if info.RelayMode == relayconstant.RelayModeImagesEdits {
+		output.Event = "image_edit"
 	}
 
 	images, apiErr := imageInputs(c, fields, files, "image")
@@ -316,27 +329,12 @@ func ImageUsage(usage *dto.Usage) OpenAIImageUsage {
 func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 	usage := generation.Usage()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
-	if err != nil {
-		if c.Request.Context().Err() != nil {
-			logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
-			return usage, nil
-		}
-		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	images, clientLeft, apiErr := readImages(c, resp, info)
+	if clientLeft {
+		return usage, nil
 	}
-	noImage := func(cause error) *types.NewAPIError {
-		message := i18n.T(c, i18n.MsgNovelAINoImage)
-		if cause != nil {
-			logger.LogWarn(c, common.LogText("NovelAI response could not be read as images: %s", cause.Error()))
-		}
-		return types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
-	}
-	if len(body) > responseLimit {
-		return nil, noImage(errors.New("the response exceeds the limit"))
-	}
-	images, err := ParseImages(body)
-	if err != nil || len(images) == 0 {
-		return nil, noImage(err)
+	if apiErr != nil {
+		return nil, apiErr
 	}
 
 	response := openAIImagesResponse{
@@ -348,7 +346,7 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 	for i, data := range images {
 		rendered, format, err := RenderImage(data, output.OutputFormat, output.Compression)
 		if err != nil {
-			return nil, noImage(err)
+			return nil, noImageError(c, err)
 		}
 		if response.OutputFormat == "" {
 			response.OutputFormat = format
@@ -374,4 +372,36 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 	}
 	info.UpdateImageCount(int64(len(images)))
 	return usage, nil
+}
+
+// readImages reads the images of a complete /ai/generate-image response. A
+// read the client cut short by leaving reports clientLeft, which keeps the
+// reserved quantity; any other failure is a final 502, as upstream accepted
+// the job (2xx) and may have spent Anlas on it.
+func readImages(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (images [][]byte, clientLeft bool, apiErr *types.NewAPIError) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
+	if err != nil {
+		if c.Request.Context().Err() != nil {
+			logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
+			return nil, true, nil
+		}
+		return nil, false, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+	if len(body) > responseLimit {
+		return nil, false, noImageError(c, errors.New("the response exceeds the limit"))
+	}
+	images, err = ParseImages(body)
+	if err != nil || len(images) == 0 {
+		return nil, false, noImageError(c, err)
+	}
+	return images, false, nil
+}
+
+// noImageError is the final 502 of a 2xx NovelAI answer the relay could not
+// turn into images; the cause goes to the log.
+func noImageError(c *gin.Context, cause error) *types.NewAPIError {
+	if cause != nil {
+		logger.LogWarn(c, common.LogText("NovelAI response could not be read as images: %s", cause.Error()))
+	}
+	return types.NewOpenAIError(errors.New(i18n.T(c, i18n.MsgNovelAINoImage)), types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
 }

@@ -90,6 +90,9 @@ const (
 	MsgNovelAIPassThroughUnsupported = "novelai.pass_through_unsupported"
 	MsgNovelAINoImage                = "novelai.no_image"
 	MsgNovelAIAccountBusy            = "novelai.account_busy"
+	MsgNovelAIStreamFailed           = "novelai.stream_failed"
+	MsgNovelAIStreamIncomplete       = "novelai.stream_incomplete"
+	MsgNovelAIChatPromptMissing      = "novelai.chat_prompt_missing"
 )
 
 // Emails and the name of the token created at registration, in the
