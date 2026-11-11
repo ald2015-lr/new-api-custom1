@@ -296,6 +296,10 @@ func TestGetAndValidateNovelAIImageRequestBoundsNSamples(t *testing.T) {
 		{name: "n_samples null", request: `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"n_samples":null}}`, count: 1},
 		{name: "n_samples 4", request: `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"n_samples":4}}`, count: 4},
 		{name: "n_samples at max", request: fmt.Sprintf(`{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"n_samples":%d}}`, dto.MaxImageN), count: dto.MaxImageN},
+		// Nested deeper than a goroutine stack can recurse: a recursive JSON
+		// validator ended the whole process with a fatal stack overflow.
+		{name: "deeply nested member", request: `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"n_samples":2,"nested":` +
+			strings.Repeat("[", 10_000_000) + strings.Repeat("]", 10_000_000) + `}}`, count: 2},
 		{name: "n_samples 0", request: `{"model":"nai-diffusion-4-5-full","parameters":{"n_samples":0}}`, wantErr: boundErr},
 		{name: "n_samples negative", request: `{"model":"nai-diffusion-4-5-full","parameters":{"n_samples":-1}}`, wantErr: boundErr},
 		{name: "n_samples above max", request: fmt.Sprintf(`{"model":"nai-diffusion-4-5-full","parameters":{"n_samples":%d}}`, dto.MaxImageN+1), wantErr: boundErr},
@@ -436,7 +440,7 @@ func TestGetAndValidateNovelAIImageRequestBoundsNSamples(t *testing.T) {
 	}
 }
 
-// A JSON request is billed as gjson reads its bytes, and the upstream decodes
+// A JSON request is billed as ojson reads its bytes, and the upstream decodes
 // the same bytes by their Content-Type. Only a body without one, or typed
 // application/json with unambiguous parameters and a UTF-8 charset, reads the
 // same on both sides; any other type is rejected before a channel is chosen.

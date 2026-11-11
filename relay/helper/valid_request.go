@@ -19,8 +19,8 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/samber/lo"
-	"github.com/tidwall/gjson"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 )
 
@@ -462,10 +462,12 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 	if err != nil {
 		return nil, err
 	}
-	if !gjson.ValidBytes(requestJSON) {
+	// ojson validates with its own stack, so a deeply nested request cannot
+	// overflow the goroutine stack and end the process.
+	if !ojson.ValidBytes(requestJSON) {
 		return nil, errors.New(i18n.T(c, i18n.MsgNovelAIRequestInvalid))
 	}
-	request := gjson.ParseBytes(requestJSON)
+	request := ojson.ParseBytes(requestJSON)
 	if !request.IsObject() {
 		return nil, errors.New(i18n.T(c, i18n.MsgNovelAIRequestInvalid))
 	}
@@ -473,7 +475,7 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 	if err != nil {
 		return nil, err
 	}
-	if model.Type != gjson.String || model.String() == "" {
+	if model.Type != ojson.String || model.String() == "" {
 		return nil, errors.New(i18n.T(c, i18n.MsgDistributorModelNameRequired))
 	}
 	parameters, err := novelAIRequestMember(c, request, "parameters")
@@ -483,7 +485,7 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 	// n_samples becomes the billing multiplier, so it is bounded here like the
 	// OpenAI image n.
 	count := 1
-	if parameters.Exists() && parameters.Type != gjson.Null {
+	if parameters.Exists() && parameters.Type != ojson.Null {
 		if !parameters.IsObject() {
 			return nil, errors.New(i18n.T(c, i18n.MsgNovelAIParametersInvalid))
 		}
@@ -491,9 +493,9 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 		if err != nil {
 			return nil, err
 		}
-		if samples.Exists() && samples.Type != gjson.Null {
+		if samples.Exists() && samples.Type != ojson.Null {
 			n, convErr := strconv.Atoi(samples.Raw)
-			if samples.Type != gjson.Number || convErr != nil || n < 1 || n > dto.MaxImageN {
+			if samples.Type != ojson.Number || convErr != nil || n < 1 || n > dto.MaxImageN {
 				return nil, errors.New(i18n.T(c, i18n.MsgNovelAINSamplesInvalid, map[string]any{"Max": dto.MaxImageN}))
 			}
 			count = n
@@ -505,7 +507,7 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 		return nil, err
 	}
 	imageRequest := &dto.ImageRequest{Model: model.String(), N: common.GetPointer(uint(count))}
-	if input.Type == gjson.String {
+	if input.Type == ojson.String {
 		imageRequest.Prompt = input.String()
 	}
 	return imageRequest, nil
@@ -515,10 +517,10 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 // Keys match case-insensitively and must occur once, so a repeated or
 // differently cased key cannot carry a value the upstream reads but billing
 // does not.
-func novelAIRequestMember(c *gin.Context, object gjson.Result, key string) (gjson.Result, error) {
-	var member gjson.Result
+func novelAIRequestMember(c *gin.Context, object ojson.Result, key string) (ojson.Result, error) {
+	var member ojson.Result
 	matches := 0
-	object.ForEach(func(name, value gjson.Result) bool {
+	object.ForEach(func(name, value ojson.Result) bool {
 		if strings.EqualFold(name.String(), key) {
 			member = value
 			matches++
@@ -526,7 +528,7 @@ func novelAIRequestMember(c *gin.Context, object gjson.Result, key string) (gjso
 		return true
 	})
 	if matches > 1 {
-		return gjson.Result{}, errors.New(i18n.T(c, i18n.MsgNovelAIFieldRepeated, map[string]any{"Field": key}))
+		return ojson.Result{}, errors.New(i18n.T(c, i18n.MsgNovelAIFieldRepeated, map[string]any{"Field": key}))
 	}
 	return member, nil
 }
