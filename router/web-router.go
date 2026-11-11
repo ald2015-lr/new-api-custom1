@@ -59,7 +59,9 @@ func SetWebRouter(router *gin.Engine, assets WebAssets, pluginDispatcher gin.Han
 				c.String(http.StatusNotFound, "404 page not found")
 				return
 			}
-			if strings.HasPrefix(requestPath, "/v1") || strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/assets") {
+			// /ai/ is NovelAI's API prefix: only its billed routes are
+			// served, any other path is an API miss.
+			if strings.HasPrefix(requestPath, "/v1") || strings.HasPrefix(requestPath, "/api") || strings.HasPrefix(requestPath, "/assets") || strings.HasPrefix(requestPath, "/ai/") {
 				c.Header("Cache-Control", "no-store")
 				controller.RelayNotFound(c)
 				return

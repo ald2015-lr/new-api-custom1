@@ -457,6 +457,17 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
+// upstreamRoundTripError is a failed round trip to the upstream as relay
+// errors report it. Its text hides the transport error, which can name
+// upstream addresses, while errors.As still reaches that error, so a relay can
+// tell a connection that was never made from a request that may have reached
+// the upstream.
+type upstreamRoundTripError struct{ err error }
+
+func (e *upstreamRoundTripError) Error() string { return "upstream error: do request failed" }
+
+func (e *upstreamRoundTripError) Unwrap() error { return e.err }
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
@@ -498,7 +509,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		} else {
 			logger.LogError(c, common2.LogText("do request failed: %s", err.Error()))
 		}
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+		return nil, types.NewError(&upstreamRoundTripError{err: err}, types.ErrorCodeDoRequestFailed)
 	}
 	if resp == nil {
 		return nil, errors.New("resp is nil")

@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -259,6 +260,20 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	modelRequest, err := modelRequestFromJSON(requestBody)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
+		return nil, seekErr
+	}
+	c.Request.Body = io.NopCloser(storage)
+	return modelRequest, nil
+}
+
+// modelRequestFromJSON reads the top-level model and group of a JSON request.
+func modelRequestFromJSON(requestBody []byte) (*ModelRequest, error) {
 	if !gjson.ValidBytes(requestBody) {
 		return nil, errors.New("invalid JSON request body")
 	}
@@ -275,12 +290,6 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	if _, seekErr := storage.Seek(0, io.SeekStart); seekErr != nil {
-		return nil, seekErr
-	}
-	c.Request.Body = io.NopCloser(storage)
-
 	return &ModelRequest{
 		Model: model,
 		Group: group,
@@ -440,6 +449,18 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			modelRequest.Model = modelName
 		}
 		c.Set("relay_mode", relayMode)
+	} else if _, novelAI := relayconstant.NovelAIPath(relayconstant.Path2RelayMode(c.Request.URL.Path)); novelAI {
+		// NovelAI names the model in the request JSON: the body, or the
+		// multipart field request.
+		requestJSON, err := helper.NovelAIRequestJSON(c)
+		if err != nil {
+			return nil, false, err
+		}
+		req, err := modelRequestFromJSON(requestJSON)
+		if err != nil {
+			return nil, false, err
+		}
+		modelRequest.Model = req.Model
 	} else if !strings.HasPrefix(c.Request.URL.Path, "/v1/audio/transcriptions") && !strings.Contains(c.Request.Header.Get("Content-Type"), "multipart/form-data") {
 		req, err := getModelFromRequest(c)
 		if err != nil {
