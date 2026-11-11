@@ -197,6 +197,39 @@ it('previews a dry run, then converts every listed model after confirmation and 
   )
 })
 
+it('opens the dry-run preview from the phone More actions menu when the toolbar collapses on a phone', async () => {
+  const user = userEvent.setup()
+  const originalMatchMedia = window.matchMedia
+  vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+    ...originalMatchMedia(query),
+    matches: query.includes('max-width') || originalMatchMedia(query).matches,
+  }))
+  const { post } = renderCard(preview)
+
+  await user.click(await screen.findByRole('button', { name: 'More actions' }))
+  expect(
+    screen.queryByRole('button', { name: 'Convert all to expressions' })
+  ).not.toBeInTheDocument()
+  const menu = await screen.findByRole('menu')
+  const item = within(menu).getByRole('menuitem', {
+    name: 'Convert all to expressions',
+  })
+  expect(item).not.toHaveAttribute('aria-disabled', 'true')
+  await user.click(item)
+
+  const dialog = await screen.findByRole('alertdialog', {
+    name: 'Convert all to expressions',
+  })
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(post).toHaveBeenLastCalledWith(
+    '/api/option/model_pricing/convert_all',
+    { dry_run: true }
+  )
+  expect(
+    within(dialog).getByRole('region', { name: 'Models to convert' })
+  ).toHaveTextContent('per-call-model')
+})
+
 it('keeps the confirmation disabled and writes nothing when no model can be converted', async () => {
   const user = userEvent.setup()
   const { post } = renderCard({
