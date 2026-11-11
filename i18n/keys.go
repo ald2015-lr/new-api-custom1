@@ -56,6 +56,16 @@ const (
 	MsgRelayRetryGetChannelFailed        = "relay.retry_get_channel_failed"
 	MsgRelayRetryNoAvailableChannel      = "relay.retry_no_available_channel"
 	MsgRelayAccessTokenUnsupported       = "relay.access_token_unsupported"
+
+	// NovelAI native image routes (/ai/generate-image and /v1/ai/generate-image)
+	MsgNovelAIRequestInvalid      = "novelai.request_invalid"
+	MsgNovelAIContentTypeInvalid  = "novelai.content_type_invalid"
+	MsgNovelAIRequestFieldMissing = "novelai.request_field_missing"
+	MsgNovelAIMultipartInvalid    = "novelai.multipart_invalid"
+	MsgNovelAIFieldRepeated       = "novelai.field_repeated"
+	MsgNovelAIParametersInvalid   = "novelai.parameters_invalid"
+	MsgNovelAINSamplesInvalid     = "novelai.n_samples_invalid"
+	MsgNovelAIChannelUnsupported  = "novelai.channel_unsupported"
 )
 
 // Emails and the name of the token created at registration, in the

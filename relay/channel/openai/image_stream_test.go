@@ -1,20 +1,32 @@
 package openai
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
+	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -630,4 +642,573 @@ func TestOpenaiImageStreamHandlerRecordsUpstreamErrorEvent(t *testing.T) {
 	// is still forwarded in the data: payload (stream ID 77).
 	require.Contains(t, recorder.Body.String(), `event: upstream_error`)
 	require.Contains(t, recorder.Body.String(), `stream ID 77`)
+}
+
+// novelAIZip builds the zip a NovelAI generate-image call returns, one entry
+// per name.
+func novelAIZip(t *testing.T, names ...string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	archive := zip.NewWriter(&buf)
+	for _, name := range names {
+		entry, err := archive.Create(name)
+		require.NoError(t, err)
+		if !strings.HasSuffix(name, "/") {
+			_, err = entry.Write([]byte("\x89PNG\r\n\x1a\n" + name))
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, archive.Close())
+	return buf.Bytes()
+}
+
+// failingWriter fails every client write after the first, like a client
+// that disconnected mid-body.
+type failingWriter struct {
+	gin.ResponseWriter
+	writes int
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes > 1 {
+		return 0, errors.New("client disconnected")
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// A NovelAI response settles at the images it carries: the .png entries of a
+// zip, or the images[] entries with a non-empty image in JSON, never the array
+// length. A body that cannot be counted, a client that leaves or an upstream
+// that fails mid-body keeps the reserved quantity, under a per-image price and
+// under an image_count expression alike. The client receives the upstream
+// status, headers and bytes unchanged.
+func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const requested = 4
+	images := novelAIZip(t, "image_0.png", "image_1.PNG", "metadata.json", "thumbs/")
+
+	tests := []struct {
+		name, contentType string
+		body              []byte
+		// upstream and client failures; the body is still forwarded up to them
+		upstreamFailsAfterBody, clientLeaves bool
+		want                                 int
+	}{
+		{name: "zip counts its png entries", contentType: "application/zip", body: images, want: 2},
+		{name: "zip is recognized without its media type", contentType: "application/octet-stream", body: images, want: 2},
+		{name: "JSON counts images with a payload", contentType: "application/json", body: []byte(`{"images":[{"image":"aGk="},{"image":""},{"image":"aGk="},{"seed":7}]}`), want: 2},
+		{name: "JSON object images counts one", contentType: "application/json", body: []byte(`{"images":{"image":"aGk="}}`), want: 1},
+		{name: "JSON without image payloads keeps the reservation", contentType: "application/json", body: []byte(`{"images":[{"image":""},{"seed":7}]}`), want: requested},
+		{name: "msgpack stream events keep the reservation", contentType: "application/x-msgpack", body: []byte("\x82\xaaevent_type\xa5final\xa5image\xc4\x01x"), want: requested},
+		{name: "corrupt zip keeps the reservation", contentType: "application/zip", body: images[:24], want: requested},
+		{name: "upstream failing after the body keeps the reservation", contentType: "application/zip", body: images, upstreamFailsAfterBody: true, want: requested},
+		{name: "client leaving mid-body keeps the reservation", contentType: "application/zip", body: images, clientLeaves: true, want: requested},
+	}
+	for _, tc := range tests {
+		for _, pricing := range []string{"per-image price", "image_count expression"} {
+			t.Run(tc.name+"/"+pricing, func(t *testing.T) {
+				c, recorder, resp, info := newImageTestContext(t, "", tc.contentType, false)
+				var body io.Reader = bytes.NewReader(tc.body)
+				if tc.upstreamFailsAfterBody {
+					body = io.MultiReader(body, iotest.ErrReader(errors.New("connection reset by peer")))
+				}
+				if tc.clientLeaves {
+					body = io.MultiReader(bytes.NewReader(tc.body[:16]), bytes.NewReader(tc.body[16:]))
+					c.Writer = &failingWriter{ResponseWriter: c.Writer}
+				}
+				resp.Body = io.NopCloser(body)
+				resp.ContentLength = int64(len(tc.body))
+				resp.Header.Set("Content-Disposition", `attachment; filename="images.zip"`)
+				resp.Header.Set("X-Upstream-Internal", "not forwarded")
+				if pricing == "per-image price" {
+					info.PriceData.UsePrice = true
+					info.PriceData.AddOtherRatio("n", requested)
+				} else {
+					info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{EstimatedImageCount: common.GetPointer(requested)}
+				}
+
+				usage, apiErr := NovelAIImageHandler(c, info, resp)
+
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, http.StatusOK, recorder.Code)
+				assert.Equal(t, tc.contentType, recorder.Header().Get("Content-Type"))
+				assert.Equal(t, `attachment; filename="images.zip"`, recorder.Header().Get("Content-Disposition"))
+				assert.Equal(t, strconv.Itoa(len(tc.body)), recorder.Header().Get("Content-Length"))
+				assert.Empty(t, recorder.Header().Get("X-Upstream-Internal"))
+				if tc.clientLeaves {
+					assert.Equal(t, tc.body[:16], recorder.Body.Bytes())
+				} else {
+					assert.Equal(t, tc.body, recorder.Body.Bytes())
+				}
+				if pricing == "per-image price" {
+					assert.Equal(t, float64(tc.want), info.PriceData.OtherRatios()["n"])
+					return
+				}
+				settled := info.RequestedImageCount()
+				if info.BillingImageCount != nil {
+					settled = *info.BillingImageCount
+				}
+				assert.Equal(t, tc.want, settled)
+				assert.Empty(t, info.PriceData.OtherRatios(), "expression quantities must not add a legacy multiplier")
+			})
+		}
+	}
+
+	t.Run("upstream failing before the first byte fails the attempt", func(t *testing.T) {
+		c, recorder, resp, info := newImageTestContext(t, "", "application/zip", false)
+		resp.Body = io.NopCloser(iotest.ErrReader(errors.New("connection reset by peer")))
+		info.PriceData.UsePrice = true
+		info.PriceData.AddOtherRatio("n", requested)
+
+		usage, apiErr := NovelAIImageHandler(c, info, resp)
+
+		assert.Nil(t, usage)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+		assert.False(t, c.Writer.Written(), "a retry or the error response still needs the untouched writer")
+		assert.Empty(t, recorder.Body.Bytes())
+	})
+
+	// Upstream answered 2xx and nothing reached the client yet. A client that
+	// leaves once upstream has started the body pays the reserved count: the
+	// images exist. Before the first body byte (a stall the client or its
+	// proxy gave up on, or a stream that has not generated anything), and on
+	// an upstream failure with the client still there, the attempt fails.
+	for _, tc := range []struct {
+		name, accept string
+		mode         int
+		prefix       []byte
+		clientLeaves bool
+		billed       bool
+	}{
+		{name: "stream endpoint: client leaving before the first body byte fails the attempt", mode: relayconstant.RelayModeNovelAIGenerateImageStream, clientLeaves: true},
+		{name: "generate-image: client leaving before the first body byte fails the attempt", mode: relayconstant.RelayModeNovelAIGenerateImage, clientLeaves: true},
+		{name: "generate-image: client leaving after the first body bytes keeps the reservation", mode: relayconstant.RelayModeNovelAIGenerateImage, prefix: images[:2], clientLeaves: true, billed: true},
+		{name: "generate-image: client leaving while a zip is held for conversion to JSON keeps the reservation", accept: "application/json", mode: relayconstant.RelayModeNovelAIGenerateImage, prefix: images[:40], clientLeaves: true, billed: true},
+		{name: "generate-image: upstream failing while a zip is held for conversion to JSON fails the attempt", accept: "application/json", mode: relayconstant.RelayModeNovelAIGenerateImage, prefix: images[:40]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, "", "application/zip", false)
+			info.RelayMode = tc.mode
+			if tc.accept != "" {
+				c.Request.Header.Set("Accept", tc.accept)
+			}
+			ctx, cancel := context.WithCancel(c.Request.Context())
+			t.Cleanup(cancel)
+			c.Request = c.Request.WithContext(ctx)
+			var failure io.Reader = iotest.ErrReader(errors.New("connection reset by peer"))
+			if tc.clientLeaves {
+				// The upstream read ends with the client's request context.
+				failure = clientLeavingReader{cancel: cancel}
+			}
+			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(tc.prefix), failure))
+			info.PriceData.UsePrice = true
+			info.PriceData.AddOtherRatio("n", requested)
+
+			usage, apiErr := NovelAIImageHandler(c, info, resp)
+
+			assert.Empty(t, recorder.Body.Bytes())
+			if !tc.billed {
+				assert.Nil(t, usage)
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+				assert.Equal(t, types.ErrorTypeOpenAIError, apiErr.GetErrorType(), "an upstream read failure is not a new-api rejection")
+				assert.False(t, c.Writer.Written(), "the error response still needs the untouched writer")
+				return
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, float64(requested), info.PriceData.OtherRatios()["n"])
+		})
+	}
+}
+
+// clientLeavingReader is an upstream body whose read ends because the client
+// left: it cancels the client's request context and fails with it.
+type clientLeavingReader struct {
+	cancel context.CancelFunc
+}
+
+func (r clientLeavingReader) Read([]byte) (int, error) {
+	r.cancel()
+	return 0, context.Canceled
+}
+
+// flushNotifyWriter reports what the client has received at every flush.
+type flushNotifyWriter struct {
+	gin.ResponseWriter
+	recorder *httptest.ResponseRecorder
+	flushed  chan<- string
+}
+
+func (w *flushNotifyWriter) Flush() {
+	w.ResponseWriter.Flush()
+	w.flushed <- w.recorder.Body.String()
+}
+
+// The stream endpoint hands each upstream read to the client as it arrives
+// instead of buffering the response until upstream finishes, and so does the
+// generate-image endpoint once the first bytes show the response is already
+// in the format the client asked for.
+func TestNovelAIImageHandlerFlushesBeforeUpstreamFinishes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name, accept, contentType string
+		relayMode                 int
+		first, second             string
+	}{
+		{name: "stream events", contentType: "application/x-msgpack", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: "first event", second: "second event"},
+		{name: "zip without Accept", contentType: "application/zip", relayMode: relayconstant.RelayModeNovelAIGenerateImage, first: "PK\x03\x04first entry", second: "second entry"},
+		{name: "JSON asked as JSON", accept: "application/json", contentType: "application/json", relayMode: relayconstant.RelayModeNovelAIGenerateImage, first: `{"images":[`, second: `{"image":"aGk="}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, "", tc.contentType, tc.relayMode == relayconstant.RelayModeNovelAIGenerateImageStream)
+			info.RelayMode = tc.relayMode
+			if tc.accept != "" {
+				c.Request.Header.Set("Accept", tc.accept)
+			}
+			upstream, upstreamWriter := io.Pipe()
+			t.Cleanup(func() { _ = upstreamWriter.CloseWithError(io.ErrClosedPipe) })
+			resp.Body = upstream
+			resp.ContentLength = -1
+			flushed := make(chan string, 4)
+			c.Writer = &flushNotifyWriter{ResponseWriter: c.Writer, recorder: recorder, flushed: flushed}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, apiErr := NovelAIImageHandler(c, info, resp)
+				assert.Nil(t, apiErr)
+			}()
+
+			_, err := upstreamWriter.Write([]byte(tc.first))
+			require.NoError(t, err)
+			select {
+			case received := <-flushed:
+				assert.Equal(t, tc.first, received)
+			case <-time.After(5 * time.Second):
+				_ = upstreamWriter.CloseWithError(io.ErrClosedPipe)
+				<-done
+				require.FailNow(t, "the first bytes did not reach the client while upstream was still open")
+			}
+			_, err = upstreamWriter.Write([]byte(tc.second))
+			require.NoError(t, err)
+			require.NoError(t, upstreamWriter.Close())
+			<-done
+
+			assert.Equal(t, tc.first+tc.second, recorder.Body.String())
+			assert.Equal(t, tc.contentType, recorder.Header().Get("Content-Type"))
+			assert.Empty(t, recorder.Header().Get("Content-Length"))
+		})
+	}
+}
+
+// deadlineWriter counts the client writes made without a write deadline that
+// http.ResponseController set beforehand.
+type deadlineWriter struct {
+	gin.ResponseWriter
+	deadline                time.Time
+	writes, withoutDeadline int
+}
+
+func (w *deadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return nil
+}
+
+func (w *deadlineWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if !w.deadline.After(time.Now()) {
+		w.withoutDeadline++
+	}
+	w.deadline = time.Time{}
+	return w.ResponseWriter.Write(p)
+}
+
+// An upstream that sends nothing for STREAMING_TIMEOUT no longer holds the
+// client, as on the other relay streams. Once the client has data, the relay
+// ends there and keeps the reserved image count; with nothing sent yet, the
+// attempt fails with the writer untouched, for a retry or the error response.
+// Each client write runs under a write deadline, so a client that stops
+// reading cannot hold the relay either.
+func TestNovelAIImageHandlerEndsStalledResponses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := constant.StreamingTimeout
+	constant.StreamingTimeout = 1
+	t.Cleanup(func() { constant.StreamingTimeout = previous })
+	const requested = 4
+
+	for _, sent := range []string{"first event", ""} {
+		t.Run(fmt.Sprintf("stalls after %q", sent), func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, "", "application/x-msgpack", true)
+			upstream, upstreamWriter := io.Pipe()
+			t.Cleanup(func() { _ = upstreamWriter.CloseWithError(io.ErrClosedPipe) })
+			resp.Body = upstream
+			resp.ContentLength = -1
+			info.PriceData.UsePrice = true
+			info.PriceData.AddOtherRatio("n", requested)
+			writer := &deadlineWriter{ResponseWriter: c.Writer}
+			c.Writer = writer
+
+			done := make(chan struct{})
+			var usage *dto.Usage
+			var apiErr *types.NewAPIError
+			go func() {
+				defer close(done)
+				usage, apiErr = NovelAIImageHandler(c, info, resp)
+			}()
+			if sent != "" {
+				_, err := upstreamWriter.Write([]byte(sent))
+				require.NoError(t, err)
+			}
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				require.FailNow(t, "the relay kept waiting on an upstream that sent nothing")
+			}
+
+			assert.Equal(t, float64(requested), info.PriceData.OtherRatios()["n"])
+			if sent == "" {
+				assert.Nil(t, usage)
+				require.NotNil(t, apiErr)
+				assert.False(t, c.Writer.Written())
+				return
+			}
+			require.Nil(t, apiErr)
+			assert.NotNil(t, usage)
+			assert.Equal(t, sent, recorder.Body.String())
+			assert.Equal(t, 1, writer.writes)
+			assert.Zero(t, writer.withoutDeadline)
+		})
+	}
+}
+
+// novelAIPNGZip archives pngs as NovelAI names them, image_0.png,
+// image_1.png, ..., stored and deflated in turn.
+func novelAIPNGZip(t *testing.T, pngs ...[]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	archive := zip.NewWriter(&buf)
+	for i, png := range pngs {
+		method := zip.Store
+		if i%2 == 1 {
+			method = zip.Deflate
+		}
+		entry, err := archive.CreateHeader(&zip.FileHeader{Name: fmt.Sprintf("image_%d.png", i), Method: method})
+		require.NoError(t, err)
+		_, err = entry.Write(png)
+		require.NoError(t, err)
+	}
+	require.NoError(t, archive.Close())
+	return buf.Bytes()
+}
+
+// novelAIClientImages reads the images a NovelAI client gets from a response
+// body: the entries of a zip in archive order, with their names and methods,
+// or the non-empty images[] of JSON, base64 decoded.
+func novelAIClientImages(t *testing.T, contentType string, body []byte) (images [][]byte, names []string, methods []uint16) {
+	t.Helper()
+	if contentType == "application/json" {
+		var payload struct {
+			Images []struct {
+				Image string `json:"image"`
+			} `json:"images"`
+		}
+		require.NoError(t, common.Unmarshal(body, &payload))
+		for _, image := range payload.Images {
+			if image.Image == "" {
+				continue
+			}
+			png, err := base64.StdEncoding.DecodeString(image.Image)
+			require.NoError(t, err)
+			images = append(images, png)
+		}
+		return images, nil, nil
+	}
+	archive, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	require.NoError(t, err)
+	for _, file := range archive.File {
+		entry, err := file.Open()
+		require.NoError(t, err)
+		png, err := io.ReadAll(entry)
+		require.NoError(t, err)
+		require.NoError(t, entry.Close())
+		images, names, methods = append(images, png), append(names, file.Name), append(methods, file.Method)
+	}
+	return images, names, methods
+}
+
+// /ai/generate-image answers as NovelAI does: a zip unless Accept names
+// application/json (in any case), then JSON, whichever format upstream chose.
+// A response already in that format goes through as sent; one in the other
+// format is converted, keeps the upstream status, carries its own
+// Content-Type and Content-Length and no upstream Content-Disposition. A
+// converted zip is typed application/x-zip-compressed, which novelai-api
+// reads as a zip where it rejects application/zip, and each stored entry
+// carries its CRC and sizes in its local header, as streaming readers such as
+// Java's ZipInputStream need. Either way the call settles at the images the
+// client received.
+func TestNovelAIImageHandlerAnswersInTheAcceptedFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pngs := [][]byte{[]byte("\x89PNG\r\n\x1a\nfirst image"), []byte("\x89PNG\r\n\x1a\nsecond image")}
+	encoded := func(png []byte) string { return base64.StdEncoding.EncodeToString(png) }
+	upstreams := []struct {
+		format, contentType, disposition string
+		body                             []byte
+		// the images the body carries, in order
+		pngs [][]byte
+	}{
+		{format: "zip", contentType: "application/zip", disposition: `attachment; filename="images.zip"`, body: novelAIPNGZip(t, pngs...), pngs: pngs},
+		{format: "JSON", contentType: "application/json", body: []byte(`{"images":[{"image":"` + encoded(pngs[0]) + `","seed":1},{"image":""},{"image":"` + encoded(pngs[1]) + `"}]}`), pngs: pngs},
+		{format: "JSON object", contentType: "application/json", body: []byte(`{"images":{"image":"` + encoded(pngs[0]) + `","seed":1}}`), pngs: pngs[:1]},
+	}
+	for _, client := range []struct {
+		accept   string
+		wantJSON bool
+	}{
+		{accept: ""},
+		{accept: "*/*"},
+		{accept: "application/json", wantJSON: true},
+		{accept: "application/json, text/plain", wantJSON: true},
+		{accept: "APPLICATION/JSON", wantJSON: true},
+	} {
+		for _, upstream := range upstreams {
+			t.Run(fmt.Sprintf("Accept %q/%s upstream", client.accept, upstream.format), func(t *testing.T) {
+				c, recorder, resp, info := newImageTestContext(t, "", upstream.contentType, false)
+				info.RelayMode = relayconstant.RelayModeNovelAIGenerateImage
+				if client.accept != "" {
+					c.Request.Header.Set("Accept", client.accept)
+				}
+				resp.StatusCode = http.StatusCreated
+				resp.Body = io.NopCloser(bytes.NewReader(upstream.body))
+				resp.ContentLength = int64(len(upstream.body))
+				if upstream.disposition != "" {
+					resp.Header.Set("Content-Disposition", upstream.disposition)
+				}
+				info.PriceData.UsePrice = true
+				info.PriceData.AddOtherRatio("n", 4)
+
+				usage, apiErr := NovelAIImageHandler(c, info, resp)
+
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, http.StatusCreated, recorder.Code)
+				assert.Equal(t, strconv.Itoa(recorder.Body.Len()), recorder.Header().Get("Content-Length"))
+				assert.Equal(t, float64(len(upstream.pngs)), info.PriceData.OtherRatios()["n"])
+				if passthrough := client.wantJSON == (upstream.format != "zip"); passthrough {
+					assert.Equal(t, upstream.contentType, recorder.Header().Get("Content-Type"))
+					assert.Equal(t, upstream.body, recorder.Body.Bytes())
+					assert.Equal(t, upstream.disposition, recorder.Header().Get("Content-Disposition"))
+					return
+				}
+				assert.Empty(t, recorder.Header().Get("Content-Disposition"))
+				if client.wantJSON {
+					assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+					images, _, _ := novelAIClientImages(t, "application/json", recorder.Body.Bytes())
+					assert.Equal(t, upstream.pngs, images)
+					return
+				}
+				assert.Equal(t, "application/x-zip-compressed", recorder.Header().Get("Content-Type"))
+				images, names, methods := novelAIClientImages(t, "application/x-zip-compressed", recorder.Body.Bytes())
+				assert.Equal(t, upstream.pngs, images)
+				assert.Equal(t, []string{"image_0.png", "image_1.png"}[:len(upstream.pngs)], names)
+				assert.Equal(t, []uint16{zip.Store, zip.Store}[:len(upstream.pngs)], methods)
+				// Read entry by entry from the local headers, as a streaming
+				// reader does: no data descriptor follows the stored bytes.
+				local := recorder.Body.Bytes()
+				for _, png := range upstream.pngs {
+					require.True(t, len(local) >= 30 && bytes.HasPrefix(local, []byte("PK\x03\x04")), "a local file header")
+					assert.Zero(t, binary.LittleEndian.Uint16(local[6:])&0x8, "the data descriptor flag")
+					assert.Equal(t, crc32.ChecksumIEEE(png), binary.LittleEndian.Uint32(local[14:]), "the CRC")
+					assert.Equal(t, []uint32{uint32(len(png)), uint32(len(png))}, []uint32{binary.LittleEndian.Uint32(local[18:]), binary.LittleEndian.Uint32(local[22:])}, "the sizes")
+					start := 30 + int(binary.LittleEndian.Uint16(local[26:])) + int(binary.LittleEndian.Uint16(local[28:]))
+					require.GreaterOrEqual(t, len(local), start+len(png))
+					assert.Equal(t, png, local[start:start+len(png)])
+					local = local[start+len(png):]
+				}
+				assert.True(t, bytes.HasPrefix(local, []byte("PK\x01\x02")), "the central directory follows the last entry")
+			})
+		}
+	}
+}
+
+// A response that cannot be converted to the wanted format reaches the client
+// as upstream sent it and settles at the images it carries, keeping the
+// reservation when they cannot be counted: JSON without an image or with an
+// invalid one, a corrupt zip or one without PNG entries, JSON or a zip with
+// more images than a request may ask for (a count billing does not take), a
+// zip whose entries expand past the response limit whatever its headers
+// claim, a body past the limit (what was held goes out, the rest streams
+// after it), an encoded body, a body of neither format, and anything on the
+// stream endpoint.
+func TestNovelAIImageHandlerSendsUnconvertibleResponsesAsReceived(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := novelAIResponseLimit
+	novelAIResponseLimit = 1 << 20
+	t.Cleanup(func() { novelAIResponseLimit = previous })
+	const requested = 4
+
+	var bomb bytes.Buffer
+	bombWriter := zip.NewWriter(&bomb)
+	entry, err := bombWriter.Create("image_0.png")
+	require.NoError(t, err)
+	_, err = entry.Write(make([]byte, 2*novelAIResponseLimit))
+	require.NoError(t, err)
+	require.NoError(t, bombWriter.Close())
+	require.Less(t, bomb.Len(), novelAIResponseLimit, "the archive itself fits the limit")
+	oversized := []byte(`{"images":[{"image":"` + strings.Repeat("aGk=", novelAIResponseLimit/4) + `"}]}`)
+	tooManyImages := []byte(`{"images":[` + strings.Repeat(`{"image":"aGk="},`, dto.MaxImageN) + `{"image":"aGk="}]}`)
+	tooManyPNGs := novelAIPNGZip(t, slices.Repeat([][]byte{[]byte("\x89PNG")}, dto.MaxImageN+1)...)
+
+	for _, tc := range []struct {
+		name, accept, contentType, encoding string
+		body                                []byte
+		stream                              bool
+		want                                int
+	}{
+		{name: "JSON without images asked as zip", contentType: "application/json", body: []byte(`{"images":[{"image":""},{"seed":7}]}`), want: requested},
+		{name: "JSON with invalid base64 asked as zip", contentType: "application/json", body: []byte(`{"images":[{"image":"aGk="},{"image":"not base64!"}]}`), want: 2},
+		{name: "corrupt zip asked as JSON", accept: "application/json", contentType: "application/zip", body: novelAIPNGZip(t, []byte("\x89PNG"))[:30], want: requested},
+		{name: "zip without PNG entries asked as JSON", accept: "application/json", contentType: "application/zip", body: novelAIZip(t, "metadata.json", "thumbs/"), want: requested},
+		{name: "zip bomb asked as JSON", accept: "application/json", contentType: "application/zip", body: bomb.Bytes(), want: requested},
+		{name: "JSON with more images than a request may ask for asked as zip", contentType: "application/json", body: tooManyImages, want: requested},
+		{name: "zip with more PNG entries than a request may ask for asked as JSON", accept: "application/json", contentType: "application/zip", body: tooManyPNGs, want: requested},
+		{name: "JSON past the limit asked as zip", contentType: "application/json", body: oversized, want: requested},
+		// Bytes under an encoding the relay does not decode are left alone,
+		// even when they happen to read as JSON.
+		{name: "encoded JSON asked as zip", contentType: "application/json", encoding: "br", body: []byte(`{"images":[{"image":"aGk="}]}`), want: 1},
+		{name: "msgpack asked as zip", contentType: "application/x-msgpack", body: []byte("\x82\xaaevent_type\xa5final"), want: requested},
+		{name: "stream endpoint JSON without Accept", contentType: "application/json", body: []byte(`{"images":[{"image":"aGk="},{"image":"aGk="}]}`), stream: true, want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, recorder, resp, info := newImageTestContext(t, "", tc.contentType, tc.stream)
+			info.RelayMode = relayconstant.RelayModeNovelAIGenerateImage
+			if tc.stream {
+				info.RelayMode = relayconstant.RelayModeNovelAIGenerateImageStream
+			}
+			if tc.accept != "" {
+				c.Request.Header.Set("Accept", tc.accept)
+			}
+			if tc.encoding != "" {
+				resp.Header.Set("Content-Encoding", tc.encoding)
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(tc.body))
+			resp.ContentLength = int64(len(tc.body))
+			info.PriceData.UsePrice = true
+			info.PriceData.AddOtherRatio("n", requested)
+
+			usage, apiErr := NovelAIImageHandler(c, info, resp)
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, tc.contentType, recorder.Header().Get("Content-Type"))
+			assert.Equal(t, tc.encoding, recorder.Header().Get("Content-Encoding"))
+			assert.Equal(t, strconv.Itoa(len(tc.body)), recorder.Header().Get("Content-Length"))
+			assert.True(t, bytes.Equal(tc.body, recorder.Body.Bytes()), "the client must receive the upstream bytes")
+			assert.Equal(t, float64(tc.want), info.PriceData.OtherRatios()["n"])
+		})
+	}
 }

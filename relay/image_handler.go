@@ -159,14 +159,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		return newAPIError
 	}
 
-	// The log content shows the settled count: the count the handler derived
-	// from the upstream response when it did, otherwise the reserved quantity.
-	imageN := info.RequestedImageCount()
-	if info.BillingImageCount != nil {
-		imageN = *info.BillingImageCount
-	} else if count, ok := info.PriceData.OtherRatios()["n"]; ok && info.PriceData.UsePrice && count >= 1 && count <= dto.MaxImageN {
-		imageN = common.QuotaRound(count)
-	}
+	imageN := settledImageCount(info)
 
 	if usage.(*dto.Usage).TotalTokens == 0 {
 		usage.(*dto.Usage).TotalTokens = 1
@@ -194,4 +187,17 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
 	return nil
+}
+
+// settledImageCount is the image quantity the consume log shows: the count the
+// response handler derived from the upstream response when it did, otherwise
+// the reserved quantity.
+func settledImageCount(info *relaycommon.RelayInfo) int {
+	if info.BillingImageCount != nil {
+		return *info.BillingImageCount
+	}
+	if count, ok := info.PriceData.OtherRatios()["n"]; ok && info.PriceData.UsePrice && count >= 1 && count <= dto.MaxImageN {
+		return common.QuotaRound(count)
+	}
+	return info.RequestedImageCount()
 }

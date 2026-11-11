@@ -4,17 +4,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"mime"
+	"mime/multipart"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/samber/lo"
+	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
 )
@@ -54,6 +59,8 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 		request, err = GetAndValidAudioRequest(c, relayMode)
 	case types.RelayFormatOpenAIRealtime:
 		request = &dto.BaseRequest{}
+	case relayconstant.RelayFormatNovelAI:
+		request, err = GetAndValidateNovelAIImageRequest(c)
 	default:
 		return nil, fmt.Errorf("unsupported relay format: %s", format)
 	}
@@ -310,6 +317,218 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 		return nil, err
 	}
 	return imageRequest, nil
+}
+
+// NovelAIRequestJSON returns the request JSON of a NovelAI generate-image
+// call: the body itself, or for multipart/form-data the one field named
+// request, sent as a form value or as a file part. The body is left in place
+// for forwarding. Any other body must come without a Content-Type or as
+// application/json, with unambiguous parameters and a UTF-8 charset if one is
+// named.
+//
+// The upstream parses the same forwarded bytes with its own multipart parser,
+// so a form that parsers can read differently is rejected instead of being
+// billed as Go reads it. The form's Content-Type must name a boundary. Every
+// part must carry exactly one form-data Content-Disposition with a non-empty
+// name, and no transfer encoding but an identity one (Go's NextPart would
+// decode quoted-printable unseen). These headers, and the request field's
+// Content-Type, must be unambiguous (see unambiguousMediaParams).
+func NovelAIRequestJSON(c *gin.Context) ([]byte, error) {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if _, seekErr := storage.Seek(0, io.SeekStart); seekErr == nil {
+			c.Request.Body = io.NopCloser(storage)
+		}
+	}()
+	contentType := c.Request.Header.Get("Content-Type")
+	if base, _, _ := strings.Cut(contentType, ";"); !strings.EqualFold(strings.TrimSpace(base), gin.MIMEMultipartPOSTForm) {
+		// The upstream decodes the body by its Content-Type as well; under
+		// any other type or charset it could read other values than the ones
+		// billed here.
+		if contentType != "" {
+			if mediaType, _, ok := unambiguousMediaParams(contentType); !ok || mediaType != gin.MIMEJSON {
+				return nil, errors.New(i18n.T(c, i18n.MsgNovelAIContentTypeInvalid))
+			}
+		}
+		return storage.Bytes()
+	}
+	invalid := func(reason string) error {
+		return errors.New(i18n.T(c, i18n.MsgNovelAIMultipartInvalid, map[string]any{"Error": reason}))
+	}
+	_, params, ok := unambiguousMediaParams(contentType)
+	if !ok || params["boundary"] == "" {
+		return nil, invalid("ambiguous Content-Type")
+	}
+	if _, err := storage.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	reader := multipart.NewReader(storage, params["boundary"])
+	var requestJSON []byte
+	found := false
+	for {
+		part, err := reader.NextRawPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, invalid(err.Error())
+		}
+		for _, name := range []string{"Content-Disposition", "Content-Type", "Content-Transfer-Encoding"} {
+			if len(part.Header.Values(name)) > 1 {
+				return nil, invalid("repeated " + name)
+			}
+		}
+		disposition, dispositionParams, ok := unambiguousMediaParams(part.Header.Get("Content-Disposition"))
+		if !ok || disposition != "form-data" || dispositionParams["name"] == "" {
+			return nil, invalid("ambiguous Content-Disposition")
+		}
+		switch strings.ToLower(strings.TrimSpace(part.Header.Get("Content-Transfer-Encoding"))) {
+		case "", "7bit", "8bit", "binary":
+		default:
+			return nil, invalid("unsupported Content-Transfer-Encoding")
+		}
+		if dispositionParams["name"] != "request" {
+			continue
+		}
+		// The upstream reads one request; a second one could carry another
+		// image count than the one billed.
+		if found {
+			return nil, errors.New(i18n.T(c, i18n.MsgNovelAIRequestFieldMissing))
+		}
+		if partType := part.Header.Get("Content-Type"); partType != "" {
+			if _, _, ok := unambiguousMediaParams(partType); !ok {
+				return nil, invalid("ambiguous Content-Type of the request field")
+			}
+		}
+		if requestJSON, err = io.ReadAll(part); err != nil {
+			return nil, invalid(err.Error())
+		}
+		found = true
+	}
+	if !found {
+		return nil, errors.New(i18n.T(c, i18n.MsgNovelAIRequestFieldMissing))
+	}
+	return requestJSON, nil
+}
+
+// unambiguousMediaParams parses a Content-Type or Content-Disposition value
+// of a request whose bytes another MIME parser reads too, and reports false
+// unless every parser reads it alike: mime.ParseMediaType must accept it, no
+// parameter may use RFC 2231 extended or continued syntax (name*=, name*0=),
+// which ParseMediaType folds into the plain name while other parsers keep the
+// plain value, and a charset must be UTF-8, since parsers that decode a field
+// by it read other text than these bytes.
+func unambiguousMediaParams(value string) (string, map[string]string, bool) {
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		return "", nil, false
+	}
+	if charset, ok := params["charset"]; ok && !strings.EqualFold(charset, "utf-8") {
+		return "", nil, false
+	}
+	// ParseMediaType accepted the value, so each parameter name follows an
+	// unquoted ";" and ends at its "=".
+	inName, quoted, escaped := false, false, false
+	for _, r := range value {
+		switch {
+		case escaped:
+			escaped = false
+		case quoted:
+			escaped = r == '\\'
+			quoted = r != '"'
+		case r == '"':
+			quoted = true
+		case r == ';':
+			inName = true
+		case r == '=':
+			inName = false
+		case r == '*' && inName:
+			return "", nil, false
+		}
+	}
+	return mediaType, params, true
+}
+
+// GetAndValidateNovelAIImageRequest validates a NovelAI generate-image request
+// (JSON body or multipart request field) and returns it as an image request
+// carrying only what billing reads: model, the input prompt and
+// parameters.n_samples as the image count. The client body itself is
+// forwarded unchanged.
+func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error) {
+	requestJSON, err := NovelAIRequestJSON(c)
+	if err != nil {
+		return nil, err
+	}
+	if !gjson.ValidBytes(requestJSON) {
+		return nil, errors.New(i18n.T(c, i18n.MsgNovelAIRequestInvalid))
+	}
+	request := gjson.ParseBytes(requestJSON)
+	if !request.IsObject() {
+		return nil, errors.New(i18n.T(c, i18n.MsgNovelAIRequestInvalid))
+	}
+	model, err := novelAIRequestMember(c, request, "model")
+	if err != nil {
+		return nil, err
+	}
+	if model.Type != gjson.String || model.String() == "" {
+		return nil, errors.New(i18n.T(c, i18n.MsgDistributorModelNameRequired))
+	}
+	parameters, err := novelAIRequestMember(c, request, "parameters")
+	if err != nil {
+		return nil, err
+	}
+	// n_samples becomes the billing multiplier, so it is bounded here like the
+	// OpenAI image n.
+	count := 1
+	if parameters.Exists() && parameters.Type != gjson.Null {
+		if !parameters.IsObject() {
+			return nil, errors.New(i18n.T(c, i18n.MsgNovelAIParametersInvalid))
+		}
+		samples, err := novelAIRequestMember(c, parameters, "n_samples")
+		if err != nil {
+			return nil, err
+		}
+		if samples.Exists() && samples.Type != gjson.Null {
+			n, convErr := strconv.Atoi(samples.Raw)
+			if samples.Type != gjson.Number || convErr != nil || n < 1 || n > dto.MaxImageN {
+				return nil, errors.New(i18n.T(c, i18n.MsgNovelAINSamplesInvalid, map[string]any{"Max": dto.MaxImageN}))
+			}
+			count = n
+		}
+	}
+	// The prompt feeds the sensitive word check and token estimation.
+	input, err := novelAIRequestMember(c, request, "input")
+	if err != nil {
+		return nil, err
+	}
+	imageRequest := &dto.ImageRequest{Model: model.String(), N: common.GetPointer(uint(count))}
+	if input.Type == gjson.String {
+		imageRequest.Prompt = input.String()
+	}
+	return imageRequest, nil
+}
+
+// novelAIRequestMember returns the member key of a NovelAI request object.
+// Keys match case-insensitively and must occur once, so a repeated or
+// differently cased key cannot carry a value the upstream reads but billing
+// does not.
+func novelAIRequestMember(c *gin.Context, object gjson.Result, key string) (gjson.Result, error) {
+	var member gjson.Result
+	matches := 0
+	object.ForEach(func(name, value gjson.Result) bool {
+		if strings.EqualFold(name.String(), key) {
+			member = value
+			matches++
+		}
+		return true
+	})
+	if matches > 1 {
+		return gjson.Result{}, errors.New(i18n.T(c, i18n.MsgNovelAIFieldRepeated, map[string]any{"Field": key}))
+	}
+	return member, nil
 }
 
 func GetAndValidateClaudeRequest(c *gin.Context) (textRequest *dto.ClaudeRequest, err error) {

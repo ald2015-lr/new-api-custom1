@@ -46,6 +46,14 @@ relay.group_upstream_saturated: "当前分组上游负载已饱和，请稍后�
 relay.retry_get_channel_failed: "获取分组 {{.Group}} 下模型 {{.Model}} 的可用渠道失败（retry）: {{.Error}}"
 relay.retry_no_available_channel: "分组 {{.Group}} 下模型 {{.Model}} 的可用渠道不存在（retry）"
 relay.access_token_unsupported: "暂不支持使用 access token"
+novelai.request_invalid: "NovelAI 请求必须是 JSON 对象"
+novelai.content_type_invalid: "NovelAI 请求必须以 UTF-8 编码的 application/json 或 multipart/form-data 发送"
+novelai.request_field_missing: "multipart 表单必须在名为 request 的字段中携带 NovelAI 请求 JSON，且该字段只能有一个"
+novelai.multipart_invalid: "无效的 multipart 表单：{{.Error}}"
+novelai.field_repeated: "NovelAI 请求中的字段 {{.Field}} 只能出现一次"
+novelai.parameters_invalid: "NovelAI 请求的 parameters 字段必须是 JSON 对象"
+novelai.n_samples_invalid: "parameters.n_samples 必须是 1 到 {{.Max}} 之间的整数"
+novelai.channel_unsupported: "所选渠道不支持 NovelAI 图片生成"
 
 # 分组充值门槛消息
 group_access.topup_required: "分组 {{.Group}} 需要累计充值满 {{.Required}} 才能使用（当前累计 {{.Current}}）"

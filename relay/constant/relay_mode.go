@@ -2,6 +2,8 @@ package constant
 
 import (
 	"strings"
+
+	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
 const (
@@ -52,9 +54,50 @@ const (
 
 	RelayModeToolsSearch
 	RelayModeToolsFetch
+
+	RelayModeNovelAIGenerateImage
+	RelayModeNovelAIGenerateImageStream
 )
 
+// RelayFormatNovelAI is the NovelAI native image API. It is a host-only
+// passthrough format: request and response bytes are forwarded unchanged, so
+// relaykit has no DTO or conversion for it.
+const RelayFormatNovelAI types.RelayFormat = "novelai"
+
+// NovelAI serves image generation at these paths. new-api serves them with and
+// without a /v1 prefix and forwards to the same path on the channel, never
+// with /v1.
+const (
+	NovelAIGenerateImagePath       = "/ai/generate-image"
+	NovelAIGenerateImageStreamPath = "/ai/generate-image-stream"
+)
+
+// NovelAI clients read the account at these paths; new-api answers them for
+// the calling token, with and without a /v1 prefix.
+const (
+	NovelAIUserSubscriptionPath = "/user/subscription"
+	NovelAIUserDataPath         = "/user/data"
+)
+
+// NovelAIPath returns the NovelAI path of a NovelAI relay mode.
+func NovelAIPath(relayMode int) (string, bool) {
+	switch relayMode {
+	case RelayModeNovelAIGenerateImage:
+		return NovelAIGenerateImagePath, true
+	case RelayModeNovelAIGenerateImageStream:
+		return NovelAIGenerateImageStreamPath, true
+	}
+	return "", false
+}
+
 func Path2RelayMode(path string) int {
+	novelAIPath, _, _ := strings.Cut(strings.TrimPrefix(path, "/v1"), "?")
+	switch novelAIPath {
+	case NovelAIGenerateImagePath:
+		return RelayModeNovelAIGenerateImage
+	case NovelAIGenerateImageStreamPath:
+		return RelayModeNovelAIGenerateImageStream
+	}
 	relayMode := RelayModeUnknown
 	if strings.HasPrefix(path, "/v1/chat/completions") || strings.HasPrefix(path, "/pg/chat/completions") {
 		relayMode = RelayModeChatCompletions
