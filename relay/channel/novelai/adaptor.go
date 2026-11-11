@@ -28,9 +28,9 @@ import (
 // convert to.
 type Adaptor struct{}
 
-// errNativeOnly rejects a request this channel cannot serve. It is final:
+// ErrNativeOnly rejects a request this channel cannot serve. It is final:
 // another channel would not serve a NovelAI model on that route either.
-func errNativeOnly(c *gin.Context) *types.NewAPIError {
+func ErrNativeOnly(c *gin.Context) *types.NewAPIError {
 	return types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgNovelAIChannelNativeOnly)), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 }
 
@@ -39,7 +39,7 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {}
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	path, ok := relayconstant.NovelAIPath(info.RelayMode)
 	if !ok {
-		return "", errNativeOnly(nil)
+		return "", ErrNativeOnly(nil)
 	}
 	baseURL := strings.TrimSuffix(info.ChannelBaseUrl, "/")
 	if baseURL == "" {
@@ -60,48 +60,48 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	// Checked here as well as by the request conversions, which a pass-through
 	// body skips.
 	if _, ok := relayconstant.NovelAIPath(info.RelayMode); !ok {
-		return nil, errNativeOnly(c)
+		return nil, ErrNativeOnly(c)
 	}
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	if _, ok := relayconstant.NovelAIPath(info.RelayMode); !ok {
-		return nil, errNativeOnly(c)
+		return nil, ErrNativeOnly(c)
 	}
 	return openai.NovelAIImageHandler(c, info, resp)
 }
 
 func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ClaudeRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeminiChatRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertRerankRequest(c *gin.Context, relayMode int, request dto.RerankRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.EmbeddingRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
-	return nil, errNativeOnly(c)
+	return nil, ErrNativeOnly(c)
 }
 
 func (a *Adaptor) GetModelList() []string {

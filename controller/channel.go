@@ -1263,6 +1263,12 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// A NovelAI channel's balance is Anlas and any other channel's is USD, so
+	// a balance in the old unit is cleared rather than read in the new one.
+	if channel.Type != originChannel.Type &&
+		(channel.Type == constant.ChannelTypeNovelAI || originChannel.Type == constant.ChannelTypeNovelAI) {
+		channel.ClearBalance()
+	}
 	model.InitChannelCache()
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)

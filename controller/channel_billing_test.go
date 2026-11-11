@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -241,4 +242,35 @@ func TestUpdateChannelNovelAIBalanceStoresAnlas(t *testing.T) {
 		assert.Zero(t, stored.Balance)
 		assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
 	})
+
+	// Editing a channel to or from NovelAI clears its balance, which would
+	// otherwise be read in the other unit until the next balance query.
+	for _, tc := range []struct {
+		name                     string
+		fromType, toType         int
+		balance, wantBalance     float64
+		updatedTime, wantUpdated int64
+	}{
+		{name: "NovelAI to OpenAI", fromType: constant.ChannelTypeNovelAI, toType: constant.ChannelTypeOpenAI, balance: 10250, updatedTime: 1700000000},
+		{name: "OpenAI to NovelAI", fromType: constant.ChannelTypeOpenAI, toType: constant.ChannelTypeNovelAI, balance: 500, updatedTime: 1700000000},
+		{name: "NovelAI kept", fromType: constant.ChannelTypeNovelAI, toType: constant.ChannelTypeNovelAI, balance: 10250, updatedTime: 1700000000, wantBalance: 10250, wantUpdated: 1700000000},
+		{name: "OpenAI to DeepSeek", fromType: constant.ChannelTypeOpenAI, toType: constant.ChannelTypeDeepSeek, balance: 500, updatedTime: 1700000000, wantBalance: 500, wantUpdated: 1700000000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTaskPluginBindChannelTest(t)
+			channel := &model.Channel{Type: tc.fromType, Key: "pst-test", Name: "edited", Status: common.ChannelStatusEnabled, Models: "nai-diffusion-3", Group: "default",
+				Balance: tc.balance, BalanceUpdatedTime: tc.updatedTime}
+			require.NoError(t, channel.Insert())
+
+			recorder := putUpdateChannel(t, 1, common.RoleRootUser,
+				fmt.Sprintf(`{"id":%d,"type":%d,"name":"renamed","models":"nai-diffusion-3","group":"default","balance":0}`, channel.Id, tc.toType))
+
+			require.Contains(t, recorder.Body.String(), `"success":true`)
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, tc.toType, stored.Type)
+			assert.Equal(t, tc.wantBalance, stored.Balance)
+			assert.Equal(t, tc.wantUpdated, stored.BalanceUpdatedTime)
+		})
+	}
 }

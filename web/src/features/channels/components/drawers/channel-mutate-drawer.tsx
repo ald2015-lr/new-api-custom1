@@ -141,6 +141,7 @@ import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_TASK_PLUGIN,
@@ -733,8 +734,14 @@ export function ChannelMutateDrawer({
         (model) => model.startsWith('gpt-') || model.startsWith('text-')
       )
     }
+    // A NovelAI channel serves only the models of NovelAI's adaptor.
+    if (currentType === CHANNEL_TYPE_NOVELAI) {
+      return (allModelsData?.data ?? [])
+        .filter((model) => model.owned_by === 'novelai')
+        .map((model) => model.id)
+    }
     return allModelsList
-  }, [allModelsList, currentType])
+  }, [allModelsData, allModelsList, currentType])
 
   // Get prefill groups
   const prefillGroups = useMemo(

@@ -606,4 +606,32 @@ func TestNovelAIChannelTestReadsTheAccountInsteadOfGenerating(t *testing.T) {
 			assert.True(t, service.ShouldDisableChannel(result.newAPIError))
 		})
 	}
+
+	// The console shows the failure of a test it runs in its own language.
+	t.Run("the console receives the failure as a translatable message", func(t *testing.T) {
+		channel := &model.Channel{Type: constant.ChannelTypeNovelAI, Key: "pst-revoked", Name: "novelai", Status: common.ChannelStatusEnabled,
+			Group: "default", Models: "nai-diffusion-4-5-full", BaseURL: common.GetPointer(server.URL)}
+		require.NoError(t, db.Create(channel).Error)
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("id", user.Id)
+		ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+		ctx.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/channel/test/%d", channel.Id), nil)
+
+		TestChannel(ctx)
+
+		var response struct {
+			Success       bool           `json:"success"`
+			Message       string         `json:"message"`
+			MessageKey    string         `json:"message_key"`
+			MessageParams map[string]any `json:"message_params"`
+			ErrorCode     string         `json:"error_code"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		assert.False(t, response.Success)
+		assert.Equal(t, "NovelAI account answered HTTP 401: Invalid accessToken.", response.Message)
+		assert.Equal(t, "NovelAI account answered HTTP {{status}}: {{message}}", response.MessageKey)
+		assert.Equal(t, map[string]any{"status": float64(http.StatusUnauthorized), "message": "Invalid accessToken."}, response.MessageParams)
+		assert.Equal(t, "bad_response_status_code", response.ErrorCode)
+	})
 }

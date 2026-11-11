@@ -68,7 +68,9 @@ func ResolveLegacyBillingDetails(name string, effective, configured PricingValue
 		return details
 	}
 	if _, fixed := effective["ModelPrice"]; fixed {
-		details.ImageCount = common.IsImageGenerationModel(name)
+		// The NovelAI relay charges a per-call price for each image, behind a
+		// NovelAI channel or an OpenAI-type forwarder alike.
+		details.ImageCount = common.IsImageGenerationModel(name) || strings.HasPrefix(strings.ToLower(name), "nai-diffusion")
 		details.RequestRules = legacyDallePricingRules(name)
 		return details
 	}

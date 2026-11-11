@@ -534,6 +534,8 @@ export const MODEL_FETCHABLE_TYPES = new Set([
   60,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
+  // The server answers with NovelAI's built-in models, without a request.
+  CHANNEL_TYPE_NOVELAI,
 ])
 
 export const FIELD_PASSTHROUGH_TYPES = new Set([

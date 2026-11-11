@@ -894,16 +894,14 @@ func TestChannel(c *gin.Context) {
 		requestCtx = c.Request.Context()
 	}
 	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
+	// A failure that is a web console message (a NovelAI account error) also
+	// carries message_key and message_params, which the console translates.
 	if result.localErr != nil {
-		resp := gin.H{
-			"success": false,
-			"message": result.localErr.Error(),
-			"time":    0.0,
-		}
+		fields := gin.H{"time": 0.0}
 		if result.newAPIError != nil {
-			resp["error_code"] = result.newAPIError.GetErrorCode()
+			fields["error_code"] = result.newAPIError.GetErrorCode()
 		}
-		c.JSON(http.StatusOK, resp)
+		common.ApiErrorStatus(c, http.StatusOK, result.localErr, fields)
 		return
 	}
 	tok := time.Now()
@@ -911,12 +909,7 @@ func TestChannel(c *gin.Context) {
 	go channel.UpdateResponseTime(milliseconds)
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success":    false,
-			"message":    result.newAPIError.Error(),
-			"time":       consumedTime,
-			"error_code": result.newAPIError.GetErrorCode(),
-		})
+		common.ApiErrorStatus(c, http.StatusOK, result.newAPIError, gin.H{"time": consumedTime, "error_code": result.newAPIError.GetErrorCode()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

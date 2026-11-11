@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -73,19 +74,25 @@ func TestModelPricingConversionAcceptsDeclaredEndpointArray(t *testing.T) {
 
 // The NovelAI relay charges a per-call price for each image, so a per-call
 // price on a model a NovelAI channel serves converts to a per-image
-// expression, whatever the model is called.
+// expression, whatever the model is called, and so does a NovelAI model an
+// OpenAI-type channel in front of a NovelAI-compatible forwarder serves.
 func TestModelPricingConversionBillsNovelAIChannelModelsPerImage(t *testing.T) {
 	db := modelManagementDB(t, "sqlite", "")
 	previousQuota := common.QuotaPerUnit
 	common.QuotaPerUnit = 500000
 	t.Cleanup(func() { common.QuotaPerUnit = previousQuota })
-	channel := model.Channel{Type: constant.ChannelTypeNovelAI, Key: "pst-test", Name: "novelai", Status: common.ChannelStatusEnabled, Group: "default", Models: "nai-diffusion-4-5-full,anime-v4"}
-	require.NoError(t, db.Create(&channel).Error)
-	for _, name := range []string{"nai-diffusion-4-5-full", "anime-v4"} {
-		require.NoError(t, db.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
+	for channelType, models := range map[int][]string{
+		constant.ChannelTypeNovelAI: {"nai-diffusion-4-5-full", "anime-v4"},
+		constant.ChannelTypeOpenAI:  {"nai-diffusion-3", "nai-diffusion-4-5-full-inpainting"},
+	} {
+		channel := model.Channel{Type: channelType, Key: "pst-test", Name: "novelai", Status: common.ChannelStatusEnabled, Group: "default", Models: strings.Join(models, ",")}
+		require.NoError(t, db.Create(&channel).Error)
+		for _, name := range models {
+			require.NoError(t, db.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
+		}
 	}
 
-	for _, name := range []string{"nai-diffusion-4-5-full", "anime-v4"} {
+	for _, name := range []string{"nai-diffusion-4-5-full", "anime-v4", "nai-diffusion-3", "nai-diffusion-4-5-full-inpainting"} {
 		var response struct {
 			Success bool
 			Data    model.ModelPricingConversion

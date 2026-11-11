@@ -628,8 +628,9 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 
 // A NovelAI channel serves only the NovelAI native routes: NovelAI's own 201
 // zip passes through as sent, while an OpenAI-format request for one of its
-// models, converted or passed through, is rejected with a 400 before anything
-// reaches NovelAI, and charges nothing.
+// models, converted or passed through, or a search on a model the channel
+// lists, is rejected with a 400 before anything reaches NovelAI, and charges
+// nothing.
 func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 	setupRelayRouterTestDB(t)
 	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
@@ -647,7 +648,7 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
 		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
 	})
-	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-3":0.02}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-3":0.02,"deepseek-search":0.02}`))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
 
 	upstream := &novelAIUpstream{}
@@ -656,8 +657,10 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-official", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
 	require.NoError(t, model.DB.Create(&user).Error)
 	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiofficialkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
-	// nai-diffusion-3 is served by a channel that passes request bodies through.
-	for modelName, setting := range map[string]string{"nai-diffusion-4-5-full": "", "nai-diffusion-3": `{"pass_through_body_enabled":true}`} {
+	// nai-diffusion-3 is served by a channel that passes request bodies
+	// through; deepseek-search, the /v1/tools/search routing name, by a
+	// channel that lists it by mistake.
+	for modelName, setting := range map[string]string{"nai-diffusion-4-5-full": "", "nai-diffusion-3": `{"pass_through_body_enabled":true}`, constant.DeepSeekSearchModel: ""} {
 		channel := model.Channel{Name: "novelai-" + modelName, Key: "pst-novelai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default", Models: modelName, BaseURL: common.GetPointer(server.URL), Setting: common.GetPointer(setting)}
 		require.NoError(t, model.DB.Create(&channel).Error)
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: modelName, Group: "default", Enabled: true}).Error)
@@ -702,6 +705,8 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 		{"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat"}`},
 		{"/v1/chat/completions", `{"model":"nai-diffusion-3","messages":[{"role":"user","content":"a cat"}]}`},
 		{"/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"a cat"}`},
+		{"/v1/alpha/search", `{"model":"nai-diffusion-4-5-full","query":"a cat"}`},
+		{"/v1/tools/search", `{"query":"a cat"}`},
 	} {
 		t.Run(rejected.path+" "+rejected.body, func(t *testing.T) {
 			calls, before := upstream.calls, walletQuota()

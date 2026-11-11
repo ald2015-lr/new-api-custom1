@@ -48,7 +48,7 @@ export const channelSchema = z.object({
   response_time: z.number(), // in milliseconds
   base_url: z.string().nullish(),
   other: z.string().default(''),
-  balance: z.number().default(0), // in USD
+  balance: z.number().default(0), // in USD; a NovelAI channel's is its account's Anlas
   balance_updated_time: z.number(),
   models: z.string().default(''),
   group: z.string().default('default'),

@@ -149,26 +149,31 @@ func FetchSubscription(ctx context.Context, baseURL, key string, setting dto.Cha
 	var account struct {
 		Tier   *int64 `json:"tier"`
 		Active *bool  `json:"active"`
-		// Read as numbers of any size, so that an odd balance leaves the
-		// account readable and only Anlas unknown.
-		TrainingStepsLeft *struct {
-			Fixed     *float64 `json:"fixedTrainingStepsLeft"`
-			Purchased *float64 `json:"purchasedTrainingSteps"`
-		} `json:"trainingStepsLeft"`
+		// Decoded on its own, so that an odd balance (a value of another
+		// type, or a number past float64) leaves the account readable and
+		// only Anlas unknown.
+		TrainingStepsLeft common.RawMessage `json:"trainingStepsLeft"`
 	}
 	if err := common.Unmarshal(body, &account); err != nil || account.Tier == nil || account.Active == nil {
 		return nil, types.NewError(common.NewMessage("NovelAI account response is not a subscription"), types.ErrorCodeBadResponseBody)
 	}
 	subscription := &Subscription{Tier: *account.Tier, Active: *account.Active}
-	if steps := account.TrainingStepsLeft; steps != nil && steps.Fixed != nil && steps.Purchased != nil {
-		fixed, purchased := *steps.Fixed, *steps.Purchased
-		// Both are whole and within maxAnlas, so the difference and the
-		// conversions are exact.
-		if fixed >= 0 && purchased >= 0 && fixed == math.Trunc(fixed) && purchased == math.Trunc(purchased) &&
-			purchased <= maxAnlas && fixed <= maxAnlas-purchased {
-			anlas := int64(fixed) + int64(purchased)
-			subscription.Anlas = &anlas
-		}
+	var steps struct {
+		Fixed     common.RawMessage `json:"fixedTrainingStepsLeft"`
+		Purchased common.RawMessage `json:"purchasedTrainingSteps"`
+	}
+	var fixed, purchased *float64
+	if common.Unmarshal(account.TrainingStepsLeft, &steps) != nil ||
+		common.Unmarshal(steps.Fixed, &fixed) != nil || common.Unmarshal(steps.Purchased, &purchased) != nil ||
+		fixed == nil || purchased == nil {
+		return subscription, nil
+	}
+	// Both are whole and within maxAnlas, so the difference and the
+	// conversions are exact.
+	if *fixed >= 0 && *purchased >= 0 && *fixed == math.Trunc(*fixed) && *purchased == math.Trunc(*purchased) &&
+		*purchased <= maxAnlas && *fixed <= maxAnlas-*purchased {
+		anlas := int64(*fixed) + int64(*purchased)
+		subscription.Anlas = &anlas
 	}
 	return subscription, nil
 }
