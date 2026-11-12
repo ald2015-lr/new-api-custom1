@@ -135,6 +135,7 @@
   "No .env file found, using default environment variables. If needed, please create a .env file and set the relevant variables.": "未找到 .env 文件，直接使用进程的环境变量。需要时可以新建 .env 文件，把变量写在里面。",
   "No available channel in group %s for model %s at priorityRetry %d, trying next group": "分组 %s 没有模型 %s 的可用渠道 (priorityRetry=%d)，尝试下一个分组",
   "No update needed for task %s": "任务 %s 没有变化，跳过更新",
+  "NovelAI HD enhanced %d of %d images at %s, about %d Anlas": "NovelAI 高清：%[2]d 张图片中 %[1]d 张已增强为 %[3]s，约消耗 %[4]d Anlas",
   "NovelAI account request: failed to load token %d: %s": "NovelAI 账户请求: 读取令牌 %d 失败: %s",
   "NovelAI channel #%d key #%d answered %d, so new requests go to its other keys with room for %s": "NovelAI 渠道 #%d 的 KEY #%d 返回 %d，%s 内新请求优先使用其他有空位的 KEY",
   "NovelAI channel #%d key #%d: no turn after waiting %s, rejected with 429": "NovelAI 渠道 #%d 的 KEY #%d 排队 %s 仍未轮到，已返回 429",

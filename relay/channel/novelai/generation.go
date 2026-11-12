@@ -85,6 +85,11 @@ type GenerationIntent struct {
 	// channel's novelai_presets_disabled setting); they are on by default,
 	// as in NovelAI's web client.
 	PresetsOff bool
+	// HDOff turns the HD pass off (the channel's novelai_hd_disabled
+	// setting): a request can turn HD off, never on past it.
+	HDOff bool
+	// Quality is the OpenAI images quality; "low" turns HD off.
+	Quality string
 	// Extras are the top-level NovelAI extension keys of the request, as
 	// ParseExtensions returns them: negative_prompt, seed, steps, scale,
 	// strength, noise, characterPrompts and the rest of extensionKeys.
@@ -121,6 +126,10 @@ type Generation struct {
 	Streamable bool
 	// Tokens is what the request counts as in tokens (RequestTokens).
 	Tokens GenerationTokens
+	// HD tells that the request wants the HD pass and qualifies for it
+	// (hdEligible); hdSkip says why not, for the debug log.
+	HD     bool
+	hdSkip string
 }
 
 // Size is the generated size in OpenAI's WIDTHxHEIGHT form.
@@ -236,6 +245,10 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	}
 
 	seed, apiErr := generationSeed(c, fields)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	hd, apiErr := fields.boolean("hd")
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -549,7 +562,7 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
 	}
 
-	return &Generation{
+	generation := &Generation{
 		Body:        body,
 		Model:       model,
 		Action:      action,
@@ -563,7 +576,19 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		Transparent: intent.Transparent,
 		Streamable:  modelProfile.family != familyV3,
 		Tokens:      RequestTokens(countedJSON),
-	}, nil
+	}
+	switch {
+	case intent.HDOff:
+		generation.hdSkip = "the channel turned HD off"
+	case hd != nil && !*hd:
+		generation.hdSkip = "the request turned HD off"
+	case strings.EqualFold(intent.Quality, "low"):
+		generation.hdSkip = "quality low"
+	default:
+		generation.hdSkip = hdEligible(generation, modelProfile, intent.Parameters)
+		generation.HD = generation.hdSkip == ""
+	}
+	return generation, nil
 }
 
 // ddimFailingSteps are the step counts at which V3's DDIM fails on NovelAI.
@@ -579,6 +604,7 @@ var interpretedKeys = map[string]bool{
 	"strength": true, "noise": true, "characterPrompts": true, "skip_cfg_above_sigma": true,
 	"variety": true, "image_format": true, "params_version": true, "legacy_uc": true,
 	"width": true, "height": true, "n_samples": true, "v4_prompt": true, "v4_negative_prompt": true,
+	"hd": true,
 }
 
 // sampleLimit is the most images NovelAI generates at once for an area.

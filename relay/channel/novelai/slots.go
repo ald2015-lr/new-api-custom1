@@ -257,7 +257,8 @@ func releaseGenerationKey(id [sha256.Size]byte) {
 // call, the automatic disable of a failing key and the logs' key index use
 // it. The key is released once, by the first of: release, the end of
 // NovelAI's answer or the close of the response body (generationBody), or
-// the end of the client's request.
+// the end of the client's request. A request with HD holds the key past the
+// base answer, through its enhance calls, as one job (Adaptor.DoRequest).
 func holdGeneration(c *gin.Context, info *relaycommon.RelayInfo) (func(), *types.NewAPIError) {
 	if info.ChannelType != constant.ChannelTypeNovelAI || !isNovelAIImageHost(info.ChannelBaseUrl) {
 		return func() {}, nil

@@ -145,6 +145,10 @@ type ChannelOtherSettings struct {
 	// requests on a NovelAI channel; a request can still ask for them with
 	// qualityToggle, qualityPresetId or ucPresetId.
 	NovelAIPresetsDisabled bool `json:"novelai_presets_disabled,omitempty"`
+	// NovelAIHDDisabled turns off the HD pass (a 1.5× img2img enhance of each
+	// text-to-image result, at the same user price) that a NovelAI channel
+	// gives OpenAI-format requests by default.
+	NovelAIHDDisabled bool `json:"novelai_hd_disabled,omitempty"`
 	// NovelAIQueueLimit is how many requests may wait for each busy key of a
 	// NovelAI channel on NovelAI's host, the generating one aside; nil means
 	// NovelAIQueueLimitDefault, 0 no waiting.

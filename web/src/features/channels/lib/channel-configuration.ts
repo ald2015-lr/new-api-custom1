@@ -65,6 +65,7 @@ const CONFIGURATION_BLOCKS = {
       'responses_websocket_enabled',
       'ollama_openai_chat',
       'novelai_presets_disabled',
+      'novelai_hd_disabled',
       'novelai_queue_limit',
       'system_prompt',
       'system_prompt_override',
@@ -164,6 +165,7 @@ export function getChannelConfigurationState(
       (values.type === CHANNEL_TYPE_OLLAMA && values.ollama_openai_chat) ||
       (values.type === CHANNEL_TYPE_NOVELAI &&
         (values.novelai_presets_disabled ||
+          values.novelai_hd_disabled ||
           (values.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT) !==
             NOVELAI_QUEUE_LIMIT_DEFAULT)) ||
       values.system_prompt?.trim() ||

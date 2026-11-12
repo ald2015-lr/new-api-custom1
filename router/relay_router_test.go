@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
@@ -905,15 +907,17 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-openai", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
 	require.NoError(t, model.DB.Create(&user).Error)
 	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiopenaikey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	// The channels here describe the base pass, one call a request: their
+	// HD pass is off (the HD subtests at the end use a channel of their own).
 	channel := model.Channel{Name: "novelai-official", Key: "pst-openai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full,nai-diffusion-5-curated,nai-diffusion-furry-3", BaseURL: common.GetPointer(server.URL)}
+		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full,nai-diffusion-5-curated,nai-diffusion-furry-3", BaseURL: common.GetPointer(server.URL), OtherSettings: `{"novelai_hd_disabled":true}`}
 	require.NoError(t, model.DB.Create(&channel).Error)
 	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-5-full", "nai-diffusion-5-curated", "nai-diffusion-furry-3"} {
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
 	}
 	// This channel makes NovelAI's prompt presets opt-in.
 	withoutPresets := model.Channel{Name: "novelai-without-presets", Key: "pst-plain", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-		Models: "nai-diffusion-4-full", BaseURL: common.GetPointer(server.URL), OtherSettings: `{"novelai_presets_disabled":true}`}
+		Models: "nai-diffusion-4-full", BaseURL: common.GetPointer(server.URL), OtherSettings: `{"novelai_presets_disabled":true,"novelai_hd_disabled":true}`}
 	require.NoError(t, model.DB.Create(&withoutPresets).Error)
 	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: withoutPresets.Id, Model: "nai-diffusion-4-full", Group: "default", Enabled: true}).Error)
 	passThrough := model.Channel{Name: "novelai-pass-through", Key: "pst-pass", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
@@ -952,6 +956,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			B64JSON string `json:"b64_json"`
 			URL     string `json:"url"`
 			Seed    int64  `json:"seed"`
+			Size    string `json:"size"`
 		} `json:"data"`
 		Background   string `json:"background"`
 		OutputFormat string `json:"output_format"`
@@ -1470,7 +1475,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			if channelType == constant.ChannelTypeOpenAI {
 				baseURL = forwarder.URL
 			}
-			retried := model.Channel{Name: "novelai-retry", Key: "pst-retry", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-curated-preview", BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0)}
+			retried := model.Channel{Name: "novelai-retry", Key: "pst-retry", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-curated-preview", BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0), OtherSettings: `{"novelai_hd_disabled":true}`}
 			require.NoError(t, model.DB.Create(&retried).Error)
 			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: retried.Id, Model: "nai-diffusion-4-curated-preview", Group: "default", Enabled: true, Priority: &priority}).Error)
 		}
@@ -1528,7 +1533,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	t.Run("a parameter override cannot change the image count", func(t *testing.T) {
 		override := `{"operations":[{"path":"parameters.n_samples","mode":"set","value":3}]}`
 		overridden := model.Channel{Name: "novelai-override", Key: "pst-override", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-			Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), ParamOverride: &override, AutoBan: common.GetPointer(0)}
+			Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), ParamOverride: &override, AutoBan: common.GetPointer(0), OtherSettings: `{"novelai_hd_disabled":true}`}
 		require.NoError(t, model.DB.Create(&overridden).Error)
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: overridden.Id, Model: "nai-diffusion-4-5-curated", Group: "default", Enabled: true}).Error)
 		calls, before := upstream.calls(), walletQuota()
@@ -1616,6 +1621,172 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Contains(t, recorder.Body.String(), i18n.Translate("", i18n.MsgNovelAINoImage))
 		assert.Equal(t, calls+1, upstream.calls())
 		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+	})
+
+	// HD, NovelAI's 1.5x Enhance, is on by default: novelai-hd serves V4.5
+	// Full and V5 Full ahead of novelai-official, which would take a retry.
+	// Each HD request is one more call to NovelAI and costs the user exactly
+	// what it costs without HD, in quota and in usage tokens, whatever HD
+	// manages; HD never fails or retries a request.
+	hdPriority := int64(5)
+	hdChannel := model.Channel{Name: "novelai-hd", Key: "pst-hd", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full", BaseURL: common.GetPointer(server.URL), Priority: &hdPriority}
+	require.NoError(t, model.DB.Create(&hdChannel).Error)
+	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-5-full"} {
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: hdChannel.Id, Model: name, Group: "default", Enabled: true, Priority: &hdPriority}).Error)
+	}
+	base, hd := novelAIPNG(t, 1216, 832, color.NRGBA{G: 255, A: 255}), novelAIPNG(t, 1856, 1280, color.NRGBA{R: 255, B: 255, A: 255})
+	enhanced := novelAIZip(t, hd)
+	failed := []byte(`{"statusCode":500,"message":"Error generating image"}`)
+	// requested is what NovelAI got since calls.
+	requested := func(calls int) []novelAIRecordedRequest {
+		upstream.mu.Lock()
+		defer upstream.mu.Unlock()
+		return slices.Clone(upstream.requests[calls:])
+	}
+	const hdPrompt = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"1216x832"`
+
+	t.Run("HD images cost what standard ones do", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusOK, "application/zip", enhanced)
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+
+		sent := requested(calls)
+		require.Len(t, sent, 2)
+		assert.Equal(t, "generate", sent[0].body["action"])
+		assert.Equal(t, "img2img", sent[1].body["action"])
+		parameters := sent[1].body["parameters"].(map[string]any)
+		assert.Equal(t, [2]any{1856.0, 1280.0}, [2]any{parameters["width"], parameters["height"]})
+		assert.Equal(t, "Bearer pst-hd", sent[1].authorization)
+		assert.Equal(t, "1856x1280", response.Size)
+		assert.Equal(t, "1856x1280", response.Data[0].Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, hd, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD 1856x1280")
+		assert.Equal(t, 10_000, log.Quota, "one image at $0.02, as without HD")
+		assert.Equal(t, 1245, log.CompletionTokens, "the 1216x832 image the request is priced at")
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("an account without Anlas gets the standard image at the same price", func(t *testing.T) {
+		t.Cleanup(func() { novelai.NoteAnlas("pst-hd", 1_000_000) })
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+
+		assert.Equal(t, calls+2, upstream.calls())
+		assert.Equal(t, "1216x832", response.Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, base, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD unavailable, delivered at the standard size")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, 1245, log.CompletionTokens)
+		assert.Equal(t, before-10_000, walletQuota())
+		var other map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok, log.Other)
+		diagnostics := adminInfo["conversion_diagnostics"].([]any)
+		require.Len(t, diagnostics, 1)
+		assert.Equal(t, "novelai_hd_fallback", diagnostics[0].(map[string]any)["code"])
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		calls = upstream.calls()
+		decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+		assert.Equal(t, calls+1, upstream.calls(), "the key skips HD after its 402")
+		assert.Contains(t, lastLog().Content, "HD unavailable, delivered at the standard size")
+	})
+
+	t.Run("a failed enhance is not retried on another channel", func(t *testing.T) {
+		retryTimes := common.RetryTimes
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = retryTimes })
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusInternalServerError, "application/json", failed)
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+
+		sent := requested(calls)
+		require.Len(t, sent, 2, "the base and its one enhance")
+		for _, request := range sent {
+			assert.Equal(t, "Bearer pst-hd", request.authorization, "novelai-official is never asked")
+		}
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, base, got)
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("an image_count expression settles the same whatever HD does", func(t *testing.T) {
+		two := novelAIZip(t, base, base)
+		for _, tc := range []struct {
+			name     string
+			answers  [][]byte
+			statuses []int
+			images   int
+		}{
+			{"both enhanced", [][]byte{two, enhanced, enhanced}, []int{200, 200, 200}, 2},
+			{"none enhanced", [][]byte{two, failed}, []int{200, 500}, 2},
+			{"one enhanced", [][]byte{two, enhanced, failed}, []int{200, 200, 500}, 2},
+			{"fewer images than reserved", [][]byte{novelAIZip(t, base), failed}, []int{200, 500}, 1},
+		} {
+			for i, answer := range tc.answers {
+				contentType := "application/zip"
+				if tc.statuses[i] != http.StatusOK {
+					contentType = "application/json"
+				}
+				upstream.queue(tc.statuses[i], contentType, answer)
+			}
+			calls, before := upstream.calls(), walletQuota()
+
+			response := decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-5-full","prompt":"1girl","size":"1216x832","n":2}`)))
+
+			assert.Equal(t, calls+len(tc.answers), upstream.calls(), tc.name)
+			assert.Len(t, response.Data, tc.images, tc.name)
+			log := lastLog()
+			assert.Equal(t, tc.images*30_000, log.Quota, tc.name+": $0.06 an image delivered")
+			assert.Equal(t, tc.images*1245, log.CompletionTokens, tc.name)
+			assert.Equal(t, before-tc.images*30_000, walletQuota(), tc.name)
+		}
+	})
+
+	t.Run("hd false and quality low skip HD", func(t *testing.T) {
+		for _, extra := range []string{`,"hd":false`, `,"quality":"low"`} {
+			upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+			calls := upstream.calls()
+
+			decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+extra+`}`)))
+
+			assert.Equal(t, calls+1, upstream.calls(), extra)
+			assert.NotContains(t, lastLog().Content, "HD", extra)
+		}
+	})
+
+	t.Run("a chat stream gets HD images at the base usage", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusOK, "application/zip", enhanced)
+		before := walletQuota()
+
+		events := streamEvents(send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","size":"1216x832","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"1girl"}]}`)))
+
+		require.Len(t, events, 5, "role, image, stop, usage, [DONE]")
+		content := events[1].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"].(string)
+		assert.Equal(t, [][]byte{hd}, chatContent(content))
+		assert.Equal(t, 1245.0, events[3].data["usage"].(map[string]any)["completion_tokens"])
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD 1856x1280")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, before-10_000, walletQuota())
 	})
 }
 

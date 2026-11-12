@@ -318,6 +318,7 @@ const SENSITIVE_FORM_FIELDS = [
   'claude_beta_query',
   'ollama_openai_chat',
   'novelai_presets_disabled',
+  'novelai_hd_disabled',
   'novelai_queue_limit',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
@@ -2036,6 +2037,31 @@ export function ChannelMutateDrawer({
                 disabled={sensitiveLocked}
                 checked={field.value === true}
                 onCheckedChange={field.onChange}
+              />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='novelai_hd_disabled'
+        render={({ field }) => (
+          <FormItem className='flex items-center justify-between px-4 py-3'>
+            <div className='space-y-0.5'>
+              <FormLabel>{t('NovelAI HD (1.5× Enhance)')}</FormLabel>
+              <FormDescription>
+                {t(
+                  'On by default. OpenAI-format text-to-image requests on V4 and later, for images up to about 1.4 MP, get a second img2img pass at 1.5× size at the same user price. Each HD image spends the account\'s Anlas (about 20 on V4/V4.5 and 30 on V5 at 23 steps), the same Anlas paid standard images use, and takes about twice as long; on a forwarder base URL it is one more paid call there. When the account cannot pay, the standard image is returned. A request can turn it off with "hd": false.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              {/* A positive switch over the negative setting: on means HD,
+                  which an unset setting is. */}
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value !== true}
+                onCheckedChange={(on) => field.onChange(!on)}
               />
             </FormControl>
           </FormItem>

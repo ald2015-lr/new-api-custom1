@@ -25,6 +25,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// consumeLogContentAdaptor is an adaptor that adds what it did to the
+// consume log's content, after the request's own lines and before the image
+// count (a NovelAI channel's HD pass).
+type consumeLogContentAdaptor interface{ ConsumeLogContent() []*common.Message }
+
 func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
 	info.BillingImageCount = nil
@@ -187,6 +192,9 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	}
 	if len(quality) > 0 {
 		logContent = append(logContent, common.NewMessage("Quality {{quality}}", map[string]any{"quality": quality}))
+	}
+	if a, ok := adaptor.(consumeLogContentAdaptor); ok {
+		logContent = append(logContent, a.ConsumeLogContent()...)
 	}
 	if imageN > 0 {
 		logContent = append(logContent, common.NewMessage("Image count {{count}}", map[string]any{"count": imageN}))

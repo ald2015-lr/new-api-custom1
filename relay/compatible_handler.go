@@ -194,6 +194,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	// A chat answered with generated images (a NovelAI channel) is billed
 	// per image, which the log shows as on the image routes.
 	var logContent []*common.Message
+	if a, ok := adaptor.(consumeLogContentAdaptor); ok {
+		logContent = append(logContent, a.ConsumeLogContent()...)
+	}
 	if info.ImageRequestCount > 0 {
 		logContent = append(logContent, common.NewMessage("Image count {{count}}", map[string]any{"count": info.SettledImageCount()}))
 	}

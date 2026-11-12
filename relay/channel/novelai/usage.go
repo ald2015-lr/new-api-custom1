@@ -47,7 +47,10 @@ type GenerationTokens struct {
 	// each vibe transfer or Precise Reference image.
 	InputImages int
 	// PerImage is ImageTokens of the canvas: what each generated image counts
-	// as.
+	// as. An HD image counts as the image of the canvas the request asked
+	// for, not as the larger one it is delivered at: HD is the same image at
+	// the same price, and a token-priced model would otherwise charge more
+	// than twice as much for it.
 	PerImage int
 }
 

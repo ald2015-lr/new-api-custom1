@@ -111,6 +111,7 @@ export interface ChannelOtherSettings {
   claude_beta_query?: boolean
   ollama_openai_chat?: boolean
   novelai_presets_disabled?: boolean
+  novelai_hd_disabled?: boolean
   novelai_queue_limit?: number
   disable_task_polling_sleep?: boolean
   upstream_model_update_check_enabled?: boolean

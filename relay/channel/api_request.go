@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -321,14 +322,20 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	// Bound to the client's request: when the client disconnects, the
+	// upstream stops generating (and billing) an answer nobody will read.
+	return DoApiRequestWithContext(c.Request.Context(), a, c, info, requestBody)
+}
+
+// DoApiRequestWithContext is DoApiRequest bound to ctx, which must derive
+// from the client's request context.
+func DoApiRequestWithContext(ctx context.Context, a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
-	// Bound to the client's request: when the client disconnects, the
-	// upstream stops generating (and billing) an answer nobody will read.
-	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
+	req, err := http.NewRequestWithContext(ctx, c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}

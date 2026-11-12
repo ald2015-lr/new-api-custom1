@@ -158,6 +158,8 @@ func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request 
 		ImageFormat: formatPNG,
 		Transparent: transparent,
 		PresetsOff:  info.ChannelOtherSettings.NovelAIPresetsDisabled,
+		HDOff:       info.ChannelOtherSettings.NovelAIHDDisabled,
+		Quality:     request.Quality,
 		Extras:      extras,
 		Parameters:  parameters,
 		Image:       sourceImage,
@@ -283,12 +285,15 @@ func imageReference(c *gin.Context, raw json.RawMessage, field string) ([]byte, 
 	return LoadImageReference(c, reference, field)
 }
 
-// openAIImageData is one image of an OpenAI images response. seed is an
-// extension: the seed NovelAI generated the image with.
+// openAIImageData is one image of an OpenAI images response. seed and size
+// are extensions: the seed NovelAI generated the image with (an HD image's
+// enhance seed follows from it, hdSeed, so it reproduces the HD image too),
+// and the image's own size, the HD canvas or the generation's.
 type openAIImageData struct {
 	B64JSON string `json:"b64_json,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Seed    int64  `json:"seed"`
+	Size    string `json:"size,omitempty"`
 }
 
 // OpenAIImageUsage is the usage object of an OpenAI images response and of
@@ -328,11 +333,15 @@ func ImageUsage(usage *dto.Usage) OpenAIImageUsage {
 // /ai/generate-image response: each image NovelAI returned, in its order,
 // rendered in the requested output format, as b64_json or a data: URL, with
 // the real size and format, and the generation's usage for those images.
-// The billed quantity becomes the images the client received. Upstream
-// accepted the job (2xx) and may have spent Anlas, so every failure here
-// skips retries; one that loses the images charges nothing, and a client
-// that left keeps the reserved quantity, its usage included.
-func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput) (*dto.Usage, *types.NewAPIError) {
+// With HD (e not nil) each image is enhanced in turn once every base
+// rendered, and the key is free before the response is written; an image HD
+// could not enhance is delivered as NovelAI made it. The usage stays the
+// base canvas's, so HD costs nothing more. The billed quantity becomes the
+// images the client received. Upstream accepted the job (2xx) and may have
+// spent Anlas, so every failure here skips retries; one that loses the
+// images charges nothing, and a client that left keeps the reserved
+// quantity, its usage included.
+func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput, e *enhancer) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 	images, clientLeft, apiErr := readImages(c, resp, info, generation.NSamples)
 	if clientLeft {
@@ -342,25 +351,39 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 		return nil, apiErr
 	}
 
-	response := openAIImagesResponse{
-		Created:    time.Now().Unix(),
-		Background: output.Background,
-		Size:       generation.Size(),
-		Usage:      ImageUsage(generation.Tokens.Usage(len(images))),
-	}
-	for i, data := range images {
+	finals := make([]renderedImage, 0, len(images))
+	for _, data := range images {
 		rendered, format, err := RenderImage(data, output.OutputFormat, output.Compression)
 		if err != nil {
 			return nil, noImageError(c, err)
 		}
-		if response.OutputFormat == "" {
-			response.OutputFormat = format
+		finals = append(finals, renderedImage{rendered, format, generation.Size()})
+	}
+	for i, data := range images {
+		final, err := e.deliver(i, data, finals[i], output.OutputFormat, output.Compression, i == len(images)-1)
+		if err != nil {
+			openai.NovelAIClientLeft(info, err)
+			logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
+			return generation.Tokens.Usage(info.SettledImageCount()), nil
 		}
-		item := openAIImageData{Seed: generation.Seed + int64(i)}
+		finals[i] = final
+	}
+
+	response := openAIImagesResponse{
+		Created:    time.Now().Unix(),
+		Background: output.Background,
+		Size:       finals[0].size,
+		Usage:      ImageUsage(generation.Tokens.Usage(len(images))),
+	}
+	for i, final := range finals {
+		if response.OutputFormat == "" {
+			response.OutputFormat = final.format
+		}
+		item := openAIImageData{Seed: generation.Seed + int64(i), Size: final.size}
 		if output.ResponseFormat == "url" {
-			item.URL = DataURL(rendered, format)
+			item.URL = DataURL(final.data, final.format)
 		} else {
-			item.B64JSON = base64.StdEncoding.EncodeToString(rendered)
+			item.B64JSON = base64.StdEncoding.EncodeToString(final.data)
 		}
 		response.Data = append(response.Data, item)
 	}

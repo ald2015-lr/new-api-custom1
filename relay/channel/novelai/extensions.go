@@ -43,6 +43,7 @@ var extensionKeys = map[string]string{
 	"params_version":       "params_version",
 	"legacy_uc":            "legacy_uc",
 	"aspect_ratio":         "aspect_ratio",
+	"hd":                   "hd",
 }
 
 // stringKeys are the extension keys whose value is a string, which a
