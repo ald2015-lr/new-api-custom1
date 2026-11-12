@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -22,12 +23,28 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/image/draw"
 	"golang.org/x/image/webp"
+	"golang.org/x/sync/semaphore"
 )
 
-// maxInputPixels bounds a source image or mask (4096x4096), which decodes at
-// 4 bytes a pixel: 64 MiB. A 16-bit image takes 8 bytes a pixel, so it may
-// have half as many (inputPixelLimit).
-const maxInputPixels = 1 << 24
+// An image or mask a request sends may have at most maxInputPixels pixels
+// (4096x4096) and maxInputSide a side, and decoding it may take at most
+// maxDecodeBytes besides a copy of its bytes (decodeBytesPerPixel):
+// 4096x4096 at 4 bytes a pixel.
+const (
+	maxInputPixels = 1 << 24
+	maxInputSide   = 65_535
+	maxDecodeBytes = 64 << 20
+)
+
+// imageWork bounds the memory the image work of all requests (decoding an
+// edit's image and mask, resizing them to the canvas) takes at once: a
+// request's work runs once it holds about the bytes it needs of
+// imageWorkBudget, or ends when its client leaves (BuildGeneration). One
+// request needs at most about 190 MiB: two images of maxDecodeBytes, the
+// resize's columns and three canvases.
+var imageWork = semaphore.NewWeighted(imageWorkBudget)
+
+const imageWorkBudget = 256 << 20
 
 // Image formats as OpenAI names them in output_format.
 const (
@@ -54,67 +71,185 @@ func SniffImageFormat(data []byte) string {
 	return ""
 }
 
-// inputPixelLimit is the most pixels an image of model may have: a 16-bit
-// one decodes at twice the memory a pixel.
-func inputPixelLimit(model color.Model) int {
-	if model == color.RGBA64Model || model == color.NRGBA64Model {
-		return maxInputPixels / 2
-	}
-	return maxInputPixels
+// imageHeader is what the header of an image tells before anything decodes
+// it.
+type imageHeader struct {
+	image.Config
+	// bytes is about the most memory decoding the image takes, and maxPixels
+	// the most pixels an image of its kind may have (decodeBytesPerPixel).
+	bytes     int64
+	maxPixels int
+	decode    func(io.Reader) (image.Image, error)
 }
 
-// imageConfig reads the header of a PNG, JPEG or WebP image of at most
-// inputPixelLimit pixels, and returns its decoder.
-func imageConfig(data []byte) (image.Config, func(io.Reader) (image.Image, error), error) {
+// readImageHeader reads the header of a PNG, JPEG or WebP image; it fails
+// for an image past maxInputSide, or past the pixels of its kind.
+func readImageHeader(data []byte) (imageHeader, error) {
+	header := imageHeader{maxPixels: maxInputPixels}
 	var decodeConfig func(io.Reader) (image.Config, error)
-	var decode func(io.Reader) (image.Image, error)
-	switch SniffImageFormat(data) {
+	format := SniffImageFormat(data)
+	switch format {
 	case formatPNG:
-		decodeConfig, decode = png.DecodeConfig, png.Decode
+		decodeConfig, header.decode = png.DecodeConfig, png.Decode
 	case formatJPEG:
-		decodeConfig, decode = jpeg.DecodeConfig, jpeg.Decode
+		decodeConfig, header.decode = jpeg.DecodeConfig, jpeg.Decode
 	case formatWebP:
-		decodeConfig, decode = webp.DecodeConfig, webp.Decode
+		decodeConfig, header.decode = webp.DecodeConfig, webp.Decode
 	default:
-		return image.Config{}, nil, errors.New("not a PNG, JPEG or WebP image")
+		return header, errors.New("not a PNG, JPEG or WebP image")
 	}
 	config, err := decodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return config, nil, err
+		return header, err
 	}
-	if config.Width < 1 || config.Height < 1 || int64(config.Width)*int64(config.Height) > int64(inputPixelLimit(config.ColorModel)) {
-		return config, nil, fmt.Errorf("the image is %dx%d", config.Width, config.Height)
+	header.Config = config
+	perPixel := decodeBytesPerPixel(data, format, config.ColorModel)
+	header.maxPixels = min(maxInputPixels, int(maxDecodeBytes/perPixel))
+	header.bytes = int64(perPixel * float64(config.Width) * float64(config.Height))
+	if format == formatWebP {
+		header.bytes += int64(len(data))
 	}
-	return config, decode, nil
+	if config.Width < 1 || config.Height < 1 || config.Width > maxInputSide || config.Height > maxInputSide ||
+		int64(config.Width)*int64(config.Height) > int64(header.maxPixels) {
+		return header, fmt.Errorf("the image is %dx%d", config.Width, config.Height)
+	}
+	return header, nil
 }
 
-// decodeImage decodes a PNG, JPEG or WebP image within imageConfig's limit.
+// decodeBytesPerPixel is about how much memory decoding an image takes a
+// pixel, read from its header, decoders included:
+//   - PNG: 4 bytes, 8 at 16 bits (a grey image with a transparent colour
+//     decodes as RGBA), twice that when interlaced: each pass is decoded
+//     into an image of its own;
+//   - JPEG: a byte a sample (a subsampled component has fewer samples than
+//     pixels), 5 when progressive, which keeps 4-byte coefficients for each
+//     sample; RGB and CMYK images add a 4-byte RGBA or CMYK copy;
+//   - WebP: 8 bytes when lossless (the VP8L pixels and their copy when
+//     colour-indexed); 1.5 when lossy (YCbCr 4:2:0), with a byte of alpha,
+//     or 9 when the alpha is lossless. The lossy decoder also copies the
+//     compressed frame (readImageHeader adds the image's bytes).
+func decodeBytesPerPixel(data []byte, format string, model color.Model) float64 {
+	switch format {
+	case formatPNG:
+		perPixel := 4.0
+		switch model {
+		case color.Gray16Model, color.RGBA64Model, color.NRGBA64Model:
+			perPixel = 8
+		}
+		// The interlace method, the last byte of the IHDR chunk.
+		if len(data) > 28 && data[28] != 0 {
+			perPixel *= 2
+		}
+		return perPixel
+	case formatJPEG:
+		samples, progressive := jpegFrame(data)
+		perPixel := samples
+		if progressive {
+			perPixel += 4 * samples
+		}
+		if model == color.RGBAModel || model == color.CMYKModel {
+			perPixel += 4
+		}
+		return perPixel
+	}
+	// The chunks of a WebP after its RIFF header: an ALPH chunk (alpha,
+	// lossless when its compression is 1) comes before the VP8 one.
+	alpha := 0.0
+	for i := 12; i+8 < len(data); {
+		switch string(data[i : i+4]) {
+		case "VP8L":
+			return 8
+		case "VP8 ":
+			return 1.5 + alpha
+		case "ALPH":
+			alpha = 1
+			if data[i+8]&3 == 1 {
+				alpha = 9
+			}
+		}
+		size := int(binary.LittleEndian.Uint32(data[i+4 : i+8]))
+		i += 8 + size + size&1
+	}
+	return 8
+}
+
+// jpegFrame reads the frame header (SOFn) of a JPEG: the samples its
+// components hold a pixel and whether it is progressive (SOF2). When it
+// cannot, the most there may be: four components, progressive.
+func jpegFrame(data []byte) (float64, bool) {
+	for i := 2; i+4 <= len(data) && data[i] == 0xff; {
+		marker := data[i+1]
+		switch {
+		case marker == 0xff:
+			// A fill byte.
+			i++
+			continue
+		case marker == 0 || marker >= 0xd0 && marker <= 0xd7:
+			// Markers without a segment.
+			i += 2
+			continue
+		}
+		length := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
+		if length < 2 {
+			break
+		}
+		if marker < 0xc0 || marker > 0xcf || marker == 0xc4 || marker == 0xc8 || marker == 0xcc {
+			i += 2 + length
+			continue
+		}
+		// SOFn: precision, height, width, components, then an id, the
+		// sampling factors (horizontal << 4 | vertical) and a table for each.
+		frame := data[i+4 : min(len(data), i+2+length)]
+		if len(frame) < 6 || len(frame) < 6+3*int(frame[5]) {
+			break
+		}
+		components := frame[6 : 6+3*int(frame[5])]
+		maxH, maxV, area := 1, 1, 0
+		for c := 0; c < len(components); c += 3 {
+			h, v := int(components[c+1]>>4), int(components[c+1]&15)
+			maxH, maxV, area = max(maxH, h), max(maxV, v), area+h*v
+		}
+		if area == 0 {
+			break
+		}
+		return float64(area) / float64(maxH*maxV), marker == 0xc2
+	}
+	return 4, true
+}
+
+// decodeImage decodes a PNG, JPEG or WebP image within readImageHeader's
+// limits.
 func decodeImage(data []byte) (image.Image, error) {
-	_, decode, err := imageConfig(data)
+	header, err := readImageHeader(data)
 	if err != nil {
 		return nil, err
 	}
-	return decode(bytes.NewReader(data))
+	return header.decode(bytes.NewReader(data))
 }
 
-// imageInputConfig checks the header of a request's image (field names it)
+// invalidImage rejects a request's image (field names it) that is not a
+// PNG, JPEG or WebP image of at most maxPixels pixels and maxInputSide a
+// side.
+func invalidImage(c *gin.Context, field string, maxPixels int) *types.NewAPIError {
+	return badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxPixels, "Side": maxInputSide})
+}
+
+// imageInputHeader checks the header of a request's image (field names it)
 // before anything decodes it.
-func imageInputConfig(c *gin.Context, data []byte, field string) (image.Config, *types.NewAPIError) {
-	config, _, err := imageConfig(data)
+func imageInputHeader(c *gin.Context, data []byte, field string) (imageHeader, *types.NewAPIError) {
+	header, err := readImageHeader(data)
 	if err != nil {
-		return config, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": inputPixelLimit(config.ColorModel)})
+		return header, invalidImage(c, field, header.maxPixels)
 	}
-	return config, nil
+	return header, nil
 }
 
-func decodeImageInput(c *gin.Context, data []byte, field string) (image.Image, *types.NewAPIError) {
-	config, apiErr := imageInputConfig(c, data, field)
-	if apiErr != nil {
-		return nil, apiErr
-	}
-	decoded, err := decodeImage(data)
+// decodeImageInput decodes a request's image whose header imageInputHeader
+// checked.
+func decodeImageInput(c *gin.Context, data []byte, header imageHeader, field string) (image.Image, *types.NewAPIError) {
+	decoded, err := header.decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": inputPixelLimit(config.ColorModel)})
+		return nil, invalidImage(c, field, header.maxPixels)
 	}
 	return decoded, nil
 }
@@ -136,20 +271,33 @@ func coverCrop(bounds image.Rectangle, width, height int) image.Rectangle {
 	return crop
 }
 
-// coverResize scales the crop of src to exactly width x height with scaler
-// (crop is coverCrop of the source the canvas is for). NovelAI requires an
-// edit's image, and its mask, to match the canvas. A kernel scaler
-// (CatmullRom) holds 32 bytes for every canvas column and crop row, so a
-// crop past twice the canvas is first brought to twice the canvas with a
-// bilinear pass, which holds nothing.
-func coverResize(src image.Image, crop image.Rectangle, width, height int, scaler draw.Scaler) *image.RGBA {
-	if _, kernel := scaler.(*draw.Kernel); kernel && (crop.Dx() > 2*width || crop.Dy() > 2*height) {
-		smaller := image.NewRGBA(image.Rect(0, 0, min(crop.Dx(), 2*width), min(crop.Dy(), 2*height)))
-		draw.ApproxBiLinear.Scale(smaller, smaller.Bounds(), src, crop, draw.Src, nil)
-		src, crop = smaller, smaller.Bounds()
+// resizeBand bounds what one call of a kernel scaler holds: 32 bytes for
+// each column it writes and row it reads.
+const resizeBand = 1 << 20
+
+// coverResize scales the crop of src to exactly width x height with
+// CatmullRom (crop is coverCrop of the source the canvas is for): NovelAI
+// requires an edit's image to match the canvas. One call of a kernel scaler
+// would hold about 200 MB for a 3 MP canvas from a 4096-pixel crop, so it
+// scales in two passes of calls within resizeBand: the columns of bands of
+// crop rows, into an RGBA image as wide as the canvas and as high as the
+// crop, then the rows of bands of its columns. Across a band the kernel
+// keeps each pixel as it is.
+func coverResize(src image.Image, crop image.Rectangle, width, height int) *image.RGBA {
+	columns := image.NewRGBA(image.Rect(0, 0, width, crop.Dy()))
+	rows := max(1, resizeBand/(32*width))
+	scaler := draw.CatmullRom.NewScaler(width, rows, crop.Dx(), rows)
+	for y := 0; y < crop.Dy(); y += rows {
+		band := image.Rect(0, y, width, min(y+rows, crop.Dy()))
+		scaler.Scale(columns, band, src, image.Rect(crop.Min.X, crop.Min.Y+band.Min.Y, crop.Max.X, crop.Min.Y+band.Max.Y), draw.Src, nil)
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-	scaler.Scale(dst, dst.Bounds(), src, crop, draw.Src, nil)
+	cols := max(1, resizeBand/(32*crop.Dy()))
+	scaler = draw.CatmullRom.NewScaler(cols, height, cols, crop.Dy())
+	for x := 0; x < width; x += cols {
+		band := image.Rect(x, 0, min(x+cols, width), height)
+		scaler.Scale(dst, band, columns, image.Rect(band.Min.X, 0, band.Max.X, crop.Dy()), draw.Src, nil)
+	}
 	return dst
 }
 
@@ -169,9 +317,10 @@ func encodePNGBase64(img image.Image) string {
 // transparent pixels; a mask without any is read as a black-and-white
 // NovelAI mask, white (brighter than mid-grey) marking the area. The mask
 // covers the source image (source is its bounds), stretched when its size
-// differs, so it gets the image's crop; it is scaled with nearest neighbour,
-// then snapped to the 8x8 blocks of NovelAI's latent grid: a block is white
-// when more than half of it is. It reports false when no block is white.
+// differs, so it gets the image's crop; each canvas pixel reads the mask's
+// nearest pixel (as draw.NearestNeighbor picks it), then the canvas is
+// snapped to the 8x8 blocks of NovelAI's latent grid: a block is white when
+// more than half of it is. It reports false when no block is white.
 func novelAIMask(mask image.Image, source image.Rectangle, width, height int) (string, bool) {
 	bounds := mask.Bounds()
 	// The decoders' image types read a pixel without boxing it in a
@@ -191,20 +340,6 @@ func novelAIMask(mask image.Image, source image.Rectangle, width, height int) (s
 			}
 		}
 	}
-	binary := image.NewGray(bounds)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			pixel := pixels.RGBA64At(x, y)
-			repaint := pixel.A == 0
-			if !transparent {
-				// color.GrayModel's luminance.
-				repaint = (19595*uint32(pixel.R)+38470*uint32(pixel.G)+7471*uint32(pixel.B)+1<<15)>>24 > 127
-			}
-			if repaint {
-				binary.SetGray(x, y, color.Gray{Y: 255})
-			}
-		}
-	}
 	// The image's crop, in the mask's pixels.
 	crop := coverCrop(source, width, height)
 	maskCrop := image.Rect(
@@ -213,16 +348,22 @@ func novelAIMask(mask image.Image, source image.Rectangle, width, height int) (s
 		bounds.Min.X+((crop.Max.X-source.Min.X)*bounds.Dx()+source.Dx()-1)/source.Dx(),
 		bounds.Min.Y+((crop.Max.Y-source.Min.Y)*bounds.Dy()+source.Dy()-1)/source.Dy(),
 	)
-	scaled := coverResize(binary, maskCrop, width, height, draw.NearestNeighbor)
 	out := image.NewRGBA(image.Rect(0, 0, width, height))
 	selected := false
 	for blockY := 0; blockY < height; blockY += 8 {
 		for blockX := 0; blockX < width; blockX += 8 {
 			white, total := 0, 0
 			for y := blockY; y < min(blockY+8, height); y++ {
+				maskY := maskCrop.Min.Y + (2*y+1)*maskCrop.Dy()/(2*height)
 				for x := blockX; x < min(blockX+8, width); x++ {
+					pixel := pixels.RGBA64At(maskCrop.Min.X+(2*x+1)*maskCrop.Dx()/(2*width), maskY)
+					repaint := pixel.A == 0
+					if !transparent {
+						// color.GrayModel's luminance.
+						repaint = (19595*uint32(pixel.R)+38470*uint32(pixel.G)+7471*uint32(pixel.B)+1<<15)>>24 > 127
+					}
 					total++
-					if scaled.RGBAAt(x, y).R > 127 {
+					if repaint {
 						white++
 					}
 				}
@@ -249,7 +390,7 @@ func novelAIMask(mask image.Image, source image.Rectangle, width, height int) (s
 // fetcher and its size limit. field names the request field in errors.
 func LoadImageReference(c *gin.Context, reference, field string) ([]byte, *types.NewAPIError) {
 	reference = strings.TrimSpace(reference)
-	invalid := badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxInputPixels})
+	invalid := invalidImage(c, field, maxInputPixels)
 	lower := strings.ToLower(reference)
 	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
 		encoded, _, err := service.GetBase64Data(c, types.NewURLFileSource(reference), "novelai "+field)

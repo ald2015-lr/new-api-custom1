@@ -1,6 +1,7 @@
 package novelai
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"image"
@@ -22,7 +23,6 @@ import (
 	"github.com/QuantumNous/new-api/tokenkit"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/image/draw"
 )
 
 // NovelAI's generation actions.
@@ -165,7 +165,9 @@ var relayOwnedParameters = map[string]bool{
 // web client does (the server does not): the quality tags go after the
 // prompt (withPresetTags) and the UC preset in front of the negative prompt,
 // unless the request turns them off. A failure is a 400 that skips retries:
-// another channel would reject the request the same way.
+// another channel would reject the request the same way. An edit's image
+// and mask are decoded last, once the request holds the memory they need of
+// imageWork; a client that leaves while it waits ends the build.
 func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *types.NewAPIError) {
 	model := intent.Model
 	modelProfile, ok := profiles[model]
@@ -209,17 +211,20 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	// The headers of the image and the mask are checked first; they are
 	// decoded once everything else is valid.
 	var source image.Rectangle
+	var sourceHeader, maskHeader imageHeader
 	if intent.Image != nil {
-		config, err := imageInputConfig(c, intent.Image, "image")
+		header, err := imageInputHeader(c, intent.Image, "image")
 		if err != nil {
 			return nil, err
 		}
-		source = image.Rect(0, 0, config.Width, config.Height)
+		sourceHeader, source = header, image.Rect(0, 0, header.Width, header.Height)
 	}
 	if intent.Mask != nil {
-		if _, err := imageInputConfig(c, intent.Mask, "mask"); err != nil {
+		header, err := imageInputHeader(c, intent.Mask, "mask")
+		if err != nil {
 			return nil, err
 		}
+		maskHeader = header
 	}
 	width, height, apiErr := generationSize(c, fields, intent.Size, source)
 	if apiErr != nil {
@@ -487,7 +492,24 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 				parameters["img2img"] = map[string]any{"strength": strength, "noise": noise, "color_correct": true, "extra_noise_seed": seed}
 				parameters["inpaintImg2ImgStrength"] = strength
 			}
-			mask, err := decodeImageInput(c, intent.Mask, "mask")
+			parameters["request_type"] = infillingRequest
+		}
+
+		// The image work takes its memory of imageWork, waiting while
+		// other requests' work holds it: the decoded image and mask, the
+		// resize's columns (coverResize), and three RGBA images of the
+		// canvas (the image, the mask, and the PNGs encoded from them).
+		work := min(imageWorkBudget, sourceHeader.bytes+maskHeader.bytes+4*int64(width)*int64(coverCrop(source, width, height).Dy()+3*height))
+		ctx := context.Background()
+		if c != nil && c.Request != nil {
+			ctx = c.Request.Context()
+		}
+		if err := imageWork.Acquire(ctx, work); err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+		}
+		defer imageWork.Release(work)
+		if action == ActionInfill {
+			mask, err := decodeImageInput(c, intent.Mask, maskHeader, "mask")
 			if err != nil {
 				return nil, err
 			}
@@ -496,13 +518,12 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 				return nil, badRequest(c, i18n.MsgNovelAIMaskEmpty, nil)
 			}
 			parameters["mask"] = encodedMask
-			parameters["request_type"] = infillingRequest
 		}
-		decoded, err := decodeImageInput(c, intent.Image, "image")
+		decoded, err := decodeImageInput(c, intent.Image, sourceHeader, "image")
 		if err != nil {
 			return nil, err
 		}
-		parameters["image"] = encodePNGBase64(coverResize(decoded, coverCrop(decoded.Bounds(), width, height), width, height, draw.CatmullRom))
+		parameters["image"] = encodePNGBase64(coverResize(decoded, coverCrop(decoded.Bounds(), width, height), width, height))
 	}
 
 	// The rest of parameters goes to NovelAI as sent.

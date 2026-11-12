@@ -241,7 +241,7 @@ func imageInput(c *gin.Context, fields map[string]json.RawMessage, files map[str
 		data, apiErr := imageReference(c, references[0], field)
 		return data, count, apiErr
 	}
-	invalid := badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxInputPixels})
+	invalid := invalidImage(c, field, maxInputPixels)
 	file, err := headers[0].Open()
 	if err != nil {
 		return nil, count, invalid

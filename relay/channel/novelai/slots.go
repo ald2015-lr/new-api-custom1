@@ -96,6 +96,13 @@ var errGenerationBodyClosed = errors.New("http: read on closed response body")
 // hand the images to its client, which may read slowly or not at all. Up to
 // generationReadAhead bytes wait for the relay; past that the read-ahead
 // waits for the relay to catch up.
+//
+// A deliberate trade-off: a client that stops reading keeps the rest of its
+// answer in memory (at most generationReadAhead) until the native relay's
+// write budget (helper.StreamWriteBudget) gives up on it, about 35 minutes
+// for a 16 MB answer, while the key it freed generates again, so one user
+// may hold several such answers, each one paid for. The converted routes
+// hold a whole answer the same way, with no write deadline at all.
 type generationBody struct {
 	upstream io.ReadCloser
 	release  func()

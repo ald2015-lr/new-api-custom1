@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -281,16 +282,43 @@ func solid(c color.Color) func(x, y int) color.Color {
 	return func(int, int) color.Color { return c }
 }
 
-// pngHeader is a PNG that ends after its IHDR chunk (truecolor at bitDepth):
-// its header reads, its pixels do not decode.
-func pngHeader(width, height int, bitDepth byte) []byte {
+// pngHeader is a PNG that ends after its IHDR chunk (truecolor at bitDepth,
+// Adam7 when interlace is 1): its header reads, its pixels do not decode.
+func pngHeader(width, height int, bitDepth, interlace byte) []byte {
 	chunk := []byte("IHDR")
 	chunk = binary.BigEndian.AppendUint32(chunk, uint32(width))
 	chunk = binary.BigEndian.AppendUint32(chunk, uint32(height))
-	chunk = append(chunk, bitDepth, 2, 0, 0, 0)
+	chunk = append(chunk, bitDepth, 2, 0, 0, interlace)
 	data := binary.BigEndian.AppendUint32([]byte("\x89PNG\r\n\x1a\n"), uint32(len(chunk)-4))
 	data = append(data, chunk...)
 	return binary.BigEndian.AppendUint32(data, crc32.ChecksumIEEE(chunk))
+}
+
+// jpegHeader is a JPEG that ends at its scan: a frame header (sof is SOF0,
+// baseline, or SOF2, progressive) with a component for each sampling factor
+// (horizontal << 4 | vertical).
+func jpegHeader(width, height int, sof byte, sampling ...byte) []byte {
+	data := []byte{0xff, 0xd8, 0xff, sof}
+	data = binary.BigEndian.AppendUint16(data, uint16(8+3*len(sampling)))
+	data = append(data, 8)
+	data = binary.BigEndian.AppendUint16(data, uint16(height))
+	data = binary.BigEndian.AppendUint16(data, uint16(width))
+	data = append(data, byte(len(sampling)))
+	for i, factors := range sampling {
+		data = append(data, byte(i+1), factors, 0)
+	}
+	return append(data, 0xff, 0xda, 0, 2)
+}
+
+// losslessWebPHeader is a lossless WebP that ends after its VP8L header.
+func losslessWebPHeader(width, height int) []byte {
+	chunk := []byte{0x2f}
+	chunk = binary.LittleEndian.AppendUint32(chunk, uint32(width-1)|uint32(height-1)<<14)
+	chunk = append(chunk, 0)
+	data := binary.LittleEndian.AppendUint32([]byte("RIFF"), uint32(4+8+len(chunk)))
+	data = append(data, "WEBPVP8L"...)
+	data = binary.LittleEndian.AppendUint32(data, 5)
+	return append(data, chunk...)
 }
 
 // decodedBase64Image decodes a base64 PNG of a NovelAI request.
@@ -889,6 +917,19 @@ func TestBuildGenerationEditImages(t *testing.T) {
 	assert.Equal(t, uint32(255), maskValue(mask, 10, 40))
 	assert.Equal(t, false, parameters["sm"], "no SMEA with an image")
 
+	// Each canvas pixel reads the mask's pixel nearest its centre: on a
+	// 64x64 canvas, a 128x128 mask white in its odd columns is all white.
+	oddColumns := testImage(128, 128, func(x, y int) color.Color {
+		if x%2 == 1 {
+			return color.White
+		}
+		return color.Black
+	})
+	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: testImage(128, 128, solid(color.White)), Mask: oddColumns, Size: "64x64"})
+	mask = decodedBase64Image(t, parameters["mask"])
+	assert.Equal(t, uint32(255), maskValue(mask, 0, 0))
+	assert.Equal(t, uint32(255), maskValue(mask, 63, 63))
+
 	opaque := testImage(64, 64, solid(color.Black))
 	assert.Contains(t, buildRejected(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: opaque, Mask: opaque}), "mask selects no area")
 	assert.Contains(t, buildRejected(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: []byte("GIF89a"), Size: "64x64"}), "must be a PNG, JPEG or WebP")
@@ -924,13 +965,18 @@ func TestBuildGenerationEditImages(t *testing.T) {
 	}
 }
 
-// Image work is bounded by memory, not pixels, and comes last. A 16-bit
-// image decodes at 8 bytes a pixel, so it may have half the pixels of an
-// 8-bit one; headers are checked before anything decodes, and the source
-// decodes only once everything else is valid, after the mask, so a mask
-// that selects nothing (a free 400) costs no source decode. A resample's
-// buffer follows the canvas, not the source, and a mask's pixels are read
-// without an allocation each.
+// Image work is bounded by memory, not pixels, and comes last. An image may
+// take at most 64 MiB to decode, read from its header: a 16-bit PNG decodes
+// at 8 bytes a pixel, an interlaced one at twice its pixels, a progressive
+// JPEG keeps 4-byte coefficients for each sample, a lossless WebP a copy of
+// its pixels; and it has at most 65535 pixels a side. Headers are checked
+// before anything decodes, and the source decodes only once everything else
+// is valid, after the mask, so a mask that selects nothing (a free 400)
+// costs no source decode. The work of all requests shares imageWork: a
+// request waits while other requests hold the memory it needs and ends when
+// its client leaves. The resize holds about its canvas and the crop's rows,
+// not a buffer of 32 bytes for each canvas column and crop row, and a
+// mask's pixels are read without an allocation each.
 func TestBuildGenerationBoundsImageWork(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	area := testImage(64, 64, func(x, y int) color.Color {
@@ -944,13 +990,20 @@ func TestBuildGenerationBoundsImageWork(t *testing.T) {
 		image, mask       []byte
 		message, strength string
 	}{
-		{name: "an 8-bit image past 4096x4096", image: pngHeader(4097, 4096, 8), message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
-		{name: "a 16-bit image past half of it", image: pngHeader(2897, 2897, 16), message: "image must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
-		{name: "a 16-bit mask past half of it", image: area, mask: pngHeader(2897, 2897, 16), message: "mask must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
-		// pngHeader(64, 64, 8) reads as an image but does not decode.
-		{name: "the mask before the source", image: pngHeader(64, 64, 8), mask: testImage(64, 64, solid(color.Black)), message: "mask selects no area"},
-		{name: "the strength before the source", image: pngHeader(64, 64, 8), mask: area, strength: "5", message: "strength must be between"},
-		{name: "the source last", image: pngHeader(64, 64, 8), mask: area, message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
+		{name: "an 8-bit image past 4096x4096", image: pngHeader(4097, 4096, 8, 0), message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
+		{name: "a 16-bit image past half of it", image: pngHeader(2897, 2897, 16, 0), message: "image must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
+		{name: "a 16-bit mask past half of it", image: area, mask: pngHeader(2897, 2897, 16, 0), message: "mask must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
+		{name: "an interlaced image past half of it", image: pngHeader(2897, 2897, 8, 1), message: "image must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
+		{name: "an image past 65535 pixels a side", image: testImage(65536, 1, solid(color.White)), message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels and 65535 pixels a side"},
+		{name: "a progressive 4:4:4 JPEG past 15 bytes a pixel", image: jpegHeader(2116, 2116, 0xc2, 0x11, 0x11, 0x11), message: "image must be a PNG, JPEG or WebP image of at most 4473924 pixels"},
+		{name: "a progressive 4:2:0 JPEG mask past 7.5 bytes a pixel", image: area, mask: jpegHeader(3000, 3000, 0xc2, 0x22, 0x11, 0x11), message: "mask must be a PNG, JPEG or WebP image of at most 8947848 pixels"},
+		// Its header reads; it fails to decode.
+		{name: "a baseline 4:2:0 JPEG of that size", image: jpegHeader(3000, 3000, 0xc0, 0x22, 0x11, 0x11), message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
+		{name: "a lossless WebP past half of it", image: losslessWebPHeader(2897, 2897), message: "image must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
+		// pngHeader(64, 64, 8, 0) reads as an image but does not decode.
+		{name: "the mask before the source", image: pngHeader(64, 64, 8, 0), mask: testImage(64, 64, solid(color.Black)), message: "mask selects no area"},
+		{name: "the strength before the source", image: pngHeader(64, 64, 8, 0), mask: area, strength: "5", message: "strength must be between"},
+		{name: "the source last", image: pngHeader(64, 64, 8, 0), mask: area, message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			intent := GenerationIntent{Model: "nai-diffusion-4-5-full", Image: tc.image, Mask: tc.mask}
@@ -960,26 +1013,73 @@ func TestBuildGenerationBoundsImageWork(t *testing.T) {
 			assert.Contains(t, buildRejected(t, intent), tc.message)
 		})
 	}
-	_, parameters := buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: area, Mask: area, Size: "64x64"})
+	edit := GenerationIntent{Model: "nai-diffusion-4-5-full", N: 1, Image: area, Mask: area, Size: "64x64"}
+	_, parameters := buildParameters(t, edit)
 	assert.NotEmpty(t, parameters["image"])
 
+	// Every build gave back the memory it took. While other work holds all
+	// of it, a header is still rejected and a generation without images is
+	// still built at once; an edit waits, and ends when its client leaves.
+	require.True(t, imageWork.TryAcquire(imageWorkBudget), "builds gave back the memory they took")
+	left, leave := context.WithCancel(context.Background())
+	leave()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequestWithContext(left, http.MethodPost, "/v1/images/edits", nil)
+	assert.Contains(t, buildRejected(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: pngHeader(4097, 4096, 8, 0)}), "at most 16777216 pixels")
+	generation, apiErr := BuildGeneration(c, GenerationIntent{Model: "nai-diffusion-4-5-full", N: 1, Prompt: "x"})
+	assert.Nil(t, apiErr)
+	assert.NotNil(t, generation)
+	generation, apiErr = BuildGeneration(c, edit)
+	imageWork.Release(imageWorkBudget)
+	assert.Nil(t, generation)
+	require.NotNil(t, apiErr)
+	assert.Contains(t, apiErr.Error(), context.Canceled.Error())
+	assert.True(t, types.IsSkipRetryError(apiErr), "its client left")
+
 	// Red | green | blue thirds of 6144x2048: the 2048x2048 green centre of
-	// a square canvas. Kernel resampling holds 32 bytes for each canvas
-	// column and crop row (4 MiB here); a bilinear pass first brings the crop
-	// to twice the canvas.
+	// a square canvas.
 	thirds := image.NewRGBA(image.Rect(0, 0, 6144, 2048))
 	for i := 0; i < len(thirds.Pix); i += 4 {
 		// R, G or B by third, opaque.
 		thirds.Pix[i+i/4%6144/2048] = 255
 		thirds.Pix[i+3] = 255
 	}
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	resized := coverResize(thirds, coverCrop(thirds.Bounds(), 64, 64), 64, 64, draw.CatmullRom)
-	runtime.ReadMemStats(&after)
-	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(1<<20), "allocated for a 64x64 canvas")
+	resized := coverResize(thirds, coverCrop(thirds.Bounds(), 64, 64), 64, 64)
 	for _, point := range []image.Point{{0, 0}, {63, 63}, {32, 32}} {
 		assert.Equal(t, color.RGBA{G: 255, A: 255}, resized.RGBAAt(point.X, point.Y), "the centre at %v", point)
+	}
+
+	// The bands of the resize give what one CatmullRom call gives, to the
+	// rounding of the 8-bit columns between its passes: no seams. (The
+	// columns also clip the kernel's overshoot past black or white, which
+	// one call keeps until the end; this pattern stays clear of both.)
+	pattern := image.NewRGBA(image.Rect(0, 0, 1536, 1024))
+	for i := 0; i < len(pattern.Pix); i += 4 {
+		x, y := i/4%1536, i/4/1536
+		pattern.Pix[i], pattern.Pix[i+1], pattern.Pix[i+2], pattern.Pix[i+3] = byte(64+x*3%128), byte(64+y*5%128), byte(64+(x^y)*7%128), 255
+	}
+	crop := coverCrop(pattern.Bounds(), 1024, 768)
+	whole := image.NewRGBA(image.Rect(0, 0, 1024, 768))
+	draw.CatmullRom.Scale(whole, whole.Bounds(), pattern, crop, draw.Src, nil)
+	banded := coverResize(pattern, crop, 1024, 768)
+	largest := 0
+	for i := range whole.Pix {
+		largest = max(largest, int(whole.Pix[i])-int(banded.Pix[i]), int(banded.Pix[i])-int(whole.Pix[i]))
+	}
+	assert.LessOrEqual(t, largest, 1, "the largest difference of a channel")
+
+	// A 4096x4096 image on a 1728x1728 canvas: its columns (1728x4096) and the
+	// canvas, 39 MiB; one call would hold 216 MiB more. (Under the race
+	// detector sync.Pool drops a quarter of the band buffers it is given
+	// back, which are then allocated again.)
+	large := image.NewRGBA(image.Rect(0, 0, 4096, 4096))
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	coverResize(large, large.Bounds(), 1728, 1728)
+	runtime.ReadMemStats(&after)
+	build, _ := debug.ReadBuildInfo()
+	if build == nil || !slices.Contains(build.Settings, debug.BuildSetting{Key: "-race", Value: "true"}) {
+		assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(4*1728*(4096+1728)+4<<20), "allocated for a 1728x1728 canvas")
 	}
 
 	// A 16-bit black-and-white mask: 65,536 pixels read in two passes.
