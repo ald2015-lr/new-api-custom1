@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -44,7 +45,9 @@ func (e *NovelAIUpstreamError) Unwrap() error { return e.Err }
 // NovelAI path byte for byte, so model mapping and parameter overrides do not
 // apply. The call is billed like an OpenAI image request: parameters.n_samples
 // is reserved as the image count before each attempt, and a successful
-// response settles at the images it carries.
+// response settles at the images it carries. NovelAI reports no usage, so
+// the tokens are counted from the request (novelai.RequestTokens) for the
+// images the call settles at.
 //
 // Another channel is tried only when this one answered with an error status
 // (under the usual retry policy) or provably received nothing; once the
@@ -73,6 +76,11 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	if err != nil {
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
+	requestJSON, err := helper.NovelAIRequestJSON(c)
+	if err != nil {
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	tokens := novelai.RequestTokens(requestJSON)
 	if billingErr := service.PrepareImageBillingForRequest(c, info, imageCount); billingErr != nil {
 		return billingErr
 	}
@@ -118,24 +126,17 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	}
 
 	info.IsStream = info.RelayMode == relayconstant.RelayModeNovelAIGenerateImageStream
-	usage, apiErr := adaptor.DoResponse(c, httpResp, info)
-	if apiErr != nil {
+	if _, apiErr := adaptor.DoResponse(c, httpResp, info); apiErr != nil {
 		// Upstream accepted the job (2xx) and may have spent Anlas on it,
 		// even though its response never reached the client.
 		types.ErrOptionWithSkipRetry()(apiErr)
 		service.ResetStatusCode(apiErr, statusCodeMappingStr)
 		return apiErr
 	}
-	billingUsage, ok := usage.(*dto.Usage)
-	if !ok || billingUsage == nil {
-		billingUsage = &dto.Usage{}
-	}
-	// NovelAI reports no usage; one nominal token lets the per-image price
-	// settle, as for OpenAI images.
-	billingUsage.PromptTokens = max(billingUsage.PromptTokens, 1)
-	billingUsage.TotalTokens = max(billingUsage.TotalTokens, 1)
-
-	logContent := []*common.Message{common.NewMessage("Image count {{count}}", map[string]any{"count": settledImageCount(info)})}
-	service.PostTextConsumeQuota(c, info, billingUsage, logContent)
+	// The text tokens are at least 1, so the usage is never empty and a
+	// per-image price settles, as for OpenAI images.
+	images := info.SettledImageCount()
+	logContent := []*common.Message{common.NewMessage("Image count {{count}}", map[string]any{"count": images})}
+	service.PostTextConsumeQuota(c, info, tokens.Usage(images), logContent)
 	return nil
 }

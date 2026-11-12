@@ -312,29 +312,31 @@ type openAIImagesResponse struct {
 	Usage        OpenAIImageUsage  `json:"usage"`
 }
 
-// ImageUsage is the OpenAI images usage of a generation's Usage.
+// ImageUsage is the OpenAI images usage (gpt-image's shape) of a
+// generation's Usage.
 func ImageUsage(usage *dto.Usage) OpenAIImageUsage {
 	var result OpenAIImageUsage
 	result.InputTokens = usage.PromptTokens
-	result.InputTokensDetails.TextTokens = usage.PromptTokens
-	result.TotalTokens = usage.PromptTokens
+	result.InputTokensDetails.TextTokens = usage.PromptTokensDetails.TextTokens
+	result.InputTokensDetails.ImageTokens = usage.PromptTokensDetails.ImageTokens
+	result.OutputTokens = usage.CompletionTokens
+	result.TotalTokens = usage.TotalTokens
 	return result
 }
 
 // imagesResponse answers an OpenAI images request from NovelAI's
 // /ai/generate-image response: each image NovelAI returned, in its order,
 // rendered in the requested output format, as b64_json or a data: URL, with
-// the real size and format, and the prompt estimate as usage. The billed
-// quantity becomes the images the client received. Upstream accepted the
-// job (2xx) and may have spent Anlas, so every failure here skips retries;
-// one that loses the images charges nothing, and a client that left keeps
-// the reserved quantity.
+// the real size and format, and the generation's usage for those images.
+// The billed quantity becomes the images the client received. Upstream
+// accepted the job (2xx) and may have spent Anlas, so every failure here
+// skips retries; one that loses the images charges nothing, and a client
+// that left keeps the reserved quantity, its usage included.
 func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
-	usage := generation.Usage()
 	images, clientLeft, apiErr := readImages(c, resp, info, generation.NSamples)
 	if clientLeft {
-		return usage, nil
+		return generation.Tokens.Usage(info.SettledImageCount()), nil
 	}
 	if apiErr != nil {
 		return nil, apiErr
@@ -344,7 +346,7 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 		Created:    time.Now().Unix(),
 		Background: output.Background,
 		Size:       generation.Size(),
-		Usage:      ImageUsage(usage),
+		Usage:      ImageUsage(generation.Tokens.Usage(len(images))),
 	}
 	for i, data := range images {
 		rendered, format, err := RenderImage(data, output.OutputFormat, output.Compression)
@@ -372,10 +374,10 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 	if _, err := c.Writer.Write(encoded); err != nil {
 		openai.NovelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI response stopped before it reached the client, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
-		return usage, nil
+		return generation.Tokens.Usage(info.SettledImageCount()), nil
 	}
 	info.UpdateImageCount(int64(len(images)))
-	return usage, nil
+	return generation.Tokens.Usage(info.SettledImageCount()), nil
 }
 
 // readImages reads the images of a complete /ai/generate-image response, at

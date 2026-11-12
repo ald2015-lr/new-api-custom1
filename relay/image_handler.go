@@ -12,6 +12,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -98,7 +100,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 				if err != nil {
 					return newAPIErrorFromParamOverride(err)
 				}
-				if apiErr := checkNovelAISamples(info, jsonData, imageCount); apiErr != nil {
+				if apiErr := checkNovelAIOverride(info, adaptor, jsonData, imageCount); apiErr != nil {
 					return apiErr
 				}
 			}
@@ -164,7 +166,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		return newAPIError
 	}
 
-	imageN := settledImageCount(info)
+	imageN := info.SettledImageCount()
 
 	if usage.(*dto.Usage).TotalTokens == 0 {
 		usage.(*dto.Usage).TotalTokens = 1
@@ -194,32 +196,24 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	return nil
 }
 
-// checkNovelAISamples keeps a converted NovelAI request (image or chat) at the
-// image count billing reserved once the channel's parameter override, which
-// runs after the reservation, has applied: NovelAI generates
-// parameters.n_samples images. An override that changes it would send work
+// checkNovelAIOverride settles a converted NovelAI request (image or chat)
+// once the channel's parameter override, which runs after the request was
+// built and its images reserved, has applied. NovelAI generates
+// parameters.n_samples images: an override that changes it would send work
 // nobody reserved, so the request is rejected before the send, as a failed
-// override is.
-func checkNovelAISamples(info *relaycommon.RelayInfo, jsonData []byte, reserved int) *types.NewAPIError {
-	if info.ChannelType != constant.ChannelTypeNovelAI {
+// override is. Any other change applies, and the request's tokens are counted
+// again from the overridden body (novelai.Adaptor.CountRequest), which is what
+// NovelAI receives, so an override of the canvas or the prompts is billed and
+// logged as generated.
+func checkNovelAIOverride(info *relaycommon.RelayInfo, adaptor channel.Adaptor, jsonData []byte, reserved int) *types.NewAPIError {
+	novelAIAdaptor, ok := adaptor.(*novelai.Adaptor)
+	if info.ChannelType != constant.ChannelTypeNovelAI || !ok {
 		return nil
 	}
 	samples := ojson.GetBytes(jsonData, "parameters.n_samples")
 	if samples.Type == ojson.Number && samples.Num == float64(reserved) {
+		novelAIAdaptor.CountRequest(jsonData)
 		return nil
 	}
 	return types.NewErrorWithStatusCode(fmt.Errorf("the channel's parameter override sets parameters.n_samples to %s; it must stay %d, the images the request reserved", cmp.Or(samples.Raw, "nothing"), reserved), types.ErrorCodeChannelParamOverrideInvalid, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
-}
-
-// settledImageCount is the image quantity the consume log shows: the count the
-// response handler derived from the upstream response when it did, otherwise
-// the reserved quantity.
-func settledImageCount(info *relaycommon.RelayInfo) int {
-	if info.BillingImageCount != nil {
-		return *info.BillingImageCount
-	}
-	if count, ok := info.PriceData.OtherRatios()["n"]; ok && info.PriceData.UsePrice && count >= 1 && count <= dto.MaxImageN {
-		return common.QuotaRound(count)
-	}
-	return info.RequestedImageCount()
 }

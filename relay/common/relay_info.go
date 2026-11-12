@@ -179,7 +179,10 @@ type RelayInfo struct {
 	// and again before settlement. Non-nil only when billing mode is "tiered_expr".
 	TieredBillingSnapshot *billingexpr.BillingSnapshot
 	BillingRequestInput   *billingexpr.RequestInput
-	BillingImageCount     *int
+	// BillingImageCount is the image quantity UpdateImageCount derived from
+	// the upstream response, nil while the reservation stands (see
+	// SettledImageCount).
+	BillingImageCount *int
 	// ImageRequestCount is the effective quantity sent on the current attempt;
 	// ImageQuotaBeforeGroup is the frozen legacy estimate before request ratios.
 	ImageRequestCount     int
@@ -220,6 +223,12 @@ type RelayInfo struct {
 	// the request boundary, independently of billing success or failure.
 	PerformanceOutputTokens      int64
 	PerformanceBusinessRejection bool
+	// PerformanceWholeOutput marks a stream whose output reached the client
+	// only once upstream had generated all of it (a NovelAI image relayed as
+	// a stream): its first response time ends the generation instead of
+	// starting it, so throughput spans the whole request, as for a
+	// non-stream response.
+	PerformanceWholeOutput bool
 
 	// convOptions caches the converter settings snapshot (see ConvOptions).
 	convOptions *convmeta.Options
@@ -242,6 +251,12 @@ type RelayInfo struct {
 
 // UpdateImageCount replaces the billable quantity without changing the frozen
 // request parameters or multiplying the legacy and expression prices together.
+// A per-call price settles at the "n" ratio, an image_count expression at
+// BillingImageCount. BillingImageCount is recorded under every price: tiered
+// settlement passes it only to an expression that reads image_count, so under
+// a token price it changes no charge by itself, and it is the quantity that
+// SettledImageCount reports (the consume log, and the image tokens NovelAI
+// usage counts).
 func (info *RelayInfo) UpdateImageCount(count int64) {
 	if info == nil || count <= 0 || count > int64(dto.MaxImageN) {
 		return
@@ -249,10 +264,22 @@ func (info *RelayInfo) UpdateImageCount(count int64) {
 	if info.PriceData.UsePrice {
 		info.PriceData.AddOtherRatio("n", float64(count))
 	}
-	if info.TieredBillingSnapshot != nil && info.TieredBillingSnapshot.EstimatedImageCount != nil {
-		n := int(count)
-		info.BillingImageCount = &n
+	n := int(count)
+	info.BillingImageCount = &n
+}
+
+// SettledImageCount is the image quantity a request settles at: the count
+// UpdateImageCount derived from the upstream response when it did, otherwise
+// the reserved quantity (a client that left, a response that could not be
+// counted).
+func (info *RelayInfo) SettledImageCount() int {
+	if info.BillingImageCount != nil {
+		return *info.BillingImageCount
 	}
+	if count, ok := info.PriceData.OtherRatios()["n"]; ok && info.PriceData.UsePrice && count >= 1 && count <= dto.MaxImageN {
+		return common.QuotaRound(count)
+	}
+	return info.RequestedImageCount()
 }
 
 func (info *RelayInfo) RequestedImageCount() int {

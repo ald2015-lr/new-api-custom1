@@ -3,6 +3,7 @@ package perfmetrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,6 +149,29 @@ func TestRecordTaskResultSamplesTerminalTasks(t *testing.T) {
 			generationMs:   100000,
 		},
 	}, mergedHotBuckets())
+}
+
+// A stream's throughput counts from its first response. One whose output
+// reached the client whole once upstream had made it (a NovelAI image
+// relayed as a stream) counts over the whole request, as a non-stream
+// response does, not over the moment its write took.
+func TestRecordRelayResultThroughputWindow(t *testing.T) {
+	hotBuckets.Clear()
+	t.Cleanup(func() { hotBuckets.Clear() })
+	for _, whole := range []bool{false, true} {
+		RecordRelayResult(context.Background(), &relaycommon.RelayInfo{
+			OriginModelName: "image-model", UsingGroup: fmt.Sprintf("whole-%t", whole), IsStream: true,
+			StartTime: time.Now().Add(-10 * time.Second), FirstResponseTime: time.Now().Add(-20 * time.Millisecond),
+			PerformanceOutputTokens: 1245, PerformanceWholeOutput: whole,
+		}, nil)
+	}
+
+	buckets := mergedHotBuckets()
+	streamed, whole := buckets[bucketKey{model: "image-model", group: "whole-false"}], buckets[bucketKey{model: "image-model", group: "whole-true"}]
+	assert.Equal(t, int64(1245), whole.outputTokens)
+	assert.GreaterOrEqual(t, whole.generationMs, int64(10_000), "1245 tokens over the 10 s request, about 124 t/s")
+	assert.Less(t, streamed.generationMs, int64(5_000), "a stream generates after its first response")
+	assert.Equal(t, int64(1), whole.ttftCount, "the time to the images is still the stream's first response")
 }
 
 // Immediate submit results: only successes are sampled, timed from relay start.

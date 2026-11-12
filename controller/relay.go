@@ -243,6 +243,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
+		relayInfo.PerformanceWholeOutput = false
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {

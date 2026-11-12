@@ -105,21 +105,23 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 // all of them; with stream, a role chunk once NovelAI answered, one content
 // chunk per whole image, the stop chunk, the usage chunk unless the client
 // turned stream_options.include_usage off, and [DONE]. The usage is the
-// prompt estimate with no completion tokens: the images are not text, and
-// nothing counts the content again. The billed quantity becomes the images
-// the client received; a client that left keeps the reservation, and a
-// failure after the 2xx is final and charges nothing (on a stream it is an
-// error chunk).
+// generation's for the images delivered (GenerationTokens), counted from the
+// request, never from the content: the images are not text. The billed
+// quantity becomes the images the client received; a client that left keeps
+// the reservation, its usage included, and a failure after the 2xx is final
+// and charges nothing (on a stream it is an error chunk). A stream's images
+// all arrive at once, after NovelAI made them, so its throughput spans the
+// whole request (PerformanceWholeOutput).
 func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
-	usage := generation.Usage()
 	id, created, model := helper.GetResponseID(c), time.Now().Unix(), info.UpstreamModelName
 	clientLeft := func(err error) (*dto.Usage, *types.NewAPIError) {
 		openai.NovelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI response stopped before it reached the client, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
-		return usage, nil
+		return generation.Tokens.Usage(info.SettledImageCount()), nil
 	}
 	if info.IsStream {
+		info.PerformanceWholeOutput = true
 		info.StreamStatus = relaycommon.NewStreamStatus()
 		helper.SetEventStreamHeaders(c)
 		c.Status(http.StatusOK)
@@ -129,7 +131,7 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 	}
 	images, left, apiErr := readImages(c, resp, info, generation.NSamples)
 	if left {
-		return usage, nil
+		return generation.Tokens.Usage(info.SettledImageCount()), nil
 	}
 	if apiErr != nil {
 		return nil, apiErr
@@ -149,7 +151,7 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 		choice.SetStringContent(strings.Join(contents, "\n\n"))
 		encoded, err := common.Marshal(dto.OpenAITextResponse{
 			Id: id, Object: "chat.completion", Created: created, Model: model,
-			Choices: []dto.OpenAITextResponseChoice{choice}, Usage: *usage,
+			Choices: []dto.OpenAITextResponseChoice{choice}, Usage: *generation.Tokens.Usage(len(images)),
 		})
 		if err != nil {
 			return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
@@ -160,7 +162,7 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 			return clientLeft(err)
 		}
 		info.UpdateImageCount(int64(len(images)))
-		return usage, nil
+		return generation.Tokens.Usage(info.SettledImageCount()), nil
 	}
 
 	for i, content := range contents {
@@ -176,6 +178,7 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 		}
 	}
 	info.UpdateImageCount(int64(len(images)))
+	usage := generation.Tokens.Usage(info.SettledImageCount())
 	if err := helper.ObjectData(c, helper.GenerateStopResponse(id, created, model, "stop")); err != nil {
 		return clientLeft(err)
 	}
