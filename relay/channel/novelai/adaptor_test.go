@@ -42,6 +42,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1716,8 +1717,12 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 	generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 2, Extras: map[string]json.RawMessage{"steps": raw("4"), "seed": raw("100")}})
 	require.Nil(t, apiErr)
 	output := ImageOutput{OutputFormat: formatPNG, Background: "opaque", PartialImages: 2, Quality: "auto", Event: "image_generation"}
-	promptTokens := generation.Usage().PromptTokens
-	completed := func(t *testing.T, event streamedEvent, want []byte, seed float64, last bool) {
+	tokens := generation.Tokens
+	require.Equal(t, 1290, tokens.PerImage, "a 1024x1024 image")
+	require.Zero(t, tokens.InputImages)
+	// completed checks a completed event; the last one carries the usage of
+	// the delivered images delivered with it, the others zeros.
+	completed := func(t *testing.T, event streamedEvent, want []byte, seed float64, delivered int) {
 		t.Helper()
 		assert.Equal(t, "image_generation.completed", event.name)
 		assert.Equal(t, event.name, event.data["type"])
@@ -1730,13 +1735,16 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		assert.Equal(t, "auto", event.data["quality"])
 		assert.Equal(t, "opaque", event.data["background"])
 		usage := event.data["usage"].(map[string]any)
-		if last {
-			assert.Equal(t, float64(promptTokens), usage["input_tokens"])
-			assert.Equal(t, float64(promptTokens), usage["total_tokens"])
-		} else {
-			assert.Zero(t, usage["input_tokens"], "the usage counts once, on the last image")
+		if delivered == 0 {
+			assert.Equal(t, map[string]any{"input_tokens": 0.0, "input_tokens_details": map[string]any{"text_tokens": 0.0, "image_tokens": 0.0}, "output_tokens": 0.0, "total_tokens": 0.0}, usage, "the usage counts once, on the last image")
+			return
 		}
-		assert.Zero(t, usage["output_tokens"])
+		assert.Equal(t, map[string]any{
+			"input_tokens":         float64(tokens.Text),
+			"input_tokens_details": map[string]any{"text_tokens": float64(tokens.Text), "image_tokens": 0.0},
+			"output_tokens":        float64(delivered * 1290),
+			"total_tokens":         float64(tokens.Text + delivered*1290),
+		}, usage)
 	}
 	// errorEvent checks that a stream ends as OpenAI's image streams do on a
 	// failure: an error event, typed, and no [DONE].
@@ -1757,8 +1765,8 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
 
 		require.Nil(t, apiErr)
-		assert.Equal(t, promptTokens, usage.PromptTokens)
-		assert.Zero(t, usage.CompletionTokens)
+		assert.Equal(t, tokens.Usage(2), usage)
+		assert.Equal(t, 2*1290, usage.CompletionTokens)
 		assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
 		events := streamedEvents(t, recorder.Body.String())
 		require.Len(t, events, 4, recorder.Body.String())
@@ -1769,8 +1777,8 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			assert.Equal(t, "jpeg", event.data["output_format"], "the preview's own format")
 			assert.Equal(t, fmt.Sprintf("8x%d", i+2), event.data["size"], "the preview's own size")
 		}
-		completed(t, events[2], red, 100, false)
-		completed(t, events[3], blue, 101, true)
+		completed(t, events[2], red, 100, 0)
+		completed(t, events[3], blue, 101, 2)
 		assert.NotContains(t, recorder.Body.String(), "[DONE]", "OpenAI image streams send no [DONE]")
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
 		assert.Contains(t, []relaycommon.StreamEndReason{relaycommon.StreamEndReasonDone, relaycommon.StreamEndReasonEOF}, info.StreamStatus.EndReason)
@@ -1789,8 +1797,8 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		require.Nil(t, apiErr)
 		events := streamedEvents(t, recorder.Body.String())
 		require.Len(t, events, 2)
-		completed(t, events[0], red, 100, false)
-		completed(t, events[1], blue, 101, true)
+		completed(t, events[0], red, 100, 0)
+		completed(t, events[1], blue, 101, 2)
 	})
 
 	// An image sent in order before the failure went out as not the last,
@@ -1814,11 +1822,15 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
 
 			require.Nil(t, apiErr)
-			require.NotNil(t, usage)
+			assert.Equal(t, tokens.Usage(len(tc.want)), usage, "the images delivered, not the 2 asked for")
 			events := streamedEvents(t, recorder.Body.String())
 			require.Len(t, events, len(tc.want)+1, recorder.Body.String())
 			for i, want := range tc.want {
-				completed(t, events[i], want, tc.seeds[i], tc.withUsage && i == len(tc.want)-1)
+				delivered := 0
+				if tc.withUsage && i == len(tc.want)-1 {
+					delivered = len(tc.want)
+				}
+				completed(t, events[i], want, tc.seeds[i], delivered)
 			}
 			errorEvent(t, events, tc.message)
 			assert.Equal(t, float64(len(tc.want)), info.PriceData.OtherRatios()["n"])
@@ -1849,7 +1861,7 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
 
 		require.Nil(t, apiErr)
-		require.NotNil(t, usage)
+		assert.Equal(t, tokens.Usage(2), usage, "the reserved images")
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
 	})
 
@@ -1863,10 +1875,10 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		usage, apiErr := imagesStreamResponse(c, resp, info, generation, output)
 
 		require.Nil(t, apiErr)
-		require.NotNil(t, usage)
+		assert.Equal(t, tokens.Usage(2), usage, "the reserved images")
 		events := streamedEvents(t, recorder.Body.String())
 		require.Len(t, events, 2, recorder.Body.String())
-		completed(t, events[0], red, 100, false)
+		completed(t, events[0], red, 100, 0)
 		errorEvent(t, events, "upstream stream ended before the response was complete")
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
 		assert.Equal(t, relaycommon.StreamEndReasonScannerErr, info.StreamStatus.EndReason)
@@ -1881,7 +1893,7 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			writer := &failingWriter{ResponseWriter: c.Writer}
 			c.Writer = writer
 			info.StreamStatus = relaycommon.NewStreamStatus()
-			stream := &imageStream{c: c, info: info, generation: generation, output: output, usage: generation.Usage(),
+			stream := &imageStream{c: c, info: info, generation: generation, output: output,
 				received: make([]bool, generation.NSamples), pending: map[int]renderedImage{}}
 
 			stream.handle(string(mustMarshal(t, event)), &helper.StreamResult{})
@@ -1889,7 +1901,7 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			usage, apiErr := stream.finish()
 
 			require.Nil(t, apiErr)
-			require.NotNil(t, usage)
+			assert.Equal(t, tokens.Usage(2), usage, "the reserved images")
 			assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
 			assert.Equal(t, 1, writer.attempts, "one failed write, no retry")
 			assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
@@ -1918,7 +1930,11 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		usage, apiErr := imagesStreamResponse(c, resp, info, v3, edit)
 
 		require.Nil(t, apiErr)
-		assert.Equal(t, v3.Usage().PromptTokens, usage.PromptTokens)
+		// The 16x16 source makes a 1024x1024 canvas: the source counts as
+		// one input image, and the two images delivered as completion.
+		assert.Equal(t, "1024x1024", v3.Size())
+		assert.Equal(t, GenerationTokens{Text: v3.Tokens.Text, InputImages: 1290, PerImage: 1290}, v3.Tokens)
+		assert.Equal(t, v3.Tokens.Usage(2), usage)
 		events := streamedEvents(t, recorder.Body.String())
 		require.Len(t, events, 2, recorder.Body.String())
 		for i, event := range events {
@@ -1927,9 +1943,15 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			assert.Equal(t, float64(100+i), event.data["seed"])
 		}
 		assert.Zero(t, events[0].data["usage"].(map[string]any)["input_tokens"])
-		assert.Equal(t, float64(v3.Usage().PromptTokens), events[1].data["usage"].(map[string]any)["input_tokens"])
+		assert.Equal(t, map[string]any{
+			"input_tokens":         float64(v3.Tokens.Text + 1290),
+			"input_tokens_details": map[string]any{"text_tokens": float64(v3.Tokens.Text), "image_tokens": 1290.0},
+			"output_tokens":        2 * 1290.0,
+			"total_tokens":         float64(v3.Tokens.Text + 3*1290),
+		}, events[1].data["usage"])
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "billed per image received")
 		assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+		assert.True(t, info.PerformanceWholeOutput, "the images arrived whole: throughput spans the request")
 	})
 }
 
@@ -1978,7 +2000,8 @@ func TestConvertedResponsesCountClientAbortsAsCancellations(t *testing.T) {
 				usage, apiErr := adaptor.DoResponse(c, resp, info)
 
 				require.Nil(t, apiErr)
-				require.NotNil(t, usage)
+				assert.Equal(t, generation.Tokens.Usage(2), usage, "the usage of the reserved images")
+				assert.Equal(t, 2*generation.Tokens.PerImage, usage.(*dto.Usage).CompletionTokens)
 				assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
 				assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(c.Request.Context(), info, apiErr))
 			})
@@ -2096,7 +2119,9 @@ func TestChatResponse(t *testing.T) {
 	require.NoError(t, writer.Close())
 	generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 2})
 	require.Nil(t, apiErr)
-	promptTokens := generation.Usage().PromptTokens
+	// The 2 images delivered of the 3 reserved, at 1024x1024.
+	prompt := generation.Tokens.Text
+	delivered := &dto.Usage{PromptTokens: prompt, CompletionTokens: 2 * 1290, TotalTokens: prompt + 2*1290, PromptTokensDetails: dto.InputTokenDetails{TextTokens: prompt}}
 	respond := func(t *testing.T, stream, includeUsage bool, body []byte) (*httptest.ResponseRecorder, *relaycommon.RelayInfo, *dto.Usage, *types.NewAPIError) {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -2131,7 +2156,7 @@ func TestChatResponse(t *testing.T) {
 		recorder, info, usage, apiErr := respond(t, false, true, archive.Bytes())
 
 		require.Nil(t, apiErr)
-		assert.Equal(t, &dto.Usage{PromptTokens: promptTokens, TotalTokens: promptTokens}, usage)
+		assert.Equal(t, delivered, usage)
 		assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
 		var response struct {
 			ID      string `json:"id"`
@@ -2161,8 +2186,9 @@ func TestChatResponse(t *testing.T) {
 		images := markdownPNGs(t, response.Choices[0].Message.Content)
 		require.Len(t, images, 2)
 		assert.Equal(t, red, images[0])
-		assert.Equal(t, [3]int{promptTokens, 0, promptTokens}, [3]int{response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens})
+		assert.Equal(t, [3]int{prompt, 2 * 1290, prompt + 2*1290}, [3]int{response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens})
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "billed per image received")
+		assert.False(t, info.PerformanceWholeOutput, "a non-stream response's throughput spans the request anyway")
 	})
 
 	for _, includeUsage := range []bool{true, false} {
@@ -2170,8 +2196,8 @@ func TestChatResponse(t *testing.T) {
 			recorder, info, usage, apiErr := respond(t, true, includeUsage, archive.Bytes())
 
 			require.Nil(t, apiErr)
-			assert.Equal(t, promptTokens, usage.PromptTokens)
-			assert.Zero(t, usage.CompletionTokens)
+			assert.Equal(t, delivered, usage)
+			assert.True(t, info.PerformanceWholeOutput, "the images arrived whole: throughput spans the request")
 			assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
 			events := streamedEvents(t, recorder.Body.String())
 			wantEvents := 6
@@ -2195,8 +2221,9 @@ func TestChatResponse(t *testing.T) {
 			assert.Equal(t, "stop", events[3].data["choices"].([]any)[0].(map[string]any)["finish_reason"])
 			if includeUsage {
 				chunkUsage := events[4].data["usage"].(map[string]any)
-				assert.Equal(t, float64(promptTokens), chunkUsage["prompt_tokens"])
-				assert.Zero(t, chunkUsage["completion_tokens"])
+				assert.Equal(t, float64(prompt), chunkUsage["prompt_tokens"])
+				assert.Equal(t, 2*1290.0, chunkUsage["completion_tokens"])
+				assert.Equal(t, float64(prompt+2*1290), chunkUsage["total_tokens"])
 				assert.Empty(t, events[4].data["choices"])
 			}
 			assert.Equal(t, map[string]any{"[DONE]": true}, events[len(events)-1].data)
@@ -2234,6 +2261,37 @@ func TestChatResponse(t *testing.T) {
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
 	})
 
+	// NovelAI made one of the 2 images asked for: the usage counts the one
+	// delivered and billed, in the response and in the log.
+	t.Run("fewer images than asked for", func(t *testing.T) {
+		var archive bytes.Buffer
+		writer := zip.NewWriter(&archive)
+		entry, err := writer.Create("image_0.png")
+		require.NoError(t, err)
+		_, err = entry.Write(red)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		one := &dto.Usage{PromptTokens: prompt, CompletionTokens: 1290, TotalTokens: prompt + 1290, PromptTokensDetails: dto.InputTokenDetails{TextTokens: prompt}}
+		for _, stream := range []bool{false, true} {
+			recorder, info, usage, apiErr := respond(t, stream, true, archive.Bytes())
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, one, usage)
+			assert.Equal(t, 1.0, info.PriceData.OtherRatios()["n"])
+			var reported map[string]any
+			if stream {
+				events := streamedEvents(t, recorder.Body.String())
+				require.Len(t, events, 5, recorder.Body.String())
+				reported = events[3].data["usage"].(map[string]any)
+			} else {
+				var response map[string]any
+				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+				reported = response["usage"].(map[string]any)
+			}
+			assert.Equal(t, []float64{float64(prompt), 1290, float64(prompt + 1290)}, []float64{reported["prompt_tokens"].(float64), reported["completion_tokens"].(float64), reported["total_tokens"].(float64)})
+		}
+	})
+
 	t.Run("a 2xx without images is final", func(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			recorder, info, usage, apiErr := respond(t, stream, true, []byte(`{"statusCode":500,"message":"Error generating image"}`))
@@ -2251,4 +2309,144 @@ func TestChatResponse(t *testing.T) {
 			}
 		}
 	})
+}
+
+// One image counts as 1290 tokens (Gemini's documented size of one
+// generated image up to 1024x1024) scaled by its area and rounded up; the
+// area counts at most NovelAI's 3,145,728-pixel canvas.
+func TestImageTokens(t *testing.T) {
+	for _, tc := range []struct{ width, height, want int }{
+		{1024, 1024, 1290},
+		{832, 1216, 1245}, // 1290 x 1,011,712 / 1,048,576 = 1244.7
+		{1216, 832, 1245},
+		{1024, 1536, 1935},
+		{64, 64, 6},        // 5.04
+		{1728, 1728, 3674}, // 3673.48
+		{2048, 1536, 3870}, // NovelAI's largest canvas
+		{65_536, 65_536, 3870},
+		{0, -5, 1},
+	} {
+		assert.Equal(t, tc.want, ImageTokens(tc.width, tc.height), "%dx%d", tc.width, tc.height)
+	}
+}
+
+// A NovelAI request counts as NovelAI reads it: the text of its V4
+// captions (characters included) or else of input, and of its negative
+// captions or else negative_prompt (or uc); its canvas, NovelAI's 832x1216
+// by default; and as input images its img2img or infill source (not the
+// mask) and each vibe or Precise Reference image, as base64 or as the
+// cached lists of a multipart form. A key repeated in another case counts
+// at its largest.
+func TestRequestTokens(t *testing.T) {
+	const model = "nai-diffusion-5-full"
+	estimate := func(texts ...string) int {
+		total := 0
+		for _, text := range texts {
+			total += tokenkit.Estimate(model, text)
+		}
+		return total
+	}
+	square := `"width":1024,"height":1024`
+	references := func(count int) string {
+		list := make([]string, count)
+		for i := range list {
+			list[i] = `"dmliZQ=="`
+		}
+		return "[" + strings.Join(list, ",") + "]"
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want GenerationTokens
+	}{
+		{"V4 captions count once, with their characters",
+			`{"input":"1girl, very aesthetic","model":"` + model + `","action":"generate","parameters":{"width":832,"height":1216,"negative_prompt":"lowres, bad hands",` +
+				`"v4_prompt":{"caption":{"base_caption":"1girl, very aesthetic","char_captions":[{"char_caption":"girl, red hair","centers":[{"x":0.5,"y":0.5}]}]},"use_order":true},` +
+				`"v4_negative_prompt":{"caption":{"base_caption":"lowres, bad hands","char_captions":[{"char_caption":"blurry"}]}}}}`,
+			GenerationTokens{Text: estimate("1girl, very aesthetic", "girl, red hair", "lowres, bad hands", "blurry"), PerImage: 1245}},
+		{"input and negative_prompt without captions",
+			`{"input":"a cat","model":"` + model + `","parameters":{` + square + `,"negative_prompt":"lowres"}}`,
+			GenerationTokens{Text: estimate("a cat", "lowres"), PerImage: 1290}},
+		{"uc without negative_prompt",
+			`{"input":"a cat","model":"` + model + `","parameters":{` + square + `,"uc":"lowres"}}`,
+			GenerationTokens{Text: estimate("a cat", "lowres"), PerImage: 1290}},
+		{"NovelAI's default canvas", `{"input":"a cat","model":"` + model + `"}`, GenerationTokens{Text: estimate("a cat"), PerImage: 1245}},
+		{"a side that is not a positive whole number keeps its default",
+			`{"input":"a cat","model":"` + model + `","parameters":{"width":"1024","height":1000.5}}`,
+			GenerationTokens{Text: estimate("a cat"), PerImage: 1245}},
+		{"one side given", `{"input":"a cat","model":"` + model + `","parameters":{"width":1024}}`, GenerationTokens{Text: estimate("a cat"), PerImage: 1532}},
+		{"an empty prompt counts 1", `{"input":"","model":"` + model + `"}`, GenerationTokens{Text: 1, PerImage: 1245}},
+		{"img2img counts its source",
+			`{"input":"a cat","model":"` + model + `","action":"img2img","parameters":{` + square + `,"image":"aW1n","strength":0.7}}`,
+			GenerationTokens{Text: estimate("a cat"), InputImages: 1290, PerImage: 1290}},
+		{"infill counts its source, not its mask",
+			`{"input":"a cat","model":"` + model + `-inpainting","action":"infill","parameters":{` + square + `,"image":"aW1n","mask":"bWFzaw=="}}`,
+			GenerationTokens{Text: estimate("a cat"), InputImages: 1290, PerImage: 1290}},
+		{"a multipart form names its source part",
+			`{"input":"a cat","model":"` + model + `","action":"img2img","parameters":{` + square + `,"image":"image","image_cache_secret_key":"ab12"}}`,
+			GenerationTokens{Text: estimate("a cat"), InputImages: 1290, PerImage: 1290}},
+		{"each vibe and reference image counts, base64 or cached",
+			`{"input":"a cat","model":"` + model + `","parameters":{` + square + `,"reference_image_multiple":["dmliZQ==","dmliZQ==",""],"reference_strength_multiple":[0.6,0.6,0.6],` +
+				`"director_reference_images_cached":[{"cache_secret_key":"a","data":"director_ref_0"},{"cache_secret_key":"b"},{"cache_secret_key":"c","data":"director_ref_2"}]}}`,
+			GenerationTokens{Text: estimate("a cat"), InputImages: 5 * 1290, PerImage: 1290}},
+		{"a list sent both ways counts once",
+			`{"input":"a cat","model":"` + model + `","parameters":{` + square + `,"reference_image_multiple":["dmliZQ=="],"reference_image_multiple_cached":[{"cache_secret_key":"a","data":"ref_multiple_0"}]}}`,
+			GenerationTokens{Text: estimate("a cat"), InputImages: 1290, PerImage: 1290}},
+		{"a reference list counts at most 16 images",
+			`{"input":"a cat","model":"` + model + `","parameters":{` + square + `,"reference_image_multiple":` + references(20) + `}}`,
+			GenerationTokens{Text: estimate("a cat"), InputImages: 16 * 1290, PerImage: 1290}},
+		{"a key repeated in another case counts at its largest",
+			`{"input":"a cat","model":"` + model + `","parameters":{"width":64,"Width":1024,"height":1024}}`,
+			GenerationTokens{Text: estimate("a cat"), PerImage: 1290}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, RequestTokens([]byte(tc.body)))
+		})
+	}
+}
+
+// A converted request counts as the native routes count the request NovelAI
+// receives (RequestTokens of its body): its final prompts, presets and
+// characters included, its canvas, its source image (the infill mask is not
+// an input image) and the references it passes through.
+func TestBuildGenerationCountsTheRequestNovelAIReceives(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	source := testImage(96, 64, solid(color.White))
+	mask := testImage(96, 64, func(x, y int) color.Color {
+		if x >= 48 {
+			return color.NRGBA{}
+		}
+		return color.NRGBA{A: 255}
+	})
+	const model = "nai-diffusion-4-5-full"
+	for _, tc := range []struct {
+		name        string
+		intent      GenerationIntent
+		characters  []string
+		inputImages int
+	}{
+		{"generation with a negative prompt and characters", GenerationIntent{Prompt: "1girl", Size: "1024x1024",
+			Extras: map[string]json.RawMessage{"negative_prompt": raw(`"bad hands"`), "characterPrompts": raw(`[{"prompt":"girl, red hair","uc":"blurry"}]`)}}, []string{"girl, red hair", "blurry"}, 0},
+		{"img2img", GenerationIntent{Prompt: "1girl", Size: "1024x1024", Image: source}, nil, 1},
+		{"infill", GenerationIntent{Prompt: "1girl", Size: "1024x1024", Image: source, Mask: mask}, nil, 1},
+		{"vibes passed through", GenerationIntent{Prompt: "1girl", Size: "1024x1024",
+			Parameters: map[string]json.RawMessage{"reference_image_multiple": raw(`["dmliZQ==","dmliZQ=="]`), "reference_strength_multiple": raw(`[0.6,0.6]`)}}, nil, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.intent.Model, tc.intent.N = model, 2
+			generation, parameters := buildParameters(t, tc.intent)
+			input, negative := generation.Body["input"].(string), parameters["negative_prompt"].(string)
+			assert.Contains(t, negative, "lowres", "the UC preset is counted")
+			text := tokenkit.Estimate(generation.Model, input) + tokenkit.Estimate(generation.Model, negative)
+			for _, character := range tc.characters {
+				text += tokenkit.Estimate(generation.Model, character)
+			}
+			assert.Equal(t, GenerationTokens{Text: text, InputImages: tc.inputImages * 1290, PerImage: 1290}, generation.Tokens)
+			assert.Equal(t, RequestTokens(mustMarshal(t, generation.Body)), generation.Tokens, "as the native routes count the same body")
+			assert.Equal(t, &dto.Usage{
+				PromptTokens: text + tc.inputImages*1290, CompletionTokens: 2 * 1290, TotalTokens: text + (tc.inputImages+2)*1290,
+				PromptTokensDetails: dto.InputTokenDetails{TextTokens: text, ImageTokens: tc.inputImages * 1290},
+			}, generation.Tokens.Usage(2))
+		})
+	}
 }

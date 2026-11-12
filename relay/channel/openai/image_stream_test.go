@@ -681,8 +681,9 @@ func (w *failingWriter) Write(p []byte) (int, error) {
 // A NovelAI response settles at the images it carries: the .png entries of a
 // zip, or the images[] entries with a non-empty image in JSON, never the array
 // length. A body that cannot be counted, a client that leaves or an upstream
-// that fails mid-body keeps the reserved quantity, under a per-image price and
-// under an image_count expression alike. The client receives the upstream
+// that fails mid-body keeps the reserved quantity, under a per-image price,
+// an image_count expression and a token price alike (where the quantity sets
+// the image tokens of the NovelAI usage). The client receives the upstream
 // status, headers and bytes unchanged. A client that leaves is no perf-metrics
 // health sample, as on the relay streams, while a completed body is a success.
 func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
@@ -712,7 +713,7 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 		{name: "client leaving between upstream reads keeps the reservation", contentType: "application/zip", body: images, clientLeaves: "read ends", want: requested},
 	}
 	for _, tc := range tests {
-		for _, pricing := range []string{"per-image price", "image_count expression"} {
+		for _, pricing := range []string{"per-image price", "image_count expression", "token price"} {
 			t.Run(tc.name+"/"+pricing, func(t *testing.T) {
 				c, recorder, resp, info := newImageTestContext(t, "", tc.contentType, false)
 				var body io.Reader = bytes.NewReader(tc.body)
@@ -733,11 +734,16 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 				resp.ContentLength = int64(len(tc.body))
 				resp.Header.Set("Content-Disposition", `attachment; filename="images.zip"`)
 				resp.Header.Set("X-Upstream-Internal", "not forwarded")
-				if pricing == "per-image price" {
+				switch pricing {
+				case "per-image price":
 					info.PriceData.UsePrice = true
 					info.PriceData.AddOtherRatio("n", requested)
-				} else {
+				case "image_count expression":
 					info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{EstimatedImageCount: common.GetPointer(requested)}
+				default:
+					// As service.PrepareImageBillingForRequest reserves it.
+					info.ImageRequestCount = requested
+					info.PriceData.AddOtherRatio("n", 1)
 				}
 
 				usage, apiErr := NovelAIImageHandler(c, info, resp)
@@ -759,16 +765,15 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 				if tc.clientLeaves == "" && !tc.upstreamFailsAfterBody {
 					assert.Equal(t, perfmetrics.OutcomeSuccess, outcome)
 				}
-				if pricing == "per-image price" {
+				assert.Equal(t, tc.want, info.SettledImageCount())
+				switch pricing {
+				case "per-image price":
 					assert.Equal(t, float64(tc.want), info.PriceData.OtherRatios()["n"])
-					return
+				case "token price":
+					assert.Equal(t, 1.0, info.PriceData.OtherRatios()["n"], "a token price is not multiplied by the images")
+				default:
+					assert.Empty(t, info.PriceData.OtherRatios(), "expression quantities must not add a legacy multiplier")
 				}
-				settled := info.RequestedImageCount()
-				if info.BillingImageCount != nil {
-					settled = *info.BillingImageCount
-				}
-				assert.Equal(t, tc.want, settled)
-				assert.Empty(t, info.PriceData.OtherRatios(), "expression quantities must not add a legacy multiplier")
 			})
 		}
 	}

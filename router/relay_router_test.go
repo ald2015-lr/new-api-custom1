@@ -260,6 +260,7 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
 	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
 	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedRatios, savedCompletionRatios := ratio_setting.ModelRatio2JSONString(), ratio_setting.CompletionRatio2JSONString()
 	savedOptions := map[string]string{}
 	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
 		savedOptions[key] = value
@@ -268,10 +269,15 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 	t.Cleanup(func() {
 		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
+		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(savedCompletionRatios))
 		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
 	})
-	// $0.02 per image, and $0.06 per image as an expression.
+	// $0.02 per image, and $0.06 per image as an expression; V5 Full is
+	// priced by tokens.
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-retry-0":0.02,"nai-retry-1":0.02,"nai-retry-2":0.02,"nai-retry-3":0.02,"nai-retry-4":0.02,"nai-retry-5":0.02}`))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"nai-diffusion-5-full":2}`))
+	require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"nai-diffusion-5-full":4}`))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 		"billing_setting.billing_mode": `{"nai-diffusion-3":"tiered_expr"}`,
 		"billing_setting.billing_expr": `{"nai-diffusion-3":"tier(\"image\", fixed(0.06)) * image_count"}`,
@@ -287,9 +293,9 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-user", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
 	require.NoError(t, model.DB.Create(&user).Error)
 	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaitestkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
-	channel := model.Channel{Name: "novelai-upstream", Key: "sk-novelai", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-5-full,nai-diffusion-3", BaseURL: &baseURL}
+	channel := model.Channel{Name: "novelai-upstream", Key: "sk-novelai", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-5-full,nai-diffusion-3,nai-diffusion-5-full", BaseURL: &baseURL}
 	require.NoError(t, model.DB.Create(&channel).Error)
-	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-3"} {
+	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-3", "nai-diffusion-5-full"} {
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
 	}
 	engine := gin.New()
@@ -412,6 +418,10 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 		assert.Equal(t, "nai-diffusion-4-5-full", last.ModelName)
 		assert.Equal(t, 20_000, last.Quota, "two images at $0.02, not the four requested")
 		assert.Contains(t, last.Content, "Image count 2")
+		// NovelAI reports no usage: the prompt's estimate, and 1245 tokens
+		// for each 832x1216 image delivered.
+		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", "a cat"), last.PromptTokens)
+		assert.Equal(t, 2*1245, last.CompletionTokens)
 		assert.False(t, last.IsStream)
 		assert.Equal(t, before-20_000, walletQuota())
 	})
@@ -446,11 +456,40 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 		last := logs[len(logs)-1]
 		assert.Equal(t, "nai-diffusion-3", last.ModelName)
 		assert.Equal(t, 60_000, last.Quota, "two images with a payload at $0.06")
+		// The img2img source counts as an input image of NovelAI's default
+		// 832x1216 canvas.
+		assert.Equal(t, tokenkit.Estimate("nai-diffusion-3", "a fox")+1245, last.PromptTokens)
+		assert.Equal(t, 2*1245, last.CompletionTokens)
 		var other map[string]any
 		require.NoError(t, common.Unmarshal([]byte(last.Other), &other))
 		assert.Equal(t, float64(2), other["image_count"])
 		assert.Equal(t, "tiered_expr", other["billing_mode"])
 		assert.Equal(t, before-60_000, walletQuota())
+	})
+
+	// A model priced by tokens now bills the images too: (prompt +
+	// completion x completion ratio) x model ratio x group ratio, the input
+	// image at the default image ratio of 1.
+	t.Run("a ratio price bills the prompts and the images as tokens", func(t *testing.T) {
+		upstream.respond(http.StatusOK, "application/zip", archive.String())
+		requestJSON := `{"input":"1girl","model":"nai-diffusion-5-full","action":"img2img","parameters":{"width":1024,"height":1024,"n_samples":2,"image":"aW1n",` +
+			`"v4_prompt":{"caption":{"base_caption":"1girl, very aesthetic","char_captions":[{"char_caption":"red hair"}]}},"v4_negative_prompt":{"caption":{"base_caption":"lowres","char_captions":[]}}}}`
+		before := walletQuota()
+
+		recorder := send("/ai/generate-image", "application/json", "", []byte(requestJSON), true)
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		text := tokenkit.Estimate("nai-diffusion-5-full", "1girl, very aesthetic") + tokenkit.Estimate("nai-diffusion-5-full", "red hair") + tokenkit.Estimate("nai-diffusion-5-full", "lowres")
+		logs := consumeLogs()
+		last := logs[len(logs)-1]
+		assert.Equal(t, text+1290, last.PromptTokens, "the captions, not input again, and the source image")
+		assert.Equal(t, 2*1290, last.CompletionTokens)
+		assert.Equal(t, (text+1290+2*1290*4)*2, last.Quota)
+		var other map[string]any
+		require.NoError(t, common.Unmarshal([]byte(last.Other), &other))
+		assert.Equal(t, float64(1290), other["image_output"], "the input image tokens the log shows")
+		assert.Equal(t, float64(1), other["image_ratio"])
+		assert.Equal(t, before-last.Quota, walletQuota())
 	})
 
 	t.Run("stream that cannot be counted keeps the reserved count", func(t *testing.T) {
@@ -466,6 +505,7 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 		logs := consumeLogs()
 		last := logs[len(logs)-1]
 		assert.Equal(t, 20_000, last.Quota)
+		assert.Equal(t, 2*1245, last.CompletionTokens, "the two reserved images")
 		assert.True(t, last.IsStream)
 		assert.Equal(t, before-20_000, walletQuota())
 	})
@@ -914,23 +954,33 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		Usage        struct {
 			InputTokens        int `json:"input_tokens"`
 			InputTokensDetails struct {
-				TextTokens int `json:"text_tokens"`
+				TextTokens  int `json:"text_tokens"`
+				ImageTokens int `json:"image_tokens"`
 			} `json:"input_tokens_details"`
 			OutputTokens int `json:"output_tokens"`
 			TotalTokens  int `json:"total_tokens"`
 		} `json:"usage"`
 	}
+	// decode reads an images response, whose usage is the consume log's.
 	decode := func(recorder *httptest.ResponseRecorder) imagesResponse {
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
 		var response imagesResponse
 		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 		assert.NotZero(t, response.Created)
-		assert.Positive(t, response.Usage.InputTokens)
-		assert.Equal(t, response.Usage.InputTokens, response.Usage.InputTokensDetails.TextTokens)
-		assert.Zero(t, response.Usage.OutputTokens)
-		assert.Equal(t, response.Usage.InputTokens, response.Usage.TotalTokens)
+		usage := response.Usage
+		assert.Positive(t, usage.InputTokensDetails.TextTokens)
+		assert.Equal(t, usage.InputTokensDetails.TextTokens+usage.InputTokensDetails.ImageTokens, usage.InputTokens)
+		assert.Equal(t, usage.InputTokens+usage.OutputTokens, usage.TotalTokens)
+		log := lastLog()
+		assert.Equal(t, [2]int{log.PromptTokens, log.CompletionTokens}, [2]int{usage.InputTokens, usage.OutputTokens})
 		return response
+	}
+	// promptText is the estimate of the prompts a NovelAI request sent.
+	promptText := func(body map[string]any) int {
+		model := body["model"].(string)
+		negative := body["parameters"].(map[string]any)["negative_prompt"].(string)
+		return tokenkit.Estimate(model, body["input"].(string)) + tokenkit.Estimate(model, negative)
 	}
 	red, blue := novelAIPNG(t, 16, 16, color.NRGBA{R: 255, A: 255}), novelAIPNG(t, 16, 16, color.NRGBA{B: 255, A: 128})
 
@@ -968,9 +1018,10 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, "nai-diffusion-4-5-full", log.ModelName)
 		assert.Equal(t, 20_000, log.Quota, "two images at $0.02")
 		assert.Contains(t, log.Content, "Image count 2")
-		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", sent.body["input"].(string)), log.PromptTokens, "the final prompt's estimate")
-		assert.Equal(t, log.PromptTokens, response.Usage.InputTokens)
-		assert.Zero(t, log.CompletionTokens)
+		assert.Equal(t, promptText(sent.body), log.PromptTokens, "the final prompts' estimate, presets included")
+		assert.Equal(t, 2*1290, log.CompletionTokens, "two 1024x1024 images")
+		assert.Equal(t, 2*1290, response.Usage.OutputTokens)
+		assert.Zero(t, response.Usage.InputTokensDetails.ImageTokens)
 		assert.Equal(t, before-20_000, walletQuota())
 	})
 
@@ -983,6 +1034,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Len(t, response.Data, 1)
 		assert.Equal(t, 10_000, lastLog().Quota)
 		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, 1290, lastLog().CompletionTokens, "the image received, not the 3 reserved")
 		assert.Equal(t, before-10_000, walletQuota())
 	})
 
@@ -1088,6 +1140,10 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			assert.Equal(t, [2]int{1216, 832}, [2]int{config.Width, config.Height}, key)
 		}
 		assert.Equal(t, 10_000, lastLog().Quota)
+		// The source counts as one 1216x832 input image; the mask does not.
+		assert.Equal(t, 1245, response.Usage.InputTokensDetails.ImageTokens)
+		assert.Equal(t, promptText(sent.body)+1245, lastLog().PromptTokens)
+		assert.Equal(t, 1245, lastLog().CompletionTokens)
 		assert.Equal(t, before-10_000, walletQuota())
 	})
 
@@ -1101,6 +1157,9 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, "img2img", upstream.last().body["action"])
 		assert.Equal(t, "nai-diffusion-5-curated", upstream.last().body["model"])
 		assert.Equal(t, 0.7, upstream.last().body["parameters"].(map[string]any)["strength"])
+		// A 512x512 image is a quarter of 1024x1024: 322.5 tokens, rounded up.
+		assert.Equal(t, 323, response.Usage.InputTokensDetails.ImageTokens)
+		assert.Equal(t, 323, response.Usage.OutputTokens)
 	})
 
 	t.Run("JSON edit with a data URL", func(t *testing.T) {
@@ -1177,10 +1236,12 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		log := lastLog()
 		assert.Equal(t, 20_000, log.Quota, "two images at $0.02")
 		assert.Contains(t, log.Content, "Image count 2")
-		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", sent.body["input"].(string)), log.PromptTokens)
-		assert.Zero(t, log.CompletionTokens)
-		assert.Equal(t, float64(log.PromptTokens), events[2].data["usage"].(map[string]any)["input_tokens"], "the usage on the last image")
+		assert.Equal(t, promptText(sent.body), log.PromptTokens)
+		assert.Equal(t, 2*1290, log.CompletionTokens)
+		usage := events[2].data["usage"].(map[string]any)
+		assert.Equal(t, []float64{float64(log.PromptTokens), 2 * 1290, float64(log.PromptTokens + 2*1290)}, []float64{usage["input_tokens"].(float64), usage["output_tokens"].(float64), usage["total_tokens"].(float64)}, "the usage on the last image")
 		assert.Zero(t, events[1].data["usage"].(map[string]any)["input_tokens"])
+		assert.Zero(t, events[1].data["usage"].(map[string]any)["output_tokens"])
 		assert.Equal(t, before-20_000, walletQuota())
 	})
 
@@ -1198,6 +1259,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Contains(t, events[1].data["error"].(map[string]any)["message"], "Error generating image, an internal error occurred")
 		assert.Equal(t, 10_000, lastLog().Quota)
 		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, 1290, lastLog().CompletionTokens, "the image delivered")
 		assert.Equal(t, before-10_000, walletQuota())
 
 		upstream.queue(http.StatusOK, "text/event-stream", sse(failure))
@@ -1235,9 +1297,14 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, "img2img", sent.body["action"])
 		assert.NotContains(t, sent.body["parameters"], "stream")
 		assert.False(t, sent.acceptSent)
-		assert.Equal(t, float64(lastLog().PromptTokens), events[0].data["usage"].(map[string]any)["input_tokens"])
-		assert.Equal(t, 10_000, lastLog().Quota)
-		assert.Contains(t, lastLog().Content, "Image count 1")
+		// The 64x64 source makes a 1024x1024 canvas.
+		log := lastLog()
+		assert.Equal(t, promptText(sent.body)+1290, log.PromptTokens)
+		assert.Equal(t, 1290, log.CompletionTokens)
+		usage := events[0].data["usage"].(map[string]any)
+		assert.Equal(t, []float64{float64(log.PromptTokens), 1290, 1290}, []float64{usage["input_tokens"].(float64), usage["output_tokens"].(float64), usage["input_tokens_details"].(map[string]any)["image_tokens"].(float64)})
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Contains(t, log.Content, "Image count 1")
 	})
 
 	// chatContent reads the Markdown PNGs of an assistant message.
@@ -1300,9 +1367,11 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, "nai-diffusion-4-5-full", log.ModelName)
 		assert.Equal(t, 20_000, log.Quota, "two images at $0.02: the n multiplier counts once")
 		assert.Contains(t, log.Content, "Image count 2")
-		assert.Equal(t, tokenkit.Estimate("nai-diffusion-4-5-full", sent.body["input"].(string)), log.PromptTokens, "the final prompt's estimate, not the history's")
-		assert.Zero(t, log.CompletionTokens, "the images are not counted as text")
-		assert.Equal(t, [3]int{log.PromptTokens, 0, log.PromptTokens}, [3]int{response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens})
+		// The 300x200 source makes a 1216x832 canvas and counts as one of
+		// its images; the history counts nothing.
+		assert.Equal(t, promptText(sent.body)+1245, log.PromptTokens, "the final prompts' estimate and the source, not the history")
+		assert.Equal(t, 2*1245, log.CompletionTokens, "the images by their area, not as text")
+		assert.Equal(t, [3]int{log.PromptTokens, 2 * 1245, log.PromptTokens + 2*1245}, [3]int{response.Usage.PromptTokens, response.Usage.CompletionTokens, response.Usage.TotalTokens})
 		assert.Equal(t, before-20_000, walletQuota())
 	})
 
@@ -1321,8 +1390,9 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, [][]byte{blue}, chatContent(delta(2)["content"].(string)))
 		assert.Equal(t, "stop", events[3].data["choices"].([]any)[0].(map[string]any)["finish_reason"])
 		log := lastLog()
+		assert.Equal(t, promptText(upstream.last().body), log.PromptTokens)
 		assert.Equal(t, float64(log.PromptTokens), events[4].data["usage"].(map[string]any)["prompt_tokens"])
-		assert.Zero(t, events[4].data["usage"].(map[string]any)["completion_tokens"])
+		assert.Equal(t, 2*1290.0, events[4].data["usage"].(map[string]any)["completion_tokens"])
 		assert.Equal(t, map[string]any{"[DONE]": true}, events[5].data)
 		assert.Equal(t, "/ai/generate-image", upstream.last().path, "chat asks NovelAI for the whole answer")
 		assert.Equal(t, 60_000, log.Quota, "two images at $0.06")
@@ -1331,7 +1401,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, float64(2), other["image_count"])
 		assert.Equal(t, "tiered_expr", other["billing_mode"])
 		assert.Contains(t, log.Content, "Image count 2")
-		assert.Zero(t, log.CompletionTokens)
+		assert.Equal(t, 2*1290, log.CompletionTokens)
 		assert.Equal(t, before-60_000, walletQuota())
 	})
 

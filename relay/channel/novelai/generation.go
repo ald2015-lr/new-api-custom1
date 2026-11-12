@@ -20,7 +20,6 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
-	"github.com/QuantumNous/new-api/tokenkit"
 
 	"github.com/gin-gonic/gin"
 )
@@ -119,6 +118,8 @@ type Generation struct {
 	// Streamable tells whether the model serves /ai/generate-image-stream;
 	// V3 models return only final images.
 	Streamable bool
+	// Tokens is what the request counts as in tokens (RequestTokens).
+	Tokens GenerationTokens
 }
 
 // Size is the generated size in OpenAI's WIDTHxHEIGHT form.
@@ -138,14 +139,6 @@ func (g *Generation) RequestBody(stream bool) map[string]any {
 	parameters["stream"] = "sse"
 	body["parameters"] = parameters
 	return body
-}
-
-// Usage is what a converted request reports and bills as tokens: the
-// estimate of the final prompt (at least 1) as prompt tokens and nothing as
-// completion, as NovelAI reports no usage and image bytes are not text.
-func (g *Generation) Usage() *dto.Usage {
-	prompt := max(tokenkit.Estimate(g.Model, g.Prompt), 1)
-	return &dto.Usage{PromptTokens: prompt, TotalTokens: prompt}
 }
 
 // relayOwnedParameters are the keys of parameters the relay sets itself. A
@@ -533,14 +526,28 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		}
 	}
 
+	body := map[string]any{
+		"input":                prompt,
+		"model":                model,
+		"action":               action,
+		"parameters":           parameters,
+		"use_new_shared_trial": true,
+	}
+	// Counted as the native routes count a request, from what NovelAI
+	// receives; the action tells there is a source image, so the copy leaves
+	// out the image and the mask.
+	counted := maps.Clone(body)
+	countedParameters := maps.Clone(parameters)
+	delete(countedParameters, "image")
+	delete(countedParameters, "mask")
+	counted["parameters"] = countedParameters
+	countedJSON, err := common.Marshal(counted)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+	}
+
 	return &Generation{
-		Body: map[string]any{
-			"input":                prompt,
-			"model":                model,
-			"action":               action,
-			"parameters":           parameters,
-			"use_new_shared_trial": true,
-		},
+		Body:        body,
 		Model:       model,
 		Action:      action,
 		Width:       width,
@@ -552,6 +559,7 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		ImageFormat: imageFormat,
 		Transparent: intent.Transparent,
 		Streamable:  modelProfile.family != familyV3,
+		Tokens:      RequestTokens(countedJSON),
 	}, nil
 }
 

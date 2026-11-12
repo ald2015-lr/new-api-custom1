@@ -72,18 +72,18 @@ type renderedImage struct {
 // Partial images come from sample 0 only (OpenAI's events name no image):
 // at most output.PartialImages previews, evenly spaced over the steps. Each
 // final becomes one completed event, in sample order; the last one carries
-// the usage and the others zeros, so summing them counts the prompt once.
-// No [DONE] follows, as OpenAI sends none.
+// the usage of the images delivered with it and the others zeros, so summing
+// them counts the prompt once. No [DONE] follows, as OpenAI sends none.
 //
 // The billed quantity is the completed events delivered once upstream ended
 // the stream; a client that left keeps the reservation, as does a stream
 // that broke (a timeout or a transport error) before NovelAI finished it.
+// The usage returned is the generation's for the billed quantity.
 type imageStream struct {
 	c          *gin.Context
 	info       *relaycommon.RelayInfo
 	generation *Generation
 	output     ImageOutput
-	usage      *dto.Usage
 	created    int64
 	partials   int
 	// received marks the samples whose final arrived; pending holds those
@@ -106,7 +106,6 @@ type imageStream struct {
 func imagesStreamResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput) (*dto.Usage, *types.NewAPIError) {
 	stream := &imageStream{
 		c: c, info: info, generation: generation, output: output,
-		usage:    generation.Usage(),
 		created:  time.Now().Unix(),
 		received: make([]bool, generation.NSamples),
 		pending:  map[int]renderedImage{},
@@ -217,12 +216,13 @@ func (s *imageStream) fail(sr *helper.StreamResult, err error) {
 	sr.Stop(err)
 }
 
-// complete sends the completed event of sample's image.
+// complete sends the completed event of sample's image; the last one
+// carries the usage of the images delivered with it.
 func (s *imageStream) complete(sample int, final renderedImage, last bool) error {
 	seed := s.generation.Seed + int64(sample)
 	usage := OpenAIImageUsage{}
 	if last {
-		usage = ImageUsage(s.usage)
+		usage = ImageUsage(s.generation.Tokens.Usage(s.delivered + 1))
 	}
 	if err := s.write(openAIImageStreamEvent{
 		Type: s.output.Event + ".completed", CreatedAt: s.created, Size: s.generation.Size(), Quality: s.output.Quality,
@@ -243,12 +243,17 @@ func (s *imageStream) write(event openAIImageStreamEvent) error {
 	return helper.ResponseChunkData(s.c, dto.ResponsesStreamResponse{Type: event.Type}, string(payload))
 }
 
+// usage is the generation's usage for the quantity the request settles at.
+func (s *imageStream) usage() *dto.Usage {
+	return s.generation.Tokens.Usage(s.info.SettledImageCount())
+}
+
 // finish settles a relayed stream once it ended.
 func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 	status := s.info.StreamStatus
 	if s.delivered == s.generation.NSamples {
 		s.info.UpdateImageCount(int64(s.delivered))
-		return s.usage, nil
+		return s.usage(), nil
 	}
 	if s.clientGone == nil {
 		// The images that came before a missing one still reach the client.
@@ -271,7 +276,7 @@ func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 		// and perf metrics take the request for a cancellation.
 		status.EndReason, status.EndError = relaycommon.StreamEndReasonClientGone, s.clientGone
 		logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, s.generation.NSamples, s.info.RequestedImageCount()))
-		return s.usage, nil
+		return s.usage(), nil
 	}
 	upstreamEnded := s.failure != nil || status.EndReason == relaycommon.StreamEndReasonEOF || status.EndReason == relaycommon.StreamEndReasonDone
 	if !upstreamEnded {
@@ -279,7 +284,7 @@ func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 		// timeout, a transport error): NovelAI may still be generating what
 		// it charged for, so only a finished stream lowers the count.
 		helper.ReportStreamInterruption(s.c, s.info)
-		return s.usage, nil
+		return s.usage(), nil
 	}
 	message := i18n.T(s.c, i18n.MsgNovelAIStreamIncomplete, map[string]any{"Count": s.delivered, "Total": s.generation.NSamples})
 	if s.failure != nil {
@@ -295,16 +300,19 @@ func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 	status.MarkFailed(string(apiErr.GetErrorCode()), string(apiErr.GetErrorType()), apiErr.StatusCode)
 	common.SetContextKey(s.c, constant.ContextKeyResponseStreamStatus, status)
 	helper.WriteStreamError(s.c, s.info.RelayFormat, apiErr)
-	return s.usage, nil
+	return s.usage(), nil
 }
 
 // synthesize answers from a complete NovelAI response (zip, JSON or a bare
-// image): one completed event per image, the usage on the last.
+// image): one completed event per image, the usage on the last. The images
+// all arrive at once, after NovelAI made them, so the stream's throughput
+// spans the whole request (PerformanceWholeOutput).
 func (s *imageStream) synthesize(resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
+	s.info.PerformanceWholeOutput = true
 	images, clientLeft, apiErr := readImages(s.c, resp, s.info, s.generation.NSamples)
 	if clientLeft {
-		return s.usage, nil
+		return s.usage(), nil
 	}
 	if apiErr != nil {
 		return nil, apiErr
@@ -325,10 +333,10 @@ func (s *imageStream) synthesize(resp *http.Response) (*dto.Usage, *types.NewAPI
 		if err := s.complete(i, final, i == len(finals)-1); err != nil {
 			s.info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
 			logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, len(finals), s.info.RequestedImageCount()))
-			return s.usage, nil
+			return s.usage(), nil
 		}
 	}
 	s.info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	s.info.UpdateImageCount(int64(s.delivered))
-	return s.usage, nil
+	return s.usage(), nil
 }

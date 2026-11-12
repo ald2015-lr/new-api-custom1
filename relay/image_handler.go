@@ -164,7 +164,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		return newAPIError
 	}
 
-	imageN := settledImageCount(info)
+	imageN := info.SettledImageCount()
 
 	if usage.(*dto.Usage).TotalTokens == 0 {
 		usage.(*dto.Usage).TotalTokens = 1
@@ -209,17 +209,4 @@ func checkNovelAISamples(info *relaycommon.RelayInfo, jsonData []byte, reserved 
 		return nil
 	}
 	return types.NewErrorWithStatusCode(fmt.Errorf("the channel's parameter override sets parameters.n_samples to %s; it must stay %d, the images the request reserved", cmp.Or(samples.Raw, "nothing"), reserved), types.ErrorCodeChannelParamOverrideInvalid, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
-}
-
-// settledImageCount is the image quantity the consume log shows: the count the
-// response handler derived from the upstream response when it did, otherwise
-// the reserved quantity.
-func settledImageCount(info *relaycommon.RelayInfo) int {
-	if info.BillingImageCount != nil {
-		return *info.BillingImageCount
-	}
-	if count, ok := info.PriceData.OtherRatios()["n"]; ok && info.PriceData.UsePrice && count >= 1 && count <= dto.MaxImageN {
-		return common.QuotaRound(count)
-	}
-	return info.RequestedImageCount()
 }
