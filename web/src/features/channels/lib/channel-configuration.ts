@@ -66,6 +66,7 @@ const CONFIGURATION_BLOCKS = {
       'ollama_openai_chat',
       'novelai_presets_disabled',
       'novelai_hd_disabled',
+      'novelai_upscale_enabled',
       'novelai_queue_limit',
       'system_prompt',
       'system_prompt_override',
@@ -166,6 +167,7 @@ export function getChannelConfigurationState(
       (values.type === CHANNEL_TYPE_NOVELAI &&
         (values.novelai_presets_disabled ||
           values.novelai_hd_disabled ||
+          values.novelai_upscale_enabled ||
           (values.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT) !==
             NOVELAI_QUEUE_LIMIT_DEFAULT)) ||
       values.system_prompt?.trim() ||

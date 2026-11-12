@@ -90,6 +90,10 @@ type GenerationIntent struct {
 	HDOff bool
 	// Quality is the OpenAI images quality; "low" turns HD off.
 	Quality string
+	// Upscale turns NovelAI's 2x upscale on (the channel's
+	// novelai_upscale_enabled setting): a request can turn it off with
+	// upscale: false, never on past it.
+	Upscale bool
 	// Extras are the top-level NovelAI extension keys of the request, as
 	// ParseExtensions returns them: negative_prompt, seed, steps, scale,
 	// strength, noise, characterPrompts and the rest of extensionKeys.
@@ -130,6 +134,20 @@ type Generation struct {
 	// (hdEligible); hdSkip says why not, for the debug log.
 	HD     bool
 	hdSkip string
+	// Upscale is set when the channel's upscale is on and the request did
+	// not send upscale: false. UpscaleExcluded names why no image of the
+	// request can be upscaled ("a masked edit", "a transparent background",
+	// "WebP output"), "" when each image is checked on its own (upscaler).
+	// A channel's parameter override, which changes the body after this,
+	// turns neither on or off.
+	Upscale         bool
+	UpscaleExcluded string
+}
+
+// UpscalePlanned tells that the request's images go to NovelAI's upscaler
+// once generated (and enhanced).
+func (g *Generation) UpscalePlanned() bool {
+	return g.Upscale && g.UpscaleExcluded == ""
 }
 
 // Size is the generated size in OpenAI's WIDTHxHEIGHT form.
@@ -249,6 +267,10 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		return nil, apiErr
 	}
 	hd, apiErr := fields.boolean("hd")
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	upscale, apiErr := fields.boolean("upscale")
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -588,6 +610,19 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		generation.hdSkip = hdEligible(generation, modelProfile, intent.Parameters)
 		generation.HD = generation.hdSkip == ""
 	}
+	generation.Upscale = intent.Upscale && (upscale == nil || *upscale)
+	switch {
+	case !generation.Upscale:
+	case action == ActionInfill:
+		// Clients put an inpainted result back onto its source, at the
+		// source's size.
+		generation.UpscaleExcluded = "a masked edit"
+	case intent.Transparent:
+		generation.UpscaleExcluded = "a transparent background"
+	case imageFormat != formatPNG:
+		// The upscaler answers PNG, which the relay cannot turn into WebP.
+		generation.UpscaleExcluded = "WebP output"
+	}
 	return generation, nil
 }
 
@@ -604,7 +639,7 @@ var interpretedKeys = map[string]bool{
 	"strength": true, "noise": true, "characterPrompts": true, "skip_cfg_above_sigma": true,
 	"variety": true, "image_format": true, "params_version": true, "legacy_uc": true,
 	"width": true, "height": true, "n_samples": true, "v4_prompt": true, "v4_negative_prompt": true,
-	"hd": true,
+	"hd": true, "upscale": true,
 }
 
 // sampleLimit is the most images NovelAI generates at once for an area.

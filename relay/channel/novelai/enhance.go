@@ -476,18 +476,24 @@ type hdOutcome struct {
 	enhanced, delivered int
 }
 
-// enhancer runs the HD pass of one request in DoResponse, image by image in
-// sample order, under the key's hold (release, once). It never fails the
-// request: an image it cannot enhance is delivered as NovelAI made it, and
-// HD stops for the rest of the request (stopped is why).
+// enhancer runs the passes that follow a request's base pass in DoResponse,
+// image by image in sample order, under the key's hold (release, once): HD
+// when planned (plan), then the upscale when planned (upscale). It never
+// fails the request: an image it cannot enhance is delivered as NovelAI made
+// it, and HD stops for the rest of the request (stopped is why); one it
+// does not upscale is delivered as it was.
 type enhancer struct {
 	c       *gin.Context
 	info    *relaycommon.RelayInfo
 	adaptor *Adaptor
 	plan    *hdPlan
+	upscale *upscaler
 	release func()
-	// started is when the first image's preparation started: hdBudget
-	// counts from it.
+	// upscaledBytes are the bytes of the upscaled images delivered since the
+	// last holdDelivery.
+	upscaledBytes int64
+	// started is when the first image's preparation started, moved on by
+	// the time the upscales in between took: hdBudget counts from it.
 	started time.Time
 	stopped string
 	// cooldownUntil is the end of the cooldown a 402 of this request set.
@@ -586,17 +592,7 @@ func (e *enhancer) image(sample int, base []byte) ([]byte, error) {
 		return nil, nil
 	case resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices:
 		answer, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
-		message := strings.TrimSpace(string(answer))
-		var parsed struct {
-			Message string `json:"message"`
-		}
-		if common.Unmarshal(answer, &parsed) == nil && parsed.Message != "" {
-			message = parsed.Message
-		}
-		if runes := []rune(message); len(runes) > maxErrorMessageRunes {
-			message = string(runes[:maxErrorMessageRunes])
-		}
-		e.stop(fmt.Sprintf("NovelAI answered HTTP %d: %s", resp.StatusCode, message))
+		e.stop(fmt.Sprintf("NovelAI answered HTTP %d: %s", resp.StatusCode, upstreamMessage(answer)))
 		return nil, nil
 	}
 	answer, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
@@ -643,6 +639,23 @@ func (e *enhancer) failed(callCtx context.Context, timeoutReason string, err err
 	return nil, nil
 }
 
+// upstreamMessage is NovelAI's message in an error answer
+// ({"statusCode":...,"message":...}), or else the answer's text, at most
+// maxErrorMessageRunes, for the logs and diagnostics.
+func upstreamMessage(answer []byte) string {
+	message := strings.TrimSpace(string(answer))
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if common.Unmarshal(answer, &parsed) == nil && parsed.Message != "" {
+		message = parsed.Message
+	}
+	if runes := []rune(message); len(runes) > maxErrorMessageRunes {
+		message = string(runes[:maxErrorMessageRunes])
+	}
+	return message
+}
+
 // reject records that the caller could not render an HD image: it counts as
 // an enhance failure (HD stops), and the caller delivers the base.
 func (e *enhancer) reject(sample int, cause error) {
@@ -650,18 +663,59 @@ func (e *enhancer) reject(sample int, cause error) {
 	e.stop("the HD image could not be rendered: " + cause.Error())
 }
 
-// deliver is base image sample as the client gets it: final, its rendering
-// in outputFormat at quality, or the HD image rendered alike when HD made
-// one (an HD image that does not render counts as a failure). last finishes
-// the pass once the last image went through, before it is written. err is
-// the client's leaving. A nil enhancer (no HD) delivers final.
+// deliver is base image sample as the client gets it, base as NovelAI
+// returned it and final its rendering in outputFormat at quality: the HD
+// image when HD made one, then that image (or the base) upscaled when the
+// upscale made one, rendered alike. An image that does not render counts as
+// its pass's failure, and the one before it is delivered. With last the key
+// is released once NovelAI answered the image's last call, before anything
+// renders, and the passes finish. err is the client's leaving. A nil
+// enhancer (no pass) delivers final.
 func (e *enhancer) deliver(sample int, base []byte, final renderedImage, outputFormat string, quality int, last bool) (renderedImage, error) {
 	if e == nil {
 		return final, nil
 	}
-	hd, err := e.image(sample, base)
-	if err != nil {
-		return final, err
+	source := base
+	var hd []byte
+	if e.plan != nil {
+		var err error
+		if hd, err = e.image(sample, base); err != nil {
+			return final, err
+		}
+		if hd != nil {
+			source = hd
+		}
+	}
+	var upscaled []byte
+	var upscaledSize image.Point
+	if e.upscale != nil {
+		upscaleStarted := time.Now()
+		var err error
+		upscaled, upscaledSize, err = e.upscale.image(sample, source)
+		if !e.started.IsZero() {
+			// hdBudget counts the enhance work only.
+			e.started = e.started.Add(time.Since(upscaleStarted))
+		}
+		if err != nil {
+			e.clientLeft = true
+			return final, err
+		}
+	}
+	if last {
+		e.release()
+	}
+	if upscaled != nil {
+		rendered, format, err := renderUpscaled(e.c.Request.Context(), upscaled, outputFormat, quality)
+		switch {
+		case err == nil:
+			e.upscaledBytes += int64(len(rendered))
+			final, hd = renderedImage{rendered, format, strconv.Itoa(upscaledSize.X) + "x" + strconv.Itoa(upscaledSize.Y)}, nil
+		case e.c.Request.Context().Err() != nil:
+			e.clientLeft = true
+			return final, e.c.Request.Context().Err()
+		default:
+			e.upscale.rejected(sample, err)
+		}
 	}
 	if hd != nil {
 		if rendered, format, err := RenderImage(hd, outputFormat, quality); err != nil {
@@ -676,16 +730,23 @@ func (e *enhancer) deliver(sample int, base []byte, final renderedImage, outputF
 	return final, nil
 }
 
-// finish releases the key's slot (once) and settles the outcome for the
-// logs: a success line, or a diagnostic for admins naming why some images
-// were delivered at the standard size. It is called once the last image
-// went through image, before the relay writes it.
+// finish releases the key's slot (once) and settles the outcomes for the
+// logs: the upscale's for the consume log, and HD's success line or a
+// diagnostic for admins naming why some images were delivered at the
+// standard size. It is called once the last image went through deliver,
+// before the relay writes it.
 func (e *enhancer) finish() {
 	if e.done {
 		return
 	}
 	e.done = true
 	e.release()
+	if e.upscale != nil && !e.clientLeft {
+		e.adaptor.upscaleResult = upscaleResult{info: e.info, counts: e.upscale.outcomes}
+	}
+	if e.plan == nil {
+		return
+	}
 	e.adaptor.hdResult = hdOutcome{info: e.info, canvas: e.plan.canvas(), enhanced: e.enhanced, delivered: e.delivered}
 	if e.clientLeft || e.delivered == 0 {
 		e.adaptor.hdResult.delivered = 0

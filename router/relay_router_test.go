@@ -1788,6 +1788,151 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, 10_000, log.Quota)
 		assert.Equal(t, before-10_000, walletQuota())
 	})
+
+	// The upscale, NovelAI's 2x upscaler, is a channel's opt-in: novelai-upscale
+	// serves V4.5 Curated ahead of novelai-override, with HD on as by
+	// default. Each upscale is one
+	// more call to NovelAI after the base (and HD), and the user pays exactly
+	// what a request without it costs, in quota and in usage tokens; the
+	// consume log notes what became of each image.
+	upscaleChannel := model.Channel{Name: "novelai-upscale", Key: "pst-up", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+		Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), Priority: &hdPriority, OtherSettings: `{"novelai_upscale_enabled":true}`}
+	require.NoError(t, model.DB.Create(&upscaleChannel).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: upscaleChannel.Id, Model: "nai-diffusion-4-5-curated", Group: "default", Enabled: true, Priority: &hdPriority}).Error)
+	square, doubled := novelAIPNG(t, 1024, 1024, color.NRGBA{G: 255, A: 255}), novelAIPNG(t, 2048, 2048, color.NRGBA{R: 255, G: 200, A: 255})
+	const upscalePrompt = `{"model":"nai-diffusion-4-5-curated","prompt":"1girl","size":"1024x1024"`
+	paths := func(sent []novelAIRecordedRequest) []string {
+		var paths []string
+		for _, request := range sent {
+			paths = append(paths, request.path)
+		}
+		return paths
+	}
+
+	t.Run("an upscaled image costs what a standard one does", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusOK, "application/x-zip-compressed", novelAIZip(t, doubled))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`,"hd":false}`)))
+
+		sent := requested(calls)
+		assert.Equal(t, []string{"/ai/generate-image", "/ai/upscale"}, paths(sent))
+		assert.Equal(t, map[string]any{"image": base64.StdEncoding.EncodeToString(square), "model": "nai-diffusion-5-curated", "declared_blur_sigma": 0.0}, sent[1].body)
+		assert.Equal(t, "Bearer pst-up", sent[1].authorization)
+		assert.False(t, sent[1].acceptSent)
+		assert.Equal(t, "2048x2048", response.Size)
+		assert.Equal(t, "2048x2048", response.Data[0].Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, doubled, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "Upscaled 2x: 1")
+		assert.Contains(t, log.Content, "Image count 1")
+		assert.NotContains(t, log.Content, "HD")
+		assert.Equal(t, 10_000, log.Quota, "one image at $0.02, as without the upscale")
+		assert.Equal(t, novelai.ImageTokens(1024, 1024), log.CompletionTokens, "the 1024x1024 image the request is priced at")
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("HD, then the upscale, at the same price", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, novelAIPNG(t, 1536, 1536, color.NRGBA{B: 255, A: 255})))
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, novelAIPNG(t, 3072, 3072, color.NRGBA{R: 255, A: 255})))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`}`)))
+
+		sent := requested(calls)
+		assert.Equal(t, []string{"/ai/generate-image", "/ai/generate-image", "/ai/upscale"}, paths(sent))
+		assert.Equal(t, "img2img", sent[1].body["action"])
+		assert.Equal(t, "3072x3072", response.Size)
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD 1536x1536")
+		assert.Contains(t, log.Content, "Upscaled 2x: 1")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, novelai.ImageTokens(1024, 1024), log.CompletionTokens)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("an account without Anlas gets the image before the upscale at the same price", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`,"hd":false}`)))
+
+		assert.Equal(t, calls+2, upstream.calls())
+		assert.Equal(t, "1024x1024", response.Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, square, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "Not upscaled, not enough Anlas: 1")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("upscale false skips it, as a JSON field and as a form field", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		calls := upstream.calls()
+		decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`,"hd":false,"upscale":false}`)))
+		assert.Equal(t, calls+1, upstream.calls())
+		assert.NotContains(t, lastLog().Content, "pscale")
+
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for key, value := range map[string]string{"model": "nai-diffusion-4-5-curated", "prompt": "a red scarf", "upscale": "false"} {
+			require.NoError(t, writer.WriteField(key, value))
+		}
+		part, err := writer.CreateFormFile("image", "source.png")
+		require.NoError(t, err)
+		_, err = part.Write(square)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		calls = upstream.calls()
+		decode(send("/v1/images/edits", writer.FormDataContentType(), body.Bytes()))
+		assert.Equal(t, calls+1, upstream.calls())
+		assert.Equal(t, "img2img", upstream.last().body["action"])
+		assert.NotContains(t, upstream.last().body["parameters"], "upscale")
+		assert.NotContains(t, lastLog().Content, "pscale")
+	})
+
+	t.Run("an edit is upscaled, a masked one noted not applicable", func(t *testing.T) {
+		edit := func(mask bool) (string, []byte) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			for key, value := range map[string]string{"model": "nai-diffusion-4-5-curated", "prompt": "a red scarf"} {
+				require.NoError(t, writer.WriteField(key, value))
+			}
+			for _, name := range []string{"image", "mask"}[:map[bool]int{false: 1, true: 2}[mask]] {
+				part, err := writer.CreateFormFile(name, name+".png")
+				require.NoError(t, err)
+				_, err = part.Write(square)
+				require.NoError(t, err)
+			}
+			require.NoError(t, writer.Close())
+			return writer.FormDataContentType(), body.Bytes()
+		}
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, doubled))
+		calls := upstream.calls()
+		contentType, body := edit(false)
+		response := decode(send("/v1/images/edits", contentType, body))
+		assert.Equal(t, []string{"/ai/generate-image", "/ai/upscale"}, paths(requested(calls)))
+		assert.Equal(t, "img2img", requested(calls)[0].body["action"])
+		assert.Equal(t, "2048x2048", response.Size)
+		assert.Contains(t, lastLog().Content, "Upscaled 2x: 1")
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		calls = upstream.calls()
+		contentType, body = edit(true)
+		decode(send("/v1/images/edits", contentType, body))
+		assert.Equal(t, []string{"/ai/generate-image"}, paths(requested(calls)))
+		assert.Equal(t, "infill", requested(calls)[0].body["action"])
+		assert.Contains(t, lastLog().Content, "Not upscaled, not applicable: 1")
+	})
 }
 
 // novelAIQueueUpstream is NovelAI's image host for the queue test, reached

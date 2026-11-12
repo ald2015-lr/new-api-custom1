@@ -55,6 +55,7 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'ollama_openai_chat',
   'novelai_presets_disabled',
   'novelai_hd_disabled',
+  'novelai_upscale_enabled',
   'novelai_queue_limit',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',

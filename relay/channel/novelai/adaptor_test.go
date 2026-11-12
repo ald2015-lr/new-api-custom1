@@ -3276,6 +3276,43 @@ func TestEnhanceGoldenRequests(t *testing.T) {
 	})
 }
 
+// convertRequest converts an OpenAI-format request on path (images
+// generations or edits, or chat completions) for a NovelAI channel with
+// settings, as the relays do: its generation and the parameters it sends, or
+// the conversion's error.
+func convertRequest(t *testing.T, path, body string, settings dto.ChannelOtherSettings) (*Generation, map[string]any, *types.NewAPIError) {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelOtherSettings: settings}}
+	adaptor := &Adaptor{}
+	var converted any
+	var err error
+	if path == "/v1/chat/completions" {
+		request := &dto.GeneralOpenAIRequest{}
+		require.NoError(t, common.UnmarshalBodyReusable(c, request))
+		info.RelayMode = relayconstant.RelayModeChatCompletions
+		converted, err = adaptor.ConvertOpenAIRequest(c, info, request)
+	} else {
+		request := &dto.ImageRequest{}
+		require.NoError(t, common.UnmarshalBodyReusable(c, request))
+		info.RelayMode = relayconstant.RelayModeImagesGenerations
+		if path == "/v1/images/edits" {
+			info.RelayMode = relayconstant.RelayModeImagesEdits
+		}
+		converted, err = adaptor.ConvertImageRequest(c, info, *request)
+	}
+	if err != nil {
+		var apiErr *types.NewAPIError
+		require.ErrorAs(t, err, &apiErr)
+		return nil, nil, apiErr
+	}
+	var sent map[string]any
+	require.NoError(t, common.Unmarshal(mustMarshal(t, converted), &sent))
+	return adaptor.generation, sent["parameters"].(map[string]any), nil
+}
+
 // HD is on by default for a text-to-image request of V4 or later, on the
 // images routes and chat. The channel turns it off for good (a request's
 // hd true does not override it), and a request turns it off with hd false
@@ -3287,39 +3324,8 @@ func TestEnhanceGoldenRequests(t *testing.T) {
 // read again or is too large gets none.
 func TestHDEligibility(t *testing.T) {
 	require.NoError(t, i18n.Init())
+	convert := convertRequest
 	source := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testImage(64, 64, solid(color.White)))
-	convert := func(t *testing.T, path, body string, settings dto.ChannelOtherSettings) (*Generation, map[string]any, *types.NewAPIError) {
-		t.Helper()
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelOtherSettings: settings}}
-		adaptor := &Adaptor{}
-		var converted any
-		var err error
-		if path == "/v1/chat/completions" {
-			request := &dto.GeneralOpenAIRequest{}
-			require.NoError(t, common.UnmarshalBodyReusable(c, request))
-			info.RelayMode = relayconstant.RelayModeChatCompletions
-			converted, err = adaptor.ConvertOpenAIRequest(c, info, request)
-		} else {
-			request := &dto.ImageRequest{}
-			require.NoError(t, common.UnmarshalBodyReusable(c, request))
-			info.RelayMode = relayconstant.RelayModeImagesGenerations
-			if path == "/v1/images/edits" {
-				info.RelayMode = relayconstant.RelayModeImagesEdits
-			}
-			converted, err = adaptor.ConvertImageRequest(c, info, *request)
-		}
-		if err != nil {
-			var apiErr *types.NewAPIError
-			require.ErrorAs(t, err, &apiErr)
-			return nil, nil, apiErr
-		}
-		var sent map[string]any
-		require.NoError(t, common.Unmarshal(mustMarshal(t, converted), &sent))
-		return adaptor.generation, sent["parameters"].(map[string]any), nil
-	}
 	off := dto.ChannelOtherSettings{NovelAIHDDisabled: true}
 	const generations, edits, chat = "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions"
 	cat := func(extra string) string { return `{"model":"nai-diffusion-4-5-full","prompt":"a cat"` + extra + `}` }
@@ -3457,12 +3463,15 @@ type hdUpstream struct {
 	calls    []hdCall
 	base     func(w http.ResponseWriter, r *http.Request, call hdCall)
 	enhances []func(w http.ResponseWriter, r *http.Request, call hdCall)
+	upscales []func(w http.ResponseWriter, r *http.Request, call hdCall)
 }
 
 type hdCall struct {
-	path, contentType, authorization string
-	acceptSent                       bool
-	body                             map[string]any
+	method, host, path, contentType, authorization string
+	acceptSent                                     bool
+	header                                         http.Header
+	raw                                            []byte
+	body                                           map[string]any
 }
 
 func (c hdCall) parameter(key string) any {
@@ -3485,13 +3494,20 @@ func newHDUpstream(t *testing.T) (*hdUpstream, *httptest.Server) {
 
 func (u *hdUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	data, _ := io.ReadAll(r.Body)
-	call := hdCall{path: r.URL.Path, contentType: r.Header.Get("Content-Type"), authorization: r.Header.Get("Authorization")}
+	call := hdCall{method: r.Method, host: r.Host, path: r.URL.Path, contentType: r.Header.Get("Content-Type"), authorization: r.Header.Get("Authorization"),
+		header: r.Header.Clone(), raw: data}
 	_, call.acceptSent = r.Header["Accept"]
 	_ = common.Unmarshal(data, &call.body)
 	u.mu.Lock()
 	u.calls = append(u.calls, call)
 	answer := u.base
-	if call.body["action"] == ActionImg2Img {
+	switch {
+	case call.upscale():
+		answer = upscaleAnswered
+		if len(u.upscales) > 0 {
+			answer, u.upscales = u.upscales[0], u.upscales[1:]
+		}
+	case call.body["action"] == ActionImg2Img:
 		answer = nil
 		if len(u.enhances) > 0 {
 			answer, u.enhances = u.enhances[0], u.enhances[1:]
@@ -3540,6 +3556,62 @@ func (u *hdUpstream) recorded() []hdCall {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return slices.Clone(u.calls)
+}
+
+// upscale queues the answers of the next upscale calls; any other gets
+// upscaleAnswered.
+func (u *hdUpstream) upscale(answers ...func(http.ResponseWriter, *http.Request, hdCall)) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.upscales = append(u.upscales, answers...)
+}
+
+// upscaleCalls are the upscale calls since the first before calls.
+func (u *hdUpstream) upscaleCalls(before int) []hdCall {
+	var calls []hdCall
+	for _, call := range u.recorded()[before:] {
+		if call.upscale() {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+// answerBase makes answer the base pass's answer for the rest of the test.
+func (u *hdUpstream) answerBase(t *testing.T, answer func(http.ResponseWriter, *http.Request, hdCall)) {
+	u.mu.Lock()
+	u.base = answer
+	u.mu.Unlock()
+	t.Cleanup(func() {
+		u.mu.Lock()
+		u.base = nil
+		u.mu.Unlock()
+	})
+}
+
+// upscale tells a call to NovelAI's upscaler (at a forwarder's base path
+// too).
+func (c hdCall) upscale() bool {
+	return strings.HasSuffix(c.path, upscalePath)
+}
+
+// upscaleInput is the size of the image an upscale call sent.
+func (c hdCall) upscaleInput() (int, int) {
+	encoded, _ := c.body["image"].(string)
+	data, _ := base64.StdEncoding.DecodeString(encoded)
+	config, _, _ := image.DecodeConfig(bytes.NewReader(data))
+	return config.Width, config.Height
+}
+
+// upscaleColor is the colour of an upscaled image in the tests.
+var upscaleColor = color.NRGBA{R: 250, G: 200, B: 10, A: 255}
+
+// upscaleAnswered is NovelAI's answer to an upscale call: a zip of the image
+// at twice its size.
+func upscaleAnswered(w http.ResponseWriter, _ *http.Request, call hdCall) {
+	width, height := call.upscaleInput()
+	w.Header().Set("Content-Type", "application/x-zip-compressed")
+	_, _ = w.Write(hdZip(hdPNG(2*width, 2*height, upscaleColor)))
 }
 
 // hdRun is a request the adaptor answered (runHD).
@@ -4053,6 +4125,84 @@ func TestImagesStreamHD(t *testing.T) {
 		assert.Equal(t, float64(323), events[0].data["usage"].(map[string]any)["output_tokens"])
 		assert.True(t, run.info.PerformanceWholeOutput)
 	})
+
+	upscaleMeta := func(key string) relaycommon.ChannelMeta {
+		return relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: key, ChannelOtherSettings: upscaleOnly}
+	}
+	// countingUpscale records how often needle had reached the client when
+	// an upscale came, then upscales.
+	countingUpscale := func(log *eventLog, seen *[]int, mu *sync.Mutex) func(http.ResponseWriter, *http.Request, hdCall) {
+		return func(w http.ResponseWriter, r *http.Request, call hdCall) {
+			mu.Lock()
+			*seen = append(*seen, log.count("event: image_generation.completed"))
+			mu.Unlock()
+			upscaleAnswered(w, r, call)
+		}
+	}
+
+	t.Run("previews first, then each image after its upscale", func(t *testing.T) {
+		answerWith(t, "text/event-stream", sseEvents(t,
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 7, "image": preview},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 15, "image": preview},
+			final(0, hdPNG(512, 512, hdBaseColor(0))), final(1, hdPNG(512, 512, hdBaseColor(1)))))
+		log := &eventLog{}
+		var mu sync.Mutex
+		var seen []int
+		upstream.upscale(countingUpscale(log, &seen, &mu), countingUpscale(log, &seen, &mu))
+		run := runHD(t, context.Background(), upscaleMeta("pst-up-stream"), "/v1/images/generations", request, func(c *gin.Context) {
+			log.ResponseWriter = c.Writer
+			c.Writer = log
+		})
+
+		require.Nil(t, run.apiErr)
+		events := streamedEvents(t, run.recorder.Body.String())
+		require.Len(t, events, 4)
+		assert.Equal(t, []string{"image_generation.partial_image", "image_generation.partial_image", "image_generation.completed", "image_generation.completed"},
+			[]string{events[0].name, events[1].name, events[2].name, events[3].name})
+		for i, event := range events[2:] {
+			assert.Equal(t, "1024x1024", event.data["size"])
+			data, err := base64.StdEncoding.DecodeString(event.data["b64_json"].(string))
+			require.NoError(t, err)
+			assert.Equal(t, hdPNG(1024, 1024, upscaleColor), data, "image %d", i)
+		}
+		assert.Equal(t, float64(0), events[2].data["usage"].(map[string]any)["output_tokens"])
+		assert.Equal(t, float64(2*323), events[3].data["usage"].(map[string]any)["output_tokens"], "the base canvas's usage of both images")
+		mu.Lock()
+		assert.Equal(t, []int{0, 1}, seen, "no image before the base stream ended, and the second upscale after the first image")
+		mu.Unlock()
+		assert.Equal(t, 2, *run.info.BillingImageCount)
+		assert.Equal(t, []*common.Message{upscaleNote(upscaleApplied, 2)}, run.adaptor.ConsumeLogContent())
+	})
+
+	t.Run("a base stream that broke gets no upscale", func(t *testing.T) {
+		answerWith(t, "text/event-stream", sseEvents(t, final(0, hdPNG(512, 512, hdBaseColor(0))), map[string]any{"event_type": "error", "message": "Error generating image"}))
+		before := len(upstream.recorded())
+		run := runHD(t, context.Background(), upscaleMeta("pst-up-broken"), "/v1/images/generations", request)
+
+		require.Nil(t, run.apiErr)
+		assert.Empty(t, upstream.upscaleCalls(before))
+		events := streamedEvents(t, run.recorder.Body.String())
+		require.Len(t, events, 2)
+		assert.Equal(t, "512x512", events[0].data["size"])
+		assert.Contains(t, events[1].data["error"].(map[string]any)["message"], "Error generating image")
+		assert.Equal(t, 1, *run.info.BillingImageCount)
+		assert.Equal(t, []*common.Message{upscaleNote(upscaleFailed, 1)}, run.adaptor.ConsumeLogContent())
+	})
+
+	t.Run("a V3 stream's whole answer is upscaled too", func(t *testing.T) {
+		before := len(upstream.recorded())
+		run := runHD(t, context.Background(), upscaleMeta("pst-up-v3"), "/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"1girl","size":"512x512","n":2,"stream":true}`)
+
+		require.Nil(t, run.apiErr)
+		assert.Len(t, upstream.upscaleCalls(before), 2)
+		events := streamedEvents(t, run.recorder.Body.String())
+		require.Len(t, events, 2)
+		for _, event := range events {
+			assert.Equal(t, "image_generation.completed", event.name)
+			assert.Equal(t, "1024x1024", event.data["size"])
+		}
+		assert.Equal(t, []*common.Message{upscaleNote(upscaleApplied, 2)}, run.adaptor.ConsumeLogContent())
+	})
 }
 
 // A chat gets HD as the images routes do: the Markdown images are the HD
@@ -4125,6 +4275,59 @@ func TestChatResponseHD(t *testing.T) {
 		require.NoError(t, common.Unmarshal(run.recorder.Body.Bytes(), &response))
 		assert.Equal(t, []string{"512x512"}, markdownSizes(t, response.Choices[0].Message.StringContent()))
 		assert.Equal(t, []*common.Message{common.NewMessage("HD unavailable, delivered at the standard size")}, run.adaptor.ConsumeLogContent())
+	})
+
+	upscaleMeta := func(key string) relaycommon.ChannelMeta {
+		return relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: key, ChannelOtherSettings: upscaleOnly}
+	}
+	markdownImages := func(t *testing.T, content string) [][]byte {
+		t.Helper()
+		var images [][]byte
+		for _, part := range strings.Split(content, "![image](data:image/png;base64,")[1:] {
+			encoded, _, ok := strings.Cut(part, ")")
+			require.True(t, ok)
+			data, err := base64.StdEncoding.DecodeString(encoded)
+			require.NoError(t, err)
+			images = append(images, data)
+		}
+		return images
+	}
+
+	t.Run("one message of upscaled PNGs as NovelAI sent them", func(t *testing.T) {
+		run := runHD(t, context.Background(), upscaleMeta("pst-up-chat"), "/v1/chat/completions", `{`+messages+`,"n":2}`)
+
+		require.Nil(t, run.apiErr)
+		var response dto.OpenAITextResponse
+		require.NoError(t, common.Unmarshal(run.recorder.Body.Bytes(), &response))
+		assert.Equal(t, [][]byte{hdPNG(1024, 1024, upscaleColor), hdPNG(1024, 1024, upscaleColor)}, markdownImages(t, response.Choices[0].Message.StringContent()))
+		assert.Equal(t, 2*323, response.Usage.CompletionTokens, "the base canvas's usage")
+		assert.Equal(t, []*common.Message{upscaleNote(upscaleApplied, 2)}, run.adaptor.ConsumeLogContent())
+	})
+
+	t.Run("a stream sends the image once upscaled", func(t *testing.T) {
+		log := &eventLog{}
+		var mu sync.Mutex
+		var seen []int
+		upstream.upscale(func(w http.ResponseWriter, r *http.Request, call hdCall) {
+			mu.Lock()
+			seen = append(seen, log.count("![image]"), log.count(`"role":"assistant"`))
+			mu.Unlock()
+			upscaleAnswered(w, r, call)
+		})
+		run := runHD(t, context.Background(), upscaleMeta("pst-up-chat-stream"), "/v1/chat/completions", `{`+messages+`,"stream":true}`, func(c *gin.Context) {
+			log.ResponseWriter = c.Writer
+			c.Writer = log
+		})
+
+		require.Nil(t, run.apiErr)
+		events := streamedEvents(t, run.recorder.Body.String())
+		require.Len(t, events, 5, "role, image, stop, usage, [DONE]")
+		content := events[1].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"].(string)
+		assert.Equal(t, [][]byte{hdPNG(1024, 1024, upscaleColor)}, markdownImages(t, content))
+		assert.Equal(t, float64(323), events[3].data["usage"].(map[string]any)["completion_tokens"])
+		mu.Lock()
+		assert.Equal(t, []int{0, 1}, seen, "the role chunk, then the upscale, then the image")
+		mu.Unlock()
 	})
 }
 
@@ -4362,4 +4565,755 @@ func TestEnhanceBoundsImageWork(t *testing.T) {
 			assert.Equal(t, "the image work did not start in time", run.info.ConversionDiagnostics()[0].Message[:len("the image work did not start in time")])
 		})
 	}
+}
+
+// resetUpscale restores the upscale's limits after a test, and retries a 429
+// at once.
+func resetUpscale(t *testing.T) {
+	t.Helper()
+	resetHD(t)
+	savedTimeout, savedDelays, savedLimit := upscaleTimeout, upscaleRetryDelays, responseLimit
+	upscaleRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() {
+		upscaleTimeout, upscaleRetryDelays, responseLimit = savedTimeout, savedDelays, savedLimit
+	})
+}
+
+// upscaleOnly is a channel with the upscale on and HD off.
+var upscaleOnly = dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true, NovelAIHDDisabled: true}
+
+// upscaleNote is the consume log's note of count images with outcome.
+func upscaleNote(outcome upscaleOutcome, count int) *common.Message {
+	return common.NewMessage(upscaleNoteKeys[outcome], map[string]any{"count": count})
+}
+
+// NovelAI prices an upscale by the pixels sent, Opus included: 1 Anlas up to
+// 1 MP, then 2, 3 and 4 up to 3 MP. A 402 at a price stops the request's
+// images that cost as much.
+func TestUpscaleAnlas(t *testing.T) {
+	for pixels, anlas := range map[int]int{
+		1: 1, 1_048_576: 1, 1_048_577: 2, 1_747_627: 2, 1_747_628: 3, 2_446_678: 3, 2_446_679: 4, 3_145_728: 4,
+	} {
+		assert.Equal(t, anlas, upscaleAnlas(pixels), pixels)
+	}
+}
+
+// The upscale is off unless the channel turns it on, on every OpenAI-format
+// route: text-to-image, img2img (an edit without a mask, or the extension
+// image), chat with or without an image, V3 and JPEG output included. A
+// request turns it off with upscale false (at the top level, in extra_fields
+// or extra_body, or in parameters, which wins), never on past the channel;
+// NovelAI never receives the key, which counts no token. A masked edit, a
+// transparent background and WebP output are excluded as a whole, and
+// anything but a boolean is a final 400.
+func TestUpscaleEligibility(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	source := "data:image/png;base64," + base64.StdEncoding.EncodeToString(testImage(64, 64, solid(color.White)))
+	on, off := dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}, dto.ChannelOtherSettings{}
+	const generations, edits, chat = "/v1/images/generations", "/v1/images/edits", "/v1/chat/completions"
+	cat := func(extra string) string {
+		return `{"model":"nai-diffusion-4-5-full","prompt":"a cat","seed":1` + extra + `}`
+	}
+	chatCat := func(extra string) string {
+		return `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}]` + extra + `}`
+	}
+	for _, tc := range []struct {
+		name, path, body string
+		settings         dto.ChannelOtherSettings
+		upscale          bool
+		excluded         string
+	}{
+		{"off by default", generations, cat(""), off, false, ""},
+		{"on", generations, cat(""), on, true, ""},
+		{"upscale true where the channel has it off", generations, cat(`,"upscale":true`), off, false, ""},
+		{"parameters.upscale true where the channel has it off", generations, cat(`,"parameters":{"upscale":true}`), off, false, ""},
+		{"upscale false at the top level", generations, cat(`,"upscale":false`), on, false, ""},
+		{"upscale false in extra_fields", generations, cat(`,"extra_fields":{"upscale":false}`), on, false, ""},
+		{"upscale false in parameters", generations, cat(`,"parameters":{"upscale":false}`), on, false, ""},
+		{"parameters.upscale false over a top-level true", generations, cat(`,"upscale":true,"parameters":{"upscale":false}`), on, false, ""},
+		{"upscale null", generations, cat(`,"upscale":null`), on, true, ""},
+		{"img2img with the extension image", generations, cat(`,"image":"` + source + `"`), on, true, ""},
+		{"an edit without a mask", edits, cat(`,"image":"` + source + `"`), on, true, ""},
+		{"JPEG output", generations, cat(`,"output_format":"jpeg"`), on, true, ""},
+		{"V3", generations, `{"model":"nai-diffusion-3","prompt":"a cat"}`, on, true, ""},
+		{"a masked edit", edits, cat(`,"image":"` + source + `","mask":"` + source + `"`), on, true, "a masked edit"},
+		{"a transparent background", generations, `{"model":"nai-diffusion-5-full","prompt":"a cat","background":"transparent"}`, on, true, "a transparent background"},
+		{"WebP output", generations, cat(`,"output_format":"webp"`), on, true, "WebP output"},
+		{"WebP asked of NovelAI", generations, cat(`,"parameters":{"image_format":"webp"}`), on, true, "WebP output"},
+		{"a chat", chat, chatCat(""), on, true, ""},
+		{"a chat on a channel that has it off", chat, chatCat(""), off, false, ""},
+		{"a chat with upscale false in extra_body", chat, chatCat(`,"extra_body":{"upscale":false}`), on, false, ""},
+		{"a chat with an image", chat, `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":[{"type":"text","text":"a cat"},{"type":"image_url","image_url":{"url":"` + source + `"}}]}]}`, on, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			generation, parameters, apiErr := convertRequest(t, tc.path, tc.body, tc.settings)
+			require.Nil(t, apiErr)
+			assert.Equal(t, tc.upscale, generation.Upscale)
+			assert.Equal(t, tc.excluded, generation.UpscaleExcluded)
+			assert.Equal(t, tc.upscale && tc.excluded == "", generation.UpscalePlanned())
+			assert.NotContains(t, parameters, "upscale", "NovelAI never gets the relay's upscale")
+			assert.NotContains(t, generation.Body, "upscale")
+		})
+	}
+	t.Run("the key counts no token", func(t *testing.T) {
+		with, _, apiErr := convertRequest(t, generations, cat(`,"upscale":false,"parameters":{"upscale":false}`), on)
+		require.Nil(t, apiErr)
+		without, _, apiErr := convertRequest(t, generations, cat(""), on)
+		require.Nil(t, apiErr)
+		assert.Equal(t, without.Tokens, with.Tokens)
+	})
+	t.Run("an upscale that is not a boolean is a final 400", func(t *testing.T) {
+		for _, body := range []string{cat(`,"upscale":"no"`), cat(`,"parameters":{"upscale":1}`)} {
+			_, _, apiErr := convertRequest(t, generations, body, on)
+			require.NotNil(t, apiErr, body)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.Equal(t, i18n.Translate("", i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": "upscale"}), apiErr.Error())
+		}
+	})
+}
+
+// The upscale of an image is one JSON POST to the channel's base URL +
+// /ai/upscale: exactly {"image":...,"model":"nai-diffusion-5-curated",
+// "declared_blur_sigma":0}, the image as NovelAI returned it, with the key
+// as a Bearer token, a browser's User-Agent, no Accept, and the channel's
+// header override. A forwarder base URL gets the same path.
+func TestUpscaleRequest(t *testing.T) {
+	resetGenerationQueue(t)
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	// NovelAI's PNGs carry their generation's metadata in text chunks,
+	// which an image encoded again would lose.
+	plain := hdPNG(512, 512, hdBaseColor(0))
+	text := append([]byte("tEXt"), "Comment\x00{\"request_type\":\"GenerateRequest\"}"...)
+	chunk := binary.BigEndian.AppendUint32(nil, uint32(len(text)-4))
+	chunk = binary.BigEndian.AppendUint32(append(chunk, text...), crc32.ChecksumIEEE(text))
+	base := slices.Concat(plain[:33], chunk, plain[33:])
+	upstream.answerBase(t, hdAnswer(http.StatusOK, "application/zip", hdZip(base)))
+	const request = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512"}`
+
+	t.Run("on NovelAI's host", func(t *testing.T) {
+		meta := relaycommon.ChannelMeta{ChannelBaseUrl: "http://image.novelai.net", ApiKey: "pst-up-request",
+			ChannelSetting: dto.ChannelSettings{Proxy: server.URL}, ChannelOtherSettings: upscaleOnly,
+			HeadersOverride: map[string]any{"X-Test": "{api_key}"}}
+		before := len(upstream.recorded())
+		run := runHD(t, context.Background(), meta, "/v1/images/generations", request)
+
+		calls := upstream.recorded()[before:]
+		require.Len(t, calls, 2)
+		call := calls[1]
+		assert.Equal(t, [3]string{http.MethodPost, "image.novelai.net", "/ai/upscale"}, [3]string{call.method, call.host, call.path})
+		assert.Equal(t, `{"image":"`+base64.StdEncoding.EncodeToString(base)+`","model":"nai-diffusion-5-curated","declared_blur_sigma":0}`, string(call.raw),
+			"the image NovelAI made, not encoded again")
+		assert.Equal(t, "Bearer pst-up-request", call.authorization)
+		assert.Equal(t, "application/json", call.contentType)
+		assert.False(t, call.acceptSent)
+		assert.Equal(t, upscaleUserAgent, call.header.Get("User-Agent"))
+		assert.Equal(t, "pst-up-request", call.header.Get("X-Test"))
+		response, images := run.images(t)
+		assert.Equal(t, "1024x1024", response.Size)
+		assert.Equal(t, "1024x1024", response.Data[0].Size)
+		assert.Equal(t, hdPNG(1024, 1024, upscaleColor), images[0])
+		assert.Equal(t, []*common.Message{upscaleNote(upscaleApplied, 1)}, run.adaptor.ConsumeLogContent())
+	})
+
+	t.Run("a forwarder base URL", func(t *testing.T) {
+		meta := relaycommon.ChannelMeta{ChannelBaseUrl: server.URL + "/x/", ApiKey: "pst-up-forwarder", ChannelOtherSettings: upscaleOnly,
+			HeadersOverride: map[string]any{"User-Agent": "forwarder-client"}}
+		before := len(upstream.recorded())
+		runHD(t, context.Background(), meta, "/v1/images/generations", request)
+
+		calls := upstream.upscaleCalls(before)
+		require.Len(t, calls, 1)
+		assert.Equal(t, "/x/ai/upscale", calls[0].path)
+		assert.Equal(t, "forwarder-client", calls[0].header.Get("User-Agent"), "the override wins")
+	})
+}
+
+// Each image's upscale settles on its own: an answer of twice the image's
+// size (of it rounded down to multiples of 16 too), as a zip, a bare PNG or
+// JSON, replaces it; anything else delivers the image as it was, the
+// response reporting each image's real size and the first one's as size, at
+// the base canvas's usage and count whatever happened. NovelAI's 402 stops
+// the images that cost as much, a 429 is sent again twice, a failure the
+// next image would repeat (401, 404, 5xx, a timeout) stops the rest, and a
+// redirect is not followed. An image over the limits, or not a PNG, is not
+// sent. With the channel's upscale off nothing is sent or noted.
+func TestUpscaleOutcomes(t *testing.T) {
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	redirected := atomic.Int32{}
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1) }))
+	t.Cleanup(elsewhere.Close)
+	upscaled := func(width, height int) []byte { return hdPNG(width, height, upscaleColor) }
+	failure := func(status int, message string) func(http.ResponseWriter, *http.Request, hdCall) {
+		return hdAnswer(status, "application/json", []byte(fmt.Sprintf(`{"statusCode":%d,"message":%q}`, status, message)))
+	}
+	noise := testImage(1024, 1024, func(x, y int) color.Color {
+		v := uint32(x*7919+y*104729) * 2654435761
+		return color.NRGBA{R: uint8(v >> 24), G: uint8(v >> 16), B: uint8(v >> 8), A: 255}
+	})
+	webpPixel, err := base64.StdEncoding.DecodeString("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==")
+	require.NoError(t, err)
+	const usage = 323 // a 512x512 image
+	for _, tc := range []struct {
+		name     string
+		n        int
+		settings *dto.ChannelOtherSettings
+		base     [][]byte
+		answers  []func(http.ResponseWriter, *http.Request, hdCall)
+		limit    int
+		sizes    []string
+		// reported are the sizes the response names when they are not the
+		// images' own: an image not upscaled has the generation's.
+		reported []string
+		calls    int
+		notes    []*common.Message
+	}{
+		{name: "both upscaled", n: 2, sizes: []string{"1024x1024", "1024x1024"}, calls: 2, notes: []*common.Message{upscaleNote(upscaleApplied, 2)}},
+		{name: "a bare PNG", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "image/png", upscaled(1024, 1024))},
+			sizes: []string{"1024x1024"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleApplied, 1)}},
+		{name: "JSON", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "application/json",
+			[]byte(`{"images":[{"image":"`+base64.StdEncoding.EncodeToString(upscaled(1024, 1024))+`"}]}`))},
+			sizes: []string{"1024x1024"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleApplied, 1)}},
+		{name: "twice the image rounded down to multiples of 16", n: 1, base: [][]byte{hdPNG(520, 520, hdBaseColor(0))},
+			answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "application/zip", hdZip(upscaled(1024, 1024)))},
+			sizes:   []string{"1024x1024"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleApplied, 1)}},
+		{name: "an answer at the same size", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "application/zip", hdZip(upscaled(512, 512)))},
+			sizes: []string{"512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "an answer at 4x", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "application/zip", hdZip(upscaled(2048, 2048)))},
+			sizes: []string{"512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "one upscaled and one refused: the size is the first one's", n: 2, answers: []func(http.ResponseWriter, *http.Request, hdCall){upscaleAnswered, failure(http.StatusBadRequest, "bad image")},
+			sizes: []string{"1024x1024", "512x512"}, calls: 2, notes: []*common.Message{upscaleNote(upscaleApplied, 1), upscaleNote(upscaleFailed, 1)}},
+		{name: "a 402 stops the images that cost as much", n: 2, answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusPaymentRequired, "Insufficient Anlas")},
+			sizes: []string{"512x512", "512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleNoAnlas, 2)}},
+		{name: "a cheaper image after a 402 is sent", n: 2, base: [][]byte{hdPNG(1536, 1536, hdBaseColor(0)), hdPNG(512, 512, hdBaseColor(1))},
+			answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusPaymentRequired, "Insufficient Anlas")},
+			sizes:   []string{"1536x1536", "1024x1024"}, reported: []string{"512x512", "1024x1024"}, calls: 2, notes: []*common.Message{upscaleNote(upscaleApplied, 1), upscaleNote(upscaleNoAnlas, 1)}},
+		{name: "a 400 refuses only its image", n: 2, answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusBadRequest, "bad image"), failure(http.StatusBadRequest, "bad image")},
+			sizes: []string{"512x512", "512x512"}, calls: 2, notes: []*common.Message{upscaleNote(upscaleFailed, 2)}},
+		{name: "a 401 stops the rest", n: 2, answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusUnauthorized, "Invalid token")},
+			sizes: []string{"512x512", "512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 2)}},
+		{name: "a 404 stops the rest", n: 2, answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusNotFound, "Cannot POST /ai/upscale")},
+			sizes: []string{"512x512", "512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 2)}},
+		{name: "a 503 stops the rest and is not sent again", n: 2, answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusServiceUnavailable, "down")},
+			sizes: []string{"512x512", "512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 2)}},
+		{name: "a 429 is sent again", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){failure(http.StatusTooManyRequests, "Concurrent generation is locked")},
+			sizes: []string{"1024x1024"}, calls: 2, notes: []*common.Message{upscaleNote(upscaleApplied, 1)}},
+		{name: "a 429 three times fails", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){
+			failure(http.StatusTooManyRequests, "locked"), failure(http.StatusTooManyRequests, "locked"), failure(http.StatusTooManyRequests, "locked")},
+			sizes: []string{"512x512"}, calls: 3, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "a redirect is not followed", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){func(w http.ResponseWriter, r *http.Request, _ hdCall) {
+			http.Redirect(w, r, elsewhere.URL+"/ai/upscale", http.StatusFound)
+		}}, sizes: []string{"512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "a 200 that is no image", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "text/plain", []byte("not an image"))},
+			sizes: []string{"512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "a zip without an image", n: 1, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "application/zip", hdZip([]byte("text")))},
+			sizes: []string{"512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "an answer past the response limit", n: 1, limit: 256 << 10, answers: []func(http.ResponseWriter, *http.Request, hdCall){hdAnswer(http.StatusOK, "image/png", noise)},
+			sizes: []string{"512x512"}, calls: 1, notes: []*common.Message{upscaleNote(upscaleFailed, 1)}},
+		{name: "an image over 2048 a side is not sent", n: 1, base: [][]byte{hdPNG(2112, 1472, hdBaseColor(0))},
+			sizes: []string{"2112x1472"}, reported: []string{"512x512"}, notes: []*common.Message{upscaleNote(upscaleNotApplicable, 1)}},
+		{name: "an image over 3,145,728 pixels is not sent", n: 1, base: [][]byte{hdPNG(1792, 1792, hdBaseColor(0))},
+			sizes: []string{"1792x1792"}, reported: []string{"512x512"}, notes: []*common.Message{upscaleNote(upscaleNotApplicable, 1)}},
+		{name: "an image that is not a PNG is not sent", n: 1, base: [][]byte{webpPixel},
+			sizes: []string{"1x1"}, reported: []string{"512x512"}, notes: []*common.Message{upscaleNote(upscaleNotApplicable, 1)}},
+		{name: "the channel's upscale off", n: 2, settings: &dto.ChannelOtherSettings{NovelAIHDDisabled: true}, sizes: []string{"512x512", "512x512"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.base != nil {
+				upstream.answerBase(t, hdAnswer(http.StatusOK, "application/zip", hdZip(tc.base...)))
+			}
+			if tc.limit > 0 {
+				saved := responseLimit
+				responseLimit = tc.limit
+				t.Cleanup(func() { responseLimit = saved })
+			}
+			upstream.upscale(tc.answers...)
+			t.Cleanup(func() {
+				upstream.mu.Lock()
+				upstream.upscales = nil
+				upstream.mu.Unlock()
+			})
+			settings := upscaleOnly
+			if tc.settings != nil {
+				settings = *tc.settings
+			}
+			before := len(upstream.recorded())
+			run := runHD(t, context.Background(), relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-outcomes", ChannelOtherSettings: settings},
+				"/v1/images/generations", fmt.Sprintf(`{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","n":%d}`, tc.n))
+
+			assert.Len(t, upstream.upscaleCalls(before), tc.calls)
+			response, images := run.images(t)
+			require.Len(t, images, len(tc.sizes))
+			reported := tc.sizes
+			if tc.reported != nil {
+				reported = tc.reported
+			}
+			for i, data := range images {
+				assert.Equal(t, tc.sizes[i], sizeOf(t, data), "image %d", i)
+				assert.Equal(t, reported[i], response.Data[i].Size, "image %d", i)
+				if tc.sizes[i] == "1024x1024" {
+					assert.Equal(t, upscaled(1024, 1024), data, "image %d is NovelAI's upscale as it came", i)
+				}
+			}
+			assert.Equal(t, reported[0], response.Size)
+			assert.Equal(t, tc.n*usage, response.Usage.OutputTokens, "the base canvas's usage")
+			assert.Equal(t, tc.n, run.info.SettledImageCount())
+			assert.Equal(t, tc.notes, run.adaptor.ConsumeLogContent())
+			assert.Zero(t, redirected.Load())
+		})
+	}
+
+	t.Run("an upscale that takes too long stops the rest", func(t *testing.T) {
+		upscaleTimeout = 50 * time.Millisecond
+		upstream.upscale(func(w http.ResponseWriter, r *http.Request, _ hdCall) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+		})
+		before := len(upstream.recorded())
+		run := runHD(t, context.Background(), relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-slow", ChannelOtherSettings: upscaleOnly},
+			"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","n":2}`)
+
+		assert.Len(t, upstream.upscaleCalls(before), 1)
+		_, images := run.images(t)
+		assert.Equal(t, []string{"512x512", "512x512"}, []string{sizeOf(t, images[0]), sizeOf(t, images[1])})
+		assert.Equal(t, []*common.Message{upscaleNote(upscaleFailed, 2)}, run.adaptor.ConsumeLogContent())
+	})
+
+	for _, n := range []int{1, 2} {
+		t.Run(fmt.Sprintf("a client that leaves during an upscale of %d images gets nothing more", n), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var cancelled atomic.Bool
+			upstream.upscale(func(w http.ResponseWriter, r *http.Request, _ hdCall) {
+				cancel()
+				select {
+				case <-r.Context().Done():
+					cancelled.Store(true)
+				case <-time.After(5 * time.Second):
+				}
+			})
+			before := len(upstream.recorded())
+			run := runHD(t, ctx, relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-left", ChannelOtherSettings: upscaleOnly},
+				"/v1/images/generations", fmt.Sprintf(`{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","n":%d}`, n))
+
+			require.Nil(t, run.apiErr)
+			assert.Len(t, upstream.upscaleCalls(before), 1, "no later image is sent")
+			assert.Zero(t, run.recorder.Body.Len(), "nothing is written")
+			assert.Nil(t, run.info.BillingImageCount, "the reservation is billed")
+			assert.Equal(t, run.adaptor.generation.Tokens.Usage(n), run.usage)
+			require.NotNil(t, run.info.StreamStatus)
+			assert.Equal(t, relaycommon.StreamEndReasonClientGone, run.info.StreamStatus.EndReason)
+			assert.Empty(t, run.adaptor.ConsumeLogContent())
+			assert.Eventually(t, cancelled.Load, 5*time.Second, time.Millisecond, "NovelAI's request was cancelled")
+		})
+	}
+}
+
+// A request the upscale excludes as a whole sends nothing to the upscaler,
+// and the consume log counts its images as not applicable; a request that
+// opts out is not noted at all.
+func TestUpscaleExclusionsAreNoted(t *testing.T) {
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	meta := relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-excluded", ChannelOtherSettings: dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}}
+	for _, tc := range []struct {
+		name, body string
+		notes      []*common.Message
+		calls      int
+	}{
+		// HD still runs for WebP output.
+		{"WebP output", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","n":2,"output_format":"webp","parameters":{"image_format":"webp"}}`,
+			[]*common.Message{common.NewMessage("HD {{size}}", map[string]any{"size": "768x768"}), upscaleNote(upscaleNotApplicable, 2)}, 3},
+		{"a transparent background", `{"model":"nai-diffusion-5-full","prompt":"1girl","size":"512x512","background":"transparent"}`,
+			[]*common.Message{upscaleNote(upscaleNotApplicable, 1)}, 1},
+		{"upscale false", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","upscale":false,"hd":false}`, nil, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(upstream.recorded())
+			run := runHD(t, context.Background(), meta, "/v1/images/generations", tc.body)
+
+			require.Nil(t, run.apiErr)
+			require.Equal(t, http.StatusOK, run.recorder.Code, run.recorder.Body.String())
+			assert.Len(t, upstream.recorded(), before+tc.calls)
+			assert.Empty(t, upstream.upscaleCalls(before))
+			assert.Equal(t, tc.notes, run.adaptor.ConsumeLogContent())
+		})
+	}
+}
+
+// On NovelAI's own host the upscale is the request's next generation on its
+// key: the key stays held from the base send through the last upscale
+// answer, so another request waits behind it, and with HD each image is
+// enhanced and then upscaled, in sample order, on the same key. The key is
+// free once NovelAI's last answer arrived, before the client got anything,
+// and at once after a base answer the relay does not take. A refused upscale
+// marks the key, and a key HD skips for its 402 still gets the upscale.
+func TestAdaptorHoldsTheKeyThroughTheUpscale(t *testing.T) {
+	resetGenerationQueue(t)
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	official := func(key string, limit int, settings dto.ChannelOtherSettings) relaycommon.ChannelMeta {
+		settings.NovelAIQueueLimit = &limit
+		return relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://image.novelai.net", ApiKey: key,
+			ChannelSetting: dto.ChannelSettings{Proxy: server.URL}, ChannelOtherSettings: settings}
+	}
+	const request = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","seed":7`
+	runs := make(chan hdRun, 2)
+	send := func(meta relaycommon.ChannelMeta, extra string) {
+		go func() {
+			runs <- runHD(t, context.Background(), meta, "/v1/images/generations", request+extra+"}")
+		}()
+	}
+	awaitRun := func(t *testing.T) hdRun {
+		t.Helper()
+		select {
+		case run := <-runs:
+			return run
+		case <-time.After(time.Minute):
+			require.FailNow(t, "the request did not end")
+			return hdRun{}
+		}
+	}
+	kinds := func(calls []hdCall) []string {
+		var kinds []string
+		for _, call := range calls {
+			switch {
+			case call.upscale():
+				width, height := call.upscaleInput()
+				kinds = append(kinds, fmt.Sprintf("upscale %dx%d", width, height))
+			default:
+				kinds = append(kinds, fmt.Sprint(call.body["action"]))
+			}
+		}
+		return kinds
+	}
+
+	t.Run("a request waits behind the upscale of the one before", func(t *testing.T) {
+		const key = "pst-up-hold"
+		entered, open := make(chan struct{}, 1), make(chan struct{})
+		release := sync.OnceFunc(func() { close(open) })
+		t.Cleanup(release)
+		upstream.upscale(func(w http.ResponseWriter, r *http.Request, call hdCall) {
+			entered <- struct{}{}
+			<-open
+			upscaleAnswered(w, r, call)
+		})
+		before := len(upstream.recorded())
+		send(official(key, 1, upscaleOnly), "")
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "the upscale never came")
+		}
+		assert.False(t, keyIsFree(key), "the key is held during the upscale")
+		send(official(key, 1, upscaleOnly), "")
+		require.Eventually(t, func() bool { return waitingFor(key) == 1 }, 5*time.Second, time.Millisecond)
+		assert.Len(t, upstream.recorded(), before+2, "the second request has not reached NovelAI")
+
+		release()
+		for range 2 {
+			run := awaitRun(t)
+			require.NoError(t, run.err)
+			response, _ := run.images(t)
+			assert.Equal(t, "1024x1024", response.Size)
+		}
+		assert.Equal(t, []string{ActionGenerate, "upscale 512x512", ActionGenerate, "upscale 512x512"}, kinds(upstream.recorded()[before:]))
+		assert.True(t, keyIsFree(key))
+	})
+
+	t.Run("with HD each image is enhanced, then upscaled, on the key", func(t *testing.T) {
+		before := len(upstream.recorded())
+		send(official("pst-up-hd", 0, dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}), `,"n":2`)
+		run := awaitRun(t)
+		require.NoError(t, run.err)
+
+		calls := upstream.recorded()[before:]
+		assert.Equal(t, []string{ActionGenerate, ActionImg2Img, "upscale 768x768", ActionImg2Img, "upscale 768x768"}, kinds(calls))
+		assert.Equal(t, []any{float64(hdSeed(7)), float64(hdSeed(8))}, []any{calls[1].parameter("seed"), calls[3].parameter("seed")})
+		for _, call := range calls {
+			assert.Equal(t, "Bearer pst-up-hd", call.authorization)
+		}
+		response, images := run.images(t)
+		assert.Equal(t, "1536x1536", response.Size)
+		for i, data := range images {
+			assert.Equal(t, hdPNG(1536, 1536, upscaleColor), data, "image %d is the upscale of its HD image", i)
+			assert.Equal(t, "1536x1536", response.Data[i].Size)
+		}
+		assert.Equal(t, 2*323, response.Usage.OutputTokens, "the base canvas's usage")
+		assert.Equal(t, []*common.Message{common.NewMessage("HD {{size}}", map[string]any{"size": "768x768"}), upscaleNote(upscaleApplied, 2)}, run.adaptor.ConsumeLogContent())
+		assert.True(t, keyIsFree("pst-up-hd"))
+	})
+
+	t.Run("a key HD skips for its 402 is upscaled and held", func(t *testing.T) {
+		const key = "pst-up-hd-cooling"
+		now := time.Now()
+		hdCannotPay.Store(sha256.Sum256([]byte(key)), hdRefusal{at: now, until: now.Add(time.Minute), needed: 5})
+		entered, open := make(chan struct{}, 1), make(chan struct{})
+		release := sync.OnceFunc(func() { close(open) })
+		t.Cleanup(release)
+		upstream.upscale(func(w http.ResponseWriter, r *http.Request, call hdCall) {
+			entered <- struct{}{}
+			<-open
+			upscaleAnswered(w, r, call)
+		})
+		before := len(upstream.recorded())
+		send(official(key, 0, dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}), "")
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "the upscale never came")
+		}
+		assert.False(t, keyIsFree(key))
+		release()
+		run := awaitRun(t)
+		require.NoError(t, run.err)
+		assert.Equal(t, []string{ActionGenerate, "upscale 512x512"}, kinds(upstream.recorded()[before:]))
+		response, _ := run.images(t)
+		assert.Equal(t, "1024x1024", response.Size)
+	})
+
+	t.Run("the key is free once the last upscale answered", func(t *testing.T) {
+		const key = "pst-up-stalled"
+		client := &stalledClient{entered: make(chan struct{}), unblock: make(chan struct{})}
+		go func() {
+			runs <- runHD(t, context.Background(), official(key, 0, upscaleOnly), "/v1/images/generations", request+`,"n":2}`, func(c *gin.Context) {
+				client.ResponseWriter = c.Writer
+				c.Writer = client
+			})
+		}()
+		select {
+		case <-client.entered:
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "the relay never wrote to its client")
+		}
+		assert.True(t, keyIsFree(key), "free while the client has read nothing")
+		close(client.unblock)
+		awaitRun(t)
+	})
+
+	t.Run("a base stream that broke frees the key before its images are written", func(t *testing.T) {
+		const key = "pst-up-broken-stalled"
+		upstream.answerBase(t, hdAnswer(http.StatusOK, "text/event-stream", []byte(sseEvents(t,
+			map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(0)))},
+			map[string]any{"event_type": "error", "message": "Error generating image"}))))
+		client := &stalledClient{entered: make(chan struct{}), unblock: make(chan struct{})}
+		go func() {
+			runs <- runHD(t, context.Background(), official(key, 0, upscaleOnly), "/v1/images/generations", request+`,"n":2,"stream":true}`, func(c *gin.Context) {
+				client.ResponseWriter = c.Writer
+				c.Writer = client
+			})
+		}()
+		select {
+		case <-client.entered:
+		case <-time.After(time.Minute):
+			require.FailNow(t, "the relay never wrote to its client")
+		}
+		assert.True(t, keyIsFree(key), "free while the client has read nothing")
+		close(client.unblock)
+		run := awaitRun(t)
+		require.Nil(t, run.apiErr)
+		assert.Equal(t, 1, *run.info.BillingImageCount)
+	})
+
+	t.Run("the key is free while the last image waits to render", func(t *testing.T) {
+		const key = "pst-up-render-wait"
+		require.True(t, imageWork.TryAcquire(imageWorkBudget))
+		releaseWork := sync.OnceFunc(func() { imageWork.Release(imageWorkBudget) })
+		t.Cleanup(releaseWork)
+		before := len(upstream.recorded())
+		send(official(key, 0, upscaleOnly), `,"output_format":"jpeg"`)
+		require.Eventually(t, func() bool { return len(upstream.upscaleCalls(before)) == 1 }, time.Minute, time.Millisecond)
+		assert.Eventually(t, func() bool { return keyIsFree(key) }, 5*time.Second, time.Millisecond, "free while the JPEG waits for its memory")
+		releaseWork()
+		run := awaitRun(t)
+		require.NoError(t, run.err)
+		response, images := run.images(t)
+		assert.Equal(t, "1024x1024", response.Size)
+		assert.Equal(t, formatJPEG, SniffImageFormat(images[0]))
+	})
+
+	t.Run("a refused upscale marks the key", func(t *testing.T) {
+		const key = "pst-up-refused"
+		upstream.upscale(hdAnswer(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`)))
+		send(official(key, 0, upscaleOnly), "")
+		awaitRun(t)
+		generationLinesMu.Lock()
+		_, refused := generationRefused[sha256.Sum256([]byte(key))]
+		generationLinesMu.Unlock()
+		assert.True(t, refused)
+	})
+
+	t.Run("a 500 base frees the key at once", func(t *testing.T) {
+		const key = "pst-up-base-500"
+		upstream.answerBase(t, hdAnswer(http.StatusInternalServerError, "application/json", []byte(`{"statusCode":500,"message":"Error generating image"}`)))
+		run := runHD(t, context.Background(), official(key, 0, upscaleOnly), "/v1/images/generations", request+"}")
+		require.NoError(t, run.err)
+		assert.Equal(t, http.StatusInternalServerError, run.resp.StatusCode)
+		// The retry, on the same key and client request: a held key would
+		// fail it with a 429 at once.
+		resp, err := run.adaptor.DoRequest(run.c, run.info, strings.NewReader(`{}`))
+		require.NoError(t, err, "the attempt left the key free")
+		require.NoError(t, resp.(*http.Response).Body.Close())
+	})
+}
+
+// An upscaled PNG goes to a PNG client (and chat) exactly as NovelAI sent
+// it: nothing decodes it, so a header without pixels arrives as it is. A JPEG
+// client's upscaled image is decoded within readImageHeader's limits and the
+// memory imageWork has, or delivered as the image before it when it cannot
+// be: a header without pixels, or a 16-bit PNG past the decode limit.
+func TestRenderUpscaledImages(t *testing.T) {
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	meta := relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-render", ChannelOtherSettings: upscaleOnly}
+	headerOnly := pngHeader(1024, 1024, 8, 0)
+	for _, tc := range []struct {
+		name, output string
+		base         []byte
+		answer       []byte
+		size         string
+		passedOn     []byte
+		outcome      upscaleOutcome
+	}{
+		{"a PNG client gets the upscale undecoded", "png", nil, headerOnly, "1024x1024", headerOnly, upscaleApplied},
+		{"a JPEG client gets the image before an upscale that does not decode", "jpeg", nil, headerOnly, "512x512", nil, upscaleFailed},
+		{"a JPEG client gets the image before an upscale past the decode limit", "jpeg", hdPNG(2048, 1536, hdBaseColor(0)), pngHeader(4096, 3072, 16, 0), "2048x1536", nil, upscaleFailed},
+		{"a JPEG client gets the upscale as a JPEG", "jpeg", nil, hdPNG(1024, 1024, upscaleColor), "1024x1024", nil, upscaleApplied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.base != nil {
+				upstream.answerBase(t, hdAnswer(http.StatusOK, "application/zip", hdZip(tc.base)))
+			}
+			upstream.upscale(hdAnswer(http.StatusOK, "application/zip", hdZip(tc.answer)))
+			run := runHD(t, context.Background(), meta, "/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","output_format":"`+tc.output+`"}`)
+
+			response, images := run.images(t)
+			require.Len(t, images, 1)
+			if tc.passedOn != nil {
+				assert.Equal(t, tc.passedOn, images[0])
+			} else {
+				assert.Equal(t, formatJPEG, SniffImageFormat(images[0]))
+				assert.Equal(t, tc.size, sizeOf(t, images[0]))
+			}
+			assert.Equal(t, tc.output, response.OutputFormat)
+			assert.Equal(t, []*common.Message{upscaleNote(tc.outcome, 1)}, run.adaptor.ConsumeLogContent())
+		})
+	}
+
+	t.Run("a JPEG rendering waits for its memory of imageWork", func(t *testing.T) {
+		upscaledImage := hdPNG(1024, 1024, upscaleColor)
+		header, err := readImageHeader(upscaledImage)
+		require.NoError(t, err)
+		weight := header.bytes + 4*1024*1024
+		for _, tc := range []struct {
+			name     string
+			held     int64
+			rendered bool
+		}{
+			{"one byte short", imageWorkBudget - weight + 1, false},
+			{"just enough", imageWorkBudget - weight, true},
+		} {
+			require.True(t, imageWork.TryAcquire(tc.held))
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			rendered, format, err := renderUpscaled(ctx, upscaledImage, formatJPEG, 90)
+			cancel()
+			imageWork.Release(tc.held)
+			if tc.rendered {
+				require.NoError(t, err, tc.name)
+				assert.Equal(t, formatJPEG, format)
+				assert.Equal(t, "1024x1024", sizeOf(t, rendered))
+				continue
+			}
+			assert.ErrorIs(t, err, context.DeadlineExceeded, tc.name)
+		}
+	})
+}
+
+// A response takes the memory it needs to hand over its upscaled images,
+// four times their bytes, of upscaleDelivery: a non-stream response once the
+// key is free, before it builds its JSON; a stream for each image, waiting
+// only for the last one, the others going out while the key is held without
+// waiting. A client that leaves during the wait gets nothing more and keeps
+// the reservation. The memory is free again once the response was written.
+func TestUpscaleDeliveryTakesItsMemory(t *testing.T) {
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	meta := relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-delivery", ChannelOtherSettings: upscaleOnly}
+	weight := 4 * int64(len(hdPNG(1024, 1024, upscaleColor)))
+	// run sends body while held of the memory is taken, from a client that
+	// leaves after timeout.
+	run := func(t *testing.T, held int64, timeout time.Duration, body string) hdRun {
+		t.Helper()
+		require.True(t, upscaleDelivery.TryAcquire(held))
+		defer upscaleDelivery.Release(held)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return runHD(t, ctx, meta, "/v1/images/generations", body)
+	}
+	const images = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512"`
+
+	t.Run("a response waits for its memory", func(t *testing.T) {
+		result := run(t, upscaleDeliveryBudget-weight+1, time.Second, images+`}`)
+		require.Nil(t, result.apiErr)
+		assert.Zero(t, result.recorder.Body.Len(), "nothing is written")
+		assert.Equal(t, relaycommon.StreamEndReasonClientGone, result.info.StreamStatus.EndReason)
+		assert.Nil(t, result.info.BillingImageCount, "the reservation is billed")
+		assert.Empty(t, result.adaptor.ConsumeLogContent())
+	})
+
+	t.Run("a response with its memory", func(t *testing.T) {
+		result := run(t, upscaleDeliveryBudget-weight, time.Minute, images+`}`)
+		response, _ := result.images(t)
+		assert.Equal(t, "1024x1024", response.Size)
+		assert.True(t, upscaleDelivery.TryAcquire(upscaleDeliveryBudget), "the memory is free again")
+		upscaleDelivery.Release(upscaleDeliveryBudget)
+	})
+
+	t.Run("a stream waits only for its last image", func(t *testing.T) {
+		upstream.answerBase(t, hdAnswer(http.StatusOK, "text/event-stream", []byte(sseEvents(t,
+			map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(0)))},
+			map[string]any{"event_type": "final", "samp_ix": 1, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(1)))}))))
+		result := run(t, upscaleDeliveryBudget, 5*time.Second, images+`,"n":2,"stream":true}`)
+		require.Nil(t, result.apiErr)
+		events := streamedEvents(t, result.recorder.Body.String())
+		require.Len(t, events, 1, "the first image went out without waiting")
+		assert.Equal(t, "1024x1024", events[0].data["size"])
+		assert.Equal(t, relaycommon.StreamEndReasonClientGone, result.info.StreamStatus.EndReason)
+		assert.Nil(t, result.info.BillingImageCount)
+	})
+}
+
+// HD's budget is the enhance work's: the time an upscale between two
+// enhances takes does not count, so a slow upscaler does not cost the next
+// image its HD.
+func TestHDBudgetLeavesOutTheUpscales(t *testing.T) {
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	// The first upscale outlasts the whole budget; the enhance work of the
+	// small images takes far less.
+	hdBudget = 3 * time.Second
+	upstream.upscale(func(w http.ResponseWriter, r *http.Request, call hdCall) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(hdBudget + 500*time.Millisecond):
+		}
+		upscaleAnswered(w, r, call)
+	})
+	before := len(upstream.recorded())
+	run := runHD(t, context.Background(), relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "pst-up-budget", ChannelOtherSettings: dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}},
+		"/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"256x256","n":2}`)
+
+	var enhances int
+	for _, call := range upstream.recorded()[before:] {
+		if call.body["action"] == ActionImg2Img {
+			enhances++
+		}
+	}
+	assert.Equal(t, 2, enhances, "the second image is enhanced after the slow upscale of the first")
+	response, _ := run.images(t)
+	assert.Equal(t, []string{"768x768", "768x768"}, []string{response.Data[0].Size, response.Data[1].Size})
 }

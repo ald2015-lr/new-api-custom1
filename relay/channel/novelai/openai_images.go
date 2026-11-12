@@ -159,6 +159,7 @@ func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request 
 		Transparent: transparent,
 		PresetsOff:  info.ChannelOtherSettings.NovelAIPresetsDisabled,
 		HDOff:       info.ChannelOtherSettings.NovelAIHDDisabled,
+		Upscale:     info.ChannelOtherSettings.NovelAIUpscaleEnabled,
 		Quality:     request.Quality,
 		Extras:      extras,
 		Parameters:  parameters,
@@ -288,7 +289,8 @@ func imageReference(c *gin.Context, raw json.RawMessage, field string) ([]byte, 
 // openAIImageData is one image of an OpenAI images response. seed and size
 // are extensions: the seed NovelAI generated the image with (an HD image's
 // enhance seed follows from it, hdSeed, so it reproduces the HD image too),
-// and the image's own size, the HD canvas or the generation's.
+// and the image's own size: the generation's, the HD canvas, or twice
+// either once upscaled.
 type openAIImageData struct {
 	B64JSON string `json:"b64_json,omitempty"`
 	URL     string `json:"url,omitempty"`
@@ -333,14 +335,16 @@ func ImageUsage(usage *dto.Usage) OpenAIImageUsage {
 // /ai/generate-image response: each image NovelAI returned, in its order,
 // rendered in the requested output format, as b64_json or a data: URL, with
 // the real size and format, and the generation's usage for those images.
-// With HD (e not nil) each image is enhanced in turn once every base
-// rendered, and the key is free before the response is written; an image HD
-// could not enhance is delivered as NovelAI made it. The usage stays the
-// base canvas's, so HD costs nothing more. The billed quantity becomes the
-// images the client received. Upstream accepted the job (2xx) and may have
-// spent Anlas, so every failure here skips retries; one that loses the
-// images charges nothing, and a client that left keeps the reserved
-// quantity, its usage included.
+// With HD or the upscale (e not nil) each image goes through them in turn
+// once every base rendered, and the key is free before the response is
+// written; an image HD could not enhance is delivered as NovelAI made it,
+// one the upscale did not upscale as it was before. The usage stays the
+// base canvas's, so neither costs anything more; the upscaled images take
+// their memory of upscaleDelivery while the response is built and written.
+// The billed quantity becomes the images the client received. Upstream
+// accepted the job (2xx) and may have spent Anlas, so every failure here
+// skips retries; one that loses the images charges nothing, and a client
+// that left keeps the reserved quantity, its usage included.
 func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput, e *enhancer) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 	images, clientLeft, apiErr := readImages(c, resp, info, generation.NSamples)
@@ -359,15 +363,22 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 		}
 		finals = append(finals, renderedImage{rendered, format, generation.Size()})
 	}
+	var err error
 	for i, data := range images {
-		final, err := e.deliver(i, data, finals[i], output.OutputFormat, output.Compression, i == len(images)-1)
-		if err != nil {
-			openai.NovelAIClientLeft(info, err)
-			logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
-			return generation.Tokens.Usage(info.SettledImageCount()), nil
+		if finals[i], err = e.deliver(i, data, finals[i], output.OutputFormat, output.Compression, i == len(images)-1); err != nil {
+			break
 		}
-		finals[i] = final
 	}
+	releaseDelivery := func() {}
+	if err == nil {
+		releaseDelivery, err = e.holdDelivery(true)
+	}
+	if err != nil {
+		openai.NovelAIClientLeft(info, err)
+		logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
+		return generation.Tokens.Usage(info.SettledImageCount()), nil
+	}
+	defer releaseDelivery()
 
 	response := openAIImagesResponse{
 		Created:    time.Now().Unix(),

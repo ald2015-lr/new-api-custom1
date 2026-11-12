@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -67,9 +68,9 @@ type renderedImage struct {
 	size   string
 }
 
-// heldFinal is a final NovelAI streamed while HD waits for the others: the
-// image as NovelAI sent it, for the enhance, and its rendering, the image
-// delivered when HD does not replace it.
+// heldFinal is a final NovelAI streamed while the passes wait for the
+// others: the image as NovelAI sent it, for HD and the upscale, and its
+// rendering, the image delivered when neither replaces it.
 type heldFinal struct {
 	data     []byte
 	rendered renderedImage
@@ -85,10 +86,11 @@ type heldFinal struct {
 // the usage of the images delivered with it and the others zeros, so summing
 // them counts the prompt once. No [DONE] follows, as OpenAI sends none.
 //
-// With HD each final is validated and rendered as it arrives but held back
-// (bases); once every sample arrived, each image is enhanced in turn and its
-// completed event follows its enhance, with its own size. A stream that
-// broke gets no HD: the finals that arrived are delivered as they came.
+// With HD or the upscale each final is validated and rendered as it
+// arrives but held back (bases); once every sample arrived, each image goes
+// through them in turn and its completed event follows its passes, with its
+// own size. A stream that broke gets neither: the finals that arrived are
+// delivered as they came, which the upscale counts as failed.
 //
 // The billed quantity is the completed events delivered once upstream ended
 // the stream; a client that left keeps the reservation, as does a stream
@@ -99,8 +101,8 @@ type imageStream struct {
 	info       *relaycommon.RelayInfo
 	generation *Generation
 	output     ImageOutput
-	// enhancer is the HD pass, nil without one; bases holds the finals
-	// until every sample arrived.
+	// enhancer runs HD and the upscale, nil without either; bases holds the
+	// finals until every sample arrived.
 	enhancer *enhancer
 	bases    map[int]heldFinal
 	created  int64
@@ -270,25 +272,38 @@ func (s *imageStream) write(event openAIImageStreamEvent) error {
 	return helper.ResponseChunkData(s.c, dto.ResponsesStreamResponse{Type: event.Type}, string(payload))
 }
 
+// deliver sends the completed event of sample's image once the passes
+// (enhancer.deliver) made it, base as NovelAI streamed it and final its
+// rendering; err is the client's leaving.
+func (s *imageStream) deliver(sample int, base []byte, final renderedImage, last bool) error {
+	final, err := s.enhancer.deliver(sample, base, final, s.output.OutputFormat, s.output.Compression, last)
+	if err != nil {
+		return err
+	}
+	releaseDelivery, err := s.enhancer.holdDelivery(last)
+	if err != nil {
+		return err
+	}
+	defer releaseDelivery()
+	return s.complete(sample, final, last)
+}
+
 // usage is the generation's usage for the quantity the request settles at.
 func (s *imageStream) usage() *dto.Usage {
 	return s.generation.Tokens.Usage(s.info.SettledImageCount())
 }
 
-// finish settles a relayed stream once it ended. With HD, a stream that
-// delivered every final has its images enhanced and completed one by one;
-// any other keeps the finals that arrived for the delivery below.
+// finish settles a relayed stream once it ended. With HD or the upscale, a
+// stream that delivered every final has its images go through them and
+// complete one by one; any other keeps the finals that arrived for the
+// delivery below.
 func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 	status := s.info.StreamStatus
 	if s.enhancer != nil {
 		if len(s.bases) == s.generation.NSamples && s.failure == nil && s.clientGone == nil {
 			for sample := range s.generation.NSamples {
 				last := sample == s.generation.NSamples-1
-				final, err := s.enhancer.deliver(sample, s.bases[sample].data, s.bases[sample].rendered, s.output.OutputFormat, s.output.Compression, last)
-				if err == nil {
-					err = s.complete(sample, final, last)
-				}
-				if err != nil {
+				if err := s.deliver(sample, s.bases[sample].data, s.bases[sample].rendered, last); err != nil {
 					s.clientGone = err
 					break
 				}
@@ -296,6 +311,11 @@ func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 		} else {
 			for sample, held := range s.bases {
 				s.pending[sample] = held.rendered
+			}
+			if s.enhancer.upscale != nil && s.clientGone == nil {
+				for _, sample := range slices.Sorted(maps.Keys(s.bases)) {
+					s.enhancer.upscale.settle(sample, upscaleFailed, "the image stream broke before every image arrived")
+				}
 			}
 		}
 		s.enhancer.finish()
@@ -379,12 +399,7 @@ func (s *imageStream) synthesize(resp *http.Response) (*dto.Usage, *types.NewAPI
 	helper.SetEventStreamHeaders(s.c)
 	s.c.Status(http.StatusOK)
 	for i, final := range finals {
-		last := i == len(finals)-1
-		final, err := s.enhancer.deliver(i, images[i], final, s.output.OutputFormat, s.output.Compression, last)
-		if err == nil {
-			err = s.complete(i, final, last)
-		}
-		if err != nil {
+		if err := s.deliver(i, images[i], final, i == len(finals)-1); err != nil {
 			s.info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
 			logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, len(finals), s.info.RequestedImageCount()))
 			return s.usage(), nil

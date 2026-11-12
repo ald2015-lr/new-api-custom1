@@ -149,6 +149,11 @@ type ChannelOtherSettings struct {
 	// text-to-image result, at the same user price) that a NovelAI channel
 	// gives OpenAI-format requests by default.
 	NovelAIHDDisabled bool `json:"novelai_hd_disabled,omitempty"`
+	// NovelAIUpscaleEnabled turns on NovelAI's 2x upscale (/ai/upscale) of
+	// each image of a NovelAI channel's OpenAI-format generations, after the
+	// base pass and HD, at the same user price. A request can skip it with
+	// "upscale": false, never ask for it where the channel has it off.
+	NovelAIUpscaleEnabled bool `json:"novelai_upscale_enabled,omitempty"`
 	// NovelAIQueueLimit is how many requests may wait for each busy key of a
 	// NovelAI channel on NovelAI's host, the generating one aside; nil means
 	// NovelAIQueueLimitDefault, 0 no waiting.

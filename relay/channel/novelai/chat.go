@@ -89,6 +89,7 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 		ImageFormat: formatPNG,
 		PresetsOff:  info.ChannelOtherSettings.NovelAIPresetsDisabled,
 		HDOff:       info.ChannelOtherSettings.NovelAIHDDisabled,
+		Upscale:     info.ChannelOtherSettings.NovelAIUpscaleEnabled,
 		Extras:      extras,
 		Parameters:  parameters,
 	}
@@ -112,9 +113,11 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 // the reservation, its usage included, and a failure after the 2xx is final
 // and charges nothing (on a stream it is an error chunk). A stream's images
 // all arrive at once, after NovelAI made them, so its throughput spans the
-// whole request (PerformanceWholeOutput). With HD (e not nil) every base is
-// rendered first, then each image is enhanced in turn and replaces its base;
-// a stream sends each image's chunk as soon as it is ready.
+// whole request (PerformanceWholeOutput). With HD or the upscale (e not nil)
+// every base is rendered first, then each image goes through them in turn
+// and replaces its base; a stream sends each image's chunk as soon as it is
+// ready. The upscaled images take their memory of upscaleDelivery while
+// they are written.
 func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, e *enhancer) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 	id, created, model := helper.GetResponseID(c), time.Now().Unix(), info.UpstreamModelName
@@ -149,12 +152,20 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 	}
 
 	if !info.IsStream {
-		contents := make([]string, 0, len(images))
 		for i, data := range images {
 			final, err := e.deliver(i, data, finals[i], formatPNG, 0, i == len(images)-1)
 			if err != nil {
 				return clientLeft(err)
 			}
+			finals[i] = final
+		}
+		releaseDelivery, err := e.holdDelivery(true)
+		if err != nil {
+			return clientLeft(err)
+		}
+		defer releaseDelivery()
+		contents := make([]string, 0, len(images))
+		for _, final := range finals {
 			contents = append(contents, "![image]("+DataURL(final.data, final.format)+")")
 		}
 		info.SetFirstResponseTime()
@@ -177,7 +188,12 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 	}
 
 	for i, data := range images {
-		final, err := e.deliver(i, data, finals[i], formatPNG, 0, i == len(images)-1)
+		last := i == len(images)-1
+		final, err := e.deliver(i, data, finals[i], formatPNG, 0, last)
+		if err != nil {
+			return clientLeft(err)
+		}
+		releaseDelivery, err := e.holdDelivery(last)
 		if err != nil {
 			return clientLeft(err)
 		}
@@ -190,7 +206,9 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 			Id: id, Object: "chat.completion.chunk", Created: created, Model: model,
 			Choices: []dto.ChatCompletionsStreamResponseChoice{{Delta: dto.ChatCompletionsStreamResponseChoiceDelta{Content: &content}}},
 		}
-		if err := helper.ObjectData(c, chunk); err != nil {
+		err = helper.ObjectData(c, chunk)
+		releaseDelivery()
+		if err != nil {
 			return clientLeft(err)
 		}
 	}

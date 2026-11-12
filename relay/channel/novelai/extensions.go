@@ -44,6 +44,7 @@ var extensionKeys = map[string]string{
 	"legacy_uc":            "legacy_uc",
 	"aspect_ratio":         "aspect_ratio",
 	"hd":                   "hd",
+	"upscale":              "upscale",
 }
 
 // stringKeys are the extension keys whose value is a string, which a

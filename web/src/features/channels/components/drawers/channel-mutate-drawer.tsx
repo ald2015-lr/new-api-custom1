@@ -319,6 +319,7 @@ const SENSITIVE_FORM_FIELDS = [
   'ollama_openai_chat',
   'novelai_presets_disabled',
   'novelai_hd_disabled',
+  'novelai_upscale_enabled',
   'novelai_queue_limit',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
@@ -2062,6 +2063,29 @@ export function ChannelMutateDrawer({
                 disabled={sensitiveLocked}
                 checked={field.value !== true}
                 onCheckedChange={(on) => field.onChange(!on)}
+              />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='novelai_upscale_enabled'
+        render={({ field }) => (
+          <FormItem className='flex items-center justify-between px-4 py-3'>
+            <div className='space-y-0.5'>
+              <FormLabel>{t('Upscale images 2x')}</FormLabel>
+              <FormDescription>
+                {t(
+                  'Off by default. After generation (and after HD when it is on), NovelAI\'s own upscaler doubles each image\'s width and height: it sharpens the image without redrawing it, and users are billed as before. NovelAI charges the account by the size of the image sent: 1 Anlas up to 1 MP, 3 Anlas for an HD image (4 for the largest), Opus included. NovelAI is not yet confirmed to accept images over 1 MP, such as HD images; when it refuses one, the Anlas run out or the upscale fails, the image from before it is returned. Not applied to masked edits, transparent backgrounds or WebP output. A request can skip it with "upscale": false.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value === true}
+                onCheckedChange={field.onChange}
               />
             </FormControl>
           </FormItem>

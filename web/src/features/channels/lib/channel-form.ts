@@ -296,6 +296,7 @@ export const channelFormSchema = z
     ollama_openai_chat: z.boolean().optional(), // Ollama: OpenAI-compatible /v1/chat/completions instead of native /api/chat
     novelai_presets_disabled: z.boolean().optional(), // NovelAI: no quality tags or UC preset on OpenAI-format requests by default
     novelai_hd_disabled: z.boolean().optional(), // NovelAI: no HD (1.5× Enhance) pass on OpenAI-format text-to-image requests
+    novelai_upscale_enabled: z.boolean().optional(), // NovelAI: 2x upscale after generation (and HD)
     // NovelAI: requests that may wait for each busy key; null is a cleared
     // field, saved as the default (react-hook-form shows the default value
     // again for undefined).
@@ -512,6 +513,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   ollama_openai_chat: false,
   novelai_presets_disabled: false,
   novelai_hd_disabled: false,
+  novelai_upscale_enabled: false,
   novelai_queue_limit: NOVELAI_QUEUE_LIMIT_DEFAULT,
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
@@ -592,6 +594,7 @@ export function transformChannelToFormDefaults(
   let ollamaOpenAIChat = false
   let novelAIPresetsDisabled = false
   let novelAIHDDisabled = false
+  let novelAIUpscaleEnabled = false
   let novelAIQueueLimit = NOVELAI_QUEUE_LIMIT_DEFAULT
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
@@ -620,6 +623,7 @@ export function transformChannelToFormDefaults(
       ollamaOpenAIChat = parsed.ollama_openai_chat === true
       novelAIPresetsDisabled = parsed.novelai_presets_disabled === true
       novelAIHDDisabled = parsed.novelai_hd_disabled === true
+      novelAIUpscaleEnabled = parsed.novelai_upscale_enabled === true
       // The limit the server applies: unset or invalid is the default, and
       // a stored value above the maximum acts as the maximum.
       if (
@@ -695,6 +699,7 @@ export function transformChannelToFormDefaults(
     ollama_openai_chat: ollamaOpenAIChat,
     novelai_presets_disabled: novelAIPresetsDisabled,
     novelai_hd_disabled: novelAIHDDisabled,
+    novelai_upscale_enabled: novelAIUpscaleEnabled,
     novelai_queue_limit: novelAIQueueLimit,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
@@ -862,16 +867,19 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
   }
 
   // Only the NovelAI adaptor adds the web client's prompt presets, enhances
-  // its images (HD) and queues generations per key.
+  // (HD) and upscales its images and queues generations per key.
   if (formData.type === CHANNEL_TYPE_NOVELAI) {
     settingsObj.novelai_presets_disabled =
       formData.novelai_presets_disabled === true
     settingsObj.novelai_hd_disabled = formData.novelai_hd_disabled === true
+    settingsObj.novelai_upscale_enabled =
+      formData.novelai_upscale_enabled === true
     settingsObj.novelai_queue_limit =
       formData.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT
   } else {
     delete settingsObj.novelai_presets_disabled
     delete settingsObj.novelai_hd_disabled
+    delete settingsObj.novelai_upscale_enabled
     delete settingsObj.novelai_queue_limit
   }
 
