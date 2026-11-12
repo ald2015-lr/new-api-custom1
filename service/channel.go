@@ -64,6 +64,10 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	// The relay's own queue limit, not the channel's answer.
+	if err.GetErrorCode() == types.ErrorCodeNovelAIKeyBusy {
+		return false
+	}
 	if types.IsChannelError(err) {
 		return true
 	}

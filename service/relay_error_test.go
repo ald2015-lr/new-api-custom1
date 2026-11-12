@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 
 	"github.com/gin-gonic/gin"
@@ -265,6 +266,30 @@ func TestRecordPolicyFailureForClientGoneLeavesHealthUnchanged(t *testing.T) {
 	assert.Equal(t, "client", events[1].ErrorSource)
 	assert.Equal(t, PolicyDecision{Action: "stop", Reason: "client_gone", Source: "client"}, events[2].Decision)
 	assert.Equal(t, "unchanged", events[2].Health)
+}
+
+// A NovelAI channel's own queue limit (every key generating with a full
+// queue, the longest wait over, or the queues stopped for shutdown) never
+// disables the channel or a key, even with 429 among the automatic disable
+// codes; NovelAI's own 429 still does.
+func TestShouldDisableChannelSparesTheNovelAIQueueLimit(t *testing.T) {
+	previousAutoDisable := common.AutomaticDisableChannelEnabled
+	previousCodes := operation_setting.AutomaticDisableStatusCodesToString()
+	common.AutomaticDisableChannelEnabled = true
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401,429,503"))
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = previousAutoDisable
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(previousCodes))
+	})
+
+	queueFull := types.NewErrorWithStatusCode(errors.New("every key is busy"), types.ErrorCodeNovelAIKeyBusy, http.StatusTooManyRequests)
+	stopped := types.NewErrorWithStatusCode(errors.New("restarting"), types.ErrorCodeNovelAIKeyBusy, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	upstream := types.NewOpenAIError(errors.New("Concurrent generation is locked"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
+
+	assert.False(t, ShouldDisableChannel(queueFull))
+	assert.False(t, ShouldDisableChannel(types.NewOpenAIError(queueFull, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)), "the relay keeps the queue's error when it wraps it")
+	assert.False(t, ShouldDisableChannel(stopped))
+	assert.True(t, ShouldDisableChannel(upstream), "NovelAI's own 429 is the channel's answer")
 }
 
 func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {

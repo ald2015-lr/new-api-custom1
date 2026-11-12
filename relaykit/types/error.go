@@ -41,6 +41,12 @@ const (
 	ErrorCodeInvalidRequest         ErrorCode = "invalid_request"
 	ErrorCodeSensitiveWordsDetected ErrorCode = "sensitive_words_detected"
 	ErrorCodeViolationFeeGrokCSAM   ErrorCode = "violation_fee.grok.csam"
+	// ErrorCodeNovelAIKeyBusy is the relay's own capacity limit on a NovelAI
+	// channel: every key of the channel is generating with a full queue, the
+	// wait for a key ran out, or the queues stopped for shutdown. The request
+	// never reached NovelAI. It may be retried on another channel, and it is
+	// never a reason to disable a channel or a key.
+	ErrorCodeNovelAIKeyBusy ErrorCode = "novelai_key_busy"
 
 	// new api error
 	ErrorCodeCountTokenFailed   ErrorCode = "count_token_failed"

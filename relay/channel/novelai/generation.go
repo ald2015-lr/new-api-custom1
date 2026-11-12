@@ -45,8 +45,15 @@ const (
 	// MaxSeed is the largest seed NovelAI takes; it reads the seed unsigned,
 	// and 0 draws a random image while its metadata says 0.
 	MaxSeed = 4_294_967_288
+	// defaultSteps is the most steps Opus generates for free (one image a
+	// request, at up to 1 MP), which most NovelAI clients and relays default
+	// to; the web client's 23 spends fewer Anlas only where an image is paid.
+	defaultSteps = 28
+	// maxSteps and maxScale are the most steps and the strongest prompt
+	// guidance NovelAI takes.
+	maxSteps = 50
+	maxScale = 10
 
-	defaultSteps     = 23
 	mediumSteps      = 14
 	defaultSampler   = "k_euler_ancestral"
 	defaultSchedule  = "karras"
@@ -85,6 +92,15 @@ type GenerationIntent struct {
 	// channel's novelai_presets_disabled setting); they are on by default,
 	// as in NovelAI's web client.
 	PresetsOff bool
+	// HDOff turns the HD pass off (the channel's novelai_hd_disabled
+	// setting): a request can turn HD off, never on past it.
+	HDOff bool
+	// Quality is the OpenAI images quality; "low" turns HD off.
+	Quality string
+	// Upscale turns NovelAI's 2x upscale on (the channel's
+	// novelai_upscale_enabled setting): a request can turn it off with
+	// upscale: false, never on past it.
+	Upscale bool
 	// Extras are the top-level NovelAI extension keys of the request, as
 	// ParseExtensions returns them: negative_prompt, seed, steps, scale,
 	// strength, noise, characterPrompts and the rest of extensionKeys.
@@ -121,6 +137,24 @@ type Generation struct {
 	Streamable bool
 	// Tokens is what the request counts as in tokens (RequestTokens).
 	Tokens GenerationTokens
+	// HD tells that the request wants the HD pass and qualifies for it
+	// (hdEligible); hdSkip says why not, for the debug log.
+	HD     bool
+	hdSkip string
+	// Upscale is set when the channel's upscale is on and the request did
+	// not send upscale: false. UpscaleExcluded names why no image of the
+	// request can be upscaled ("a masked edit", "a transparent background",
+	// "WebP output"), "" when each image is checked on its own (upscaler).
+	// A channel's parameter override, which changes the body after this,
+	// turns neither on or off.
+	Upscale         bool
+	UpscaleExcluded string
+}
+
+// UpscalePlanned tells that the request's images go to NovelAI's upscaler
+// once generated (and enhanced).
+func (g *Generation) UpscalePlanned() bool {
+	return g.Upscale && g.UpscaleExcluded == ""
 }
 
 // Size is the generated size in OpenAI's WIDTHxHEIGHT form.
@@ -151,17 +185,19 @@ var relayOwnedParameters = map[string]bool{
 
 // BuildGeneration turns an intent into the NovelAI request. Precedence,
 // highest first: the relay's own keys (model, action, image, mask, stream,
-// n_samples = N, ...), the parameters object, the top-level extension keys,
-// the OpenAI fields (size, n, output format, background), the model's
-// defaults. The model's rules apply last: V5 always uses karras and has no
-// SMEA, Variety+ or decrisper, V5 Full Medium fixes its steps, sampler and UC,
-// V3 has no V4 captions or characters. Presets are expanded as the NovelAI
-// web client does (the server does not): the quality tags go after the
-// prompt (withPresetTags) and the UC preset in front of the negative prompt,
-// unless the request turns them off. A failure is a 400 that skips retries:
-// another channel would reject the request the same way. An edit's image
-// and mask are decoded last, once the request holds the memory they need of
-// imageWork; a client that leaves while it waits ends the build.
+// n_samples = N, ...), the parameters object, the top-level extension keys
+// (their NovelAI names over their aliases, ParseExtensions), the OpenAI
+// fields (size, n, output format, background), the model's defaults. The
+// model's rules apply last: V5 always uses karras and has no SMEA, Variety+
+// or decrisper, V5 Full Medium fixes its steps, sampler and UC, V3 has no V4
+// captions or characters. Presets are expanded as the NovelAI web client
+// does (the server does not): the quality tags go after the prompt
+// (withPresetTags) and the UC preset in front of the negative prompt, unless
+// the request turns them off or already holds them (missingTags). A
+// failure is a 400 that skips retries: another channel would reject the
+// request the same way. An edit's image and mask are decoded last, once the
+// request holds the memory they need of imageWork; a client that leaves
+// while it waits ends the build.
 func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *types.NewAPIError) {
 	model := intent.Model
 	modelProfile, ok := profiles[model]
@@ -220,7 +256,7 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		}
 		maskHeader = header
 	}
-	width, height, apiErr := generationSize(c, fields, intent.Size, source)
+	width, height, apiErr := generationSize(c, fields, intent.Size, intent.Extras, requestFields{c: c, values: intent.Parameters}, source)
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -236,6 +272,14 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	}
 
 	seed, apiErr := generationSeed(c, fields)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	hd, apiErr := fields.boolean("hd")
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	upscale, apiErr := fields.boolean("upscale")
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -262,13 +306,13 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	}
 
 	steps := int64(defaultSteps)
-	if requested, err := fields.integer("steps", 1, 50); err != nil {
+	if requested, err := fields.integer("steps", 1, maxSteps); err != nil {
 		return nil, err
 	} else if requested != nil {
 		steps = *requested
 	}
 	scale := modelProfile.scale
-	if requested, err := fields.number("scale", 0, 10); err != nil {
+	if requested, err := fields.number("scale", 0, maxScale); err != nil {
 		return nil, err
 	} else if requested != nil {
 		scale = *requested
@@ -356,7 +400,8 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 
 	// The prompts: the request's V4 captions verbatim when it sends them,
 	// otherwise the prompt with the transparency tag and the quality tags,
-	// and the negative prompt behind the UC preset.
+	// and the negative prompt behind the UC preset, each added only where the
+	// client did not write it already.
 	explicitPrompt, apiErr := fields.caption("v4_prompt", modelProfile)
 	if apiErr != nil {
 		return nil, apiErr
@@ -369,11 +414,11 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	if explicitPrompt != nil {
 		prompt = explicitPrompt.baseCaption
 	} else {
-		tags := modelProfile.quality[quality]
+		transparency := ""
 		if intent.Transparent {
-			tags = joinTags(transparentTag, tags)
+			transparency = transparentTag
 		}
-		prompt = withPresetTags(prompt, tags, modelProfile.family == familyV3)
+		prompt = withPresetTags(prompt, modelProfile.family == familyV3, transparency, modelProfile.quality[quality])
 	}
 	userNegative, apiErr := fields.str("negative_prompt")
 	if apiErr != nil {
@@ -387,12 +432,12 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	if explicitNegative != nil {
 		negative = explicitNegative.baseCaption
 	} else {
-		prefix := modelProfile.uc[uc]
+		preset := modelProfile.uc[uc]
 		if uc == presetNone && userNegative != "" {
-			prefix = ""
+			preset = ""
 		}
-		negative = joinTags(prefix, userNegative)
-		if !modelProfile.curated && uc != presetNone && prefix != "" && !strings.Contains(strings.ToLower(prompt), nsfwTag) {
+		negative = joinTags(missingTags(userNegative, preset), userNegative)
+		if !modelProfile.curated && uc != presetNone && preset != "" && !strings.Contains(strings.ToLower(prompt), nsfwTag) && !holdsTag(negative, nsfwTag) {
 			negative = nsfwTag + ", " + negative
 		}
 	}
@@ -549,7 +594,7 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
 	}
 
-	return &Generation{
+	generation := &Generation{
 		Body:        body,
 		Model:       model,
 		Action:      action,
@@ -563,7 +608,32 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		Transparent: intent.Transparent,
 		Streamable:  modelProfile.family != familyV3,
 		Tokens:      RequestTokens(countedJSON),
-	}, nil
+	}
+	switch {
+	case intent.HDOff:
+		generation.hdSkip = "the channel turned HD off"
+	case hd != nil && !*hd:
+		generation.hdSkip = "the request turned HD off"
+	case strings.EqualFold(intent.Quality, "low"):
+		generation.hdSkip = "quality low"
+	default:
+		generation.hdSkip = hdEligible(generation, modelProfile, intent.Parameters)
+		generation.HD = generation.hdSkip == ""
+	}
+	generation.Upscale = intent.Upscale && (upscale == nil || *upscale)
+	switch {
+	case !generation.Upscale:
+	case action == ActionInfill:
+		// Clients put an inpainted result back onto its source, at the
+		// source's size.
+		generation.UpscaleExcluded = "a masked edit"
+	case intent.Transparent:
+		generation.UpscaleExcluded = "a transparent background"
+	case imageFormat != formatPNG:
+		// The upscaler answers PNG, which the relay cannot turn into WebP.
+		generation.UpscaleExcluded = "WebP output"
+	}
+	return generation, nil
 }
 
 // ddimFailingSteps are the step counts at which V3's DDIM fails on NovelAI.
@@ -579,6 +649,7 @@ var interpretedKeys = map[string]bool{
 	"strength": true, "noise": true, "characterPrompts": true, "skip_cfg_above_sigma": true,
 	"variety": true, "image_format": true, "params_version": true, "legacy_uc": true,
 	"width": true, "height": true, "n_samples": true, "v4_prompt": true, "v4_negative_prompt": true,
+	"hd": true, "upscale": true,
 }
 
 // sampleLimit is the most images NovelAI generates at once for an area.
@@ -593,13 +664,16 @@ func sampleLimit(pixels int) int {
 	}
 }
 
-// generationSize resolves the canvas: parameters.width / height when the
-// request sets them (exact multiples of 64 within NovelAI's area), otherwise
-// the OpenAI size rounded to multiples of 64 and scaled into NovelAI's area.
-// An auto size is 1024x1024 for a generation (or the canvas of the extension
-// aspect_ratio, aspectSize) and the aspect ratio of the source (its bounds,
-// empty without one) within 1024x1024's area for an edit.
-func generationSize(c *gin.Context, fields requestFields, size string, source image.Rectangle) (int, int, *types.NewAPIError) {
+// generationSize resolves the canvas, one side at a time:
+// parameters.width / height when the request sets them (exact multiples of
+// 64 within NovelAI's area), otherwise the top-level width / height of
+// topLevel, which other image clients send, otherwise the OpenAI size; the
+// last two are rounded to multiples of 64 and scaled into NovelAI's area
+// (fitSize) rather than refused. An auto size is 1024x1024 for a generation
+// (or the canvas of the extension aspect_ratio, aspectSize) and the aspect
+// ratio of the source (its bounds, empty without one) within 1024x1024's
+// area for an edit.
+func generationSize(c *gin.Context, fields requestFields, size string, topLevel map[string]json.RawMessage, parameters requestFields, source image.Rectangle) (int, int, *types.NewAPIError) {
 	invalidDimensions := badRequest(c, i18n.MsgNovelAIDimensionsInvalid, map[string]any{"Max": maxPixels})
 	var width, height int
 	size = strings.TrimSpace(size)
@@ -624,8 +698,24 @@ func generationSize(c *gin.Context, fields requestFields, size string, source im
 		}
 		width, height = fitSize(w, h)
 	}
-	for key, side := range map[string]*int{"width": &width, "height": &height} {
-		requested, err := fields.integer(key, 64, maxPixels/64)
+	sides := map[string]*int{"width": &width, "height": &height}
+	fitted := false
+	for key, side := range sides {
+		raw, ok := topLevel[key]
+		if !ok || isJSONNull(raw) {
+			continue
+		}
+		value, ok := jsonNumber(raw)
+		if !ok || value < 1 || value > maxSizeSide {
+			return 0, 0, badRequest(c, i18n.MsgNovelAIFieldRange, map[string]any{"Field": key, "Min": 1, "Max": maxSizeSide})
+		}
+		*side, fitted = int(math.Round(value)), true
+	}
+	if fitted {
+		width, height = fitSize(width, height)
+	}
+	for key, side := range sides {
+		requested, err := parameters.integer(key, 64, maxPixels/64)
 		if err != nil {
 			return 0, 0, invalidDimensions
 		}
@@ -850,24 +940,26 @@ func joinTags(prompt, tags string) string {
 // mixWeight is the trailing :weight of a V3 mixed prompt.
 var mixWeight = regexp.MustCompile(`:-?[0-9.]+\s*$`)
 
-// withPresetTags adds the preset tags (the transparency tag and the quality
-// suffix) to a prompt where the web client puts them. From V4 on they go to
-// the base prompt only, the first character field, and before a Text: block,
-// whose text NovelAI draws literally: the tags then end with a period. On V3,
-// whose | mixes prompts, every mixed prompt gets them before its :weight.
-func withPresetTags(prompt, tags string, v3 bool) string {
-	if tags == "" {
-		return prompt
-	}
+// withPresetTags adds the preset tags, groups such as the transparency tag
+// and the quality suffix, to a prompt where the web client puts them, but
+// for the tags the prompt already holds there (missingTags): a client that
+// writes some or all of the quality tags itself does not get them twice.
+// From V4 on they go to the base prompt only, the first character field, and
+// before a Text: block, whose text NovelAI draws literally (and which
+// therefore holds no tags): the tags then end with a period. On V3, whose |
+// mixes prompts, every mixed prompt gets them before its :weight.
+func withPresetTags(prompt string, v3 bool, groups ...string) string {
 	fields := promptFields(prompt)
 	if !v3 {
 		field := fields[0]
 		if start := textBlockStart(field); start >= 0 {
 			head := strings.TrimRightFunc(field[:start], func(r rune) bool { return unicode.IsSpace(r) || r == ',' || r == '.' })
-			fields[0] = joinTags(head, tags) + ". " + field[start:]
+			if tags := missingTags(head, groups...); tags != "" {
+				fields[0] = joinTags(head, tags) + ". " + field[start:]
+			}
 		} else {
 			head := strings.TrimRightFunc(field, unicode.IsSpace)
-			fields[0] = joinTags(head, tags) + field[len(head):]
+			fields[0] = joinTags(head, missingTags(head, groups...)) + field[len(head):]
 		}
 		return strings.Join(fields, "|")
 	}
@@ -879,9 +971,63 @@ func withPresetTags(prompt, tags string, v3 bool) string {
 			}
 		}
 		head := strings.TrimRightFunc(field, unicode.IsSpace)
-		fields[i] = joinTags(head, tags) + field[len(head):] + weight
+		fields[i] = joinTags(head, missingTags(head, groups...)) + field[len(head):] + weight
 	}
 	return strings.Join(fields, "|")
+}
+
+// missingTags joins, in their order, the tags of groups (presets'
+// comma-separated tags) that text does not hold yet (holdsTag): a client
+// that wrote some of a preset's tags, in any order or weight, gets only the
+// others.
+func missingTags(text string, groups ...string) string {
+	tags := ""
+	for _, group := range groups {
+		for tag := range strings.SplitSeq(group, ",") {
+			if tag = strings.TrimSpace(tag); tag != "" && !holdsTag(text, tag) {
+				tags = joinTags(tags, tag)
+			}
+		}
+	}
+	return tags
+}
+
+// tagText is a prompt as holdsTag reads it: lower case, full-width and
+// ideographic commas and line breaks as commas, any run of whitespace as one
+// space.
+var tagText = strings.NewReplacer("，", ",", "、", ",", "\r", ",", "\n", ",")
+
+// holdsTag tells whether text already holds tag, one preset tag, as a client
+// may have written it: in any case and spacing, as a whole tag, that is
+// with nothing but spaces between it and the text's ends or a tag
+// separator: a comma, a period, a bar, or NovelAI's or other clients'
+// weight and emphasis marks ({}, [], (), the colons of 1.2::tag::). A tag
+// inside a longer one does not count: "error" is not in "artistic error",
+// nor "blank page" in "white blank page", nor "no text" in "no texture".
+func holdsTag(text, tag string) bool {
+	normalize := func(value string) string {
+		return strings.Join(strings.Fields(tagText.Replace(strings.ToLower(value))), " ")
+	}
+	text, tag = normalize(text), normalize(tag)
+	if tag == "" {
+		return false
+	}
+	// At either end of text the rune is RuneError, which counts as a
+	// separator.
+	separates := func(r rune) bool { return r == utf8.RuneError || strings.ContainsRune(",.;:|{}[]()", r) }
+	for from := 0; ; {
+		found := strings.Index(text[from:], tag)
+		if found < 0 {
+			return false
+		}
+		begin, end := from+found, from+found+len(tag)
+		before, _ := utf8.DecodeLastRuneInString(strings.TrimRight(text[:begin], " "))
+		after, _ := utf8.DecodeRuneInString(strings.TrimLeft(text[end:], " "))
+		if separates(before) && separates(after) {
+			return true
+		}
+		from = begin + 1
+	}
 }
 
 // promptFields splits a prompt at its single bars, which mix prompts on V3
@@ -1155,6 +1301,17 @@ func snapToGrid(value float64) float64 {
 
 func isJSONNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
+}
+
+// jsonNumber reads a JSON number, or a string holding one as jsonInteger
+// takes it, as a finite float64.
+func jsonNumber(raw json.RawMessage) (float64, bool) {
+	var number json.Number
+	if common.Unmarshal(raw, &number) != nil {
+		return 0, false
+	}
+	value, err := number.Float64()
+	return value, err == nil && !math.IsInf(value, 0) && !math.IsNaN(value)
 }
 
 // jsonInteger reads a JSON number that is a whole number within int64.

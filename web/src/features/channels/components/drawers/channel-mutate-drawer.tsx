@@ -153,6 +153,7 @@ import {
   FIELD_DESCRIPTIONS,
   FIELD_PLACEHOLDERS,
   MODEL_FETCHABLE_TYPES,
+  NOVELAI_QUEUE_LIMIT_DEFAULT,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../../constants'
 import { useChannelKeyDisclosure } from '../../hooks/use-channel-key-disclosure'
@@ -317,6 +318,9 @@ const SENSITIVE_FORM_FIELDS = [
   'claude_beta_query',
   'ollama_openai_chat',
   'novelai_presets_disabled',
+  'novelai_hd_disabled',
+  'novelai_upscale_enabled',
+  'novelai_queue_limit',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -2012,32 +2016,117 @@ export function ChannelMutateDrawer({
     />
   )
 
-  const novelAIPresetsFields = currentType === CHANNEL_TYPE_NOVELAI && (
-    <FormField
-      control={form.control}
-      name='novelai_presets_disabled'
-      render={({ field }) => (
-        <FormItem className='flex items-center justify-between px-4 py-3'>
-          <div className='space-y-0.5'>
-            <FormLabel>
-              {t('Do not add NovelAI quality tags and negative presets')}
-            </FormLabel>
+  const novelAIFields = currentType === CHANNEL_TYPE_NOVELAI && (
+    <>
+      <FormField
+        control={form.control}
+        name='novelai_presets_disabled'
+        render={({ field }) => (
+          <FormItem className='flex items-center justify-between px-4 py-3'>
+            <div className='space-y-0.5'>
+              <FormLabel>
+                {t('Do not add NovelAI quality tags and negative presets')}
+              </FormLabel>
+              <FormDescription>
+                {t(
+                  'Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value === true}
+                onCheckedChange={field.onChange}
+              />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='novelai_hd_disabled'
+        render={({ field }) => (
+          <FormItem className='flex items-center justify-between px-4 py-3'>
+            <div className='space-y-0.5'>
+              <FormLabel>{t('NovelAI HD (1.5× Enhance)')}</FormLabel>
+              <FormDescription>
+                {t(
+                  'On by default. OpenAI-format text-to-image requests on V4 and later, for images up to about 1.4 MP, get a second img2img pass at 1.5× size at the same user price. Each HD image spends the account\'s Anlas (about 23 on V4/V4.5 and 35 on V5 at 28 steps), the same Anlas paid standard images use, and takes about twice as long; on a forwarder base URL it is one more paid call there. When the account cannot pay, the standard image is returned. A request can turn it off with "hd": false.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              {/* A positive switch over the negative setting: on means HD,
+                  which an unset setting is. */}
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value !== true}
+                onCheckedChange={(on) => field.onChange(!on)}
+              />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='novelai_upscale_enabled'
+        render={({ field }) => (
+          <FormItem className='flex items-center justify-between px-4 py-3'>
+            <div className='space-y-0.5'>
+              <FormLabel>{t('Upscale images 2x')}</FormLabel>
+              <FormDescription>
+                {t(
+                  'Off by default. After generation (and after HD when it is on), NovelAI\'s own upscaler doubles each image\'s width and height: it sharpens the image without redrawing it, and users are billed as before. NovelAI charges the account by the size of the image sent: 1 Anlas up to 1 MP, 3 Anlas for an HD image (4 for the largest), Opus included. NovelAI is not yet confirmed to accept images over 1 MP, such as HD images; when it refuses one, the Anlas run out or the upscale fails, the image from before it is returned. Not applied to masked edits, transparent backgrounds or WebP output. A request can skip it with "upscale": false.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value === true}
+                onCheckedChange={field.onChange}
+              />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='novelai_queue_limit'
+        render={({ field }) => (
+          <FormItem className='px-4 py-3'>
+            <FormLabel>{t('Queue limit per key')}</FormLabel>
+            <FormControl>
+              {/* No min, max or step: the browser's own check would stop
+                  the submit before the form shows its message for the
+                  field. */}
+              <Input
+                type='number'
+                inputMode='numeric'
+                placeholder={String(NOVELAI_QUEUE_LIMIT_DEFAULT)}
+                disabled={sensitiveLocked}
+                name={field.name}
+                ref={field.ref}
+                onBlur={field.onBlur}
+                value={field.value ?? ''}
+                onChange={(e) =>
+                  field.onChange(
+                    e.target.value === '' ? null : Number(e.target.value)
+                  )
+                }
+              />
+            </FormControl>
             <FormDescription>
               {t(
-                'Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.'
+                "NovelAI generates one request at a time per key. Further requests wait in line for the least busy key; once every key has this many requests waiting, new ones fail with 429, which goes to another channel when retries are on. 0 turns waiting off. Applies on NovelAI's own host."
               )}
             </FormDescription>
-          </div>
-          <FormControl>
-            <Switch
-              disabled={sensitiveLocked}
-              checked={field.value === true}
-              onCheckedChange={field.onChange}
-            />
-          </FormControl>
-        </FormItem>
-      )}
-    />
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </>
   )
 
   const notesFields = (
@@ -4821,7 +4910,7 @@ export function ChannelMutateDrawer({
                 />
                 {formatFields}
                 {ollamaOpenAIChatFields}
-                {novelAIPresetsFields}
+                {novelAIFields}
                 {thinkingFields}
                 {passthroughFields}
                 {systemPromptFields}

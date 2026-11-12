@@ -736,3 +736,37 @@ func TestChannelOtherSettingsValidateToolLossPolicy(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tool_loss_policy")
 }
+
+// A NovelAI channel's queue limit per key is stored as 0 to 100 or not at
+// all, and a stored value outside that range still acts within it: unset or
+// negative is the default of 10, above 100 is 100.
+func TestChannelOtherSettingsNovelAIQueueLimit(t *testing.T) {
+	queueLimit := func(value int) *int { return &value }
+	for _, tc := range []struct {
+		name      string
+		limit     *int
+		valid     bool
+		effective int
+	}{
+		{"unset", nil, true, 10},
+		{"no waiting", queueLimit(0), true, 0},
+		{"some waiting", queueLimit(7), true, 7},
+		{"the maximum", queueLimit(100), true, 100},
+		{"negative", queueLimit(-1), false, 10},
+		{"far negative", queueLimit(-3), false, 10},
+		{"above the maximum", queueLimit(101), false, 100},
+		{"far above the maximum", queueLimit(5000), false, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := &ChannelOtherSettings{NovelAIQueueLimit: tc.limit}
+			if tc.valid {
+				assert.NoError(t, settings.ValidateNovelAIQueueLimit())
+			} else {
+				assert.EqualError(t, settings.ValidateNovelAIQueueLimit(), "novelai_queue_limit must be between 0 and 100")
+			}
+			assert.Equal(t, tc.effective, settings.EffectiveNovelAIQueueLimit())
+		})
+	}
+	assert.NoError(t, (*ChannelOtherSettings)(nil).ValidateNovelAIQueueLimit())
+	assert.Equal(t, 10, (*ChannelOtherSettings)(nil).EffectiveNovelAIQueueLimit())
+}

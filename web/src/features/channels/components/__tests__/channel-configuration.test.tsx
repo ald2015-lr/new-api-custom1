@@ -1661,7 +1661,7 @@ test('configuration from fields unsupported by the selected provider stays unmar
     setting:
       '{"task_plugin_key":"video-a","force_format":true,"responses_websocket_enabled":true}',
     settings:
-      '{"allow_speed":true,"allow_service_tier":true,"upstream_model_update_check_enabled":true,"ollama_openai_chat":true,"novelai_presets_disabled":true}',
+      '{"allow_speed":true,"allow_service_tier":true,"upstream_model_update_check_enabled":true,"ollama_openai_chat":true,"novelai_presets_disabled":true,"novelai_hd_disabled":true,"novelai_upscale_enabled":true,"novelai_queue_limit":3}',
   }
   const user = userEvent.setup()
   render(<ConfigurationHarness currentRow={editingChannel} />)
@@ -1683,13 +1683,27 @@ test('configuration from fields unsupported by the selected provider stays unmar
       name: 'Do not add NovelAI quality tags and negative presets',
     })
   ).not.toBeInTheDocument()
+  expect(
+    within(processing).queryByRole('switch', {
+      name: 'NovelAI HD (1.5× Enhance)',
+    })
+  ).not.toBeInTheDocument()
+  expect(
+    within(processing).queryByRole('switch', { name: 'Upscale images 2x' })
+  ).not.toBeInTheDocument()
+  expect(
+    within(processing).queryByRole('spinbutton', {
+      name: 'Queue limit per key',
+    })
+  ).not.toBeInTheDocument()
 })
 
-test('an OpenAI channel saved with the NovelAI presets setting saves its other settings without it', async () => {
+test('an OpenAI channel saved with the NovelAI settings saves its other settings without them', async () => {
   editingChannel = {
     ...editingChannel,
     type: 1,
-    settings: '{"novelai_presets_disabled":true,"future_option":{"level":2}}',
+    settings:
+      '{"novelai_presets_disabled":true,"novelai_hd_disabled":true,"novelai_upscale_enabled":true,"novelai_queue_limit":3,"future_option":{"level":2}}',
   }
   const put = vi
     .spyOn(api, 'put')
@@ -1702,6 +1716,9 @@ test('an OpenAI channel saved with the NovelAI presets setting saves its other s
   const payload = put.mock.calls[0]?.[1] as { settings: string }
   const settings = JSON.parse(payload.settings)
   expect(settings).not.toHaveProperty('novelai_presets_disabled')
+  expect(settings).not.toHaveProperty('novelai_hd_disabled')
+  expect(settings).not.toHaveProperty('novelai_upscale_enabled')
+  expect(settings).not.toHaveProperty('novelai_queue_limit')
   expect(settings).toMatchObject({ future_option: { level: 2 } })
 })
 
@@ -1737,6 +1754,290 @@ test('a NovelAI channel marks saved disabled prompt presets in Request & Respons
     future_option: { level: 2 },
   })
 })
+
+test('a NovelAI channel without an HD setting shows HD on, unmarked, and turning it off marks Request & Response and saves it with the other settings intact', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{"future_option":{"level":2}}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const hd = screen.getByRole('switch', { name: 'NovelAI HD (1.5× Enhance)' })
+  expect(hd).toBeChecked()
+  // A request opts out on its own.
+  expect(hd).toHaveAccessibleDescription(/"hd": false/)
+  // What it spends at the relay's default 28 steps.
+  expect(hd).toHaveAccessibleDescription(
+    /about 23 on V4\/V4\.5 and 35 on V5 at 28 steps/
+  )
+  await user.click(hd)
+  expect(hd).not.toBeChecked()
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  expect(JSON.parse(payload.settings)).toMatchObject({
+    novelai_hd_disabled: true,
+    novelai_presets_disabled: false,
+    future_option: { level: 2 },
+  })
+})
+
+test('a NovelAI channel saved with HD off shows it off and marked, and turning it on saves HD on', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{"novelai_hd_disabled":true}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const hd = screen.getByRole('switch', { name: 'NovelAI HD (1.5× Enhance)' })
+  expect(hd).not.toBeChecked()
+  await user.click(hd)
+  expect(hd).toBeChecked()
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  expect(JSON.parse(payload.settings)).toMatchObject({
+    novelai_hd_disabled: false,
+  })
+})
+
+test('a NovelAI channel without an upscale setting shows the upscale off, unmarked, and turning it on marks Request & Response and saves it with the other settings intact', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{"future_option":{"level":2}}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const upscale = screen.getByRole('switch', { name: 'Upscale images 2x' })
+  expect(upscale).not.toBeChecked()
+  // The owner pays by the size sent, and a request opts out on its own.
+  expect(upscale).toHaveAccessibleDescription(/1 Anlas up to 1 MP/)
+  expect(upscale).toHaveAccessibleDescription(/not yet confirmed/)
+  expect(upscale).toHaveAccessibleDescription(/"upscale": false/)
+  await user.click(upscale)
+  expect(upscale).toBeChecked()
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  expect(JSON.parse(payload.settings)).toMatchObject({
+    novelai_upscale_enabled: true,
+    novelai_hd_disabled: false,
+    future_option: { level: 2 },
+  })
+})
+
+test('a NovelAI channel saved with the upscale on shows it on and marked, and turning it off saves it off', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{"novelai_upscale_enabled":true}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const upscale = screen.getByRole('switch', { name: 'Upscale images 2x' })
+  expect(upscale).toBeChecked()
+  await user.click(upscale)
+  expect(upscale).not.toBeChecked()
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  expect(JSON.parse(payload.settings)).toMatchObject({
+    novelai_upscale_enabled: false,
+  })
+})
+
+test('a new NovelAI channel starts with the upscale off', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(screen.getByRole('option', { name: /^NovelAI / }))
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  expect(
+    screen.getByRole('switch', { name: 'Upscale images 2x' })
+  ).not.toBeChecked()
+  expect(
+    screen.getByRole('switch', { name: 'NovelAI HD (1.5× Enhance)' })
+  ).toBeChecked()
+})
+
+test('the NovelAI switches and queue limit are locked without sensitive channel write permission', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{}',
+  }
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: { read: true, write: true } },
+        },
+      },
+    },
+  })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const upscale = screen.getByRole('switch', { name: 'Upscale images 2x' })
+  expect(upscale).toHaveAttribute('aria-disabled', 'true')
+  await user.click(upscale)
+  expect(upscale).not.toBeChecked()
+  const hd = screen.getByRole('switch', { name: 'NovelAI HD (1.5× Enhance)' })
+  expect(hd).toHaveAttribute('aria-disabled', 'true')
+  await user.click(hd)
+  expect(hd).toBeChecked()
+  const presets = screen.getByRole('switch', {
+    name: 'Do not add NovelAI quality tags and negative presets',
+  })
+  expect(presets).toHaveAttribute('aria-disabled', 'true')
+  await user.click(presets)
+  expect(presets).not.toBeChecked()
+  const limit = screen.getByRole('spinbutton', { name: 'Queue limit per key' })
+  expect(limit).toBeDisabled()
+  await user.type(limit, '3')
+  expect(limit).toHaveValue(10)
+})
+
+test.each([
+  ['{"novelai_queue_limit":3}', 3, true],
+  ['{}', 10, false],
+  ['{"novelai_queue_limit":5000}', 100, true],
+])(
+  'a NovelAI channel saved with settings %s shows a queue limit per key of %i, marked as configured: %s',
+  async (settings, shown, configured) => {
+    editingChannel = { ...editingChannel, type: CHANNEL_TYPE_NOVELAI, settings }
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+    if (configured) {
+      expect(requestTab).toHaveAccessibleName(/Configured/)
+    } else {
+      expect(requestTab).not.toHaveAccessibleName(/Configured/)
+    }
+    await user.click(requestTab)
+    expect(
+      screen.getByRole('spinbutton', { name: 'Queue limit per key' })
+    ).toHaveValue(shown)
+  }
+)
+
+test('a NovelAI channel queue limit set back to the default of 10 is no longer marked as configured', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{"novelai_queue_limit":3}',
+  }
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const limit = screen.getByRole('spinbutton', { name: 'Queue limit per key' })
+  await user.clear(limit)
+  await user.type(limit, '10')
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+})
+
+test.each([
+  ['0', 0],
+  ['100', 100],
+])(
+  'a NovelAI channel saves a queue limit per key of %s with the other settings intact',
+  async (typed, saved) => {
+    editingChannel = {
+      ...editingChannel,
+      type: CHANNEL_TYPE_NOVELAI,
+      settings: '{"future_option":{"level":2}}',
+    }
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+    const limit = screen.getByRole('spinbutton', {
+      name: 'Queue limit per key',
+    })
+    await user.clear(limit)
+    await user.type(limit, typed)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    const payload = put.mock.calls[0]?.[1] as { settings: string }
+    expect(JSON.parse(payload.settings)).toMatchObject({
+      novelai_queue_limit: saved,
+      future_option: { level: 2 },
+    })
+  }
+)
+
+test.each(['-1', '101', '2.5'])(
+  'a NovelAI channel with a queue limit per key of %s is not saved and shows the allowed range',
+  async (typed) => {
+    editingChannel = { ...editingChannel, type: CHANNEL_TYPE_NOVELAI }
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+    const limit = screen.getByRole('spinbutton', {
+      name: 'Queue limit per key',
+    })
+    await user.clear(limit)
+    await user.type(limit, typed)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    expect(
+      await screen.findByText(
+        'Queue limit per key must be a whole number from 0 to 100'
+      )
+    ).toBeVisible()
+    expect(limit).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  }
+)
 
 test('an Ollama channel marks a saved OpenAI-compatible chat setting in Request & Response and saves the toggled value', async () => {
   editingChannel = {

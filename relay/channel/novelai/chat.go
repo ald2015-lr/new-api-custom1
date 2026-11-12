@@ -25,8 +25,9 @@ import (
 // image in that message (image_url: a data URL, base64, or an http(s) URL
 // through the SSRF-protected downloader) makes it img2img. n is the number
 // of images, size the canvas. The NovelAI extension keys and parameters
-// come from the request's top level or its extra_body object, the top level
-// first, as the chat request type keeps no unknown key.
+// come from the request's top level, its extra_body object or its
+// extra_fields object, in that order (mergeNestedFields), read from the
+// body, as the chat request type keeps no unknown key.
 func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (GenerationIntent, *types.NewAPIError) {
 	var message *dto.Message
 	for i := len(request.Messages) - 1; i >= 0; i-- {
@@ -73,7 +74,7 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 	if err := common.Unmarshal(body, &fields); err != nil {
 		return GenerationIntent{}, invalid
 	}
-	if apiErr := mergeNestedFields(c, fields, "extra_body"); apiErr != nil {
+	if apiErr := mergeNestedFields(c, fields, "extra_body", "extra_fields"); apiErr != nil {
 		return GenerationIntent{}, apiErr
 	}
 	extras, parameters, apiErr := ParseExtensions(c, fields)
@@ -88,6 +89,8 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 		N:           count,
 		ImageFormat: formatPNG,
 		PresetsOff:  info.ChannelOtherSettings.NovelAIPresetsDisabled,
+		HDOff:       info.ChannelOtherSettings.NovelAIHDDisabled,
+		Upscale:     info.ChannelOtherSettings.NovelAIUpscaleEnabled,
 		Extras:      extras,
 		Parameters:  parameters,
 	}
@@ -111,8 +114,12 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 // the reservation, its usage included, and a failure after the 2xx is final
 // and charges nothing (on a stream it is an error chunk). A stream's images
 // all arrive at once, after NovelAI made them, so its throughput spans the
-// whole request (PerformanceWholeOutput).
-func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation) (*dto.Usage, *types.NewAPIError) {
+// whole request (PerformanceWholeOutput). With HD or the upscale (e not nil)
+// every base is rendered first, then each image goes through them in turn
+// and replaces its base, and the key is free before the first image is
+// written (enhancer.deliverAll). The upscaled images take their memory of
+// upscaleDelivery while they are written.
+func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, e *enhancer) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 	id, created, model := helper.GetResponseID(c), time.Now().Unix(), info.UpstreamModelName
 	clientLeft := func(err error) (*dto.Usage, *types.NewAPIError) {
@@ -136,17 +143,27 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	contents := make([]string, 0, len(images))
+	finals := make([]renderedImage, 0, len(images))
 	for _, data := range images {
 		rendered, format, err := RenderImage(data, formatPNG, 0)
 		if err != nil {
 			return nil, noImageError(c, err)
 		}
-		contents = append(contents, "![image]("+DataURL(rendered, format)+")")
+		finals = append(finals, renderedImage{rendered, format, generation.Size()})
 	}
-	info.SetFirstResponseTime()
+
+	releaseDelivery, err := e.deliverAll(images, finals, formatPNG, 0)
+	if err != nil {
+		return clientLeft(err)
+	}
+	defer releaseDelivery()
 
 	if !info.IsStream {
+		contents := make([]string, 0, len(images))
+		for _, final := range finals {
+			contents = append(contents, "![image]("+DataURL(final.data, final.format)+")")
+		}
+		info.SetFirstResponseTime()
 		choice := dto.OpenAITextResponseChoice{Index: 0, Message: dto.Message{Role: "assistant"}, FinishReason: "stop"}
 		choice.SetStringContent(strings.Join(contents, "\n\n"))
 		encoded, err := common.Marshal(dto.OpenAITextResponse{
@@ -165,7 +182,9 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 		return generation.Tokens.Usage(info.SettledImageCount()), nil
 	}
 
-	for i, content := range contents {
+	for i, final := range finals {
+		info.SetFirstResponseTime()
+		content := "![image](" + DataURL(final.data, final.format) + ")"
 		if i > 0 {
 			content = "\n\n" + content
 		}

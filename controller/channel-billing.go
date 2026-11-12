@@ -549,6 +549,8 @@ func updateChannelNovelAIBalance(channel *model.Channel) (float64, error) {
 	if subscription.Anlas == nil {
 		return 0, common.NewMessage("NovelAI account response carries no valid Anlas balance")
 	}
+	// Enough Anlas lift the HD cooldown a 402 set on the key.
+	novelai.NoteAnlas(strings.TrimSpace(channel.Key), *subscription.Anlas)
 	balance := float64(*subscription.Anlas)
 	channel.UpdateBalance(balance)
 	return balance, nil

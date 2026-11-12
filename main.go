@@ -26,6 +26,7 @@ import (
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/pkg/wsmanager"
 	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
@@ -209,6 +210,9 @@ func main() {
 		Addr:    ":" + port,
 		Handler: server,
 	}
+	// Requests waiting for a NovelAI key are answered at once and never sent,
+	// while the generations already running finish.
+	srv.RegisterOnShutdown(novelai.StopGenerationQueues)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

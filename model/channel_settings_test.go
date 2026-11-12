@@ -50,6 +50,29 @@ func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 	}
 }
 
+// Saving a NovelAI channel rejects a queue limit per key that is not a whole
+// number from 0 to 100.
+func TestChannelValidateSettingsBoundsTheNovelAIQueueLimit(t *testing.T) {
+	for settings, wantErr := range map[string]string{
+		`{"novelai_queue_limit":0}`:   "",
+		`{"novelai_queue_limit":100}`: "",
+		`{"novelai_queue_limit":101}`: "novelai_queue_limit must be between 0 and 100",
+		`{"novelai_queue_limit":-1}`:  "novelai_queue_limit must be between 0 and 100",
+		`{"novelai_queue_limit":2.5}`: "novelai_queue_limit",
+	} {
+		t.Run(settings, func(t *testing.T) {
+			channel := &Channel{Type: constant.ChannelTypeNovelAI, OtherSettings: settings}
+			err := channel.ValidateSettings()
+			if wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), wantErr)
+		})
+	}
+}
+
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",

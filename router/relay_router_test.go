@@ -11,11 +11,13 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"maps"
 	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,10 +30,12 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/bytedance/gopkg/util/gopool"
@@ -903,15 +907,17 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-openai", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
 	require.NoError(t, model.DB.Create(&user).Error)
 	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiopenaikey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	// The channels here describe the base pass, one call a request: their
+	// HD pass is off (the HD subtests at the end use a channel of their own).
 	channel := model.Channel{Name: "novelai-official", Key: "pst-openai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full,nai-diffusion-5-curated,nai-diffusion-furry-3", BaseURL: common.GetPointer(server.URL)}
+		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full,nai-diffusion-5-curated,nai-diffusion-furry-3", BaseURL: common.GetPointer(server.URL), OtherSettings: `{"novelai_hd_disabled":true}`}
 	require.NoError(t, model.DB.Create(&channel).Error)
 	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-5-full", "nai-diffusion-5-curated", "nai-diffusion-furry-3"} {
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
 	}
 	// This channel makes NovelAI's prompt presets opt-in.
 	withoutPresets := model.Channel{Name: "novelai-without-presets", Key: "pst-plain", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-		Models: "nai-diffusion-4-full", BaseURL: common.GetPointer(server.URL), OtherSettings: `{"novelai_presets_disabled":true}`}
+		Models: "nai-diffusion-4-full", BaseURL: common.GetPointer(server.URL), OtherSettings: `{"novelai_presets_disabled":true,"novelai_hd_disabled":true}`}
 	require.NoError(t, model.DB.Create(&withoutPresets).Error)
 	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: withoutPresets.Id, Model: "nai-diffusion-4-full", Group: "default", Enabled: true}).Error)
 	passThrough := model.Channel{Name: "novelai-pass-through", Key: "pst-pass", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
@@ -950,6 +956,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			B64JSON string `json:"b64_json"`
 			URL     string `json:"url"`
 			Seed    int64  `json:"seed"`
+			Size    string `json:"size"`
 		} `json:"data"`
 		Background   string `json:"background"`
 		OutputFormat string `json:"output_format"`
@@ -1039,6 +1046,58 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Contains(t, lastLog().Content, "Image count 1")
 		assert.Equal(t, 1290, lastLog().CompletionTokens, "the image received, not the 3 reserved")
 		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	// Other clients' names for the steps, the scale, the negative prompt and
+	// the canvas reach NovelAI from the top level, extra_fields or
+	// extra_body; presets the client wrote are sent once; a request without
+	// steps gets 28. The price stays the per-call price.
+	t.Run("other clients' field names and presets they wrote, at the per-call price", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		before := walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"1girl, Very Aesthetic, masterpiece, no text",`+
+			`"size":"1024x1024","width":832,"height":1216,"extra_body":{"num_inference_steps":30,"cfg_scale":6,"negativePrompt":"nsfw, bad hands"}}`)))
+
+		assert.Equal(t, "832x1216", response.Size)
+		sent := upstream.last()
+		assert.Equal(t, "1girl, Very Aesthetic, masterpiece, no text", sent.body["input"], "the quality tags the prompt holds are not added again")
+		parameters := sent.body["parameters"].(map[string]any)
+		assert.Equal(t, [4]any{float64(832), float64(1216), float64(30), float64(6)}, [4]any{parameters["width"], parameters["height"], parameters["steps"], parameters["scale"]})
+		negative := parameters["negative_prompt"].(string)
+		assert.True(t, strings.HasPrefix(negative, "lowres, ") && strings.HasSuffix(negative, ", nsfw, bad hands"), negative)
+		assert.Equal(t, 1, strings.Count(negative, "nsfw"), "the client's nsfw is not added again")
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, 1245, lastLog().CompletionTokens, "one 832x1216 image")
+		assert.Equal(t, promptText(sent.body), lastLog().PromptTokens)
+		assert.Equal(t, before-10_000, walletQuota())
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		recorder := send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"extra_fields":{"guidance_scale":4,"uc":"bad hands"}}`))
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		parameters = upstream.last().body["parameters"].(map[string]any)
+		assert.Equal(t, [2]any{float64(28), float64(4)}, [2]any{parameters["steps"], parameters["scale"]}, "the default 28 steps")
+		assert.True(t, strings.HasSuffix(parameters["negative_prompt"].(string), ", bad hands"))
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Equal(t, before-20_000, walletQuota())
+
+		// Another client's canvas, guidance and steps past NovelAI's range
+		// are fitted into it, as size is, and the quality tags it wrote are
+		// not added again, whatever their order.
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		response = decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"masterpiece, 1girl, very aesthetic",`+
+			`"width":1000,"height":1000,"cfg_scale":12,"num_inference_steps":60}`)))
+
+		assert.Equal(t, "1024x1024", response.Size)
+		sent = upstream.last()
+		assert.Equal(t, "masterpiece, 1girl, very aesthetic, no text", sent.body["input"])
+		parameters = sent.body["parameters"].(map[string]any)
+		assert.Equal(t, [4]any{float64(1024), float64(1024), float64(50), float64(10)}, [4]any{parameters["width"], parameters["height"], parameters["steps"], parameters["scale"]})
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, before-30_000, walletQuota())
 	})
 
 	t.Run("url and jpeg, settled by expression", func(t *testing.T) {
@@ -1216,9 +1275,10 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	}
 
 	t.Run("stream generation relays NovelAI's events, billed per completed image", func(t *testing.T) {
+		// One partial of the default 28 steps previews after step 14.
 		upstream.queue(http.StatusOK, "text/event-stream", sse(
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 10, "image": encode(blue)},
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 11, "image": encode(blue)},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 12, "image": encode(blue)},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 13, "image": encode(blue)},
 			map[string]any{"event_type": "final", "samp_ix": 0, "image": encode(red)},
 			map[string]any{"event_type": "final", "samp_ix": 1, "image": encode(blue)},
 		))
@@ -1468,7 +1528,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			if channelType == constant.ChannelTypeOpenAI {
 				baseURL = forwarder.URL
 			}
-			retried := model.Channel{Name: "novelai-retry", Key: "pst-retry", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-curated-preview", BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0)}
+			retried := model.Channel{Name: "novelai-retry", Key: "pst-retry", Status: common.ChannelStatusEnabled, Type: channelType, Group: "default", Models: "nai-diffusion-4-curated-preview", BaseURL: &baseURL, Priority: &priority, AutoBan: common.GetPointer(0), OtherSettings: `{"novelai_hd_disabled":true}`}
 			require.NoError(t, model.DB.Create(&retried).Error)
 			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: retried.Id, Model: "nai-diffusion-4-curated-preview", Group: "default", Enabled: true, Priority: &priority}).Error)
 		}
@@ -1526,7 +1586,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	t.Run("a parameter override cannot change the image count", func(t *testing.T) {
 		override := `{"operations":[{"path":"parameters.n_samples","mode":"set","value":3}]}`
 		overridden := model.Channel{Name: "novelai-override", Key: "pst-override", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
-			Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), ParamOverride: &override, AutoBan: common.GetPointer(0)}
+			Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), ParamOverride: &override, AutoBan: common.GetPointer(0), OtherSettings: `{"novelai_hd_disabled":true}`}
 		require.NoError(t, model.DB.Create(&overridden).Error)
 		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: overridden.Id, Model: "nai-diffusion-4-5-curated", Group: "default", Enabled: true}).Error)
 		calls, before := upstream.calls(), walletQuota()
@@ -1614,6 +1674,696 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Contains(t, recorder.Body.String(), i18n.Translate("", i18n.MsgNovelAINoImage))
 		assert.Equal(t, calls+1, upstream.calls())
 		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+	})
+
+	// HD, NovelAI's 1.5x Enhance, is on by default: novelai-hd serves V4.5
+	// Full and V5 Full ahead of novelai-official, which would take a retry.
+	// Each HD request is one more call to NovelAI and costs the user exactly
+	// what it costs without HD, in quota and in usage tokens, whatever HD
+	// manages; HD never fails or retries a request.
+	hdPriority := int64(5)
+	hdChannel := model.Channel{Name: "novelai-hd", Key: "pst-hd", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+		Models: "nai-diffusion-4-5-full,nai-diffusion-5-full", BaseURL: common.GetPointer(server.URL), Priority: &hdPriority}
+	require.NoError(t, model.DB.Create(&hdChannel).Error)
+	for _, name := range []string{"nai-diffusion-4-5-full", "nai-diffusion-5-full"} {
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: hdChannel.Id, Model: name, Group: "default", Enabled: true, Priority: &hdPriority}).Error)
+	}
+	base, hd := novelAIPNG(t, 1216, 832, color.NRGBA{G: 255, A: 255}), novelAIPNG(t, 1856, 1280, color.NRGBA{R: 255, B: 255, A: 255})
+	enhanced := novelAIZip(t, hd)
+	failed := []byte(`{"statusCode":500,"message":"Error generating image"}`)
+	// requested is what NovelAI got since calls.
+	requested := func(calls int) []novelAIRecordedRequest {
+		upstream.mu.Lock()
+		defer upstream.mu.Unlock()
+		return slices.Clone(upstream.requests[calls:])
+	}
+	const hdPrompt = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"1216x832"`
+
+	t.Run("HD images cost what standard ones do", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusOK, "application/zip", enhanced)
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+
+		sent := requested(calls)
+		require.Len(t, sent, 2)
+		assert.Equal(t, "generate", sent[0].body["action"])
+		assert.Equal(t, "img2img", sent[1].body["action"])
+		parameters := sent[1].body["parameters"].(map[string]any)
+		assert.Equal(t, [2]any{1856.0, 1280.0}, [2]any{parameters["width"], parameters["height"]})
+		assert.Equal(t, "Bearer pst-hd", sent[1].authorization)
+		assert.Equal(t, "1856x1280", response.Size)
+		assert.Equal(t, "1856x1280", response.Data[0].Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, hd, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD 1856x1280")
+		assert.Equal(t, 10_000, log.Quota, "one image at $0.02, as without HD")
+		assert.Equal(t, 1245, log.CompletionTokens, "the 1216x832 image the request is priced at")
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("an account without Anlas gets the standard image at the same price", func(t *testing.T) {
+		t.Cleanup(func() { novelai.NoteAnlas("pst-hd", 1_000_000) })
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+
+		assert.Equal(t, calls+2, upstream.calls())
+		assert.Equal(t, "1216x832", response.Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, base, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD unavailable, delivered at the standard size")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, 1245, log.CompletionTokens)
+		assert.Equal(t, before-10_000, walletQuota())
+		var other map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok, log.Other)
+		diagnostics := adminInfo["conversion_diagnostics"].([]any)
+		require.Len(t, diagnostics, 1)
+		assert.Equal(t, "novelai_hd_fallback", diagnostics[0].(map[string]any)["code"])
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		calls = upstream.calls()
+		decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+		assert.Equal(t, calls+1, upstream.calls(), "the key skips HD after its 402")
+		assert.Contains(t, lastLog().Content, "HD unavailable, delivered at the standard size")
+	})
+
+	t.Run("a failed enhance is not retried on another channel", func(t *testing.T) {
+		retryTimes := common.RetryTimes
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = retryTimes })
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusInternalServerError, "application/json", failed)
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+`}`)))
+
+		sent := requested(calls)
+		require.Len(t, sent, 2, "the base and its one enhance")
+		for _, request := range sent {
+			assert.Equal(t, "Bearer pst-hd", request.authorization, "novelai-official is never asked")
+		}
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, base, got)
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("an image_count expression settles the same whatever HD does", func(t *testing.T) {
+		two := novelAIZip(t, base, base)
+		for _, tc := range []struct {
+			name     string
+			answers  [][]byte
+			statuses []int
+			images   int
+		}{
+			{"both enhanced", [][]byte{two, enhanced, enhanced}, []int{200, 200, 200}, 2},
+			{"none enhanced", [][]byte{two, failed}, []int{200, 500}, 2},
+			{"one enhanced", [][]byte{two, enhanced, failed}, []int{200, 200, 500}, 2},
+			{"fewer images than reserved", [][]byte{novelAIZip(t, base), failed}, []int{200, 500}, 1},
+		} {
+			for i, answer := range tc.answers {
+				contentType := "application/zip"
+				if tc.statuses[i] != http.StatusOK {
+					contentType = "application/json"
+				}
+				upstream.queue(tc.statuses[i], contentType, answer)
+			}
+			calls, before := upstream.calls(), walletQuota()
+
+			response := decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-5-full","prompt":"1girl","size":"1216x832","n":2}`)))
+
+			assert.Equal(t, calls+len(tc.answers), upstream.calls(), tc.name)
+			assert.Len(t, response.Data, tc.images, tc.name)
+			log := lastLog()
+			assert.Equal(t, tc.images*30_000, log.Quota, tc.name+": $0.06 an image delivered")
+			assert.Equal(t, tc.images*1245, log.CompletionTokens, tc.name)
+			assert.Equal(t, before-tc.images*30_000, walletQuota(), tc.name)
+		}
+	})
+
+	t.Run("hd false and quality low skip HD", func(t *testing.T) {
+		for _, extra := range []string{`,"hd":false`, `,"quality":"low"`} {
+			upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+			calls := upstream.calls()
+
+			decode(send("/v1/images/generations", "application/json", []byte(hdPrompt+extra+`}`)))
+
+			assert.Equal(t, calls+1, upstream.calls(), extra)
+			assert.NotContains(t, lastLog().Content, "HD", extra)
+		}
+	})
+
+	t.Run("a chat stream gets HD images at the base usage", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, base))
+		upstream.queue(http.StatusOK, "application/zip", enhanced)
+		before := walletQuota()
+
+		events := streamEvents(send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","size":"1216x832","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"1girl"}]}`)))
+
+		require.Len(t, events, 5, "role, image, stop, usage, [DONE]")
+		content := events[1].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"].(string)
+		assert.Equal(t, [][]byte{hd}, chatContent(content))
+		assert.Equal(t, 1245.0, events[3].data["usage"].(map[string]any)["completion_tokens"])
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD 1856x1280")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	// The upscale, NovelAI's 2x upscaler, is a channel's opt-in: novelai-upscale
+	// serves V4.5 Curated ahead of novelai-override, with HD on as by
+	// default. Each upscale is one
+	// more call to NovelAI after the base (and HD), and the user pays exactly
+	// what a request without it costs, in quota and in usage tokens; the
+	// consume log notes what became of each image.
+	upscaleChannel := model.Channel{Name: "novelai-upscale", Key: "pst-up", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+		Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), Priority: &hdPriority, OtherSettings: `{"novelai_upscale_enabled":true}`}
+	require.NoError(t, model.DB.Create(&upscaleChannel).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: upscaleChannel.Id, Model: "nai-diffusion-4-5-curated", Group: "default", Enabled: true, Priority: &hdPriority}).Error)
+	square, doubled := novelAIPNG(t, 1024, 1024, color.NRGBA{G: 255, A: 255}), novelAIPNG(t, 2048, 2048, color.NRGBA{R: 255, G: 200, A: 255})
+	const upscalePrompt = `{"model":"nai-diffusion-4-5-curated","prompt":"1girl","size":"1024x1024"`
+	paths := func(sent []novelAIRecordedRequest) []string {
+		var paths []string
+		for _, request := range sent {
+			paths = append(paths, request.path)
+		}
+		return paths
+	}
+
+	t.Run("an upscaled image costs what a standard one does", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusOK, "application/x-zip-compressed", novelAIZip(t, doubled))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`,"hd":false}`)))
+
+		sent := requested(calls)
+		assert.Equal(t, []string{"/ai/generate-image", "/ai/upscale"}, paths(sent))
+		assert.Equal(t, map[string]any{"image": base64.StdEncoding.EncodeToString(square), "model": "nai-diffusion-5-curated", "declared_blur_sigma": 0.0}, sent[1].body)
+		assert.Equal(t, "Bearer pst-up", sent[1].authorization)
+		assert.False(t, sent[1].acceptSent)
+		assert.Equal(t, "2048x2048", response.Size)
+		assert.Equal(t, "2048x2048", response.Data[0].Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, doubled, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "Upscaled 2x: 1")
+		assert.Contains(t, log.Content, "Image count 1")
+		assert.NotContains(t, log.Content, "HD")
+		assert.Equal(t, 10_000, log.Quota, "one image at $0.02, as without the upscale")
+		assert.Equal(t, novelai.ImageTokens(1024, 1024), log.CompletionTokens, "the 1024x1024 image the request is priced at")
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("HD, then the upscale, at the same price", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, novelAIPNG(t, 1536, 1536, color.NRGBA{B: 255, A: 255})))
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, novelAIPNG(t, 3072, 3072, color.NRGBA{R: 255, A: 255})))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`}`)))
+
+		sent := requested(calls)
+		assert.Equal(t, []string{"/ai/generate-image", "/ai/generate-image", "/ai/upscale"}, paths(sent))
+		assert.Equal(t, "img2img", sent[1].body["action"])
+		assert.Equal(t, "3072x3072", response.Size)
+		log := lastLog()
+		assert.Contains(t, log.Content, "HD 1536x1536")
+		assert.Contains(t, log.Content, "Upscaled 2x: 1")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, novelai.ImageTokens(1024, 1024), log.CompletionTokens)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("an account without Anlas gets the image before the upscale at the same price", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`))
+		calls, before := upstream.calls(), walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`,"hd":false}`)))
+
+		assert.Equal(t, calls+2, upstream.calls())
+		assert.Equal(t, "1024x1024", response.Size)
+		got, err := base64.StdEncoding.DecodeString(response.Data[0].B64JSON)
+		require.NoError(t, err)
+		assert.Equal(t, square, got)
+		log := lastLog()
+		assert.Contains(t, log.Content, "Not upscaled, not enough Anlas: 1")
+		assert.Equal(t, 10_000, log.Quota)
+		assert.Equal(t, before-10_000, walletQuota())
+	})
+
+	t.Run("upscale false skips it, as a JSON field and as a form field", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		calls := upstream.calls()
+		decode(send("/v1/images/generations", "application/json", []byte(upscalePrompt+`,"hd":false,"upscale":false}`)))
+		assert.Equal(t, calls+1, upstream.calls())
+		assert.NotContains(t, lastLog().Content, "pscale")
+
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for key, value := range map[string]string{"model": "nai-diffusion-4-5-curated", "prompt": "a red scarf", "upscale": "false"} {
+			require.NoError(t, writer.WriteField(key, value))
+		}
+		part, err := writer.CreateFormFile("image", "source.png")
+		require.NoError(t, err)
+		_, err = part.Write(square)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		calls = upstream.calls()
+		decode(send("/v1/images/edits", writer.FormDataContentType(), body.Bytes()))
+		assert.Equal(t, calls+1, upstream.calls())
+		assert.Equal(t, "img2img", upstream.last().body["action"])
+		assert.NotContains(t, upstream.last().body["parameters"], "upscale")
+		assert.NotContains(t, lastLog().Content, "pscale")
+	})
+
+	t.Run("an edit is upscaled, a masked one noted not applicable", func(t *testing.T) {
+		edit := func(mask bool) (string, []byte) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			for key, value := range map[string]string{"model": "nai-diffusion-4-5-curated", "prompt": "a red scarf"} {
+				require.NoError(t, writer.WriteField(key, value))
+			}
+			for _, name := range []string{"image", "mask"}[:map[bool]int{false: 1, true: 2}[mask]] {
+				part, err := writer.CreateFormFile(name, name+".png")
+				require.NoError(t, err)
+				_, err = part.Write(square)
+				require.NoError(t, err)
+			}
+			require.NoError(t, writer.Close())
+			return writer.FormDataContentType(), body.Bytes()
+		}
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, doubled))
+		calls := upstream.calls()
+		contentType, body := edit(false)
+		response := decode(send("/v1/images/edits", contentType, body))
+		assert.Equal(t, []string{"/ai/generate-image", "/ai/upscale"}, paths(requested(calls)))
+		assert.Equal(t, "img2img", requested(calls)[0].body["action"])
+		assert.Equal(t, "2048x2048", response.Size)
+		assert.Contains(t, lastLog().Content, "Upscaled 2x: 1")
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, square))
+		calls = upstream.calls()
+		contentType, body = edit(true)
+		decode(send("/v1/images/edits", contentType, body))
+		assert.Equal(t, []string{"/ai/generate-image"}, paths(requested(calls)))
+		assert.Equal(t, "infill", requested(calls)[0].body["action"])
+		assert.Contains(t, lastLog().Content, "Not upscaled, not applicable: 1")
+	})
+}
+
+// novelAIQueueUpstream is NovelAI's image host for the queue test, reached
+// through a channel's proxy: it records the key of every generation, holds
+// the requests of a closed key until the test opens it, and answers a key's
+// queued statuses before its default answer, a zip of one PNG.
+type novelAIQueueUpstream struct {
+	mu      sync.Mutex
+	seen    map[string]int
+	held    map[string]int
+	gates   map[string]chan struct{}
+	answers map[string][]int
+	zip     []byte
+}
+
+func (u *novelAIQueueUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.ReadAll(r.Body)
+	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	u.mu.Lock()
+	u.seen[key]++
+	status := http.StatusOK
+	if queued := u.answers[key]; len(queued) > 0 {
+		status, u.answers[key] = queued[0], queued[1:]
+	}
+	gate := u.gates[key]
+	if gate != nil {
+		u.held[key]++
+	}
+	u.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+		}
+		u.mu.Lock()
+		u.held[key]--
+		u.mu.Unlock()
+	}
+	if status != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"statusCode":%d,"message":"refused"}`, status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	_, _ = w.Write(u.zip)
+}
+
+// close holds the next requests of keys until open.
+func (u *novelAIQueueUpstream) close(keys ...string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, key := range keys {
+		if u.gates[key] == nil {
+			u.gates[key] = make(chan struct{})
+		}
+	}
+}
+
+// open answers the held requests of keys, and their next ones at once.
+func (u *novelAIQueueUpstream) open(keys ...string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, key := range keys {
+		if gate := u.gates[key]; gate != nil {
+			close(gate)
+			delete(u.gates, key)
+		}
+	}
+}
+
+func (u *novelAIQueueUpstream) answer(key string, statuses ...int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.answers[key] = append(u.answers[key], statuses...)
+}
+
+// requests is how many generations reached NovelAI with key.
+func (u *novelAIQueueUpstream) requests(key string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.seen[key]
+}
+
+// holding is how many generations with key NovelAI holds right now.
+func (u *novelAIQueueUpstream) holding(key string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.held[key]
+}
+
+// A NovelAI channel on NovelAI's host generates one request at a time per
+// key and queues the others, up to the channel's queue limit per key, on the
+// least loaded enabled key of a multi-key channel. A request past every
+// key's limit fails at once with a 429 that disables neither the channel nor
+// a key, charges nothing, and goes to the next channel when retries are on.
+// The key the queue chose is the attempt's key: NovelAI gets it, and an
+// automatic disable and the error log name it. A retry after NovelAI's error
+// answer does not wait behind its own attempt. The queue works alike with
+// the channels read from the database and from the memory cache.
+func TestNovelAIChannelQueuesGenerationsPerKey(t *testing.T) {
+	for _, run := range []struct {
+		name        string
+		memoryCache bool
+	}{{"database", false}, {"memory cache", true}} {
+		t.Run(run.name, func(t *testing.T) {
+			testNovelAIQueue(t, strings.ReplaceAll(run.name, " ", "-"), run.memoryCache)
+		})
+	}
+}
+
+func testNovelAIQueue(t *testing.T, tag string, memoryCache bool) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate, cacheEnabled := common.LogConsumeEnabled, common.BatchUpdateEnabled, common.MemoryCacheEnabled
+	autoDisable, errorLog, retryTimes := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
+	disableCodes := operation_setting.AutomaticDisableStatusCodesToString()
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.BatchUpdateEnabled, common.MemoryCacheEnabled = logConsume, batchUpdate, cacheEnabled
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = autoDisable, errorLog, retryTimes
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(disableCodes))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled = true, true
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401,429"))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-queue-retry":0.02,"nai-queue-c":0.02,"nai-queue-self":0.02,"nai-diffusion-3":0.02}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+
+	upstream := &novelAIQueueUpstream{seen: map[string]int{}, held: map[string]int{}, gates: map[string]chan struct{}{}, answers: map[string][]int{},
+		zip: novelAIZip(t, novelAIPNG(t, 64, 64, color.RGBA{R: 200, A: 255}))}
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	// Refunds, quota updates and automatic disables finish on gopool
+	// workers, and a failed test may leave a generation held: both end
+	// before the fixture goes.
+	var keys []string
+	t.Cleanup(func() {
+		upstream.open(keys...)
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+	})
+	q0, q1, b, r0, r1, d := "pst-q0-"+tag, "pst-q1-"+tag, "pst-b-"+tag, "pst-r0-"+tag, "pst-r1-"+tag, "pst-d-"+tag
+	keys = []string{q0, q1, b, r0, r1, d}
+
+	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-queue", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiqueuekey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	// Every channel is on NovelAI's host, which the proxy plays.
+	host, proxy := "http://image.novelai.net", `{"proxy":"`+server.URL+`"}`
+	create := func(channel model.Channel, priority int64) model.Channel {
+		channel.Type, channel.Status, channel.Group = constant.ChannelTypeNovelAI, common.ChannelStatusEnabled, "default"
+		channel.BaseURL, channel.Setting, channel.Priority, channel.AutoBan = &host, &proxy, &priority, common.GetPointer(1)
+		require.NoError(t, model.DB.Create(&channel).Error)
+		for _, name := range channel.GetModels() {
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true, Priority: &priority}).Error)
+		}
+		return channel
+	}
+	multiKey := model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+	channelA := create(model.Channel{Name: "novelai-queue-a", Key: q0 + "\n" + q1, Models: "nai-diffusion-4-5-full,nai-queue-retry", OtherSettings: `{"novelai_queue_limit":1}`, ChannelInfo: multiKey}, 10)
+	create(model.Channel{Name: "novelai-queue-b", Key: b, Models: "nai-queue-retry"}, 0)
+	withDisabledKey := multiKey
+	withDisabledKey.MultiKeyStatusList = map[int]int{1: common.ChannelStatusManuallyDisabled}
+	create(model.Channel{Name: "novelai-queue-c", Key: r0 + "\n" + r1, Models: "nai-queue-c", OtherSettings: `{"novelai_queue_limit":1}`, ChannelInfo: withDisabledKey}, 0)
+	create(model.Channel{Name: "novelai-queue-d", Key: d, Models: "nai-queue-self,nai-diffusion-3"}, 0)
+	if memoryCache {
+		common.MemoryCacheEnabled = true
+		model.InitChannelCache()
+	}
+
+	// pointPollingAt makes channelID's next polling pick its key index.
+	pointPollingAt := func(channelID, index int) {
+		lock := model.GetChannelPollingLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+		if memoryCache {
+			channel, err := model.CacheGetChannel(channelID)
+			require.NoError(t, err)
+			channel.ChannelInfo.MultiKeyPollingIndex = index
+			return
+		}
+		channel, err := model.GetChannelById(channelID, true)
+		require.NoError(t, err)
+		channel.ChannelInfo.MultiKeyPollingIndex = index
+		require.NoError(t, channel.SaveChannelInfo())
+	}
+	// keyStatus is channelID's status and its keys' status list.
+	keyStatus := func(channelID int) (int, map[int]int) {
+		if !memoryCache {
+			channel, err := model.GetChannelById(channelID, true)
+			require.NoError(t, err)
+			return channel.Status, channel.ChannelInfo.MultiKeyStatusList
+		}
+		channel, err := model.CacheGetChannel(channelID)
+		require.NoError(t, err)
+		lock := model.GetChannelPollingLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+		return channel.Status, maps.Clone(channel.ChannelInfo.MultiKeyStatusList)
+	}
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	// /v1/images/generations is a host protocol route.
+	SetTaskPluginProtocolRouter(engine)
+	send := func(path, body string, responses chan<- *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer novelaiqueuekey")
+		engine.ServeHTTP(recorder, request)
+		responses <- recorder
+	}
+	native := func(modelName string) string {
+		return `{"input":"a cat","model":"` + modelName + `","action":"generate","parameters":{"n_samples":1}}`
+	}
+	// awaitResponse is the next response, failing the test after 5 s.
+	awaitResponse := func(responses <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+		t.Helper()
+		select {
+		case recorder := <-responses:
+			return recorder
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "no response")
+			return nil
+		}
+	}
+	walletQuota := func() int {
+		quota, err := model.GetUserQuota(user.Id, true)
+		require.NoError(t, err)
+		return quota
+	}
+	setRetryTimes := func(t *testing.T, times int) {
+		common.RetryTimes = times
+		t.Cleanup(func() { common.RetryTimes = retryTimes })
+	}
+
+	t.Run("a full queue answers 429 and disables nothing", func(t *testing.T) {
+		setRetryTimes(t, 0)
+		upstream.close(q0, q1)
+		before := walletQuota()
+		responses := make(chan *httptest.ResponseRecorder, 5)
+		for range 5 {
+			go send("/ai/generate-image", native("nai-diffusion-4-5-full"), responses)
+		}
+
+		rejected := awaitResponse(responses)
+		require.Equal(t, http.StatusTooManyRequests, rejected.Code, rejected.Body.String())
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(rejected.Body.Bytes(), &payload))
+		assert.Equal(t, float64(http.StatusTooManyRequests), payload["statusCode"])
+		assert.Contains(t, payload["message"], i18n.Translate("", i18n.MsgNovelAIQueueFull))
+		require.Eventually(t, func() bool { return upstream.holding(q0) == 1 && upstream.holding(q1) == 1 }, 5*time.Second, 5*time.Millisecond, "each key generates one request")
+		images := make(chan *httptest.ResponseRecorder, 1)
+		send("/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","n":1,"size":"1024x1024"}`, images)
+		openAI := <-images
+		require.Equal(t, http.StatusTooManyRequests, openAI.Code, openAI.Body.String())
+		var openAIPayload map[string]map[string]any
+		require.NoError(t, common.Unmarshal(openAI.Body.Bytes(), &openAIPayload))
+		assert.Equal(t, "novelai_key_busy", openAIPayload["error"]["code"])
+
+		upstream.open(q0, q1)
+		for range 4 {
+			recorder := awaitResponse(responses)
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		assert.Equal(t, 2, upstream.requests(q0))
+		assert.Equal(t, 2, upstream.requests(q1))
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		status, keys := keyStatus(channelA.Id)
+		assert.Equal(t, common.ChannelStatusEnabled, status, "the queue's 429 is not the channel's")
+		assert.Empty(t, keys)
+		assert.Eventually(t, func() bool { return walletQuota() == before-4*10_000 }, 5*time.Second, 10*time.Millisecond, "four images at $0.02, the rejected requests refunded")
+	})
+
+	t.Run("a request past the limit goes to the next channel", func(t *testing.T) {
+		setRetryTimes(t, 1)
+		upstream.close(q0, q1)
+		responses := make(chan *httptest.ResponseRecorder, 5)
+		for range 5 {
+			go send("/ai/generate-image", native("nai-queue-retry"), responses)
+		}
+
+		retried := awaitResponse(responses)
+		require.Equal(t, http.StatusOK, retried.Code, retried.Body.String())
+		assert.Equal(t, 1, upstream.requests(b), "the one request that found the channel full")
+		upstream.open(q0, q1)
+		for range 4 {
+			recorder := awaitResponse(responses)
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		assert.Equal(t, 1, upstream.requests(b))
+		assert.Equal(t, 4, upstream.requests(q0))
+		assert.Equal(t, 4, upstream.requests(q1))
+	})
+
+	t.Run("the key the queue chose is the attempt's key", func(t *testing.T) {
+		setRetryTimes(t, 0)
+		upstream.close(q0)
+		pointPollingAt(channelA.Id, 0)
+		held := make(chan *httptest.ResponseRecorder, 1)
+		go send("/ai/generate-image", native("nai-diffusion-4-5-full"), held)
+		require.Eventually(t, func() bool { return upstream.holding(q0) == 1 }, 5*time.Second, 5*time.Millisecond)
+
+		// The distributor picks the busy q0 again; the queue sends to q1.
+		pointPollingAt(channelA.Id, 0)
+		upstream.answer(q1, http.StatusUnauthorized)
+		sentToQ1 := upstream.requests(q1)
+		refused := make(chan *httptest.ResponseRecorder, 1)
+		go send("/ai/generate-image", native("nai-diffusion-4-5-full"), refused)
+		recorder := awaitResponse(refused)
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code, recorder.Body.String())
+		assert.Equal(t, sentToQ1+1, upstream.requests(q1))
+		assert.Eventually(t, func() bool {
+			status, keys := keyStatus(channelA.Id)
+			_, q0Disabled := keys[0]
+			return status == common.ChannelStatusEnabled && keys[1] == common.ChannelStatusAutoDisabled && !q0Disabled
+		}, 5*time.Second, 10*time.Millisecond, "q1 is disabled, q0 and the channel stay enabled")
+		var errorLog model.Log
+		require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", user.Id, model.LogTypeError).Order("id desc").First(&errorLog).Error)
+		var other map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(errorLog.Other, &other))
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok, errorLog.Other)
+		assert.Equal(t, float64(1), adminInfo["multi_key_index"])
+
+		upstream.open(q0)
+		recorder = awaitResponse(held)
+		assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	})
+
+	t.Run("a disabled key gets no requests", func(t *testing.T) {
+		setRetryTimes(t, 0)
+		upstream.close(r0)
+		held := make(chan *httptest.ResponseRecorder, 1)
+		go send("/ai/generate-image", native("nai-queue-c"), held)
+		require.Eventually(t, func() bool { return upstream.holding(r0) == 1 }, 5*time.Second, 5*time.Millisecond)
+
+		// One of two more requests waits for r0, the other finds its line
+		// full: r1 is not a candidate.
+		responses := make(chan *httptest.ResponseRecorder, 2)
+		go send("/ai/generate-image", native("nai-queue-c"), responses)
+		go send("/ai/generate-image", native("nai-queue-c"), responses)
+		rejected := awaitResponse(responses)
+		assert.Equal(t, http.StatusTooManyRequests, rejected.Code, rejected.Body.String())
+		assert.Equal(t, 1, upstream.requests(r0), "the waiting request has not reached NovelAI")
+
+		upstream.open(r0)
+		for _, recorder := range []*httptest.ResponseRecorder{awaitResponse(held), awaitResponse(responses)} {
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		assert.Equal(t, 2, upstream.requests(r0))
+		assert.Zero(t, upstream.requests(r1))
+	})
+
+	// The generation wait is not shortened: an attempt that kept its key
+	// would keep the retry waiting past the test's 5 s.
+	t.Run("a retry does not wait behind its own attempt", func(t *testing.T) {
+		setRetryTimes(t, 1)
+		for i, request := range []struct{ path, body string }{
+			{"/ai/generate-image", native("nai-queue-self")},
+			{"/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"a cat","n":1,"size":"1024x1024"}`},
+		} {
+			upstream.answer(d, http.StatusInternalServerError)
+			responses := make(chan *httptest.ResponseRecorder, 1)
+			go send(request.path, request.body, responses)
+			recorder := awaitResponse(responses)
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			assert.Equal(t, 2*(i+1), upstream.requests(d), "the failed attempt and its retry")
+		}
 	})
 }
 

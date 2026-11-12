@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -38,8 +40,14 @@ const generateImagePath = "/ai/generate-image"
 // stream on V4 and later), and the images come back in the OpenAI response
 // shape, billed per image received.
 //
+// A converted text-to-image request on V4 and later also gets the HD pass
+// (enhance.go) unless the channel or the request turns it off: each image
+// enhanced at 1.5 times its size, at the same price. A channel can also turn
+// on NovelAI's 2x upscale (upscale.go), which follows HD image by image.
+//
 // Every other route fails with a 400. On NovelAI's own host the generations
-// of one key run one at a time (holdGeneration).
+// of one key run one at a time, and the others wait in line for a key of the
+// channel (holdGeneration).
 type Adaptor struct {
 	// generation describes the converted request, set by
 	// ConvertImageRequest or ConvertOpenAIRequest; output is how an images
@@ -47,6 +55,19 @@ type Adaptor struct {
 	generation *Generation
 	output     ImageOutput
 	streamed   bool
+	// hd is the HD pass DoRequest planned from the sent body, nil without
+	// one; hdBlocked is why it will not call NovelAI although planned (a 402
+	// put the key in its cooldown). releaseSlot is the key's release while
+	// HD keeps the key past the base answer. hdResult is what the pass did,
+	// for the consume log.
+	hd          *hdPlan
+	hdBlocked   string
+	releaseSlot func()
+	hdResult    hdOutcome
+	// upscale tells that DoRequest planned the upscale, which keeps the key
+	// past the base answer too; upscaleResult is what it did.
+	upscale       bool
+	upscaleResult upscaleResult
 }
 
 // ErrNativeOnly rejects a request this channel cannot serve. It is final:
@@ -79,11 +100,17 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			path = generateImageStreamPath
 		}
 	}
-	baseURL := strings.TrimSuffix(info.ChannelBaseUrl, "/")
+	return imageBaseURL(info.ChannelBaseUrl) + path, nil
+}
+
+// imageBaseURL is the base URL of a NovelAI channel's image calls: the
+// channel's, and NovelAI's image host for an empty one.
+func imageBaseURL(channelBaseURL string) string {
+	baseURL := strings.TrimSuffix(channelBaseURL, "/")
 	if baseURL == "" {
-		baseURL = constant.GetChannelBaseURL(constant.ChannelTypeNovelAI)
+		return constant.GetChannelBaseURL(constant.ChannelTypeNovelAI)
 	}
-	return baseURL + path, nil
+	return baseURL
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *relaycommon.RelayInfo) error {
@@ -105,9 +132,16 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *
 	return nil
 }
 
-// DoRequest sends the request once the key's generation slot is free on
-// NovelAI's own host. A send that failed after it may have reached NovelAI
-// is final: NovelAI may have spent Anlas on it.
+// DoRequest sends the request once its turn for a key of the channel came on
+// NovelAI's own host (holdGeneration), and records NovelAI's answer for that
+// key (noteGenerationAnswer). A send that failed after it may have reached
+// NovelAI is final: NovelAI may have spent Anlas on it.
+//
+// A converted request that wants HD plans it from the body as sent (planHD).
+// HD and the upscale keep the key past the base answer: their calls are the
+// request's next generations on it, and DoResponse's enhancer releases it.
+// A base answer other than 200 (201 is NovelAI's 200) drops both and frees
+// the key at once, as the relay does not call DoResponse for it.
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
 	// Checked here as well as by the request conversions, which a pass-through
 	// body skips.
@@ -119,22 +153,56 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 			return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgNovelAIPassThroughUnsupported)), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
 	}
+	a.hd, a.hdBlocked, a.releaseSlot, a.hdResult = nil, "", nil, hdOutcome{}
+	a.upscale, a.upscaleResult = false, upscaleResult{}
+	if a.generation != nil && isConvertedMode(info.RelayMode) {
+		a.upscale = a.generation.UpscalePlanned()
+		if a.generation.Upscale && !a.upscale {
+			logger.LogDebug(c, "NovelAI upscale skipped: %s", a.generation.UpscaleExcluded)
+		}
+	}
+	if a.generation != nil && a.generation.HD && isConvertedMode(info.RelayMode) {
+		var skipped string
+		if a.hd, skipped = planHD(requestBody, a.generation); a.hd == nil {
+			logger.LogDebug(c, "NovelAI HD skipped: %s", skipped)
+		}
+	} else if a.generation != nil && a.generation.hdSkip != "" {
+		logger.LogDebug(c, "NovelAI HD skipped: %s", a.generation.hdSkip)
+	}
 	release, apiErr := holdGeneration(c, info)
 	if apiErr != nil {
+		a.hd, a.upscale = nil, false
 		return nil, apiErr
 	}
+	if a.hd != nil {
+		// The key the queue chose.
+		if refusal, refused := hdRefused(info.ApiKey); refused {
+			a.hdBlocked = refusal.reason()
+		}
+	}
+	holdsKey := a.hd != nil && a.hdBlocked == "" || a.upscale
 	resp, err := channel.DoApiRequest(a, c, info, requestBody)
 	if err != nil {
 		release()
+		a.hd, a.upscale = nil, false
 		if RequestMayHaveReachedUpstream(err) {
 			return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
 		}
 		return nil, err
 	}
+	if holdsKey {
+		a.releaseSlot = release
+	}
 	if isNovelAIImageHost(info.ChannelBaseUrl) {
-		// The key's slot is free once NovelAI's answer arrived, whatever
-		// the client still has to receive.
-		resp.Body = newGenerationBody(resp.Body, release)
+		noteGenerationAnswer(c, info, resp.StatusCode)
+		// The key is free for the next in line once NovelAI's answer
+		// arrived, whatever the client still has to receive; with HD or the
+		// upscale, once their last answer arrived.
+		bodyRelease := release
+		if holdsKey {
+			bodyRelease = func() {}
+		}
+		resp.Body = newGenerationBody(resp.Body, bodyRelease)
 	}
 	if !isConvertedMode(info.RelayMode) {
 		return resp, nil
@@ -144,10 +212,13 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		// take 200.
 		resp.StatusCode = http.StatusOK
 	}
+	if resp.StatusCode != http.StatusOK {
+		a.dropPasses()
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		// The image and chat relays read an error answer whole, and leave it
 		// open when the read fails: it is read here, bounded as on the
-		// native routes, and closed, which frees the slot for a retry.
+		// native routes, and closed, which frees the key for a retry.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
 		service.CloseResponseBodyGracefully(resp)
 		resp.Body = io.NopCloser(bytes.NewReader(body))
@@ -158,6 +229,20 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 // errorBodyLimit bounds the NovelAI error answer a converted request keeps.
 const errorBodyLimit = 1 << 20
 
+// dropPasses gives up the HD pass and the upscale of a request whose base
+// answer the relay does not take, and frees the key they kept.
+func (a *Adaptor) dropPasses() {
+	if a.releaseSlot != nil {
+		a.releaseSlot()
+	}
+	a.hd, a.hdBlocked, a.releaseSlot, a.upscale = nil, "", nil, false
+}
+
+// DoResponse answers a converted request from NovelAI's base answer; the
+// planned HD pass and upscale run in it, image by image (enhancer), and free
+// the key once their last call answered, at the latest when DoResponse
+// returns. Every image of a request the upscale excludes as a whole counts
+// as not applicable.
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	if _, ok := relayconstant.NovelAIPath(info.RelayMode); ok {
 		return openai.NovelAIImageHandler(c, info, resp)
@@ -165,13 +250,64 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	if !isConvertedMode(info.RelayMode) || a.generation == nil {
 		return nil, ErrNativeOnly(c)
 	}
+	var e *enhancer
+	if a.hd != nil || a.upscale {
+		e = &enhancer{c: c, info: info, adaptor: a, plan: a.hd, release: func() {}, stopped: a.hdBlocked}
+		if a.releaseSlot != nil {
+			e.release = a.releaseSlot
+		}
+		if a.upscale {
+			e.upscale = &upscaler{c: c, info: info, total: a.generation.NSamples}
+		}
+		defer e.finish()
+	}
+	var result *dto.Usage
 	switch {
 	case info.RelayMode == relayconstant.RelayModeChatCompletions:
-		return chatResponse(c, resp, info, a.generation)
+		result, err = chatResponse(c, resp, info, a.generation, e)
 	case info.IsStream:
-		return imagesStreamResponse(c, resp, info, a.generation, a.output)
+		result, err = imagesStreamResponse(c, resp, info, a.generation, a.output, e)
+	default:
+		result, err = imagesResponse(c, resp, info, a.generation, a.output, e)
 	}
-	return imagesResponse(c, resp, info, a.generation, a.output)
+	if a.generation.Upscale && a.generation.UpscaleExcluded != "" && err == nil {
+		a.upscaleResult = upscaleResult{info: info}
+		a.upscaleResult.counts[upscaleNotApplicable] = info.SettledImageCount()
+	}
+	return result, err
+}
+
+// ConsumeLogContent is what the consume log says about the HD pass and the
+// upscale. HD: the HD canvas when every image was enhanced, how many were
+// when some were, and that HD was unavailable when it was due and none was
+// (delivered at the standard size, unless the upscale enlarged some image).
+// The upscale, when the channel has it on and the request did not opt out:
+// how many images were upscaled, and how many were not for want of Anlas,
+// for not qualifying, or for a failure. Nothing for a pass that was not due,
+// or once the client left. HD's reason stays in the admins' diagnostics, the
+// upscale's in the server log: the account's Anlas are the operator's
+// business.
+func (a *Adaptor) ConsumeLogContent() []*common.Message {
+	var content []*common.Message
+	result := a.hdResult
+	switch {
+	case result.info == nil || result.delivered == 0 || clientLeftRequest(result.info):
+	case result.enhanced == 0 && a.upscaleResult.counts[upscaleApplied] > 0:
+		content = append(content, common.NewMessage("HD unavailable"))
+	case result.enhanced == 0:
+		content = append(content, common.NewMessage("HD unavailable, delivered at the standard size"))
+	case result.enhanced == result.delivered:
+		content = append(content, common.NewMessage("HD {{size}}", map[string]any{"size": result.canvas}))
+	default:
+		content = append(content, common.NewMessage("HD {{size}} for {{count}} of {{total}} images", map[string]any{"size": result.canvas, "count": result.enhanced, "total": result.delivered}))
+	}
+	return append(content, a.upscaleResult.notes()...)
+}
+
+// clientLeftRequest tells that the client left before its response reached
+// it.
+func clientLeftRequest(info *relaycommon.RelayInfo) bool {
+	return info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone
 }
 
 // ConvertOpenAIRequest turns a chat completion into a NovelAI generation
