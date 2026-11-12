@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { Combobox as ComboboxPrimitive } from '@base-ui/react'
 import {
+  Add01Icon,
   ArrowDown01Icon,
   Cancel01Icon,
   Tick02Icon,
@@ -48,6 +49,17 @@ type LegacyComboboxProps = {
   searchPlaceholder?: string
   emptyText?: string
   allowCustomValue?: boolean
+  /**
+   * Offers a create item for typed text that matches no option label
+   * (ignoring case and surrounding spaces) and passes the trimmed text here.
+   * The value only changes when the caller selects the created option.
+   */
+  onCreate?: (label: string) => void
+  /**
+   * Translation key of the create item. Supports the `{{value}}` placeholder.
+   * Falls back to `Add "{{value}}"` when omitted.
+   */
+  createLabel?: string
   showSelectedIcon?: boolean
   className?: string
   popupClassName?: string
@@ -103,11 +115,25 @@ function OptionCombobox(props: LegacyComboboxProps) {
   const [open, setOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
   const anchor = useComboboxAnchor()
+  const createValue = React.useId()
   const selected = props.options.find((option) => option.value === props.value)
   const displayedValue = selected?.label ?? props.value ?? ''
+  const typed = search.trim()
+  const createOption = React.useMemo<ComboboxInputOption | null>(() => {
+    if (!props.onCreate || !typed) return null
+    const label = typed.toLowerCase()
+    const exists = props.options.some(
+      (option) => option.label.trim().toLowerCase() === label
+    )
+    return exists ? null : { value: createValue, label: typed }
+  }, [props.onCreate, props.options, typed, createValue])
+  const items = React.useMemo(
+    () => (createOption ? [...props.options, createOption] : props.options),
+    [props.options, createOption]
+  )
   return (
     <ComboboxPrimitive.Root
-      items={props.options}
+      items={items}
       value={selected ?? null}
       name={props.name}
       disabled={props.disabled}
@@ -121,7 +147,12 @@ function OptionCombobox(props: LegacyComboboxProps) {
         if (details.reason !== 'input-change') setSearch('')
       }}
       onValueChange={(option) => {
-        if (option) props.onValueChange?.(option.value)
+        if (!option) return
+        if (option === createOption) {
+          props.onCreate?.(option.label)
+          return
+        }
+        props.onValueChange?.(option.value)
       }}
       filter={(option, query) => {
         const term = query.trim().toLowerCase()
@@ -165,23 +196,39 @@ function OptionCombobox(props: LegacyComboboxProps) {
           {props.emptyText ?? t('No results found')}
         </ComboboxEmpty>
         <ComboboxList>
-          {(option: ComboboxInputOption) => (
-            <ComboboxItem
-              key={option.value}
-              value={option}
-              disabled={option.disabled}
-            >
-              {option.icon && <span aria-hidden>{option.icon}</span>}
-              <span className='min-w-0 break-words'>
-                {option.label}
-                {option.description && (
-                  <span className='text-muted-foreground block text-xs break-all'>
-                    {option.description}
-                  </span>
-                )}
-              </span>
-            </ComboboxItem>
-          )}
+          {(option: ComboboxInputOption) =>
+            option === createOption ? (
+              <ComboboxItem key={option.value} value={option}>
+                <HugeiconsIcon
+                  icon={Add01Icon}
+                  strokeWidth={2}
+                  className='text-muted-foreground'
+                  aria-hidden='true'
+                />
+                <span className='min-w-0 break-words'>
+                  {t(props.createLabel ?? 'Add "{{value}}"', {
+                    value: option.label,
+                  })}
+                </span>
+              </ComboboxItem>
+            ) : (
+              <ComboboxItem
+                key={option.value}
+                value={option}
+                disabled={option.disabled}
+              >
+                {option.icon && <span aria-hidden>{option.icon}</span>}
+                <span className='min-w-0 break-words'>
+                  {option.label}
+                  {option.description && (
+                    <span className='text-muted-foreground block text-xs break-all'>
+                      {option.description}
+                    </span>
+                  )}
+                </span>
+              </ComboboxItem>
+            )
+          }
         </ComboboxList>
       </ComboboxContent>
     </ComboboxPrimitive.Root>

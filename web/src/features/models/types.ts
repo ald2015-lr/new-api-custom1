@@ -76,6 +76,14 @@ export interface Vendor {
 }
 
 /**
+ * Vendor the catalog infers without a saved record. Choosing one saves it.
+ */
+export interface BuiltinVendor {
+  name: string
+  icon?: string
+}
+
+/**
  * Prefill group entity
  */
 export interface PrefillGroup {
@@ -152,6 +160,7 @@ export interface GetVendorsResponse {
     total: number
     page: number
     page_size: number
+    builtin_vendors?: BuiltinVendor[]
   }
 }
 

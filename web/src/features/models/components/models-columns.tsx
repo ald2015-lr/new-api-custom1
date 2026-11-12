@@ -134,10 +134,27 @@ export function useModelsColumns(
                       : t('Missing metadata')}
                   </span>
                   {model.name_rule !== 0 && (
-                    <span className='shrink-0'>
-                      {rules[model.name_rule as 0 | 1 | 2 | 3]?.label} ·{' '}
-                      {model.matched_count ?? 0}
-                    </span>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span
+                            tabIndex={0}
+                            aria-description={t(
+                              'Only models on enabled channels count as matches. Matching is case-sensitive.'
+                            )}
+                            className='shrink-0'
+                          />
+                        }
+                      >
+                        {rules[model.name_rule as 0 | 1 | 2 | 3]?.label} ·{' '}
+                        {model.matched_count ?? 0}
+                      </TooltipTrigger>
+                      <TooltipContent role='tooltip'>
+                        {t(
+                          'Only models on enabled channels count as matches. Matching is case-sensitive.'
+                        )}
+                      </TooltipContent>
+                    </Tooltip>
                   )}
                 </div>
               </div>

@@ -326,6 +326,25 @@ it('keeps long model names and translated channel labels truncated inside their 
   expect(screen.getAllByText('渠道 0 · 分组 0')).toHaveLength(2)
 })
 
+it('explains on a rule count that only enabled channels count and matching is case-sensitive', async () => {
+  await renderList([
+    {
+      ...metadata,
+      model_name: 'nai-diffusion',
+      name_rule: 1,
+      matched_count: 0,
+    },
+  ])
+  const explanation =
+    'Only models on enabled channels count as matches. Matching is case-sensitive.'
+  const count = screen.getByText('Prefix · 0')
+  expect(count).toHaveAttribute('aria-description', explanation)
+  expect(count).toHaveAttribute('tabindex', '0')
+  const user = userEvent.setup()
+  await user.hover(count)
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(explanation)
+})
+
 it('prefills and creates metadata only when the user explicitly saves it', async () => {
   await renderList([channel])
   const post = vi.spyOn(api, 'post').mockResolvedValue({
