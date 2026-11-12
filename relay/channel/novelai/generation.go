@@ -8,9 +8,12 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -160,9 +163,9 @@ var relayOwnedParameters = map[string]bool{
 // SMEA, Variety+ or decrisper, V5 Full Medium fixes its steps, sampler and UC,
 // V3 has no V4 captions or characters. Presets are expanded as the NovelAI
 // web client does (the server does not): the quality tags go after the
-// prompt and the UC preset in front of the negative prompt, unless the
-// request turns them off. A failure is a 400 that skips retries: another
-// channel would reject the request the same way.
+// prompt (withPresetTags) and the UC preset in front of the negative prompt,
+// unless the request turns them off. A failure is a 400 that skips retries:
+// another channel would reject the request the same way.
 func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *types.NewAPIError) {
 	model := intent.Model
 	modelProfile, ok := profiles[model]
@@ -203,10 +206,18 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	}
 	fields := requestFields{c: c, values: user}
 
-	var source image.Image
+	// The headers of the image and the mask are checked first; they are
+	// decoded once everything else is valid.
+	var source image.Rectangle
 	if intent.Image != nil {
-		var err *types.NewAPIError
-		if source, err = decodeImageInput(c, intent.Image, "image"); err != nil {
+		config, err := imageInputConfig(c, intent.Image, "image")
+		if err != nil {
+			return nil, err
+		}
+		source = image.Rect(0, 0, config.Width, config.Height)
+	}
+	if intent.Mask != nil {
+		if _, err := imageInputConfig(c, intent.Mask, "mask"); err != nil {
 			return nil, err
 		}
 	}
@@ -281,6 +292,11 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	if apiErr != nil {
 		return nil, apiErr
 	}
+	if sampler == "ddim_v3" && slices.Contains(ddimFailingSteps, steps) {
+		// NovelAI's DDIM fails at these step counts; novelai-bridge falls
+		// back to k_euler_ancestral, with a noise schedule.
+		sampler = defaultSampler
+	}
 	parameters["sampler"] = sampler
 	schedule := defaultSchedule
 	if requested, err := fields.choice("noise_schedule", noiseSchedules, model); err != nil {
@@ -354,10 +370,11 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	if explicitPrompt != nil {
 		prompt = explicitPrompt.baseCaption
 	} else {
+		tags := modelProfile.quality[quality]
 		if intent.Transparent {
-			prompt = joinTags(prompt, transparentTag)
+			tags = joinTags(transparentTag, tags)
 		}
-		prompt = joinTags(prompt, modelProfile.quality[quality])
+		prompt = withPresetTags(prompt, tags, modelProfile.family == familyV3)
 	}
 	userNegative, apiErr := fields.str("negative_prompt")
 	if apiErr != nil {
@@ -436,7 +453,6 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	}
 
 	if action != ActionGenerate {
-		parameters["image"] = encodePNGBase64(coverResize(source, width, height, draw.CatmullRom))
 		parameters["extra_noise_seed"] = seed
 		noise := 0.0
 		if requested, err := fields.number("noise", 0, 0.99); err != nil {
@@ -455,16 +471,6 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 			parameters["noise"] = noise
 			parameters["color_correct"] = true
 		} else {
-			mask, err := decodeImageInput(c, intent.Mask, "mask")
-			if err != nil {
-				return nil, err
-			}
-			encodedMask, ok := novelAIMask(mask, width, height)
-			if !ok {
-				return nil, badRequest(c, i18n.MsgNovelAIMaskEmpty, nil)
-			}
-			parameters["mask"] = encodedMask
-			parameters["request_type"] = infillingRequest
 			strength := 1.0
 			if requested, err := fields.number("strength", 0.01, 1); err != nil {
 				return nil, err
@@ -481,7 +487,22 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 				parameters["img2img"] = map[string]any{"strength": strength, "noise": noise, "color_correct": true, "extra_noise_seed": seed}
 				parameters["inpaintImg2ImgStrength"] = strength
 			}
+			mask, err := decodeImageInput(c, intent.Mask, "mask")
+			if err != nil {
+				return nil, err
+			}
+			encodedMask, ok := novelAIMask(mask, source, width, height)
+			if !ok {
+				return nil, badRequest(c, i18n.MsgNovelAIMaskEmpty, nil)
+			}
+			parameters["mask"] = encodedMask
+			parameters["request_type"] = infillingRequest
 		}
+		decoded, err := decodeImageInput(c, intent.Image, "image")
+		if err != nil {
+			return nil, err
+		}
+		parameters["image"] = encodePNGBase64(coverResize(decoded, coverCrop(decoded.Bounds(), width, height), width, height, draw.CatmullRom))
 	}
 
 	// The rest of parameters goes to NovelAI as sent.
@@ -513,6 +534,9 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	}, nil
 }
 
+// ddimFailingSteps are the step counts at which V3's DDIM fails on NovelAI.
+var ddimFailingSteps = []int64{3, 9, 27, 36, 37}
+
 // interpretedKeys are the parameters the builder reads and normalizes; the
 // value it settles on replaces the request's. Any other key of parameters is
 // forwarded as sent, overriding the relay's default for it.
@@ -540,25 +564,24 @@ func sampleLimit(pixels int) int {
 // generationSize resolves the canvas: parameters.width / height when the
 // request sets them (exact multiples of 64 within NovelAI's area), otherwise
 // the OpenAI size rounded to multiples of 64 and scaled into NovelAI's area.
-// An auto size is 1024x1024 for a generation (or the extension aspect_ratio
-// at about that area) and the source's aspect ratio at about 1024x1024 for
-// an edit.
-func generationSize(c *gin.Context, fields requestFields, size string, source image.Image) (int, int, *types.NewAPIError) {
+// An auto size is 1024x1024 for a generation (or the canvas of the extension
+// aspect_ratio, aspectSize) and the aspect ratio of the source (its bounds,
+// empty without one) within 1024x1024's area for an edit.
+func generationSize(c *gin.Context, fields requestFields, size string, source image.Rectangle) (int, int, *types.NewAPIError) {
 	invalidDimensions := badRequest(c, i18n.MsgNovelAIDimensionsInvalid, map[string]any{"Max": maxPixels})
 	var width, height int
 	size = strings.TrimSpace(size)
 	switch {
 	case size == "" || strings.EqualFold(size, "auto"):
-		aspect, err := fields.aspectRatio()
+		aspectWidth, aspectHeight, err := fields.aspectSize()
 		if err != nil {
 			return 0, 0, err
 		}
 		switch {
-		case aspect > 0:
-			width, height = areaSize(aspect, autoEditPixels)
-		case source != nil:
-			bounds := source.Bounds()
-			width, height = areaSize(float64(bounds.Dx())/float64(bounds.Dy()), autoEditPixels)
+		case aspectWidth > 0:
+			width, height = aspectWidth, aspectHeight
+		case !source.Empty():
+			width, height = areaSize(float64(source.Dx())/float64(source.Dy()), autoEditPixels)
 		default:
 			width, height = defaultSide, defaultSide
 		}
@@ -605,29 +628,42 @@ func parseSize(size string) (int, int, bool) {
 // past NovelAI's area, scales both down into it, rounding down to 64.
 func fitSize(width, height int) (int, int) {
 	round := func(side float64) int { return max(64, int(math.Round(side/64))*64) }
-	floor := func(side float64) int { return max(64, int(side/64)*64) }
 	w, h := round(float64(width)), round(float64(height))
 	if w*h <= maxPixels {
 		return w, h
 	}
 	factor := math.Sqrt(float64(maxPixels) / float64(w*h))
-	w, h = floor(float64(w)*factor), floor(float64(h)*factor)
-	// A side held at 64 can leave the other one too long.
-	if w*h > maxPixels {
-		if w > h {
-			w = floor(float64(maxPixels / h))
-		} else {
-			h = floor(float64(maxPixels / w))
-		}
-	}
-	return w, h
+	return withinArea(floor64(float64(w)*factor), floor64(float64(h)*factor), maxPixels)
 }
 
 // areaSize is the canvas of an aspect ratio at at most pixels, both sides
 // rounded down to 64.
 func areaSize(aspect float64, pixels int) (int, int) {
-	floor := func(side float64) int { return max(64, int(side/64)*64) }
-	return floor(math.Sqrt(float64(pixels) * aspect)), floor(math.Sqrt(float64(pixels) / aspect))
+	return withinArea(floor64(math.Sqrt(float64(pixels)*aspect)), floor64(math.Sqrt(float64(pixels)/aspect)), pixels)
+}
+
+// floor64 rounds a side down to a multiple of 64, at least 64.
+func floor64(side float64) int {
+	return max(64, int(side/64)*64)
+}
+
+// withinArea brings a canvas back to at most pixels when a side held at 64
+// left the other one too long.
+func withinArea(width, height, pixels int) (int, int) {
+	switch {
+	case width*height <= pixels:
+		return width, height
+	case width > height:
+		return floor64(float64(pixels / height)), height
+	}
+	return width, floor64(float64(pixels / width))
+}
+
+// aspectPresets are the canvases nai-shengtu gives the common aspect ratios;
+// other ratios get areaSize at about 1024x1024.
+var aspectPresets = map[string][2]int{
+	"1:1": {1024, 1024}, "2:3": {832, 1216}, "3:2": {1216, 832}, "3:4": {896, 1152}, "4:3": {1152, 896},
+	"4:5": {896, 1088}, "5:4": {1088, 896}, "9:16": {768, 1344}, "16:9": {1344, 768}, "9:21": {640, 1536}, "21:9": {1536, 640},
 }
 
 // generationSeed is the request's seed, or a random one when it sends none,
@@ -779,6 +815,97 @@ func joinTags(prompt, tags string) string {
 	return prompt + ", " + tags
 }
 
+// mixWeight is the trailing :weight of a V3 mixed prompt.
+var mixWeight = regexp.MustCompile(`:-?[0-9.]+\s*$`)
+
+// withPresetTags adds the preset tags (the transparency tag and the quality
+// suffix) to a prompt where the web client puts them. From V4 on they go to
+// the base prompt only, the first character field, and before a Text: block,
+// whose text NovelAI draws literally: the tags then end with a period. On V3,
+// whose | mixes prompts, every mixed prompt gets them before its :weight.
+func withPresetTags(prompt, tags string, v3 bool) string {
+	if tags == "" {
+		return prompt
+	}
+	fields := promptFields(prompt)
+	if !v3 {
+		field := fields[0]
+		if start := textBlockStart(field); start >= 0 {
+			head := strings.TrimRightFunc(field[:start], func(r rune) bool { return unicode.IsSpace(r) || r == ',' || r == '.' })
+			fields[0] = joinTags(head, tags) + ". " + field[start:]
+		} else {
+			head := strings.TrimRightFunc(field, unicode.IsSpace)
+			fields[0] = joinTags(head, tags) + field[len(head):]
+		}
+		return strings.Join(fields, "|")
+	}
+	for i, field := range fields {
+		weight := ""
+		if len(fields) > 1 {
+			if loc := mixWeight.FindStringIndex(field); loc != nil {
+				field, weight = field[:loc[0]], field[loc[0]:]
+			}
+		}
+		head := strings.TrimRightFunc(field, unicode.IsSpace)
+		fields[i] = joinTags(head, tags) + field[len(head):] + weight
+	}
+	return strings.Join(fields, "|")
+}
+
+// promptFields splits a prompt at its single bars, which mix prompts on V3
+// and separate character fields from V4 on. A || pair delimits a
+// randomizer, whose single bars separate its alternatives.
+func promptFields(prompt string) []string {
+	var fields []string
+	start, randomizer := 0, false
+	for i := 0; i < len(prompt); i++ {
+		switch {
+		case strings.HasPrefix(prompt[i:], "||"):
+			randomizer = !randomizer
+			i++
+		case prompt[i] == '|' && !randomizer:
+			fields = append(fields, prompt[start:i])
+			start = i + 1
+		}
+	}
+	return append(fields, prompt[start:])
+}
+
+// textBlockStart is where the first Text: block of a V4+ prompt field
+// starts, or -1. The marker is the web client's: "text:" in any case but not
+// "text::", at the start or after a space or one of , . : [ ] { } | 、 。; the
+// brackets that open right before it belong to the block. A block inside a
+// randomizer starts where the randomizer does.
+func textBlockStart(field string) int {
+	randomizer := -1
+	for i := 0; i < len(field); i++ {
+		if strings.HasPrefix(field[i:], "||") {
+			if randomizer < 0 {
+				randomizer = i
+			} else {
+				randomizer = -1
+			}
+			i++
+			continue
+		}
+		rest := field[i:]
+		if len(rest) < 5 || !strings.EqualFold(rest[:5], "text:") || strings.HasPrefix(rest[5:], ":") {
+			continue
+		}
+		if previous, _ := utf8.DecodeLastRuneInString(field[:i]); i > 0 && !unicode.IsSpace(previous) && !strings.ContainsRune(",.:[]{}|、。", previous) {
+			continue
+		}
+		if randomizer >= 0 {
+			i = randomizer
+		}
+		for i > 0 && (field[i-1] == '[' || field[i-1] == '{') {
+			i--
+		}
+		return i
+	}
+	return -1
+}
+
 func badRequest(c *gin.Context, key string, args map[string]any) *types.NewAPIError {
 	return types.NewErrorWithStatusCode(errors.New(i18n.T(c, key, args)), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 }
@@ -880,19 +1007,24 @@ func (f requestFields) varietySigma(modelProfile *profile, width, height int) (a
 	return modelProfile.varietySigma * math.Sqrt(float64(width*height)/varietyArea), nil
 }
 
-// aspectRatio reads the extension aspect_ratio "W:H" (0 when absent).
-func (f requestFields) aspectRatio() (float64, *types.NewAPIError) {
+// aspectSize is the canvas of the extension aspect_ratio "W:H" (0, 0 when
+// absent): its aspectPresets canvas, or areaSize at about 1024x1024.
+func (f requestFields) aspectSize() (int, int, *types.NewAPIError) {
 	value, err := f.str("aspect_ratio")
 	if err != nil || value == "" || strings.EqualFold(value, "auto") {
-		return 0, err
+		return 0, 0, err
 	}
 	w, h, ok := strings.Cut(value, ":")
 	width, errW := strconv.ParseFloat(strings.TrimSpace(w), 64)
 	height, errH := strconv.ParseFloat(strings.TrimSpace(h), 64)
 	if !ok || errW != nil || errH != nil || !(width > 0) || !(height > 0) || width/height > 64 || height/width > 64 {
-		return 0, f.invalid("aspect_ratio")
+		return 0, 0, f.invalid("aspect_ratio")
 	}
-	return width / height, nil
+	if preset, ok := aspectPresets[strconv.FormatFloat(width, 'f', -1, 64)+":"+strconv.FormatFloat(height, 'f', -1, 64)]; ok {
+		return preset[0], preset[1], nil
+	}
+	canvasWidth, canvasHeight := areaSize(width/height, autoEditPixels)
+	return canvasWidth, canvasHeight, nil
 }
 
 // explicitCaption is a V4 caption object the request sends itself.

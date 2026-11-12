@@ -55,9 +55,8 @@ func generationSlot(key string) chan struct{} {
 
 // holdGeneration takes the generation slot of the channel key for a request
 // to NovelAI's image host and returns its release, a no-op for any other
-// channel. The slot is released once, by the first of: release, the
-// response body being closed (generationBody), or the end of the client's
-// request.
+// channel. The slot is released once, by the first of: release, the end of
+// the response body (generationBody), or the end of the client's request.
 func holdGeneration(c *gin.Context, info *relaycommon.RelayInfo) (func(), *types.NewAPIError) {
 	if info.ChannelType != constant.ChannelTypeNovelAI || !isNovelAIImageHost(info.ChannelBaseUrl) {
 		return func() {}, nil
@@ -79,11 +78,21 @@ func holdGeneration(c *gin.Context, info *relaycommon.RelayInfo) (func(), *types
 	return release, nil
 }
 
-// generationBody releases the generation slot when the response body is
-// closed: NovelAI generates while the body arrives.
+// generationBody releases the generation slot when the response body ends (a
+// read reaches its end or fails) or is closed: NovelAI generates while the
+// body arrives, and is free once all of it arrived, however long the relay
+// then takes to hand the images to its client.
 type generationBody struct {
 	io.ReadCloser
 	release func()
+}
+
+func (b *generationBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.release()
+	}
+	return n, err
 }
 
 func (b *generationBody) Close() error {

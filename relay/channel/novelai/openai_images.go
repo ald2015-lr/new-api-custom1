@@ -53,12 +53,16 @@ var rejectedImageFields = []string{"markup", "frame_count", "frame_duration_ms",
 // or /v1/images/edits as JSON or multipart, into a GenerationIntent and the
 // output it asks for. Edits take one image (image, image[] or images[0]),
 // and a mask makes them inpaint; a generation with the extension image is
-// an edit. quality, moderation, style, user, input_fidelity and similar
-// fields are ignored.
+// an edit. The NovelAI keys come from the top level or the extra_fields
+// object, the top level first. quality, moderation, style, user,
+// input_fidelity and similar fields are ignored.
 func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ImageRequest) (GenerationIntent, ImageOutput, *types.NewAPIError) {
 	var output ImageOutput
 	fields, files, apiErr := imageRequestFields(c)
 	if apiErr != nil {
+		return GenerationIntent{}, output, apiErr
+	}
+	if apiErr := mergeNestedFields(c, fields, "extra_fields"); apiErr != nil {
 		return GenerationIntent{}, output, apiErr
 	}
 	present := func(key string) bool {
@@ -119,21 +123,21 @@ func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request 
 		output.Event = "image_edit"
 	}
 
-	images, apiErr := imageInputs(c, fields, files, "image")
+	sourceImage, images, apiErr := imageInput(c, fields, files, "image")
 	if apiErr != nil {
 		return GenerationIntent{}, output, apiErr
 	}
-	masks, apiErr := imageInputs(c, fields, files, "mask")
+	if images > 1 {
+		return GenerationIntent{}, output, badRequest(c, i18n.MsgNovelAIImageMultiple, map[string]any{"Count": images})
+	}
+	mask, masks, apiErr := imageInput(c, fields, files, "mask")
 	if apiErr != nil {
 		return GenerationIntent{}, output, apiErr
 	}
-	if len(images) > 1 {
-		return GenerationIntent{}, output, badRequest(c, i18n.MsgNovelAIImageMultiple, map[string]any{"Count": len(images)})
-	}
-	if len(masks) > 1 {
+	if masks > 1 {
 		return GenerationIntent{}, output, badRequest(c, i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": "mask"})
 	}
-	if len(images) == 0 && (info.RelayMode == relayconstant.RelayModeImagesEdits || len(masks) > 0) {
+	if images == 0 && (info.RelayMode == relayconstant.RelayModeImagesEdits || masks > 0) {
 		return GenerationIntent{}, output, badRequest(c, i18n.MsgNovelAIImageMissing, nil)
 	}
 
@@ -155,15 +159,11 @@ func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request 
 		PresetsOff:  info.ChannelOtherSettings.NovelAIPresetsDisabled,
 		Extras:      extras,
 		Parameters:  parameters,
+		Image:       sourceImage,
+		Mask:        mask,
 	}
 	if output.OutputFormat == formatWebP {
 		intent.ImageFormat = formatWebP
-	}
-	if len(images) == 1 {
-		intent.Image = images[0]
-	}
-	if len(masks) == 1 {
-		intent.Mask = masks[0]
 	}
 	return intent, output, nil
 }
@@ -198,57 +198,59 @@ func imageRequestFields(c *gin.Context) (map[string]json.RawMessage, map[string]
 	return fields, nil, nil
 }
 
-// imageInputs loads the images a request gives for field ("image" or
-// "mask"): multipart files named field or field[...] and form values, or in
-// JSON the value of field (a URL, data URL or base64 string, an
-// {"image_url": ...} object, or a list of them) and, for image, the
-// images list of the JSON edit body. file_id references are rejected: there
-// is no Files API to read them from.
-func imageInputs(c *gin.Context, fields map[string]json.RawMessage, files map[string][]*multipart.FileHeader, field string) ([][]byte, *types.NewAPIError) {
-	var images [][]byte
-	for key, headers := range files {
-		if key != field && !strings.HasPrefix(key, field+"[") {
-			continue
-		}
-		for _, header := range headers {
-			file, err := header.Open()
-			if err != nil {
-				return nil, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxInputPixels})
-			}
-			data, err := io.ReadAll(file)
-			_ = file.Close()
-			if err != nil || len(data) == 0 {
-				return nil, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxInputPixels})
-			}
-			images = append(images, data)
+// imageInput counts the images a request gives for field ("image" or
+// "mask") and loads the image when there is exactly one: NovelAI takes one,
+// so more are rejected before anything is read or downloaded. They are the
+// multipart files named field or field[...], or in JSON the value of field
+// (a URL, data URL or base64 string, an {"image_url": ...} object, or a list
+// of them) and, for image, the images list of the JSON edit body. file_id
+// references are rejected: there is no Files API to read them from.
+func imageInput(c *gin.Context, fields map[string]json.RawMessage, files map[string][]*multipart.FileHeader, field string) ([]byte, int, *types.NewAPIError) {
+	var headers []*multipart.FileHeader
+	for key, list := range files {
+		if key == field || strings.HasPrefix(key, field+"[") {
+			headers = append(headers, list...)
 		}
 	}
 	keys := []string{field}
 	if field == "image" {
 		keys = append(keys, "images")
 	}
+	var references []json.RawMessage
 	for _, key := range keys {
 		raw, ok := fields[key]
 		if !ok || isJSONNull(raw) || string(raw) == `""` {
 			continue
 		}
-		var references []json.RawMessage
-		if common.GetJsonType(raw) == "array" {
-			if common.Unmarshal(raw, &references) != nil {
-				return nil, badRequest(c, i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": key})
-			}
-		} else {
-			references = []json.RawMessage{raw}
+		if common.GetJsonType(raw) != "array" {
+			references = append(references, raw)
+			continue
 		}
-		for _, reference := range references {
-			data, apiErr := imageReference(c, reference, field)
-			if apiErr != nil {
-				return nil, apiErr
-			}
-			images = append(images, data)
+		var list []json.RawMessage
+		if common.Unmarshal(raw, &list) != nil {
+			return nil, 0, badRequest(c, i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": key})
 		}
+		references = append(references, list...)
 	}
-	return images, nil
+	count := len(headers) + len(references)
+	if count != 1 {
+		return nil, count, nil
+	}
+	if len(references) == 1 {
+		data, apiErr := imageReference(c, references[0], field)
+		return data, count, apiErr
+	}
+	invalid := badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxInputPixels})
+	file, err := headers[0].Open()
+	if err != nil {
+		return nil, count, invalid
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil || len(data) == 0 {
+		return nil, count, invalid
+	}
+	return data, count, nil
 }
 
 // imageReference loads one JSON image reference: a string, or an object
@@ -329,7 +331,7 @@ func ImageUsage(usage *dto.Usage) OpenAIImageUsage {
 func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, generation *Generation, output ImageOutput) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
 	usage := generation.Usage()
-	images, clientLeft, apiErr := readImages(c, resp, info)
+	images, clientLeft, apiErr := readImages(c, resp, info, generation.NSamples)
 	if clientLeft {
 		return usage, nil
 	}
@@ -374,11 +376,13 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 	return usage, nil
 }
 
-// readImages reads the images of a complete /ai/generate-image response. A
+// readImages reads the images of a complete /ai/generate-image response, at
+// most samples: the n_samples asked for, which billing reserved, so an
+// answer with more raises neither what is delivered nor what is billed. A
 // read the client cut short by leaving reports clientLeft, which keeps the
 // reserved quantity; any other failure is a final 502, as upstream accepted
 // the job (2xx) and may have spent Anlas on it.
-func readImages(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (images [][]byte, clientLeft bool, apiErr *types.NewAPIError) {
+func readImages(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, samples int) (images [][]byte, clientLeft bool, apiErr *types.NewAPIError) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
 	if err != nil {
 		if c.Request.Context().Err() != nil {
@@ -393,6 +397,10 @@ func readImages(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo
 	images, err = ParseImages(body)
 	if err != nil || len(images) == 0 {
 		return nil, false, noImageError(c, err)
+	}
+	if len(images) > samples {
+		logger.LogWarn(c, common.LogText("NovelAI returned %d images for %d asked for, keeping %d", len(images), samples, samples))
+		images = images[:samples]
 	}
 	return images, false, nil
 }

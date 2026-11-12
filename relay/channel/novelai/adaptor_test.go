@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -19,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -35,9 +38,11 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/image/draw"
 )
 
 // NovelAI generates images at image.novelai.net and answers the account at
@@ -248,6 +253,18 @@ func solid(c color.Color) func(x, y int) color.Color {
 	return func(int, int) color.Color { return c }
 }
 
+// pngHeader is a PNG that ends after its IHDR chunk (truecolor at bitDepth):
+// its header reads, its pixels do not decode.
+func pngHeader(width, height int, bitDepth byte) []byte {
+	chunk := []byte("IHDR")
+	chunk = binary.BigEndian.AppendUint32(chunk, uint32(width))
+	chunk = binary.BigEndian.AppendUint32(chunk, uint32(height))
+	chunk = append(chunk, bitDepth, 2, 0, 0, 0)
+	data := binary.BigEndian.AppendUint32([]byte("\x89PNG\r\n\x1a\n"), uint32(len(chunk)-4))
+	data = append(data, chunk...)
+	return binary.BigEndian.AppendUint32(data, crc32.ChecksumIEEE(chunk))
+}
+
 // decodedBase64Image decodes a base64 PNG of a NovelAI request.
 func decodedBase64Image(t *testing.T, value any) image.Image {
 	t.Helper()
@@ -297,8 +314,10 @@ func raw(value string) json.RawMessage { return json.RawMessage(value) }
 // the same OpenAI-format input: prompt "1girl, cat ears", negative "bad
 // hands", seed 1234567890, an auto size, and for the edits a 96x64 source
 // (auto size: its aspect at about 1024x1024, 1216x832) with img2img strength
-// 0.5, and a mask whose right half is transparent. Run with -update to
-// rewrite testdata/requests after a deliberate change, and review the diff.
+// 0.5, and a mask whose right half is transparent; and prompts with a Text:
+// block, character fields and V3 mixing, whose preset tags go where the web
+// client puts them. Run with -update to rewrite testdata/requests after a
+// deliberate change, and review the diff.
 func TestBuildGenerationGoldenRequests(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	source := testImage(96, 64, func(x, y int) color.Color { return color.NRGBA{R: uint8(x * 2), G: uint8(y * 3), B: 128, A: 255} })
@@ -330,6 +349,21 @@ func TestBuildGenerationGoldenRequests(t *testing.T) {
 	partial := GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "1girl, cat ears", N: 1, Image: source, Mask: mask,
 		Extras: map[string]json.RawMessage{"seed": raw("1234567890"), "strength": raw("0.6"), "noise": raw("0.1")}}
 	variants = append(variants, variant{"nai-diffusion-4-5-full-infill-strength", partial})
+	for name, prompt := range map[string]string{
+		// Before the Text: block, which NovelAI draws as literal text.
+		"nai-diffusion-4-5-full-text-block": "1girl, holding sign, Text: OPEN",
+		"nai-diffusion-5-full-text-block":   "1girl, holding sign, Text: OPEN",
+		// In the first character field only.
+		"nai-diffusion-4-5-full-character-fields": "girl | boy",
+		// Before each mixed prompt's weight.
+		"nai-diffusion-3-mixed-prompts": "cat:0.6 | dog:0.4",
+	} {
+		model, _, _ := strings.Cut(name, "-text-block")
+		model, _, _ = strings.Cut(model, "-character-fields")
+		model, _, _ = strings.Cut(model, "-mixed-prompts")
+		intent := GenerationIntent{Model: model, Prompt: prompt, N: 1, Extras: extras, Transparent: model == "nai-diffusion-5-full"}
+		variants = append(variants, variant{name, intent})
+	}
 
 	for _, tc := range variants {
 		t.Run(tc.name, func(t *testing.T) {
@@ -378,7 +412,8 @@ func buildRejected(t *testing.T, intent GenerationIntent) string {
 }
 
 // The OpenAI size becomes NovelAI's canvas: auto is 1024x1024 for a
-// generation and the source's aspect ratio at about 1024x1024 for an edit,
+// generation (aspect_ratio's preset canvas, or its ratio at about that
+// area) and the source's aspect ratio within 1024x1024's area for an edit,
 // other sizes round to multiples of 64 and shrink into 3,145,728 pixels;
 // parameters.width / height set it exactly. n is never clamped: billing
 // reserved it, so a count past NovelAI's limit for the area (8 up to
@@ -399,7 +434,13 @@ func TestBuildGenerationSizeAndCount(t *testing.T) {
 		{"capped area keeps the aspect", GenerationIntent{Size: "4096x4096"}, 1728, 1728},
 		{"extreme aspect stays in the area", GenerationIntent{Size: "65536x64"}, 49152, 64},
 		{"aspect_ratio extension", GenerationIntent{Size: "auto", Extras: map[string]json.RawMessage{"aspect_ratio": raw(`"2:3"`)}}, 832, 1216},
+		{"aspect_ratio preset", GenerationIntent{Extras: map[string]json.RawMessage{"aspect_ratio": raw(`"3:4"`)}}, 896, 1152},
+		{"aspect_ratio without a preset", GenerationIntent{Extras: map[string]json.RawMessage{"aspect_ratio": raw(`"1:2"`)}}, 704, 1408},
 		{"edit at the source aspect", GenerationIntent{Image: wide}, 1728, 576},
+		// A side held at 64 must not leave the other past Opus's free area,
+		// let alone past NovelAI's: an auto size is never rejected.
+		{"edit at an extreme aspect stays in the free area", GenerationIntent{Image: testImage(1, 400, solid(color.White))}, 64, 16384},
+		{"edit past NovelAI's aspect still gets an auto size", GenerationIntent{Image: testImage(2400, 1, solid(color.White))}, 16384, 64},
 		{"edit at an explicit size", GenerationIntent{Image: wide, Size: "512x512"}, 512, 512},
 		{"parameters set the canvas", GenerationIntent{Size: "1024x1024", Parameters: map[string]json.RawMessage{"width": raw("832"), "height": raw("1216")}}, 832, 1216},
 	} {
@@ -410,6 +451,9 @@ func TestBuildGenerationSizeAndCount(t *testing.T) {
 			assert.Equal(t, float64(tc.height), parameters["height"])
 			assert.Equal(t, fmt.Sprintf("%dx%d", tc.width, tc.height), generation.Size())
 			assert.LessOrEqual(t, tc.width*tc.height, maxPixels)
+			if tc.intent.Size == "" {
+				assert.LessOrEqual(t, tc.width*tc.height, autoEditPixels, "an auto size is free on Opus")
+			}
 		})
 	}
 
@@ -504,6 +548,11 @@ func TestBuildGenerationPassthroughPrecedence(t *testing.T) {
 	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-3", Extras: map[string]json.RawMessage{"sampler": raw(`"ddim"`)}})
 	assert.Equal(t, "ddim_v3", parameters["sampler"])
 	assert.NotContains(t, parameters, "noise_schedule", "DDIM takes no noise schedule")
+	for _, steps := range []string{"3", "9", "27", "36", "37"} {
+		_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-furry-3", Extras: map[string]json.RawMessage{"sampler": raw(`"ddim_v3"`), "steps": raw(steps)}})
+		assert.Equal(t, "k_euler_ancestral", parameters["sampler"], "NovelAI's DDIM fails at %s steps", steps)
+		assert.Equal(t, "karras", parameters["noise_schedule"])
+	}
 	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-curated", Extras: map[string]json.RawMessage{"variety": raw("true")}, Size: "1024x1024"})
 	assert.InDelta(t, 59.047, parameters["skip_cfg_above_sigma"], 0.001, "Variety+ at 1024x1024 on V4.5")
 
@@ -566,6 +615,14 @@ func TestParseExtensions(t *testing.T) {
 	_, _, apiErr := ParseExtensions(nil, map[string]json.RawMessage{"parameters": raw(`[1]`)})
 	require.NotNil(t, apiErr)
 
+	// OpenRouter's image_config.aspect_ratio stands in for aspect_ratio.
+	extras, _, apiErr := ParseExtensions(nil, map[string]json.RawMessage{"image_config": raw(`{"aspect_ratio":"16:9","image_size":"2K"}`)})
+	require.Nil(t, apiErr)
+	assert.Equal(t, map[string]json.RawMessage{"aspect_ratio": raw(`"16:9"`)}, extras)
+	extras, _, apiErr = ParseExtensions(nil, map[string]json.RawMessage{"aspect_ratio": raw(`"3:2"`), "image_config": raw(`{"aspect_ratio":"16:9"}`)})
+	require.Nil(t, apiErr)
+	assert.Equal(t, map[string]json.RawMessage{"aspect_ratio": raw(`"3:2"`)}, extras)
+
 	fields := FormFields(map[string][]string{
 		"negative_prompt": {"123"}, "steps": {"28"}, "qualityToggle": {"false"}, "parameters[scale]": {"6"}, "parameters[sampler]": {"k_euler"}, "prompt": {"true"},
 	})
@@ -578,9 +635,77 @@ func TestParseExtensions(t *testing.T) {
 	assert.Equal(t, map[string]json.RawMessage{"scale": raw("6"), "sampler": raw(`"k_euler"`)}, formParameters)
 }
 
+// An OpenAI images request takes NovelAI's keys from its top level or from
+// new-api's extra_fields object, the top level first. Edits take one image
+// and one mask: a request with more is rejected before any is read, so a
+// list of URLs downloads nothing.
+func TestImageGenerationIntent(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	fetch := system_setting.GetFetchSetting()
+	savedFetch := *fetch
+	// The test server is on loopback, which the SSRF guard refuses.
+	fetch.EnableSSRFProtection = false
+	savedDownloadMB := constant.MaxFileDownloadMB
+	constant.MaxFileDownloadMB = 64
+	t.Cleanup(func() { *fetch, constant.MaxFileDownloadMB = savedFetch, savedDownloadMB })
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloads.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testImage(8, 8, solid(color.White)))
+	}))
+	t.Cleanup(server.Close)
+	intent := func(path, body string) (GenerationIntent, *types.NewAPIError) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		request := &dto.ImageRequest{}
+		require.NoError(t, common.UnmarshalBodyReusable(c, request))
+		relayMode := relayconstant.RelayModeImagesGenerations
+		if path == "/v1/images/edits" {
+			relayMode = relayconstant.RelayModeImagesEdits
+		}
+		intent, _, apiErr := imageGenerationIntent(c, &relaycommon.RelayInfo{RelayMode: relayMode, ChannelMeta: &relaycommon.ChannelMeta{}}, request)
+		return intent, apiErr
+	}
+
+	got, apiErr := intent("/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","steps":30,"extra_fields":{"negative_prompt":"bad hands","steps":10,"seed":5}}`)
+	require.Nil(t, apiErr)
+	assert.Equal(t, map[string]json.RawMessage{"negative_prompt": raw(`"bad hands"`), "seed": raw("5"), "steps": raw("30")}, got.Extras)
+
+	url := func(i int) string { return fmt.Sprintf(`{"image_url":"%s/image.png?%d"}`, server.URL, i) }
+	for _, tc := range []struct{ name, body, message string }{
+		{"images", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","images":[` + url(0) + `,` + url(1) + `,` + url(2) + `]}`, "the request carries 3"},
+		{"image and images", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","image":` + url(0) + `,"images":[` + url(1) + `]}`, "the request carries 2"},
+		{"masks", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","images":[` + url(0) + `],"mask":[` + url(1) + `,` + url(2) + `]}`, "mask"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			downloads.Store(0)
+
+			_, apiErr := intent("/v1/images/edits", tc.body)
+
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.Contains(t, apiErr.Error(), tc.message)
+			assert.LessOrEqual(t, downloads.Load(), int32(1), "only a lone image is read, the mask list is not")
+			if tc.name != "masks" {
+				assert.Zero(t, downloads.Load(), "a request with several images downloads none")
+			}
+		})
+	}
+	downloads.Store(0)
+	got, apiErr = intent("/v1/images/edits", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","images":[`+url(0)+`]}`)
+	require.Nil(t, apiErr)
+	assert.Equal(t, int32(1), downloads.Load())
+	assert.Equal(t, "png", SniffImageFormat(got.Image))
+}
+
 // NovelAI does not expand presets, so the relay does as the web client:
 // the quality tags after the prompt (after "transparent background" when
-// asked for) and the UC preset in front of the negative prompt, with "nsfw, "
+// asked for; before a Text: block and in the first character field only, or
+// on V3 before each mixed prompt's weight) and the UC preset in front of the
+// negative prompt, with "nsfw, "
 // first on non-Curated models unless the prompt mentions nsfw. A request
 // turns them off with qualityToggle false, qualityPresetId or ucPresetId
 // "none" (V3's none is "lowres" without a negative prompt), a channel can
@@ -607,6 +732,24 @@ func TestBuildGenerationPresets(t *testing.T) {
 	assert.Equal(t, "lowres", negative)
 	_, negative = prompts(GenerationIntent{Model: "nai-diffusion-3", Prompt: "1girl", Extras: map[string]json.RawMessage{"ucPreset": raw("2")}})
 	assert.Equal(t, "nsfw, "+ucV3HumanFocus, negative, "the legacy index follows the model's order")
+
+	// The web client's Text: marker: any case, not "text::", at a tag
+	// boundary; it ends the base prompt, as does the first single bar. A ||
+	// randomizer's bars separate alternatives, not character fields.
+	for _, tc := range []struct{ model, prompt, want string }{
+		{"nai-diffusion-5-curated", "a shop sign. text: Bakery", "a shop sign, " + qualityV5Standard + ". text: Bakery"},
+		{"nai-diffusion-4-5-full", "Text: OPEN", qualityV5Standard + ". Text: OPEN"},
+		{"nai-diffusion-4-5-full", "1girl, [Text: hi]", "1girl, " + qualityV5Standard + ". [Text: hi]"},
+		{"nai-diffusion-4-5-full", "1girl, ||Text: a|Text: b||", "1girl, " + qualityV5Standard + ". ||Text: a|Text: b||"},
+		{"nai-diffusion-4-5-full", "1girl, context: night", "1girl, context: night, " + qualityV5Standard},
+		{"nai-diffusion-4-5-full", "1girl, Text::2", "1girl, Text::2, " + qualityV5Standard},
+		{"nai-diffusion-4-5-full", "1girl, ||red|blue|| hair | boy", "1girl, ||red|blue|| hair, " + qualityV5Standard + " | boy"},
+		{"nai-diffusion-3", "cat:0.2 |frog:-0.5", "cat, " + qualityV3 + ":0.2 |frog, " + qualityV3 + ":-0.5"},
+		{"nai-diffusion-3", "cute face :3", "cute face :3, " + qualityV3},
+	} {
+		input, _ := prompts(GenerationIntent{Model: tc.model, Prompt: tc.prompt})
+		assert.Equal(t, tc.want, input, tc.prompt)
+	}
 
 	// A channel can make the presets opt-in.
 	input, negative = prompts(GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "1girl", PresetsOff: true, Extras: map[string]json.RawMessage{"negative_prompt": raw(`"bad hands"`)}})
@@ -732,6 +875,104 @@ func TestBuildGenerationEditImages(t *testing.T) {
 	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-5-full"})
 	assert.NotContains(t, parameters, "tag_hint_transparent_background")
 	buildRejected(t, GenerationIntent{Model: "nai-diffusion-5-curated", Image: source, Mask: openAIMask, Transparent: true})
+
+	// A mask of another size than the image is stretched over it, so both
+	// get the same crop: rows 0-47 of a 128x128 mask over a 256x128 image
+	// are canvas rows 0-23 at 128x64, not the rows of the mask's own crop.
+	topRows := testImage(128, 128, func(x, y int) color.Color {
+		if y < 48 {
+			return color.NRGBA{}
+		}
+		return color.NRGBA{A: 255}
+	})
+	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: testImage(256, 128, solid(color.White)), Mask: topRows, Size: "128x64"})
+	mask = decodedBase64Image(t, parameters["mask"])
+	for y := range 64 {
+		want := uint32(0)
+		if y < 24 {
+			want = 255
+		}
+		assert.Equal(t, want, maskValue(mask, 0, y), "canvas row %d", y)
+	}
+}
+
+// Image work is bounded by memory, not pixels, and comes last. A 16-bit
+// image decodes at 8 bytes a pixel, so it may have half the pixels of an
+// 8-bit one; headers are checked before anything decodes, and the source
+// decodes only once everything else is valid, after the mask, so a mask
+// that selects nothing (a free 400) costs no source decode. A resample's
+// buffer follows the canvas, not the source, and a mask's pixels are read
+// without an allocation each.
+func TestBuildGenerationBoundsImageWork(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	area := testImage(64, 64, func(x, y int) color.Color {
+		if x < 32 {
+			return color.NRGBA{}
+		}
+		return color.NRGBA{A: 255}
+	})
+	for _, tc := range []struct {
+		name              string
+		image, mask       []byte
+		message, strength string
+	}{
+		{name: "an 8-bit image past 4096x4096", image: pngHeader(4097, 4096, 8), message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
+		{name: "a 16-bit image past half of it", image: pngHeader(2897, 2897, 16), message: "image must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
+		{name: "a 16-bit mask past half of it", image: area, mask: pngHeader(2897, 2897, 16), message: "mask must be a PNG, JPEG or WebP image of at most 8388608 pixels"},
+		// pngHeader(64, 64, 8) reads as an image but does not decode.
+		{name: "the mask before the source", image: pngHeader(64, 64, 8), mask: testImage(64, 64, solid(color.Black)), message: "mask selects no area"},
+		{name: "the strength before the source", image: pngHeader(64, 64, 8), mask: area, strength: "5", message: "strength must be between"},
+		{name: "the source last", image: pngHeader(64, 64, 8), mask: area, message: "image must be a PNG, JPEG or WebP image of at most 16777216 pixels"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			intent := GenerationIntent{Model: "nai-diffusion-4-5-full", Image: tc.image, Mask: tc.mask}
+			if tc.strength != "" {
+				intent.Extras = map[string]json.RawMessage{"strength": raw(tc.strength)}
+			}
+			assert.Contains(t, buildRejected(t, intent), tc.message)
+		})
+	}
+	_, parameters := buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Image: area, Mask: area, Size: "64x64"})
+	assert.NotEmpty(t, parameters["image"])
+
+	// Red | green | blue thirds of 6144x2048: the 2048x2048 green centre of
+	// a square canvas. Kernel resampling holds 32 bytes for each canvas
+	// column and crop row (4 MiB here); a bilinear pass first brings the crop
+	// to twice the canvas.
+	thirds := image.NewRGBA(image.Rect(0, 0, 6144, 2048))
+	for i := 0; i < len(thirds.Pix); i += 4 {
+		// R, G or B by third, opaque.
+		thirds.Pix[i+i/4%6144/2048] = 255
+		thirds.Pix[i+3] = 255
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	resized := coverResize(thirds, coverCrop(thirds.Bounds(), 64, 64), 64, 64, draw.CatmullRom)
+	runtime.ReadMemStats(&after)
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(1<<20), "allocated for a 64x64 canvas")
+	for _, point := range []image.Point{{0, 0}, {63, 63}, {32, 32}} {
+		assert.Equal(t, color.RGBA{G: 255, A: 255}, resized.RGBAAt(point.X, point.Y), "the centre at %v", point)
+	}
+
+	// A 16-bit black-and-white mask: 65,536 pixels read in two passes.
+	halves := image.NewNRGBA64(image.Rect(0, 0, 256, 256))
+	for y := range 256 {
+		for x := range 256 {
+			halves.SetNRGBA64(x, y, color.NRGBA64{R: uint16(x / 128 * 0xffff), G: uint16(x / 128 * 0xffff), B: uint16(x / 128 * 0xffff), A: 0xffff})
+		}
+	}
+	var encoded string
+	allocations := testing.AllocsPerRun(1, func() {
+		var ok bool
+		encoded, ok = novelAIMask(halves, halves.Bounds(), 256, 256)
+		require.True(t, ok)
+	})
+	assert.Less(t, allocations, float64(1_000), "not one a pixel")
+	mask := decodedBase64Image(t, encoded)
+	r, _, _, _ := mask.At(0, 0).RGBA()
+	assert.Zero(t, r, "black keeps")
+	r, _, _, _ = mask.At(255, 0).RGBA()
+	assert.Equal(t, uint32(0xffff), r, "white repaints")
 }
 
 // NovelAI's /ai/generate-image answers with a zip of the images (or JSON, or
@@ -907,6 +1148,156 @@ func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 	assert.Equal(t, int32(2), requests.Load())
 }
 
+// blockingWriter is a client that stopped reading: its first write of an
+// image blocks until unblock is closed.
+type blockingWriter struct {
+	gin.ResponseWriter
+	entered, unblock chan struct{}
+	blocked          bool
+}
+
+func (w *blockingWriter) Write(data []byte) (int, error) {
+	if !w.blocked && (bytes.Contains(data, []byte("![image]")) || bytes.Contains(data, []byte("b64_json"))) {
+		w.blocked = true
+		close(w.entered)
+		<-w.unblock
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *blockingWriter) WriteString(data string) (int, error) {
+	return w.Write([]byte(data))
+}
+
+// endTracker records that NovelAI's answer was read to its end.
+type endTracker struct {
+	io.Reader
+	ended atomic.Bool
+}
+
+func (r *endTracker) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err == io.EOF {
+		r.ended.Store(true)
+	}
+	return n, err
+}
+
+// NovelAI is free for the key's next generation once its answer has
+// arrived, whatever the relay still writes to its client: on every converted
+// answer, a client that stops reading holds no slot. An error answer is read
+// as it comes back, at most 1 MiB, and closed even when it breaks off, so
+// the retry of the request on the same key does not wait for its own slot.
+func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	savedWait := generationWait
+	generationWait = 200 * time.Millisecond
+	t.Cleanup(func() { generationWait = savedWait })
+	red := testImage(16, 16, solid(color.NRGBA{R: 255, A: 255}))
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	entry, err := writer.Create("image_0.png")
+	require.NoError(t, err)
+	_, err = entry.Write(red)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	events := sseEvents(t, map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(red)})
+
+	for _, mode := range []string{"chat", "chat stream", "images", "images stream", "V3 images stream"} {
+		t.Run(mode, func(t *testing.T) {
+			model, body, contentType := "nai-diffusion-4-5-full", archive.String(), "application/zip"
+			switch mode {
+			case "images stream":
+				body, contentType = events, "text/event-stream"
+			case "V3 images stream":
+				model = "nai-diffusion-3"
+			}
+			c, _, resp, info := imageStreamContext(t, body, contentType, 1)
+			info.ChannelMeta = &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-answered-" + mode, UpstreamModelName: model}
+			info.IsStream = strings.HasSuffix(mode, "stream")
+			release, apiErr := holdGeneration(c, info)
+			require.Nil(t, apiErr)
+			upstream := &endTracker{Reader: strings.NewReader(body)}
+			resp.Body = &generationBody{ReadCloser: io.NopCloser(upstream), release: release}
+			client := &blockingWriter{ResponseWriter: c.Writer, entered: make(chan struct{}), unblock: make(chan struct{})}
+			c.Writer = client
+			generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: model, Prompt: "a cat", N: 1})
+			require.Nil(t, apiErr)
+			output := ImageOutput{ResponseFormat: "b64_json", OutputFormat: formatPNG, Background: "opaque", Quality: "auto", Event: "image_generation"}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				switch {
+				case strings.HasPrefix(mode, "chat"):
+					_, _ = chatResponse(c, resp, info, generation)
+				case info.IsStream:
+					_, _ = imagesStreamResponse(c, resp, info, generation, output)
+				default:
+					_, _ = imagesResponse(c, resp, info, generation, output)
+				}
+			}()
+			select {
+			case <-client.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the images never reached the client")
+			}
+
+			next, _ := gin.CreateTestContext(httptest.NewRecorder())
+			next.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+			releaseNext, apiErr := holdGeneration(next, info)
+			close(client.unblock)
+			<-done
+			require.Nil(t, apiErr, "the key is free while the client has not read the images")
+			releaseNext()
+			assert.True(t, upstream.ended.Load())
+		})
+	}
+
+	t.Run("an error answer that breaks off", func(t *testing.T) {
+		var requests atomic.Int32
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if requests.Add(1) > 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write(bytes.Repeat([]byte("x"), 3<<20))
+				return
+			}
+			// A 500 that promises more than it sends.
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"statusCode":500,"message":"Error gen`))
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}))
+		t.Cleanup(proxy.Close)
+		info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesGenerations, ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://image.novelai.net", ApiKey: "pst-error-answer",
+			ChannelSetting: dto.ChannelSettings{Proxy: proxy.URL},
+		}}
+		generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 1})
+		require.Nil(t, apiErr)
+		adaptor := &Adaptor{generation: generation}
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+		resp, err := adaptor.DoRequest(c, info, strings.NewReader(`{}`))
+		require.NoError(t, err)
+		// What the image relay does with an error answer.
+		relayErr := service.RelayErrorHandler(c.Request.Context(), resp.(*http.Response), false)
+		assert.Equal(t, http.StatusInternalServerError, relayErr.StatusCode)
+		assert.False(t, types.IsSkipRetryError(relayErr), "a 500 is retried")
+
+		// The retry, on the same key and client request.
+		resp, err = adaptor.DoRequest(c, info, strings.NewReader(`{}`))
+		require.NoError(t, err, "the failed attempt left the slot free")
+		body, err := io.ReadAll(resp.(*http.Response).Body)
+		require.NoError(t, err)
+		assert.Len(t, body, 1<<20, "an error answer is kept up to 1 MiB")
+		assert.Equal(t, int32(2), requests.Load())
+	})
+}
+
 // sseEvents is NovelAI's /ai/generate-image-stream answer in SSE mode.
 func sseEvents(t *testing.T, events ...map[string]any) string {
 	t.Helper()
@@ -1008,9 +1399,9 @@ func (w *failingWriter) WriteString(data string) (int, error) {
 // last only; no [DONE]. The billed count becomes the completed events once
 // NovelAI ended the stream: an error event after 200, a duplicate final or a
 // stream that ends early bills the images delivered (those after a missing
-// one included) and ends with an error chunk; an error before any image
-// fails the request, which bills nothing; a client that leaves keeps the
-// reservation. V3, which cannot stream, answers whole and gets completed
+// one included) and ends with OpenAI's error event, without [DONE]; an
+// error before any image fails the request, which bills nothing; a client
+// that leaves keeps the reservation. V3, which cannot stream, answers whole and gets completed
 // events only, named for edits on /v1/images/edits.
 func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 	require.NoError(t, i18n.Init())
@@ -1056,14 +1447,16 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		}
 		assert.Zero(t, usage["output_tokens"])
 	}
-	errorChunk := func(t *testing.T, events []streamedEvent, message string) {
+	// errorEvent checks that a stream ends as OpenAI's image streams do on a
+	// failure: an error event, typed, and no [DONE].
+	errorEvent := func(t *testing.T, events []streamedEvent, message string) {
 		t.Helper()
-		require.GreaterOrEqual(t, len(events), 2)
-		chunk := events[len(events)-2]
-		assert.Empty(t, chunk.name)
-		require.Contains(t, chunk.data, "error")
-		assert.Contains(t, chunk.data["error"].(map[string]any)["message"], message)
-		assert.Equal(t, map[string]any{"[DONE]": true}, events[len(events)-1].data)
+		require.NotEmpty(t, events)
+		event := events[len(events)-1]
+		assert.Equal(t, "error", event.name)
+		assert.Equal(t, "error", event.data["type"])
+		require.Contains(t, event.data, "error")
+		assert.Contains(t, event.data["error"].(map[string]any)["message"], message)
 	}
 
 	t.Run("partials from sample 0, completed in sample order", func(t *testing.T) {
@@ -1132,11 +1525,11 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			require.Nil(t, apiErr)
 			require.NotNil(t, usage)
 			events := streamedEvents(t, recorder.Body.String())
-			require.Len(t, events, len(tc.want)+2, recorder.Body.String())
+			require.Len(t, events, len(tc.want)+1, recorder.Body.String())
 			for i, want := range tc.want {
 				completed(t, events[i], want, tc.seeds[i], tc.withUsage && i == len(tc.want)-1)
 			}
-			errorChunk(t, events, tc.message)
+			errorEvent(t, events, tc.message)
 			assert.Equal(t, float64(len(tc.want)), info.PriceData.OtherRatios()["n"])
 			assert.True(t, info.StreamStatus.ResponseFailed())
 		})
@@ -1181,9 +1574,9 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		require.Nil(t, apiErr)
 		require.NotNil(t, usage)
 		events := streamedEvents(t, recorder.Body.String())
-		require.Len(t, events, 3, recorder.Body.String())
+		require.Len(t, events, 2, recorder.Body.String())
 		completed(t, events[0], red, 100, false)
-		errorChunk(t, events, "upstream stream ended before the response was complete")
+		errorEvent(t, events, "upstream stream ended before the response was complete")
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
 		assert.Equal(t, relaycommon.StreamEndReasonScannerErr, info.StreamStatus.EndReason)
 	})
@@ -1465,6 +1858,35 @@ func TestChatResponse(t *testing.T) {
 			assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
 		})
 	}
+
+	// NovelAI was asked for the 2 images billing reserved: a third is
+	// neither delivered nor billed.
+	t.Run("more images than asked for", func(t *testing.T) {
+		var archive bytes.Buffer
+		writer := zip.NewWriter(&archive)
+		for i := range 3 {
+			entry, err := writer.Create(fmt.Sprintf("image_%d.png", i))
+			require.NoError(t, err)
+			_, err = entry.Write(red)
+			require.NoError(t, err)
+		}
+		require.NoError(t, writer.Close())
+
+		recorder, info, _, apiErr := respond(t, false, true, archive.Bytes())
+
+		require.Nil(t, apiErr)
+		var response struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.Len(t, response.Choices, 1)
+		assert.Len(t, markdownPNGs(t, response.Choices[0].Message.Content), 2)
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
+	})
 
 	t.Run("a 2xx without images is final", func(t *testing.T) {
 		for _, stream := range []bool{false, true} {

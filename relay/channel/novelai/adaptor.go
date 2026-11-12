@@ -1,6 +1,7 @@
 package novelai
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -131,13 +132,27 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		return nil, err
 	}
 	resp.Body = &generationBody{ReadCloser: resp.Body, release: release}
-	if isConvertedMode(info.RelayMode) && resp.StatusCode == http.StatusCreated {
+	if !isConvertedMode(info.RelayMode) {
+		return resp, nil
+	}
+	if resp.StatusCode == http.StatusCreated {
 		// NovelAI's documented success status; the image and chat relays
 		// take 200.
 		resp.StatusCode = http.StatusOK
 	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		// The image and chat relays read an error answer whole, and leave it
+		// open when the read fails: it is read here, bounded as on the
+		// native routes, and closed, which frees the slot for a retry.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
+		service.CloseResponseBodyGracefully(resp)
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+	}
 	return resp, nil
 }
+
+// errorBodyLimit bounds the NovelAI error answer a converted request keeps.
+const errorBodyLimit = 1 << 20
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	if _, ok := relayconstant.NovelAIPath(info.RelayMode); ok {

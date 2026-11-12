@@ -296,7 +296,7 @@ func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 // image): one completed event per image, the usage on the last.
 func (s *imageStream) synthesize(resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
-	images, clientLeft, apiErr := readImages(s.c, resp, s.info)
+	images, clientLeft, apiErr := readImages(s.c, resp, s.info, s.generation.NSamples)
 	if clientLeft {
 		return s.usage, nil
 	}

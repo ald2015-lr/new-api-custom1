@@ -24,9 +24,10 @@ import (
 	"golang.org/x/image/webp"
 )
 
-// maxInputPixels bounds a decoded source image or mask (about 8192x4096):
-// a decoded image takes 4 bytes a pixel.
-const maxInputPixels = 1 << 25
+// maxInputPixels bounds a source image or mask (4096x4096), which decodes at
+// 4 bytes a pixel: 64 MiB. A 16-bit image takes 8 bytes a pixel, so it may
+// have half as many (inputPixelLimit).
+const maxInputPixels = 1 << 24
 
 // Image formats as OpenAI names them in output_format.
 const (
@@ -53,12 +54,21 @@ func SniffImageFormat(data []byte) string {
 	return ""
 }
 
-// decodeImage decodes a PNG, JPEG or WebP image of at most maxInputPixels.
-func decodeImage(data []byte) (image.Image, error) {
-	format := SniffImageFormat(data)
+// inputPixelLimit is the most pixels an image of model may have: a 16-bit
+// one decodes at twice the memory a pixel.
+func inputPixelLimit(model color.Model) int {
+	if model == color.RGBA64Model || model == color.NRGBA64Model {
+		return maxInputPixels / 2
+	}
+	return maxInputPixels
+}
+
+// imageConfig reads the header of a PNG, JPEG or WebP image of at most
+// inputPixelLimit pixels, and returns its decoder.
+func imageConfig(data []byte) (image.Config, func(io.Reader) (image.Image, error), error) {
 	var decodeConfig func(io.Reader) (image.Config, error)
 	var decode func(io.Reader) (image.Image, error)
-	switch format {
+	switch SniffImageFormat(data) {
 	case formatPNG:
 		decodeConfig, decode = png.DecodeConfig, png.Decode
 	case formatJPEG:
@@ -66,32 +76,52 @@ func decodeImage(data []byte) (image.Image, error) {
 	case formatWebP:
 		decodeConfig, decode = webp.DecodeConfig, webp.Decode
 	default:
-		return nil, errors.New("not a PNG, JPEG or WebP image")
+		return image.Config{}, nil, errors.New("not a PNG, JPEG or WebP image")
 	}
 	config, err := decodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return config, nil, err
 	}
-	if config.Width < 1 || config.Height < 1 || int64(config.Width)*int64(config.Height) > maxInputPixels {
-		return nil, fmt.Errorf("the image is %dx%d", config.Width, config.Height)
+	if config.Width < 1 || config.Height < 1 || int64(config.Width)*int64(config.Height) > int64(inputPixelLimit(config.ColorModel)) {
+		return config, nil, fmt.Errorf("the image is %dx%d", config.Width, config.Height)
+	}
+	return config, decode, nil
+}
+
+// decodeImage decodes a PNG, JPEG or WebP image within imageConfig's limit.
+func decodeImage(data []byte) (image.Image, error) {
+	_, decode, err := imageConfig(data)
+	if err != nil {
+		return nil, err
 	}
 	return decode(bytes.NewReader(data))
 }
 
+// imageInputConfig checks the header of a request's image (field names it)
+// before anything decodes it.
+func imageInputConfig(c *gin.Context, data []byte, field string) (image.Config, *types.NewAPIError) {
+	config, _, err := imageConfig(data)
+	if err != nil {
+		return config, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": inputPixelLimit(config.ColorModel)})
+	}
+	return config, nil
+}
+
 func decodeImageInput(c *gin.Context, data []byte, field string) (image.Image, *types.NewAPIError) {
+	config, apiErr := imageInputConfig(c, data, field)
+	if apiErr != nil {
+		return nil, apiErr
+	}
 	decoded, err := decodeImage(data)
 	if err != nil {
-		return nil, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": maxInputPixels})
+		return nil, badRequest(c, i18n.MsgNovelAIImageInvalid, map[string]any{"Field": field, "Max": inputPixelLimit(config.ColorModel)})
 	}
 	return decoded, nil
 }
 
-// coverResize scales src to exactly width x height: it keeps the centered
-// part of src with the target's aspect ratio (as CSS object-fit: cover) and
-// resamples it with scaler. NovelAI requires an edit's image, and its mask,
-// to match the canvas.
-func coverResize(src image.Image, width, height int, scaler draw.Scaler) *image.RGBA {
-	bounds := src.Bounds()
+// coverCrop is the centred part of bounds with the aspect ratio of width x
+// height, the part CSS object-fit: cover keeps.
+func coverCrop(bounds image.Rectangle, width, height int) image.Rectangle {
 	crop := bounds
 	sourceWidth, sourceHeight := bounds.Dx(), bounds.Dy()
 	if sourceWidth*height > width*sourceHeight {
@@ -102,6 +132,21 @@ func coverResize(src image.Image, width, height int, scaler draw.Scaler) *image.
 		cropHeight := max(1, sourceWidth*height/width)
 		crop.Min.Y += (sourceHeight - cropHeight) / 2
 		crop.Max.Y = crop.Min.Y + cropHeight
+	}
+	return crop
+}
+
+// coverResize scales the crop of src to exactly width x height with scaler
+// (crop is coverCrop of the source the canvas is for). NovelAI requires an
+// edit's image, and its mask, to match the canvas. A kernel scaler
+// (CatmullRom) holds 32 bytes for every canvas column and crop row, so a
+// crop past twice the canvas is first brought to twice the canvas with a
+// bilinear pass, which holds nothing.
+func coverResize(src image.Image, crop image.Rectangle, width, height int, scaler draw.Scaler) *image.RGBA {
+	if _, kernel := scaler.(*draw.Kernel); kernel && (crop.Dx() > 2*width || crop.Dy() > 2*height) {
+		smaller := image.NewRGBA(image.Rect(0, 0, min(crop.Dx(), 2*width), min(crop.Dy(), 2*height)))
+		draw.ApproxBiLinear.Scale(smaller, smaller.Bounds(), src, crop, draw.Src, nil)
+		src, crop = smaller, smaller.Bounds()
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, width, height))
 	scaler.Scale(dst, dst.Bounds(), src, crop, draw.Src, nil)
@@ -122,16 +167,25 @@ func encodePNGBase64(img image.Image) string {
 // novelAIMask converts a mask to NovelAI's: an opaque PNG at the canvas size,
 // white where NovelAI repaints. OpenAI marks the area to edit with fully
 // transparent pixels; a mask without any is read as a black-and-white
-// NovelAI mask, white (brighter than mid-grey) marking the area. The mask is
-// cropped like the image and scaled with nearest neighbour, then snapped to
-// the 8x8 blocks of NovelAI's latent grid: a block is white when more than
-// half of it is. It reports false when no block is white.
-func novelAIMask(mask image.Image, width, height int) (string, bool) {
+// NovelAI mask, white (brighter than mid-grey) marking the area. The mask
+// covers the source image (source is its bounds), stretched when its size
+// differs, so it gets the image's crop; it is scaled with nearest neighbour,
+// then snapped to the 8x8 blocks of NovelAI's latent grid: a block is white
+// when more than half of it is. It reports false when no block is white.
+func novelAIMask(mask image.Image, source image.Rectangle, width, height int) (string, bool) {
 	bounds := mask.Bounds()
+	// The decoders' image types read a pixel without boxing it in a
+	// color.Color, an allocation a pixel.
+	pixels, ok := mask.(image.RGBA64Image)
+	if !ok {
+		converted := image.NewRGBA64(bounds)
+		draw.Draw(converted, bounds, mask, bounds.Min, draw.Src)
+		pixels = converted
+	}
 	transparent := false
 	for y := bounds.Min.Y; y < bounds.Max.Y && !transparent; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			if _, _, _, alpha := mask.At(x, y).RGBA(); alpha == 0 {
+			if pixels.RGBA64At(x, y).A == 0 {
 				transparent = true
 				break
 			}
@@ -140,20 +194,26 @@ func novelAIMask(mask image.Image, width, height int) (string, bool) {
 	binary := image.NewGray(bounds)
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			pixel := mask.At(x, y)
-			repaint := false
-			if transparent {
-				_, _, _, alpha := pixel.RGBA()
-				repaint = alpha == 0
-			} else {
-				repaint = color.GrayModel.Convert(pixel).(color.Gray).Y > 127
+			pixel := pixels.RGBA64At(x, y)
+			repaint := pixel.A == 0
+			if !transparent {
+				// color.GrayModel's luminance.
+				repaint = (19595*uint32(pixel.R)+38470*uint32(pixel.G)+7471*uint32(pixel.B)+1<<15)>>24 > 127
 			}
 			if repaint {
 				binary.SetGray(x, y, color.Gray{Y: 255})
 			}
 		}
 	}
-	scaled := coverResize(binary, width, height, draw.NearestNeighbor)
+	// The image's crop, in the mask's pixels.
+	crop := coverCrop(source, width, height)
+	maskCrop := image.Rect(
+		bounds.Min.X+(crop.Min.X-source.Min.X)*bounds.Dx()/source.Dx(),
+		bounds.Min.Y+(crop.Min.Y-source.Min.Y)*bounds.Dy()/source.Dy(),
+		bounds.Min.X+((crop.Max.X-source.Min.X)*bounds.Dx()+source.Dx()-1)/source.Dx(),
+		bounds.Min.Y+((crop.Max.Y-source.Min.Y)*bounds.Dy()+source.Dy()-1)/source.Dy(),
+	)
+	scaled := coverResize(binary, maskCrop, width, height, draw.NearestNeighbor)
 	out := image.NewRGBA(image.Rect(0, 0, width, height))
 	selected := false
 	for blockY := 0; blockY < height; blockY += 8 {

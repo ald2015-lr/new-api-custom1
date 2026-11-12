@@ -83,6 +83,8 @@ func TestReportStreamInterruptionWritesOneErrorInTheClientDialect(t *testing.T) 
 		{format: types.RelayFormatOpenAI, tail: `data: {"error":{"message":"` + message + `","type":"upstream_error","param":"","code":"upstream_stream_interrupted"}}` + "\n\ndata: [DONE]\n\n"},
 		{format: types.RelayFormatClaude, tail: "event: error\n" + `data: {"error":{"type":"api_error","message":"` + message + `"},"type":"error"}` + "\n\n\n"},
 		{format: types.RelayFormatOpenAIResponses, tail: "event: error\n" + `data: {"code":"upstream_stream_interrupted","message":"` + message + `","param":"","type":"error"}` + "\n\n"},
+		// OpenAI's image streams: a typed error event and no [DONE].
+		{format: types.RelayFormatOpenAIImage, tail: "event: error\n" + `data: {"error":{"message":"` + message + `","type":"upstream_error","param":"","code":"upstream_stream_interrupted"},"type":"error"}` + "\n\n"},
 		{format: types.RelayFormatGemini, tail: `data: {"error":{"code":502,"message":"` + message + `","status":"UNAVAILABLE"}}` + "\n\n"},
 	} {
 		t.Run(string(tc.format), func(t *testing.T) {

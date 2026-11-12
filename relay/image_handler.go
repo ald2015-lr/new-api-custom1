@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 )
 
@@ -95,6 +97,9 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 				jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 				if err != nil {
 					return newAPIErrorFromParamOverride(err)
+				}
+				if apiErr := checkNovelAISamples(info, jsonData, imageCount); apiErr != nil {
+					return apiErr
 				}
 			}
 
@@ -187,6 +192,23 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
 	return nil
+}
+
+// checkNovelAISamples keeps a converted NovelAI request (image or chat) at the
+// image count billing reserved once the channel's parameter override, which
+// runs after the reservation, has applied: NovelAI generates
+// parameters.n_samples images. An override that changes it would send work
+// nobody reserved, so the request is rejected before the send, as a failed
+// override is.
+func checkNovelAISamples(info *relaycommon.RelayInfo, jsonData []byte, reserved int) *types.NewAPIError {
+	if info.ChannelType != constant.ChannelTypeNovelAI {
+		return nil
+	}
+	samples := ojson.GetBytes(jsonData, "parameters.n_samples")
+	if samples.Type == ojson.Number && samples.Num == float64(reserved) {
+		return nil
+	}
+	return types.NewErrorWithStatusCode(fmt.Errorf("the channel's parameter override sets parameters.n_samples to %s; it must stay %d, the images the request reserved", cmp.Or(samples.Raw, "nothing"), reserved), types.ErrorCodeChannelParamOverrideInvalid, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 }
 
 // settledImageCount is the image quantity the consume log shows: the count the

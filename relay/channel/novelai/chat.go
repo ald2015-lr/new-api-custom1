@@ -72,16 +72,8 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 	if err := common.Unmarshal(body, &fields); err != nil {
 		return GenerationIntent{}, invalid
 	}
-	if raw, ok := fields["extra_body"]; ok && common.GetJsonType(raw) == "object" {
-		var extra map[string]json.RawMessage
-		if err := common.Unmarshal(raw, &extra); err != nil {
-			return GenerationIntent{}, badRequest(c, i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": "extra_body"})
-		}
-		for key, value := range extra {
-			if _, set := fields[key]; !set {
-				fields[key] = value
-			}
-		}
+	if apiErr := mergeNestedFields(c, fields, "extra_body"); apiErr != nil {
+		return GenerationIntent{}, apiErr
 	}
 	extras, parameters, apiErr := ParseExtensions(c, fields)
 	if apiErr != nil {
@@ -136,7 +128,7 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 			return clientLeft(err)
 		}
 	}
-	images, left, apiErr := readImages(c, resp, info)
+	images, left, apiErr := readImages(c, resp, info, generation.NSamples)
 	if left {
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
 		return usage, nil

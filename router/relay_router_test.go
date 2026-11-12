@@ -847,7 +847,7 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	constant.StreamingTimeout = 30
 	t.Cleanup(func() { constant.StreamingTimeout = streamingTimeout })
 	// $0.02 per image, and $0.06 per image as an expression.
-	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-5-curated":0.02,"nai-diffusion-3":0.02,"nai-diffusion-4-full":0.02,"nai-diffusion-furry-3":0.02,"nai-diffusion-4-curated-preview":0.02}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-diffusion-5-curated":0.02,"nai-diffusion-3":0.02,"nai-diffusion-4-full":0.02,"nai-diffusion-furry-3":0.02,"nai-diffusion-4-curated-preview":0.02,"nai-diffusion-4-5-curated":0.02}`))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 		"billing_setting.billing_mode": `{"nai-diffusion-5-full":"tiered_expr"}`,
 		"billing_setting.billing_expr": `{"nai-diffusion-5-full":"tier(\"image\", fixed(0.06)) * image_count"}`,
@@ -1191,10 +1191,11 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 
 		events := streamEvents(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"a cat","n":2,"stream":true}`)))
 
-		require.Len(t, events, 3)
+		require.Len(t, events, 2, "OpenAI's image streams end on the error event, without [DONE]")
 		assert.Equal(t, "image_generation.completed", events[0].name)
+		assert.Equal(t, "error", events[1].name)
+		assert.Equal(t, "error", events[1].data["type"])
 		assert.Contains(t, events[1].data["error"].(map[string]any)["message"], "Error generating image, an internal error occurred")
-		assert.Equal(t, map[string]any{"[DONE]": true}, events[2].data)
 		assert.Equal(t, 10_000, lastLog().Quota)
 		assert.Contains(t, lastLog().Content, "Image count 1")
 		assert.Equal(t, before-10_000, walletQuota())
@@ -1443,6 +1444,41 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		}
 		assert.Equal(t, calls, upstream.calls(), "nothing reaches NovelAI")
 		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+	})
+
+	// A channel's parameter override applies after the images were reserved:
+	// one that changes parameters.n_samples, the count NovelAI generates, is
+	// refused before the send, on images and chat; any other override
+	// applies.
+	t.Run("a parameter override cannot change the image count", func(t *testing.T) {
+		override := `{"operations":[{"path":"parameters.n_samples","mode":"set","value":3}]}`
+		overridden := model.Channel{Name: "novelai-override", Key: "pst-override", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+			Models: "nai-diffusion-4-5-curated", BaseURL: common.GetPointer(server.URL), ParamOverride: &override, AutoBan: common.GetPointer(0)}
+		require.NoError(t, model.DB.Create(&overridden).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: overridden.Id, Model: "nai-diffusion-4-5-curated", Group: "default", Enabled: true}).Error)
+		calls, before := upstream.calls(), walletQuota()
+
+		for _, tc := range []struct{ path, body string }{
+			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-curated","prompt":"a cat","n":1}`},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-curated","n":1,"messages":[{"role":"user","content":"a cat"}]}`},
+		} {
+			recorder := send(tc.path, "application/json", []byte(tc.body))
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Contains(t, recorder.Body.String(), "sets parameters.n_samples to 3; it must stay 1")
+		}
+		assert.Equal(t, calls, upstream.calls(), "NovelAI is not asked for images nobody reserved")
+		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+
+		require.NoError(t, model.DB.Model(&overridden).Update("param_override", `{"operations":[{"path":"parameters.steps","mode":"set","value":28}]}`).Error)
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+
+		decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-curated","prompt":"a cat","n":1}`)))
+
+		parameters := upstream.last().body["parameters"].(map[string]any)
+		assert.Equal(t, float64(28), parameters["steps"])
+		assert.Equal(t, float64(1), parameters["n_samples"])
+		assert.Equal(t, 10_000, lastLog().Quota)
 	})
 
 	t.Run("NovelAI errors keep their status in an OpenAI error and charge nothing", func(t *testing.T) {

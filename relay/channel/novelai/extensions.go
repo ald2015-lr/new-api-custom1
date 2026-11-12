@@ -64,7 +64,8 @@ var ambiguousKeys = []string{"cfg", "SMEA", "DYN", "addition"}
 // ParseExtensions picks the NovelAI keys out of an OpenAI-format request's
 // top-level fields (the JSON body, or a multipart form through
 // FormFields): the extension keys under their NovelAI names (an alias
-// counts only when the NovelAI name is absent), and the parameters object.
+// counts only when the NovelAI name is absent; image_config.aspect_ratio,
+// OpenRouter's name, when aspect_ratio is), and the parameters object.
 func ParseExtensions(c *gin.Context, fields map[string]json.RawMessage) (map[string]json.RawMessage, map[string]json.RawMessage, *types.NewAPIError) {
 	for _, key := range ambiguousKeys {
 		if _, ok := fields[key]; ok {
@@ -82,6 +83,17 @@ func ParseExtensions(c *gin.Context, fields map[string]json.RawMessage) (map[str
 		}
 		extras[canonical] = value
 	}
+	if raw, ok := fields["image_config"]; ok && extras["aspect_ratio"] == nil && common.GetJsonType(raw) == "object" {
+		var imageConfig struct {
+			AspectRatio json.RawMessage `json:"aspect_ratio"`
+		}
+		if common.Unmarshal(raw, &imageConfig) != nil {
+			return nil, nil, badRequest(c, i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": "image_config"})
+		}
+		if imageConfig.AspectRatio != nil {
+			extras["aspect_ratio"] = imageConfig.AspectRatio
+		}
+	}
 	var parameters map[string]json.RawMessage
 	if raw, ok := fields["parameters"]; ok && !isJSONNull(raw) {
 		if common.Unmarshal(raw, &parameters) != nil || parameters == nil {
@@ -89,6 +101,26 @@ func ParseExtensions(c *gin.Context, fields map[string]json.RawMessage) (map[str
 		}
 	}
 	return extras, parameters, nil
+}
+
+// mergeNestedFields adds to fields the keys of the object fields[key] it does
+// not set itself: clients nest provider keys in extra_body (chat) or
+// extra_fields (images, new-api's convention), which the top level overrides.
+func mergeNestedFields(c *gin.Context, fields map[string]json.RawMessage, key string) *types.NewAPIError {
+	raw, ok := fields[key]
+	if !ok || common.GetJsonType(raw) != "object" {
+		return nil
+	}
+	var nested map[string]json.RawMessage
+	if common.Unmarshal(raw, &nested) != nil {
+		return badRequest(c, i18n.MsgNovelAIFieldInvalid, map[string]any{"Field": key})
+	}
+	for name, value := range nested {
+		if _, set := fields[name]; !set {
+			fields[name] = value
+		}
+	}
+	return nil
 }
 
 // FormFields turns multipart form values into the JSON fields of an
