@@ -2,13 +2,18 @@ package model
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func setupChannelStatusTest(t *testing.T) {
@@ -156,5 +161,68 @@ func TestAutoDisableKeepsManualDisable(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Changing a channel's type to or from NovelAI clears its balance (Anlas are
+// not USD) and the balance time, and nothing else, on every supported
+// database: ClearBalance writes the two zero values through Select.
+func TestClearBalanceDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(":memory:")
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN not configured")
+				}
+				driver = postgres.Open(dsn)
+			}
+			db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "clear_balance_test_"}})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(1)
+			previousDB := DB
+			DB = db
+			t.Cleanup(func() {
+				require.NoError(t, db.Migrator().DropTable(&Channel{}))
+				DB = previousDB
+				require.NoError(t, sqlDB.Close())
+			})
+			require.NoError(t, db.AutoMigrate(&Channel{}))
+			var version string
+			query := "SELECT version()"
+			if dialect == "sqlite" {
+				query = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(query).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+			channel := &Channel{Name: "novelai", Key: "pst-kept", Type: constant.ChannelTypeNovelAI, Status: common.ChannelStatusEnabled,
+				Balance: 10250, BalanceUpdatedTime: 1700000000, UsedQuota: 42}
+			require.NoError(t, db.Create(channel).Error)
+
+			channel.ClearBalance()
+
+			assert.Zero(t, channel.Balance)
+			assert.Zero(t, channel.BalanceUpdatedTime)
+			var stored Channel
+			require.NoError(t, db.First(&stored, channel.Id).Error)
+			assert.Zero(t, stored.Balance)
+			assert.Zero(t, stored.BalanceUpdatedTime)
+			assert.Equal(t, "pst-kept", stored.Key)
+			assert.Equal(t, "novelai", stored.Name)
+			assert.Equal(t, constant.ChannelTypeNovelAI, stored.Type)
+			assert.Equal(t, int64(42), stored.UsedQuota)
+		})
 	}
 }
