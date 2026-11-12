@@ -455,7 +455,8 @@ func unambiguousMediaParams(value string) (string, map[string]string, bool) {
 // GetAndValidateNovelAIImageRequest validates a NovelAI generate-image request
 // (JSON body or multipart request field) and returns it as an image request
 // carrying only what billing reads: model, the input prompt and
-// parameters.n_samples as the image count. The client body itself is
+// parameters.n_samples as the image count. parameters.width and height, which
+// the request's tokens scale with, are bounded too. The client body itself is
 // forwarded unchanged.
 func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error) {
 	requestJSON, err := NovelAIRequestJSON(c)
@@ -499,6 +500,33 @@ func GetAndValidateNovelAIImageRequest(c *gin.Context) (*dto.ImageRequest, error
 				return nil, errors.New(i18n.T(c, i18n.MsgNovelAINSamplesInvalid, map[string]any{"Max": dto.MaxImageN}))
 			}
 			count = n
+		}
+		// width x height is the canvas, which each image counts as in tokens
+		// (novelai.RequestTokens) and a token price bills, so it is bounded
+		// as NovelAI bounds it: each side a whole number, and the canvas, with
+		// NovelAI's default for a side not given, at most NovelAIMaxPixels. A
+		// value the count could not read would bill the default canvas.
+		canvas := int64(1)
+		for _, side := range [...]struct {
+			key      string
+			fallback int
+		}{{"width", relayconstant.NovelAIDefaultWidth}, {"height", relayconstant.NovelAIDefaultHeight}} {
+			value, err := novelAIRequestMember(c, parameters, side.key)
+			if err != nil {
+				return nil, err
+			}
+			length := side.fallback
+			if value.Exists() && value.Type != ojson.Null {
+				n, convErr := strconv.Atoi(value.Raw)
+				if value.Type != ojson.Number || convErr != nil || n < 1 || n > relayconstant.NovelAIMaxPixels {
+					return nil, errors.New(i18n.T(c, i18n.MsgNovelAIDimensionsInvalid, map[string]any{"Max": relayconstant.NovelAIMaxPixels}))
+				}
+				length = n
+			}
+			canvas *= int64(length)
+		}
+		if canvas > relayconstant.NovelAIMaxPixels {
+			return nil, errors.New(i18n.T(c, i18n.MsgNovelAIDimensionsInvalid, map[string]any{"Max": relayconstant.NovelAIMaxPixels}))
 		}
 	}
 	// The prompt feeds the sensitive word check and token estimation.

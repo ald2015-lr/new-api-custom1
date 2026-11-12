@@ -681,8 +681,9 @@ func (w *failingWriter) Write(p []byte) (int, error) {
 // A NovelAI response settles at the images it carries: the .png entries of a
 // zip, or the images[] entries with a non-empty image in JSON, never the array
 // length. A body that cannot be counted, a client that leaves or an upstream
-// that fails mid-body keeps the reserved quantity, under a per-image price and
-// under an image_count expression alike. The client receives the upstream
+// that fails mid-body keeps the reserved quantity, under a per-image price,
+// an image_count expression and a token price alike (where the quantity sets
+// the image tokens of the NovelAI usage). The client receives the upstream
 // status, headers and bytes unchanged. A client that leaves is no perf-metrics
 // health sample, as on the relay streams, while a completed body is a success.
 func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
@@ -712,7 +713,7 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 		{name: "client leaving between upstream reads keeps the reservation", contentType: "application/zip", body: images, clientLeaves: "read ends", want: requested},
 	}
 	for _, tc := range tests {
-		for _, pricing := range []string{"per-image price", "image_count expression"} {
+		for _, pricing := range []string{"per-image price", "image_count expression", "token price"} {
 			t.Run(tc.name+"/"+pricing, func(t *testing.T) {
 				c, recorder, resp, info := newImageTestContext(t, "", tc.contentType, false)
 				var body io.Reader = bytes.NewReader(tc.body)
@@ -733,11 +734,16 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 				resp.ContentLength = int64(len(tc.body))
 				resp.Header.Set("Content-Disposition", `attachment; filename="images.zip"`)
 				resp.Header.Set("X-Upstream-Internal", "not forwarded")
-				if pricing == "per-image price" {
+				switch pricing {
+				case "per-image price":
 					info.PriceData.UsePrice = true
 					info.PriceData.AddOtherRatio("n", requested)
-				} else {
+				case "image_count expression":
 					info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{EstimatedImageCount: common.GetPointer(requested)}
+				default:
+					// As service.PrepareImageBillingForRequest reserves it.
+					info.ImageRequestCount = requested
+					info.PriceData.AddOtherRatio("n", 1)
 				}
 
 				usage, apiErr := NovelAIImageHandler(c, info, resp)
@@ -759,16 +765,15 @@ func TestNovelAIImageHandlerSettlesActualImageCount(t *testing.T) {
 				if tc.clientLeaves == "" && !tc.upstreamFailsAfterBody {
 					assert.Equal(t, perfmetrics.OutcomeSuccess, outcome)
 				}
-				if pricing == "per-image price" {
+				assert.Equal(t, tc.want, info.SettledImageCount())
+				switch pricing {
+				case "per-image price":
 					assert.Equal(t, float64(tc.want), info.PriceData.OtherRatios()["n"])
-					return
+				case "token price":
+					assert.Equal(t, 1.0, info.PriceData.OtherRatios()["n"], "a token price is not multiplied by the images")
+				default:
+					assert.Empty(t, info.PriceData.OtherRatios(), "expression quantities must not add a legacy multiplier")
 				}
-				settled := info.RequestedImageCount()
-				if info.BillingImageCount != nil {
-					settled = *info.BillingImageCount
-				}
-				assert.Equal(t, tc.want, settled)
-				assert.Empty(t, info.PriceData.OtherRatios(), "expression quantities must not add a legacy multiplier")
 			})
 		}
 	}
@@ -872,15 +877,24 @@ func (w *flushNotifyWriter) Flush() {
 // The stream endpoint hands each upstream read to the client as it arrives
 // instead of buffering the response until upstream finishes, and so does the
 // generate-image endpoint once the first bytes show the response is already
-// in the format the client asked for.
+// in the format the client asked for. A stream endpoint answered with a whole
+// zip or JSON (a forwarder that does not stream) sends nothing before
+// upstream generated every image, so its throughput spans the request
+// (PerformanceWholeOutput) instead of the write of its body; event streams
+// generate after their first event.
 func TestNovelAIImageHandlerFlushesBeforeUpstreamFinishes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		name, accept, contentType string
 		relayMode                 int
 		first, second             string
+		wholeOutput               bool
 	}{
 		{name: "stream events", contentType: "application/x-msgpack", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: "first event", second: "second event"},
+		{name: "SSE stream events", contentType: "text/event-stream", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream,
+			first: "event: intermediate\ndata: {\"event_type\":\"intermediate\"}\n\n", second: "event: final\ndata: {\"event_type\":\"final\"}\n\n"},
+		{name: "stream endpoint answered with a whole zip", contentType: "application/octet-stream", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: "PK\x03\x04first entry", second: "second entry", wholeOutput: true},
+		{name: "stream endpoint answered with whole JSON", contentType: "application/json", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: `{"images":[`, second: `{"image":"aGk="}]}`, wholeOutput: true},
 		{name: "zip without Accept", contentType: "application/zip", relayMode: relayconstant.RelayModeNovelAIGenerateImage, first: "PK\x03\x04first entry", second: "second entry"},
 		{name: "JSON asked as JSON", accept: "application/json", contentType: "application/json", relayMode: relayconstant.RelayModeNovelAIGenerateImage, first: `{"images":[`, second: `{"image":"aGk="}]}`},
 	} {
@@ -922,6 +936,7 @@ func TestNovelAIImageHandlerFlushesBeforeUpstreamFinishes(t *testing.T) {
 			assert.Equal(t, tc.first+tc.second, recorder.Body.String())
 			assert.Equal(t, tc.contentType, recorder.Header().Get("Content-Type"))
 			assert.Empty(t, recorder.Header().Get("Content-Length"))
+			assert.Equal(t, tc.wholeOutput, info.PerformanceWholeOutput)
 		})
 	}
 }

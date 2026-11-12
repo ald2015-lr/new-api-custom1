@@ -242,6 +242,18 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	return generation.RequestBody(a.streamed), nil
 }
 
+// CountRequest counts the converted request's tokens again from requestJSON,
+// the body the channel's parameter override made of the one BuildGeneration
+// built. NovelAI generates what it receives, so the usage the response
+// reports and the request is billed at follows an override of the canvas,
+// the prompts or the reference images (RequestTokens reads neither the image
+// nor the mask, only the action).
+func (a *Adaptor) CountRequest(requestJSON []byte) {
+	if a.generation != nil {
+		a.generation.Tokens = RequestTokens(requestJSON)
+	}
+}
+
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
 	return nil, ErrNativeOnly(c)
 }

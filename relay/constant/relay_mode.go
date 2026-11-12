@@ -72,6 +72,15 @@ const (
 	NovelAIGenerateImageStreamPath = "/ai/generate-image-stream"
 )
 
+// NovelAI's canvas: its default when a generate-image request gives no width
+// or height, and its limit, width x height. The canvas is what a NovelAI
+// image counts as in tokens, so the native request validator bounds it.
+const (
+	NovelAIDefaultWidth  = 832
+	NovelAIDefaultHeight = 1216
+	NovelAIMaxPixels     = 3_145_728
+)
+
 // NovelAI clients read the account at these paths; new-api answers them for
 // the calling token, with and without a /v1 prefix.
 const (

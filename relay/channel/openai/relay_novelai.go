@@ -211,6 +211,13 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if len(data) > 0 {
 			if written == 0 {
 				info.SetFirstResponseTime()
+				// A stream answered with a whole zip or JSON (a forwarder that
+				// does not stream) reaches the client only once upstream
+				// generated every image: its throughput spans the request,
+				// as on /ai/generate-image, not the write of its body.
+				if info.RelayMode == relayconstant.RelayModeNovelAIGenerateImageStream && novelAIResponseFormat(resp.Header.Get("Content-Type"), data) != "" {
+					info.PerformanceWholeOutput = true
+				}
 				writeNovelAIResponseHeader(c, resp)
 			}
 			if err := forward(data); err != nil {

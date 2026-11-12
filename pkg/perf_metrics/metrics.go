@@ -51,7 +51,7 @@ func RecordRelayResult(ctx context.Context, info *relaycommon.RelayInfo, apiErr 
 	}
 	latencyMs := now.Sub(info.StartTime).Milliseconds()
 	generationMs := latencyMs
-	if hasTtft {
+	if hasTtft && !info.PerformanceWholeOutput {
 		generationMs = now.Sub(info.FirstResponseTime).Milliseconds()
 	}
 	if generationMs <= 0 {

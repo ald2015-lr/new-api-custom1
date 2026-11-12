@@ -146,7 +146,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
-			if apiErr := checkNovelAISamples(info, jsonData, info.ImageRequestCount); apiErr != nil {
+			if apiErr := checkNovelAIOverride(info, adaptor, jsonData, info.ImageRequestCount); apiErr != nil {
 				return apiErr
 			}
 		}
@@ -195,7 +195,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	// per image, which the log shows as on the image routes.
 	var logContent []*common.Message
 	if info.ImageRequestCount > 0 {
-		logContent = append(logContent, common.NewMessage("Image count {{count}}", map[string]any{"count": settledImageCount(info)}))
+		logContent = append(logContent, common.NewMessage("Image count {{count}}", map[string]any{"count": info.SettledImageCount()}))
 	}
 	if containAudioTokens && containsAudioRatios {
 		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), logContent)
