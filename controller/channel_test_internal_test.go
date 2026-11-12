@@ -132,8 +132,9 @@ func TestNewAPIChannelRegistration(t *testing.T) {
 
 // NovelAI is built-in type 64: its own API type and adaptor, NovelAI's image
 // host as the default base URL, OpenAI image generation and chat completions
-// (converted) and the NovelAI native endpoint for every model, and the
-// official models offered without asking an upstream for a list.
+// (converted) and the NovelAI native endpoint for every model but the
+// inpainting ones, which only the native endpoint (and a masked edit) serves,
+// and the official models offered without asking an upstream for a list.
 func TestNovelAIChannelRegistration(t *testing.T) {
 	apiType, ok := common.ChannelType2APIType(constant.ChannelTypeNovelAI)
 
@@ -145,6 +146,9 @@ func TestNovelAIChannelRegistration(t *testing.T) {
 	imageEndpoints := []constant.EndpointType{constant.EndpointTypeImageGeneration, constant.EndpointTypeOpenAI, constant.EndpointTypeNovelAI}
 	assert.Equal(t, imageEndpoints, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, "nai-diffusion-4-5-full"))
 	assert.Equal(t, imageEndpoints, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, "gpt-image-2"))
+	for _, inpainting := range []string{"nai-diffusion-4-5-full-inpainting", "nai-diffusion-5-full-medium-inpainting"} {
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeNovelAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, inpainting), inpainting)
+	}
 	assert.Equal(t, novelai.ModelList, channelId2Models[constant.ChannelTypeNovelAI])
 	models, err := fetchChannelUpstreamModelIDs(&model.Channel{Type: constant.ChannelTypeNovelAI, Key: "pst-test"})
 	require.NoError(t, err)

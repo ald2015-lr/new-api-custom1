@@ -92,8 +92,8 @@ type imageStream struct {
 	pending   map[int]renderedImage
 	next      int
 	delivered int
-	// clientGone is a write the client did not take.
-	clientGone bool
+	// clientGone is the failure of a write the client did not take.
+	clientGone error
 	// failure is NovelAI's own end of the stream short of its images: an
 	// error event, or an event that breaks the protocol.
 	failure error
@@ -163,7 +163,7 @@ func (s *imageStream) handle(data string, sr *helper.StreamResult) {
 			Type: s.output.Event + ".partial_image", PartialImageIndex: &index, CreatedAt: s.created, Size: size,
 			Quality: s.output.Quality, Background: s.output.Background, OutputFormat: format, B64JSON: event.Image,
 		}); err != nil {
-			s.clientGone = true
+			s.clientGone = err
 			sr.Stop(err)
 			return
 		}
@@ -191,7 +191,7 @@ func (s *imageStream) handle(data string, sr *helper.StreamResult) {
 				break
 			}
 			if err := s.complete(s.next, final, s.delivered+1 == s.generation.NSamples); err != nil {
-				s.clientGone = true
+				s.clientGone = err
 				sr.Stop(err)
 				return
 			}
@@ -250,22 +250,28 @@ func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 		s.info.UpdateImageCount(int64(s.delivered))
 		return s.usage, nil
 	}
-	if s.clientGone {
-		// Nothing more is written to it.
+	if s.clientGone == nil {
+		// The images that came before a missing one still reach the client.
+		samples := make([]int, 0, len(s.pending))
+		for sample := range s.pending {
+			samples = append(samples, sample)
+		}
+		slices.Sort(samples)
+		for i, sample := range samples {
+			if err := s.complete(sample, s.pending[sample], i == len(samples)-1); err != nil {
+				s.clientGone = err
+				break
+			}
+		}
+	}
+	if s.clientGone != nil {
+		// Nothing more is written to it. NovelAI may have ended its stream
+		// before the write failed, which the end reason then says; the
+		// stream goroutines are done, so the client that left replaces it,
+		// and perf metrics take the request for a cancellation.
+		status.EndReason, status.EndError = relaycommon.StreamEndReasonClientGone, s.clientGone
 		logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, s.generation.NSamples, s.info.RequestedImageCount()))
 		return s.usage, nil
-	}
-	// The images that came before a missing one still reach the client.
-	samples := make([]int, 0, len(s.pending))
-	for sample := range s.pending {
-		samples = append(samples, sample)
-	}
-	slices.Sort(samples)
-	for i, sample := range samples {
-		if err := s.complete(sample, s.pending[sample], i == len(samples)-1); err != nil {
-			logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, s.generation.NSamples, s.info.RequestedImageCount()))
-			return s.usage, nil
-		}
 	}
 	upstreamEnded := s.failure != nil || status.EndReason == relaycommon.StreamEndReasonEOF || status.EndReason == relaycommon.StreamEndReasonDone
 	if !upstreamEnded {

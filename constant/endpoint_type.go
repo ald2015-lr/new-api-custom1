@@ -22,7 +22,8 @@ const (
 )
 
 // EndpointTypeNovelAI is NovelAI's native image API (POST /ai/generate-image
-// and /ai/generate-image-stream), the only one a NovelAI channel serves. It is
+// and /ai/generate-image-stream), which every NovelAI channel model serves
+// beside the OpenAI images API and chat completions it converts. It is
 // host-only: the conversion kit converts no request to or from it.
 const EndpointTypeNovelAI EndpointType = "novelai"
 

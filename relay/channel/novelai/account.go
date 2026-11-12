@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -19,9 +20,10 @@ import (
 )
 
 const (
-	// NovelAI serves image generation and the account API on two hosts.
-	imageHost      = "image.novelai.net"
-	accountBaseURL = "https://api.novelai.net"
+	// imageHost is NovelAI's image host. It also serves the account API:
+	// NovelAI retired /user/* on api.novelai.net, which now answers every
+	// call with 400 "update to the image URL".
+	imageHost = "image.novelai.net"
 
 	// subscriptionPath answers the account's tier and Anlas for its API token
 	// without spending any.
@@ -40,14 +42,14 @@ const (
 )
 
 // AccountBaseURL returns the base URL of the NovelAI account API for a NovelAI
-// channel's base URL: https://api.novelai.net for NovelAI's own image host
-// (and for an empty base URL, which means that host), and the base URL itself
-// for any other host, a NovelAI-compatible forwarder that serves the account
-// endpoints next to the image ones.
+// channel's base URL: the base URL itself, and NovelAI's image host
+// (https://image.novelai.net) for an empty one. NovelAI answers
+// /user/subscription on its image host, and a NovelAI-compatible forwarder
+// serves the account endpoints next to the image ones.
 func AccountBaseURL(baseURL string) string {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if isNovelAIImageHost(baseURL) {
-		return accountBaseURL
+	if baseURL == "" {
+		return constant.GetChannelBaseURL(constant.ChannelTypeNovelAI)
 	}
 	return baseURL
 }

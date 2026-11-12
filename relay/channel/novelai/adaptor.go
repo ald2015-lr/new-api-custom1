@@ -131,7 +131,11 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		}
 		return nil, err
 	}
-	resp.Body = &generationBody{ReadCloser: resp.Body, release: release}
+	if isNovelAIImageHost(info.ChannelBaseUrl) {
+		// The key's slot is free once NovelAI's answer arrived, whatever
+		// the client still has to receive.
+		resp.Body = newGenerationBody(resp.Body, release)
+	}
 	if !isConvertedMode(info.RelayMode) {
 		return resp, nil
 	}

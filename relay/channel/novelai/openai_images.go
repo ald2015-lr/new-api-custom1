@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -369,6 +370,7 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(http.StatusOK)
 	if _, err := c.Writer.Write(encoded); err != nil {
+		openai.NovelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI response stopped before it reached the client, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
 		return usage, nil
 	}
@@ -380,12 +382,14 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 // most samples: the n_samples asked for, which billing reserved, so an
 // answer with more raises neither what is delivered nor what is billed. A
 // read the client cut short by leaving reports clientLeft, which keeps the
-// reserved quantity; any other failure is a final 502, as upstream accepted
-// the job (2xx) and may have spent Anlas on it.
+// reserved quantity and is no perf-metrics sample; any other failure is a
+// final 502, as upstream accepted the job (2xx) and may have spent Anlas on
+// it.
 func readImages(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, samples int) (images [][]byte, clientLeft bool, apiErr *types.NewAPIError) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(responseLimit)+1))
 	if err != nil {
 		if c.Request.Context().Err() != nil {
+			openai.NovelAIClientLeft(info, err)
 			logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
 			return nil, true, nil
 		}

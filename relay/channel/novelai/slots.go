@@ -1,6 +1,7 @@
 package novelai
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -56,7 +57,8 @@ func generationSlot(key string) chan struct{} {
 // holdGeneration takes the generation slot of the channel key for a request
 // to NovelAI's image host and returns its release, a no-op for any other
 // channel. The slot is released once, by the first of: release, the end of
-// the response body (generationBody), or the end of the client's request.
+// NovelAI's answer or the close of the response body (generationBody), or
+// the end of the client's request.
 func holdGeneration(c *gin.Context, info *relaycommon.RelayInfo) (func(), *types.NewAPIError) {
 	if info.ChannelType != constant.ChannelTypeNovelAI || !isNovelAIImageHost(info.ChannelBaseUrl) {
 		return func() {}, nil
@@ -78,25 +80,98 @@ func holdGeneration(c *gin.Context, info *relaycommon.RelayInfo) (func(), *types
 	return release, nil
 }
 
-// generationBody releases the generation slot when the response body ends (a
-// read reaches its end or fails) or is closed: NovelAI generates while the
-// body arrives, and is free once all of it arrived, however long the relay
-// then takes to hand the images to its client.
+// generationReadAhead bounds how much of NovelAI's answer generationBody
+// keeps for a relay that has not taken it yet: as much as the relay keeps of
+// a response it converts (responseLimit, and the native response limit).
+// Tests lower it.
+var generationReadAhead = 64 << 20
+
+// errGenerationBodyClosed fails a read of a closed response body.
+var errGenerationBodyClosed = errors.New("http: read on closed response body")
+
+// generationBody reads NovelAI's answer ahead of the relay and releases the
+// generation slot when the answer ends (its last byte arrived or the read
+// failed) or the body is closed: NovelAI generates while the body arrives,
+// and is free once all of it arrived, however long the relay then takes to
+// hand the images to its client, which may read slowly or not at all. Up to
+// generationReadAhead bytes wait for the relay; past that the read-ahead
+// waits for the relay to catch up.
 type generationBody struct {
-	io.ReadCloser
-	release func()
+	upstream io.ReadCloser
+	release  func()
+	// readAheadLimit is generationReadAhead when the body was made.
+	readAheadLimit int
+
+	mu      sync.Mutex
+	changed *sync.Cond
+	ahead   bytes.Buffer
+	// ended is how upstream's answer ended: io.EOF, or the read error.
+	ended  error
+	closed bool
+}
+
+// newGenerationBody starts reading upstream ahead of the relay.
+func newGenerationBody(upstream io.ReadCloser, release func()) *generationBody {
+	body := &generationBody{upstream: upstream, release: release, readAheadLimit: generationReadAhead}
+	body.changed = sync.NewCond(&body.mu)
+	go body.readAhead()
+	return body
+}
+
+func (b *generationBody) readAhead() {
+	chunk := make([]byte, 32<<10)
+	for {
+		b.mu.Lock()
+		for b.ahead.Len() >= b.readAheadLimit && !b.closed {
+			b.changed.Wait()
+		}
+		closed := b.closed
+		b.mu.Unlock()
+		if closed {
+			return
+		}
+		n, err := b.upstream.Read(chunk)
+		b.mu.Lock()
+		if !b.closed {
+			b.ahead.Write(chunk[:n])
+		}
+		if err != nil {
+			b.ended = err
+		}
+		b.changed.Broadcast()
+		b.mu.Unlock()
+		if err != nil {
+			b.release()
+			return
+		}
+	}
 }
 
 func (b *generationBody) Read(p []byte) (int, error) {
-	n, err := b.ReadCloser.Read(p)
-	if err != nil {
-		b.release()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.ahead.Len() == 0 && b.ended == nil && !b.closed {
+		b.changed.Wait()
 	}
-	return n, err
+	switch {
+	case b.closed:
+		return 0, errGenerationBodyClosed
+	case b.ahead.Len() > 0:
+		n, _ := b.ahead.Read(p)
+		b.changed.Broadcast()
+		return n, nil
+	}
+	return 0, b.ended
 }
 
+// Close ends the read-ahead, which also ends a read waiting on it.
 func (b *generationBody) Close() error {
-	err := b.ReadCloser.Close()
+	b.mu.Lock()
+	b.closed = true
+	b.ahead = bytes.Buffer{}
+	b.changed.Broadcast()
+	b.mu.Unlock()
+	err := b.upstream.Close()
 	b.release()
 	return err
 }

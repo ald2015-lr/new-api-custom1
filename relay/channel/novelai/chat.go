@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -114,9 +115,7 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 	usage := generation.Usage()
 	id, created, model := helper.GetResponseID(c), time.Now().Unix(), info.UpstreamModelName
 	clientLeft := func(err error) (*dto.Usage, *types.NewAPIError) {
-		if info.StreamStatus != nil {
-			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
-		}
+		openai.NovelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI response stopped before it reached the client, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
 		return usage, nil
 	}
@@ -130,7 +129,6 @@ func chatResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayIn
 	}
 	images, left, apiErr := readImages(c, resp, info, generation.NSamples)
 	if left {
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
 		return usage, nil
 	}
 	if apiErr != nil {

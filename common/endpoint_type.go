@@ -1,13 +1,23 @@
 package common
 
-import "github.com/QuantumNous/new-api/constant"
+import (
+	"strings"
+
+	"github.com/QuantumNous/new-api/constant"
+)
 
 // GetEndpointTypesByChannelType 获取渠道最优先端点类型（所有的渠道都支持 OpenAI 端点）
 func GetEndpointTypesByChannelType(channelType int, modelName string) []constant.EndpointType {
 	// A NovelAI channel serves image generation only, whatever its models are
 	// called: the OpenAI images API and chat completions it converts, and the
-	// NovelAI native routes.
+	// NovelAI native routes. A NovelAI inpainting model only repaints the
+	// masked area of an image, which neither image generation nor chat
+	// completions can carry, so it offers the native routes alone (and
+	// /v1/images/edits with a mask, which has no endpoint type).
 	if channelType == constant.ChannelTypeNovelAI {
+		if strings.HasSuffix(modelName, "-inpainting") {
+			return []constant.EndpointType{constant.EndpointTypeNovelAI}
+		}
 		return []constant.EndpointType{constant.EndpointTypeImageGeneration, constant.EndpointTypeOpenAI, constant.EndpointTypeNovelAI}
 	}
 	// The DeepSeek Search and Fetch routing names serve only their endpoint.

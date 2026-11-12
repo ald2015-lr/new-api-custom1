@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/iotest"
@@ -32,6 +33,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -45,14 +47,17 @@ import (
 	"golang.org/x/image/draw"
 )
 
-// NovelAI generates images at image.novelai.net and answers the account at
-// api.novelai.net; a NovelAI-compatible forwarder answers both itself.
-func TestAccountBaseURLMapsNovelAIsImageHostToItsAccountHost(t *testing.T) {
+// NovelAI answers the account on its image host (api.novelai.net/user/* now
+// answers 400 "update to the image URL"), and a NovelAI-compatible forwarder
+// answers it itself, so the account API is at the channel's base URL, which is
+// NovelAI's image host when empty.
+func TestAccountBaseURLIsTheChannelsImageHost(t *testing.T) {
 	for baseURL, want := range map[string]string{
-		"":                                      "https://api.novelai.net",
-		"https://image.novelai.net":             "https://api.novelai.net",
-		" https://image.novelai.net/ ":          "https://api.novelai.net",
-		"http://IMAGE.NovelAI.net.":             "https://api.novelai.net",
+		"":                                      "https://image.novelai.net",
+		"  ":                                    "https://image.novelai.net",
+		"https://image.novelai.net":             "https://image.novelai.net",
+		" https://image.novelai.net/ ":          "https://image.novelai.net",
+		"http://IMAGE.NovelAI.net.":             "http://IMAGE.NovelAI.net.",
 		"http://10.0.0.2:3585/":                 "http://10.0.0.2:3585",
 		"https://nai.example.com/base":          "https://nai.example.com/base",
 		"https://image.novelai.net.example.com": "https://image.novelai.net.example.com",
@@ -130,6 +135,12 @@ func TestAdaptorRequestURLs(t *testing.T) {
 	assert.Subset(t, adaptor.GetModelList(), []string{"nai-diffusion-5-full-inpainting", "nai-diffusion-5-full-medium-inpainting"})
 	// Every model the channel offers converts, and nothing else.
 	assert.ElementsMatch(t, ModelList, slices.Collect(maps.Keys(profiles)))
+	// The model square and /v1/models offer an inpainting model only the
+	// native endpoint, and every other model the converted ones as well.
+	for _, model := range ModelList {
+		endpoints := common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, model)
+		assert.Equal(t, inpaintingModels[model], slices.Equal([]constant.EndpointType{constant.EndpointTypeNovelAI}, endpoints), model)
+	}
 }
 
 // The channel test and the balance read the account with GET
@@ -231,6 +242,23 @@ func TestFetchSubscriptionReadsTheAccount(t *testing.T) {
 		require.Nil(t, apiErr)
 		assert.Equal(t, anlas(10250), subscription.Anlas)
 		assert.Equal(t, int32(1), proxied.Load())
+	})
+
+	// An official channel (empty base URL) reads its account on NovelAI's
+	// image host, not on the retired api.novelai.net. The proxy refuses the
+	// tunnel: *.novelai.net is not reachable from the tests.
+	t.Run("official channel reads the account on the image host", func(t *testing.T) {
+		var tunnels []string
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tunnels = append(tunnels, r.Method+" "+r.Host)
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer proxy.Close()
+
+		_, apiErr := FetchSubscription(context.Background(), "", "pst-test", dto.ChannelSettings{Proxy: proxy.URL}, nil)
+
+		require.NotNil(t, apiErr)
+		assert.Equal(t, []string{"CONNECT image.novelai.net:443"}, tunnels)
 	})
 }
 
@@ -1078,8 +1106,10 @@ func TestGenerationSlotSerializesNovelAIKeys(t *testing.T) {
 	apiErr = <-waiting
 	require.NotNil(t, apiErr, "a client that left stops waiting")
 
-	// A response body closing releases the slot for the next request.
-	body := &generationBody{ReadCloser: io.NopCloser(strings.NewReader("")), release: release}
+	// A response body closing releases the slot for the next request, also
+	// while NovelAI is still answering.
+	answering, _ := io.Pipe()
+	body := newGenerationBody(answering, release)
 	require.NoError(t, body.Close())
 	require.NoError(t, body.Close())
 	next, apiErr := holdGeneration(request(context.Background()), official)
@@ -1102,9 +1132,10 @@ func TestGenerationSlotSerializesNovelAIKeys(t *testing.T) {
 }
 
 // A NovelAI channel on NovelAI's image host holds its key's generation slot
-// from the send until the response body closes, on the native routes as on
-// the converted ones: a second generation meanwhile gets the retryable 429.
-// The fake proxy plays NovelAI's host, which the test cannot reach.
+// from the send until NovelAI's answer ended or the response body closes, on
+// the native routes as on the converted ones: a second generation meanwhile
+// gets the retryable 429. The fake proxy plays NovelAI's host, which the
+// test cannot reach; it answers the first generation until finish closes.
 func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	service.InitHttpClient()
@@ -1112,11 +1143,17 @@ func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 	generationWait = 50 * time.Millisecond
 	t.Cleanup(func() { generationWait = savedWait })
 	var requests atomic.Int32
+	finish := make(chan struct{})
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		assert.Equal(t, "http://image.novelai.net/ai/generate-image", r.URL.String())
 		w.Header().Set("Content-Type", "application/zip")
 		_, _ = w.Write([]byte("PK\x03\x04"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-finish:
+		case <-r.Context().Done():
+		}
 	}))
 	defer proxy.Close()
 	info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeNovelAIGenerateImage, ChannelMeta: &relaycommon.ChannelMeta{
@@ -1144,28 +1181,31 @@ func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 	require.NoError(t, first.Body.Close())
 	second, err := send()
 	require.NoError(t, err, "a closed response frees the slot")
+	_, err = send()
+	require.ErrorAs(t, err, &apiErr, "the second generation holds the slot while NovelAI answers it")
+	close(finish)
+	third, err := send()
+	require.NoError(t, err, "an ended answer frees the slot, though nothing read it")
 	require.NoError(t, second.Body.Close())
-	assert.Equal(t, int32(2), requests.Load())
+	require.NoError(t, third.Body.Close())
+	assert.Equal(t, int32(3), requests.Load())
 }
 
-// blockingWriter is a client that stopped reading: its first write of an
-// image blocks until unblock is closed.
-type blockingWriter struct {
+// stalledClient is a client that never reads: every write blocks until
+// unblock is closed, and the first one closes entered.
+type stalledClient struct {
 	gin.ResponseWriter
 	entered, unblock chan struct{}
-	blocked          bool
+	once             sync.Once
 }
 
-func (w *blockingWriter) Write(data []byte) (int, error) {
-	if !w.blocked && (bytes.Contains(data, []byte("![image]")) || bytes.Contains(data, []byte("b64_json"))) {
-		w.blocked = true
-		close(w.entered)
-		<-w.unblock
-	}
+func (w *stalledClient) Write(data []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.unblock
 	return w.ResponseWriter.Write(data)
 }
 
-func (w *blockingWriter) WriteString(data string) (int, error) {
+func (w *stalledClient) WriteString(data string) (int, error) {
 	return w.Write([]byte(data))
 }
 
@@ -1184,75 +1224,137 @@ func (r *endTracker) Read(p []byte) (int, error) {
 }
 
 // NovelAI is free for the key's next generation once its answer has
-// arrived, whatever the relay still writes to its client: on every converted
-// answer, a client that stops reading holds no slot. An error answer is read
-// as it comes back, at most 1 MiB, and closed even when it breaks off, so
-// the retry of the request on the same key does not wait for its own slot.
+// arrived, whatever the relay still has to write to its client: on every
+// converted and native route, a client that never reads holds no slot once
+// NovelAI's answer, larger than the relay's own buffers, ended. What waits
+// for the relay is bounded: past generationReadAhead, NovelAI's answer is
+// read no further until the relay takes some, and closing the body ends a
+// read that waits on NovelAI. An error answer is read as it comes back, at
+// most 1 MiB, and closed even when it breaks off, so the retry of the
+// request on the same key does not wait for its own slot.
 func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	service.InitHttpClient()
 	savedWait := generationWait
-	generationWait = 200 * time.Millisecond
+	generationWait = time.Second
 	t.Cleanup(func() { generationWait = savedWait })
-	red := testImage(16, 16, solid(color.NRGBA{R: 255, A: 255}))
+	// A PNG of noise: about 1 MiB, which no compression shrinks.
+	large := testImage(512, 512, func(x, y int) color.Color {
+		v := crc32.ChecksumIEEE([]byte{byte(x), byte(x >> 8), byte(y), byte(y >> 8)})
+		return color.NRGBA{R: uint8(v), G: uint8(v >> 8), B: uint8(v >> 16), A: 255}
+	})
 	var archive bytes.Buffer
 	writer := zip.NewWriter(&archive)
 	entry, err := writer.Create("image_0.png")
 	require.NoError(t, err)
-	_, err = entry.Write(red)
+	_, err = entry.Write(large)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
-	events := sseEvents(t, map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(red)})
+	zipped := archive.String()
+	// A step's preview each, then the final.
+	var steps []map[string]any
+	for step := range 28 {
+		steps = append(steps, map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": step, "image": base64.StdEncoding.EncodeToString(testImage(8, 8, solid(color.Gray{Y: uint8(step)})))})
+	}
+	events := sseEvents(t, append(steps, map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(large)})...)
 
-	for _, mode := range []string{"chat", "chat stream", "images", "images stream", "V3 images stream"} {
-		t.Run(mode, func(t *testing.T) {
-			model, body, contentType := "nai-diffusion-4-5-full", archive.String(), "application/zip"
-			switch mode {
-			case "images stream":
-				body, contentType = events, "text/event-stream"
-			case "V3 images stream":
-				model = "nai-diffusion-3"
-			}
-			c, _, resp, info := imageStreamContext(t, body, contentType, 1)
-			info.ChannelMeta = &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-answered-" + mode, UpstreamModelName: model}
-			info.IsStream = strings.HasSuffix(mode, "stream")
+	for _, tc := range []struct {
+		mode              string
+		relayMode         int
+		model             string
+		stream            bool
+		body, contentType string
+	}{
+		{"chat", relayconstant.RelayModeChatCompletions, "nai-diffusion-4-5-full", false, zipped, "application/zip"},
+		{"chat stream", relayconstant.RelayModeChatCompletions, "nai-diffusion-4-5-full", true, zipped, "application/zip"},
+		{"images", relayconstant.RelayModeImagesGenerations, "nai-diffusion-4-5-full", false, zipped, "application/zip"},
+		{"images stream", relayconstant.RelayModeImagesGenerations, "nai-diffusion-4-5-full", true, events, "text/event-stream"},
+		{"V3 images stream", relayconstant.RelayModeImagesGenerations, "nai-diffusion-3", true, zipped, "application/zip"},
+		{"native image", relayconstant.RelayModeNovelAIGenerateImage, "nai-diffusion-4-5-full", false, zipped, "application/zip"},
+		{"native image stream", relayconstant.RelayModeNovelAIGenerateImageStream, "nai-diffusion-4-5-full", true, events, "text/event-stream"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			c, _, resp, info := imageStreamContext(t, tc.body, tc.contentType, 1)
+			info.RelayMode, info.IsStream = tc.relayMode, tc.stream
+			info.ChannelMeta = &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-stalled-" + tc.mode, UpstreamModelName: tc.model}
 			release, apiErr := holdGeneration(c, info)
 			require.Nil(t, apiErr)
-			upstream := &endTracker{Reader: strings.NewReader(body)}
-			resp.Body = &generationBody{ReadCloser: io.NopCloser(upstream), release: release}
-			client := &blockingWriter{ResponseWriter: c.Writer, entered: make(chan struct{}), unblock: make(chan struct{})}
+			upstream := &endTracker{Reader: strings.NewReader(tc.body)}
+			resp.Body = newGenerationBody(io.NopCloser(upstream), release)
+			client := &stalledClient{ResponseWriter: c.Writer, entered: make(chan struct{}), unblock: make(chan struct{})}
 			c.Writer = client
-			generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: model, Prompt: "a cat", N: 1})
+			generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: tc.model, Prompt: "a cat", N: 1, Extras: map[string]json.RawMessage{"steps": raw("28")}})
 			require.Nil(t, apiErr)
-			output := ImageOutput{ResponseFormat: "b64_json", OutputFormat: formatPNG, Background: "opaque", Quality: "auto", Event: "image_generation"}
+			adaptor := &Adaptor{generation: generation, output: ImageOutput{ResponseFormat: "b64_json", OutputFormat: formatPNG, Background: "opaque", Quality: "auto", PartialImages: 1, Event: "image_generation"}}
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				switch {
-				case strings.HasPrefix(mode, "chat"):
-					_, _ = chatResponse(c, resp, info, generation)
-				case info.IsStream:
-					_, _ = imagesStreamResponse(c, resp, info, generation, output)
-				default:
-					_, _ = imagesResponse(c, resp, info, generation, output)
-				}
+				_, _ = adaptor.DoResponse(c, resp, info)
+			}()
+			defer func() {
+				close(client.unblock)
+				<-done
 			}()
 			select {
 			case <-client.entered:
 			case <-time.After(5 * time.Second):
-				t.Fatal("the images never reached the client")
+				t.Fatal("the relay never wrote to its client")
 			}
 
 			next, _ := gin.CreateTestContext(httptest.NewRecorder())
 			next.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 			releaseNext, apiErr := holdGeneration(next, info)
-			close(client.unblock)
-			<-done
-			require.Nil(t, apiErr, "the key is free while the client has not read the images")
+			require.Nil(t, apiErr, "the key is free while the client has read nothing")
 			releaseNext()
-			assert.True(t, upstream.ended.Load())
+			assert.True(t, upstream.ended.Load(), "NovelAI's answer was read to its end")
 		})
 	}
+
+	t.Run("what waits for the relay is bounded", func(t *testing.T) {
+		savedAhead := generationReadAhead
+		generationReadAhead = 64 << 10
+		generationWait = 50 * time.Millisecond
+		t.Cleanup(func() {
+			generationReadAhead = savedAhead
+			generationWait = time.Second
+		})
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/ai/generate-image", nil)
+		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-read-ahead"}}
+		release, apiErr := holdGeneration(c, info)
+		require.Nil(t, apiErr)
+		upstream := &endTracker{Reader: strings.NewReader(zipped)}
+		body := newGenerationBody(io.NopCloser(upstream), release)
+		defer body.Close()
+
+		_, apiErr = holdGeneration(c, info)
+		require.NotNil(t, apiErr, "NovelAI's answer is not read past the read-ahead while nothing takes it")
+		assert.False(t, upstream.ended.Load())
+		read, err := io.ReadAll(body)
+		require.NoError(t, err)
+		assert.Equal(t, zipped, string(read), "the answer arrives whole and in order")
+		releaseNext, apiErr := holdGeneration(c, info)
+		require.Nil(t, apiErr)
+		releaseNext()
+
+		// A read waiting on a NovelAI that sends nothing more ends when the
+		// body closes (the idle timeout and the stream cleanup close it),
+		// which frees the slot.
+		release, apiErr = holdGeneration(c, info)
+		require.Nil(t, apiErr)
+		silent, _ := io.Pipe()
+		waiting := newGenerationBody(silent, release)
+		readErr := make(chan error)
+		go func() {
+			_, err := waiting.Read(make([]byte, 8))
+			readErr <- err
+		}()
+		require.NoError(t, waiting.Close())
+		assert.ErrorIs(t, <-readErr, errGenerationBodyClosed)
+		releaseNext, apiErr = holdGeneration(c, info)
+		require.Nil(t, apiErr)
+		releaseNext()
+	})
 
 	t.Run("an error answer that breaks off", func(t *testing.T) {
 		var requests atomic.Int32
@@ -1374,6 +1476,33 @@ func (w *cancelAfterWriter) Write(data []byte) (int, error) {
 
 func (w *cancelAfterWriter) WriteString(data string) (int, error) {
 	return w.Write([]byte(data))
+}
+
+// leavingWriter is a client whose connection broke on the first write: the
+// write fails, and the server ends the request.
+type leavingWriter struct {
+	gin.ResponseWriter
+	cancel context.CancelFunc
+}
+
+func (w *leavingWriter) Write([]byte) (int, error) {
+	w.cancel()
+	return 0, errors.New("broken pipe")
+}
+
+func (w *leavingWriter) WriteString(data string) (int, error) {
+	return w.Write([]byte(data))
+}
+
+// clientLeavingReader is a NovelAI answer whose read the client's leaving
+// ends: it cancels the request and fails as the upstream read then does.
+type clientLeavingReader struct {
+	cancel context.CancelFunc
+}
+
+func (r clientLeavingReader) Read([]byte) (int, error) {
+	r.cancel()
+	return 0, context.Canceled
 }
 
 // failingWriter is a client whose connection broke.
@@ -1601,6 +1730,8 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 			require.NotNil(t, usage)
 			assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
 			assert.Equal(t, 1, writer.attempts, "one failed write, no retry")
+			assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+			assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(c.Request.Context(), info, apiErr))
 		})
 	}
 
@@ -1638,6 +1769,59 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "billed per image received")
 		assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
 	})
+}
+
+// A client that leaves a converted request keeps the reserved charge and is
+// no perf-metrics health sample, as on the native routes and the relay
+// streams: a write to it fails, or its leaving ends the read of NovelAI's
+// answer.
+func TestConvertedResponsesCountClientAbortsAsCancellations(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	red := testImage(16, 16, solid(color.NRGBA{R: 255, A: 255}))
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for i := range 2 {
+		entry, err := writer.Create(fmt.Sprintf("image_%d.png", i))
+		require.NoError(t, err)
+		_, err = entry.Write(red)
+		require.NoError(t, err)
+	}
+	require.NoError(t, writer.Close())
+
+	for _, mode := range []string{"chat", "chat stream", "images", "V3 images stream"} {
+		for _, leaves := range []string{"write fails", "read ends"} {
+			t.Run(mode+", "+leaves, func(t *testing.T) {
+				model, relayMode := "nai-diffusion-4-5-full", relayconstant.RelayModeImagesGenerations
+				switch mode {
+				case "chat", "chat stream":
+					relayMode = relayconstant.RelayModeChatCompletions
+				case "V3 images stream":
+					model = "nai-diffusion-3"
+				}
+				c, _, resp, info := imageStreamContext(t, archive.String(), "application/zip", 2)
+				info.RelayMode, info.IsStream, info.UpstreamModelName = relayMode, strings.HasSuffix(mode, "stream"), model
+				ctx, cancel := context.WithCancel(c.Request.Context())
+				t.Cleanup(cancel)
+				c.Request = c.Request.WithContext(ctx)
+				switch leaves {
+				case "write fails":
+					c.Writer = &leavingWriter{ResponseWriter: c.Writer, cancel: cancel}
+				case "read ends":
+					resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(archive.Bytes()[:16]), clientLeavingReader{cancel: cancel}))
+				}
+				generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: model, Prompt: "a cat", N: 2})
+				require.Nil(t, apiErr)
+				adaptor := &Adaptor{generation: generation, output: ImageOutput{ResponseFormat: "b64_json", OutputFormat: formatPNG, Background: "opaque", Quality: "auto", Event: "image_generation"}}
+
+				usage, apiErr := adaptor.DoResponse(c, resp, info)
+
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
+				assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(c.Request.Context(), info, apiErr))
+			})
+		}
+	}
 }
 
 // chatContext is a chat completion whose raw body is body.
