@@ -247,14 +247,16 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
 }
 
 // NovelAI's parameters.n_samples is the image count a native generate-image
-// call reserves and bills. It is bounded the same way whether the request JSON
-// is the body or the multipart field request (a form value or a file part,
-// as the NovelAI web client sends it), and the body stays in place for
-// byte-for-byte forwarding.
-func TestGetAndValidateNovelAIImageRequestBoundsNSamples(t *testing.T) {
+// call reserves and bills, and parameters.width x height the canvas each
+// image counts as in tokens. They are bounded the same way whether the
+// request JSON is the body or the multipart field request (a form value or a
+// file part, as the NovelAI web client sends it), and the body stays in place
+// for byte-for-byte forwarding.
+func TestGetAndValidateNovelAIImageRequestBoundsBillingFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	require.NoError(t, i18n.Init())
 	boundErr := i18n.Translate("", i18n.MsgNovelAINSamplesInvalid, map[string]any{"Max": dto.MaxImageN})
+	canvasErr := i18n.Translate("", i18n.MsgNovelAIDimensionsInvalid, map[string]any{"Max": relayconstant.NovelAIMaxPixels})
 
 	newContext := func(t *testing.T, transport, requestJSON string) (*gin.Context, []byte) {
 		var body bytes.Buffer
@@ -312,6 +314,20 @@ func TestGetAndValidateNovelAIImageRequestBoundsNSamples(t *testing.T) {
 		{name: "parameters repeated", request: `{"model":"nai-diffusion-4-5-full","parameters":{"n_samples":1},"parameters":{"n_samples":8}}`,
 			wantErr: i18n.Translate("", i18n.MsgNovelAIFieldRepeated, map[string]any{"Field": "parameters"})},
 		{name: "parameters not an object", request: `{"model":"nai-diffusion-4-5-full","parameters":[4]}`, wantErr: i18n.Translate("", i18n.MsgNovelAIParametersInvalid)},
+		{name: "NovelAI's largest canvas", request: `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"width":1024,"height":3072}}`, count: 1},
+		{name: "a canvas side null", request: `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"width":null,"height":1536}}`, count: 1},
+		// A side the token count cannot read would bill the 832x1216 default
+		// while an upstream that coerces it generates more.
+		{name: "width string", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":"1536","height":2048}}`, wantErr: canvasErr},
+		{name: "height fractional", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":1024,"height":1024.5}}`, wantErr: canvasErr},
+		{name: "width zero", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":0}}`, wantErr: canvasErr},
+		{name: "height negative", request: `{"model":"nai-diffusion-4-5-full","parameters":{"height":-1216}}`, wantErr: canvasErr},
+		{name: "width exponent", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":1e3}}`, wantErr: canvasErr},
+		{name: "canvas above NovelAI's limit", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":2048,"height":2048}}`, wantErr: canvasErr},
+		{name: "one side above the limit with the other's default", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":3072}}`, wantErr: canvasErr},
+		{name: "a wrapped negative side", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":18446744073709550000,"height":64}}`, wantErr: canvasErr},
+		{name: "width repeated in another case", request: `{"model":"nai-diffusion-4-5-full","parameters":{"width":64,"Width":2048}}`,
+			wantErr: i18n.Translate("", i18n.MsgNovelAIFieldRepeated, map[string]any{"Field": "width"})},
 		{name: "model missing", request: `{"input":"a cat","parameters":{"n_samples":1}}`, wantErr: i18n.Translate("", i18n.MsgDistributorModelNameRequired)},
 		{name: "not a JSON object", request: `["nai-diffusion-4-5-full"]`, wantErr: i18n.Translate("", i18n.MsgNovelAIRequestInvalid)},
 	} {

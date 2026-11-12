@@ -1838,6 +1838,27 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 		})
 	}
 
+	// The images held back for a missing sample reach the client in sample
+	// order when the stream ends, and only the last of them carries the
+	// usage, so a client that adds up the events counts it once.
+	t.Run("images held back for a missing sample carry the usage on the last", func(t *testing.T) {
+		three, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 3, Extras: map[string]json.RawMessage{"steps": raw("4"), "seed": raw("100")}})
+		require.Nil(t, apiErr)
+		require.Equal(t, tokens, three.Tokens)
+		c, recorder, resp, info := imageStreamContext(t, sseEvents(t, final(2, blue), final(1, red)), "text/event-stream", 3)
+
+		usage, apiErr := imagesStreamResponse(c, resp, info, three, output)
+
+		require.Nil(t, apiErr)
+		assert.Equal(t, tokens.Usage(2), usage, "the images delivered, not the 3 asked for")
+		events := streamedEvents(t, recorder.Body.String())
+		require.Len(t, events, 3, recorder.Body.String())
+		completed(t, events[0], red, 101, 0)
+		completed(t, events[1], blue, 102, 2)
+		errorEvent(t, events, "ended after 2 of 3 images")
+		assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
+	})
+
 	t.Run("an error before any image fails the request", func(t *testing.T) {
 		c, recorder, resp, info := imageStreamContext(t, sseEvents(t, intermediate(0, 0), failure), "text/event-stream", 2)
 
@@ -1955,56 +1976,64 @@ func TestImagesStreamRelaysNovelAIEvents(t *testing.T) {
 	})
 }
 
-// A client that leaves a converted request keeps the reserved charge and is
-// no perf-metrics health sample, as on the native routes and the relay
-// streams: a write to it fails, or its leaving ends the read of NovelAI's
-// answer.
+// A client that leaves a converted request keeps the reserved charge, its
+// usage included, and is no perf-metrics health sample, as on the native
+// routes and the relay streams: a write to it fails, or its leaving ends the
+// read of NovelAI's answer. That holds when NovelAI made fewer images than
+// reserved too.
 func TestConvertedResponsesCountClientAbortsAsCancellations(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	red := testImage(16, 16, solid(color.NRGBA{R: 255, A: 255}))
-	var archive bytes.Buffer
-	writer := zip.NewWriter(&archive)
-	for i := range 2 {
-		entry, err := writer.Create(fmt.Sprintf("image_%d.png", i))
-		require.NoError(t, err)
-		_, err = entry.Write(red)
-		require.NoError(t, err)
+	archives := map[int][]byte{}
+	for _, made := range []int{1, 2} {
+		var archive bytes.Buffer
+		writer := zip.NewWriter(&archive)
+		for i := range made {
+			entry, err := writer.Create(fmt.Sprintf("image_%d.png", i))
+			require.NoError(t, err)
+			_, err = entry.Write(red)
+			require.NoError(t, err)
+		}
+		require.NoError(t, writer.Close())
+		archives[made] = archive.Bytes()
 	}
-	require.NoError(t, writer.Close())
 
 	for _, mode := range []string{"chat", "chat stream", "images", "V3 images stream"} {
 		for _, leaves := range []string{"write fails", "read ends"} {
-			t.Run(mode+", "+leaves, func(t *testing.T) {
-				model, relayMode := "nai-diffusion-4-5-full", relayconstant.RelayModeImagesGenerations
-				switch mode {
-				case "chat", "chat stream":
-					relayMode = relayconstant.RelayModeChatCompletions
-				case "V3 images stream":
-					model = "nai-diffusion-3"
-				}
-				c, _, resp, info := imageStreamContext(t, archive.String(), "application/zip", 2)
-				info.RelayMode, info.IsStream, info.UpstreamModelName = relayMode, strings.HasSuffix(mode, "stream"), model
-				ctx, cancel := context.WithCancel(c.Request.Context())
-				t.Cleanup(cancel)
-				c.Request = c.Request.WithContext(ctx)
-				switch leaves {
-				case "write fails":
-					c.Writer = &leavingWriter{ResponseWriter: c.Writer, cancel: cancel}
-				case "read ends":
-					resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(archive.Bytes()[:16]), clientLeavingReader{cancel: cancel}))
-				}
-				generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: model, Prompt: "a cat", N: 2})
-				require.Nil(t, apiErr)
-				adaptor := &Adaptor{generation: generation, output: ImageOutput{ResponseFormat: "b64_json", OutputFormat: formatPNG, Background: "opaque", Quality: "auto", Event: "image_generation"}}
+			for _, made := range []int{2, 1} {
+				t.Run(fmt.Sprintf("%s, %s, %d of 2 made", mode, leaves, made), func(t *testing.T) {
+					archive := archives[made]
+					model, relayMode := "nai-diffusion-4-5-full", relayconstant.RelayModeImagesGenerations
+					switch mode {
+					case "chat", "chat stream":
+						relayMode = relayconstant.RelayModeChatCompletions
+					case "V3 images stream":
+						model = "nai-diffusion-3"
+					}
+					c, _, resp, info := imageStreamContext(t, string(archive), "application/zip", 2)
+					info.RelayMode, info.IsStream, info.UpstreamModelName = relayMode, strings.HasSuffix(mode, "stream"), model
+					ctx, cancel := context.WithCancel(c.Request.Context())
+					t.Cleanup(cancel)
+					c.Request = c.Request.WithContext(ctx)
+					switch leaves {
+					case "write fails":
+						c.Writer = &leavingWriter{ResponseWriter: c.Writer, cancel: cancel}
+					case "read ends":
+						resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(archive[:16]), clientLeavingReader{cancel: cancel}))
+					}
+					generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: model, Prompt: "a cat", N: 2})
+					require.Nil(t, apiErr)
+					adaptor := &Adaptor{generation: generation, output: ImageOutput{ResponseFormat: "b64_json", OutputFormat: formatPNG, Background: "opaque", Quality: "auto", Event: "image_generation"}}
 
-				usage, apiErr := adaptor.DoResponse(c, resp, info)
+					usage, apiErr := adaptor.DoResponse(c, resp, info)
 
-				require.Nil(t, apiErr)
-				assert.Equal(t, generation.Tokens.Usage(2), usage, "the usage of the reserved images")
-				assert.Equal(t, 2*generation.Tokens.PerImage, usage.(*dto.Usage).CompletionTokens)
-				assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
-				assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(c.Request.Context(), info, apiErr))
-			})
+					require.Nil(t, apiErr)
+					assert.Equal(t, generation.Tokens.Usage(2), usage, "the usage of the reserved images")
+					assert.Equal(t, 2*generation.Tokens.PerImage, usage.(*dto.Usage).CompletionTokens)
+					assert.Equal(t, 2.0, info.PriceData.OtherRatios()["n"], "a client abort never lowers the charge")
+					assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(c.Request.Context(), info, apiErr))
+				})
+			}
 		}
 	}
 }
@@ -2336,16 +2365,21 @@ func TestImageTokens(t *testing.T) {
 // by default; and as input images its img2img or infill source (not the
 // mask) and each vibe or Precise Reference image, as base64 or as the
 // cached lists of a multipart form. A key repeated in another case counts
-// at its largest.
+// at its largest, one repeated inside a caption at all its values. V3 has no
+// V4 captions and reads input and negative_prompt; for a model without a
+// profile each side counts the larger of its caption and its plain prompt.
 func TestRequestTokens(t *testing.T) {
 	const model = "nai-diffusion-5-full"
-	estimate := func(texts ...string) int {
+	estimateFor := func(model string, texts ...string) int {
 		total := 0
 		for _, text := range texts {
 			total += tokenkit.Estimate(model, text)
 		}
 		return total
 	}
+	estimate := func(texts ...string) int { return estimateFor(model, texts...) }
+	long := strings.Repeat("masterpiece, best quality, 1girl, detailed background, ", 8)
+	require.Greater(t, estimate(long), estimate("a", "b")+10, "a prompt much longer than a word")
 	square := `"width":1024,"height":1024`
 	references := func(count int) string {
 		list := make([]string, count)
@@ -2398,6 +2432,22 @@ func TestRequestTokens(t *testing.T) {
 		{"a key repeated in another case counts at its largest",
 			`{"input":"a cat","model":"` + model + `","parameters":{"width":64,"Width":1024,"height":1024}}`,
 			GenerationTokens{Text: estimate("a cat"), PerImage: 1290}},
+		// JSON.parse and Python's json keep the last of a repeated key.
+		{"a key repeated inside a caption counts all its values",
+			`{"input":"a","model":"` + model + `","parameters":{` + square + `,"v4_prompt":{"caption":{"base_caption":"a","base_caption":"` + long + `",` +
+				`"char_captions":[{"char_caption":"b","char_caption":"` + long + `"}]}},"v4_negative_prompt":{"caption":{"base_caption":"b"},"caption":{"base_caption":"` + long + `"}}}}`,
+			GenerationTokens{Text: estimate("a", long, "b", long, "b", long), PerImage: 1290}},
+		{"V3 reads input and negative_prompt, not V4 captions",
+			`{"input":"` + long + `","model":"nai-diffusion-3","parameters":{` + square + `,"negative_prompt":"` + long + `",` +
+				`"v4_prompt":{"caption":{"base_caption":"","char_captions":[]}},"v4_negative_prompt":{"caption":{"base_caption":"a"}}}}`,
+			GenerationTokens{Text: estimateFor("nai-diffusion-3", long, long), PerImage: 1290}},
+		{"V3 reads uc without negative_prompt",
+			`{"input":"a cat","model":"nai-diffusion-furry-3","parameters":{` + square + `,"uc":"` + long + `","v4_prompt":{"caption":{"base_caption":"` + long + `"}}}}`,
+			GenerationTokens{Text: estimateFor("nai-diffusion-furry-3", "a cat", long), PerImage: 1290}},
+		{"a model without a profile counts each side's larger prompt",
+			`{"input":"` + long + `","model":"nai-diffusion-9","parameters":{` + square + `,"negative_prompt":"lowres",` +
+				`"v4_prompt":{"caption":{"base_caption":"a"}},"v4_negative_prompt":{"caption":{"base_caption":"` + long + `","char_captions":[{"char_caption":"b"}]}}}}`,
+			GenerationTokens{Text: estimateFor("nai-diffusion-9", long) + estimateFor("nai-diffusion-9", long, "b"), PerImage: 1290}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, RequestTokens([]byte(tc.body)))

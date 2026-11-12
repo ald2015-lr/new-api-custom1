@@ -146,7 +146,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
-			if apiErr := checkNovelAISamples(info, jsonData, info.ImageRequestCount); apiErr != nil {
+			if apiErr := checkNovelAIOverride(info, adaptor, jsonData, info.ImageRequestCount); apiErr != nil {
 				return apiErr
 			}
 		}

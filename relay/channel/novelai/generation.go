@@ -18,6 +18,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 
@@ -33,7 +34,7 @@ const (
 
 const (
 	// maxPixels is NovelAI's canvas limit, width x height.
-	maxPixels = 3_145_728
+	maxPixels = relayconstant.NovelAIMaxPixels
 	// autoEditPixels is the area of an edit whose size is auto: the
 	// source's aspect ratio at at most 1024x1024, Opus's free area.
 	autoEditPixels = 1_048_576
@@ -534,8 +535,10 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 		"use_new_shared_trial": true,
 	}
 	// Counted as the native routes count a request, from what NovelAI
-	// receives; the action tells there is a source image, so the copy leaves
-	// out the image and the mask.
+	// receives (a channel's parameter override changes that, and
+	// Adaptor.CountRequest counts the overridden body again); the action
+	// tells there is a source image, so the copy leaves out the image and the
+	// mask.
 	counted := maps.Clone(body)
 	countedParameters := maps.Clone(parameters)
 	delete(countedParameters, "image")

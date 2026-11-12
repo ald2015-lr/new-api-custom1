@@ -28,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -368,6 +369,7 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 		"\r\n--xyz\r\nContent-Disposition: form-data; name=\"unused\"; name*=UTF-8''request\r\n\r\n" +
 		`{"model":"nai-diffusion-4-5-full","parameters":{"n_samples":1}}` + "\r\n--xyz--\r\n"
 	nSamplesMessage := i18n.Translate("", i18n.MsgNovelAINSamplesInvalid, map[string]any{"Max": dto.MaxImageN})
+	canvasMessage := i18n.Translate("", i18n.MsgNovelAIDimensionsInvalid, map[string]any{"Max": relayconstant.NovelAIMaxPixels})
 	contentTypeMessage := i18n.Translate("", i18n.MsgNovelAIContentTypeInvalid)
 	for _, rejected := range []struct {
 		path, contentType, body string
@@ -381,6 +383,7 @@ func testNovelAIImageRoutes(t *testing.T, channelType int) {
 		{"/v1/ai/generate-image-stream", "application/json", `{"model":"nai-diffusion-4-5-full"}`, false, http.StatusUnauthorized, i18n.Translate("", i18n.MsgTokenInvalid)},
 		{"/ai/generate-image", "application/json", `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"n_samples":0}}`, true, http.StatusBadRequest, nSamplesMessage},
 		{"/ai/generate-image", contentType, string(outOfRange), true, http.StatusBadRequest, nSamplesMessage},
+		{"/ai/generate-image-stream", "application/json", `{"input":"a cat","model":"nai-diffusion-4-5-full","parameters":{"width":"1536","height":2048}}`, true, http.StatusBadRequest, canvasMessage},
 		{"/v1/ai/generate-image", formWriter.FormDataContentType(), withoutRequest.String(), true, http.StatusBadRequest, i18n.Translate("", i18n.MsgNovelAIRequestFieldMissing)},
 		{"/ai/generate-image-stream", "multipart/form-data; boundary=xyz", shadowed, true, http.StatusBadRequest, i18n.Translate("", i18n.MsgNovelAIMultipartInvalid, map[string]any{"Error": ""})},
 		{"/ai/generate-image", "text/plain", `{"model":"nai-diffusion-4-5-full","parameters":{"n_samples":1}}`, true, http.StatusBadRequest, contentTypeMessage},
@@ -1540,15 +1543,41 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, calls, upstream.calls(), "NovelAI is not asked for images nobody reserved")
 		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
 
-		require.NoError(t, model.DB.Model(&overridden).Update("param_override", `{"operations":[{"path":"parameters.steps","mode":"set","value":28}]}`).Error)
-		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		// The tokens are those of the body NovelAI received: a 1536x1024
+		// canvas (1935 tokens an image) and the overridden negative caption.
+		const negative = "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name"
+		require.NoError(t, model.DB.Model(&overridden).Update("param_override", `{"operations":[{"path":"parameters.steps","mode":"set","value":28},`+
+			`{"path":"parameters.width","mode":"set","value":1536},{"path":"parameters.height","mode":"set","value":1024},`+
+			`{"path":"parameters.v4_negative_prompt.caption.base_caption","mode":"set","value":"`+negative+`"}]}`).Error)
+		for _, tc := range []struct {
+			path, body string
+			n          int
+		}{
+			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-curated","prompt":"a cat","n":1,"size":"1024x1024"}`, 1},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-curated","n":2,"messages":[{"role":"user","content":"a cat"}]}`, 2},
+		} {
+			images := [][]byte{red, blue}[:tc.n]
+			upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, images...))
+			before := walletQuota()
 
-		decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-curated","prompt":"a cat","n":1}`)))
+			recorder := send(tc.path, "application/json", []byte(tc.body))
 
-		parameters := upstream.last().body["parameters"].(map[string]any)
-		assert.Equal(t, float64(28), parameters["steps"])
-		assert.Equal(t, float64(1), parameters["n_samples"])
-		assert.Equal(t, 10_000, lastLog().Quota)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			if tc.n == 1 {
+				decode(recorder)
+			}
+			sent := upstream.last().body
+			parameters := sent["parameters"].(map[string]any)
+			assert.Equal(t, float64(28), parameters["steps"])
+			assert.Equal(t, float64(tc.n), parameters["n_samples"])
+			assert.Equal(t, [2]any{1536.0, 1024.0}, [2]any{parameters["width"], parameters["height"]})
+			log := lastLog()
+			text := tokenkit.Estimate("nai-diffusion-4-5-curated", sent["input"].(string)) + tokenkit.Estimate("nai-diffusion-4-5-curated", negative)
+			assert.Equal(t, text, log.PromptTokens, tc.path+": the overridden negative caption")
+			assert.Equal(t, tc.n*1935, log.CompletionTokens, tc.path+": the 1536x1024 images NovelAI made")
+			assert.Equal(t, tc.n*10_000, log.Quota, tc.path+": the per-image price is unchanged")
+			assert.Equal(t, before-tc.n*10_000, walletQuota())
+		}
 	})
 
 	t.Run("NovelAI errors keep their status in an OpenAI error and charge nothing", func(t *testing.T) {

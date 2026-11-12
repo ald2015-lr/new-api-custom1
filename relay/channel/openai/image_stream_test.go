@@ -877,15 +877,24 @@ func (w *flushNotifyWriter) Flush() {
 // The stream endpoint hands each upstream read to the client as it arrives
 // instead of buffering the response until upstream finishes, and so does the
 // generate-image endpoint once the first bytes show the response is already
-// in the format the client asked for.
+// in the format the client asked for. A stream endpoint answered with a whole
+// zip or JSON (a forwarder that does not stream) sends nothing before
+// upstream generated every image, so its throughput spans the request
+// (PerformanceWholeOutput) instead of the write of its body; event streams
+// generate after their first event.
 func TestNovelAIImageHandlerFlushesBeforeUpstreamFinishes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		name, accept, contentType string
 		relayMode                 int
 		first, second             string
+		wholeOutput               bool
 	}{
 		{name: "stream events", contentType: "application/x-msgpack", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: "first event", second: "second event"},
+		{name: "SSE stream events", contentType: "text/event-stream", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream,
+			first: "event: intermediate\ndata: {\"event_type\":\"intermediate\"}\n\n", second: "event: final\ndata: {\"event_type\":\"final\"}\n\n"},
+		{name: "stream endpoint answered with a whole zip", contentType: "application/octet-stream", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: "PK\x03\x04first entry", second: "second entry", wholeOutput: true},
+		{name: "stream endpoint answered with whole JSON", contentType: "application/json", relayMode: relayconstant.RelayModeNovelAIGenerateImageStream, first: `{"images":[`, second: `{"image":"aGk="}]}`, wholeOutput: true},
 		{name: "zip without Accept", contentType: "application/zip", relayMode: relayconstant.RelayModeNovelAIGenerateImage, first: "PK\x03\x04first entry", second: "second entry"},
 		{name: "JSON asked as JSON", accept: "application/json", contentType: "application/json", relayMode: relayconstant.RelayModeNovelAIGenerateImage, first: `{"images":[`, second: `{"image":"aGk="}]}`},
 	} {
@@ -927,6 +936,7 @@ func TestNovelAIImageHandlerFlushesBeforeUpstreamFinishes(t *testing.T) {
 			assert.Equal(t, tc.first+tc.second, recorder.Body.String())
 			assert.Equal(t, tc.contentType, recorder.Header().Get("Content-Type"))
 			assert.Empty(t, recorder.Header().Get("Content-Length"))
+			assert.Equal(t, tc.wholeOutput, info.PerformanceWholeOutput)
 		})
 	}
 }

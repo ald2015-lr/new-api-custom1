@@ -3,6 +3,7 @@ package novelai
 import (
 	"strings"
 
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/tokenkit"
@@ -18,10 +19,6 @@ const (
 	// image up to 1024x1024, which this fork already counts for an image in
 	// a chat answer.
 	imageTokenArea = 1024 * 1024
-	// defaultWidth and defaultHeight are NovelAI's canvas when a request
-	// names none.
-	defaultWidth  = 832
-	defaultHeight = 1216
 	// maxReferenceImages bounds the images counted of one reference list:
 	// NovelAI takes at most 16 vibes, and a longer list fails there.
 	maxReferenceImages = 16
@@ -78,10 +75,11 @@ func (t GenerationTokens) Usage(images int) *dto.Usage {
 // it. BuildGeneration counts its own requests with it too.
 //   - positive text: the caption of parameters.v4_prompt (base_caption and
 //     each char_captions[].char_caption) when it has one, otherwise input,
-//     which repeats the base caption on V4 and later;
+//     which repeats the base caption on V4 and later; V3 models, which have
+//     no V4 captions, read input only (promptTokens);
 //   - negative text: the caption of parameters.v4_negative_prompt when it has
 //     one, otherwise parameters.negative_prompt (uc, its older name, without
-//     it);
+//     it), and on V3 negative_prompt (or uc) only;
 //   - canvas: parameters.width x parameters.height, NovelAI's 832x1216 for a
 //     side the request does not give as a positive whole number;
 //   - input images: the source of an img2img or infill action, and each
@@ -92,7 +90,8 @@ func (t GenerationTokens) Usage(images int) *dto.Usage {
 //
 // Keys match case-insensitively, as the request validator matches the keys it
 // reads, and a repeated key counts all its values (the largest of a number or
-// a list), so a key the upstream may read otherwise cannot lower the count.
+// a list), the keys inside a caption included, so a key the upstream may read
+// otherwise cannot lower the count.
 func RequestTokens(requestJSON []byte) GenerationTokens {
 	request := ojson.ParseBytes(requestJSON)
 	var model string
@@ -107,23 +106,14 @@ func RequestTokens(requestJSON []byte) GenerationTokens {
 		}
 	}
 
-	positive := captionTexts(members(parameters, "v4_prompt"))
-	if len(positive) == 0 {
-		positive = stringValues(members(request, "input"))
-	}
-	negative := captionTexts(members(parameters, "v4_negative_prompt"))
-	if len(negative) == 0 {
-		negative = stringValues(members(parameters, "negative_prompt"))
-	}
+	negative := stringValues(members(parameters, "negative_prompt"))
 	if len(negative) == 0 {
 		negative = stringValues(members(parameters, "uc"))
 	}
-	text := 0
-	for _, prompt := range append(positive, negative...) {
-		text += tokenkit.Estimate(model, prompt)
-	}
+	text := promptTokens(model, captionTexts(members(parameters, "v4_prompt")), stringValues(members(request, "input"))) +
+		promptTokens(model, captionTexts(members(parameters, "v4_negative_prompt")), negative)
 
-	width, height := defaultWidth, defaultHeight
+	width, height := relayconstant.NovelAIDefaultWidth, relayconstant.NovelAIDefaultHeight
 	if side := largestSide(members(parameters, "width")); side > 0 {
 		width = side
 	}
@@ -172,23 +162,51 @@ func stringValues(values []ojson.Result) []string {
 	return texts
 }
 
+// promptTokens is the estimate of one side of a request's prompt, positive or
+// negative, from the texts of its V4 caption and of its plain prompt (input,
+// or negative_prompt / uc) as model reads them. V3 has no V4 captions and
+// reads the plain prompt. V4 and later read the caption when the request has
+// one, and the plain prompt, which then repeats it, otherwise. A model the
+// relay has no profile of may read either, so the larger counts. The two are
+// never added: they are one prompt.
+func promptTokens(model string, caption, plain []string) int {
+	captionTokens, plainTokens := 0, 0
+	for _, text := range caption {
+		captionTokens += tokenkit.Estimate(model, text)
+	}
+	for _, text := range plain {
+		plainTokens += tokenkit.Estimate(model, text)
+	}
+	modelProfile, known := profiles[model]
+	switch {
+	case !known:
+		return max(captionTokens, plainTokens)
+	case modelProfile.family == familyV3, len(caption) == 0:
+		return plainTokens
+	}
+	return captionTokens
+}
+
 // captionTexts is the texts of the V4 caption objects among values
 // ({caption:{base_caption, char_captions:[{char_caption}]}}) that have a
-// string base_caption.
+// string base_caption. A key repeated inside a caption counts all its values,
+// as members reads them: JSON parsers differ in which one they keep.
 func captionTexts(values []ojson.Result) []string {
 	var texts []string
 	for _, value := range values {
-		base := value.Get("caption.base_caption")
-		if !value.IsObject() || base.Type != ojson.String {
-			continue
-		}
-		texts = append(texts, base.Str)
-		value.Get("caption.char_captions").ForEach(func(_, character ojson.Result) bool {
-			if caption := character.Get("char_caption"); caption.Type == ojson.String {
-				texts = append(texts, caption.Str)
+		for _, caption := range members(value, "caption") {
+			bases := stringValues(members(caption, "base_caption"))
+			if len(bases) == 0 {
+				continue
 			}
-			return true
-		})
+			texts = append(texts, bases...)
+			for _, characters := range members(caption, "char_captions") {
+				characters.ForEach(func(_, character ojson.Result) bool {
+					texts = append(texts, stringValues(members(character, "char_caption"))...)
+					return true
+				})
+			}
+		}
 	}
 	return texts
 }
