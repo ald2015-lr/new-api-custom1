@@ -364,12 +364,18 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
       null,
       2
     )
+    // b64_json is saved to image.png; otherwise the url is printed, or the
+    // whole answer when it carries no image (an error).
     return [
-      `curl ${url} \\`,
+      `response=$(curl -sS ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replaceAll('\n', '\n     ')}' \\`,
-      `  | jq -r '.data[0] | .b64_json // .url'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}')`,
+      `if image=$(echo "$response" | jq -er '.data[0].b64_json'); then`,
+      `  echo "$image" | base64 --decode > image.png`,
+      `else`,
+      `  echo "$response" | jq -r '.data[0].url // .'`,
+      `fi`,
     ].join('\n')
   }
   if (lang === 'python') {

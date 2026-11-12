@@ -48,13 +48,15 @@ const endpointMap = {
 }
 
 // Providers such as NovelAI and gpt-image models answer with b64_json and no
-// url, so a sample that only reads data[0].url prints nothing useful.
+// url, so a sample that only reads data[0].url prints nothing useful. The
+// SDK samples throw on an error answer; curl hands it to jq, so the cURL
+// sample prints the whole answer when it has neither (jq -e fails on null).
 describe('model details image code sample', () => {
   it.each([
     {
       tab: 'cURL',
-      b64: `jq -r '.data[0] | .b64_json // .url'`,
-      url: `.url'`,
+      b64: `if image=$(echo "$response" | jq -er '.data[0].b64_json'); then\n  echo "$image" | base64 --decode > image.png`,
+      url: `jq -r '.data[0].url // .'`,
     },
     {
       tab: 'Python',
@@ -86,7 +88,6 @@ describe('model details image code sample', () => {
       expect(code).toContain(sample.b64)
       expect(code).toContain(sample.url)
       expect(code.indexOf('b64_json')).toBeLessThan(code.lastIndexOf('url'))
-      expect(code).not.toContain('data[0].url')
     }
   )
 })

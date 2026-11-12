@@ -2024,7 +2024,7 @@ export function ChannelMutateDrawer({
             </FormLabel>
             <FormDescription>
               {t(
-                'Applies to OpenAI-format image and chat requests. A request can still ask for them with qualityToggle or ucPresetId.'
+                'Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.'
               )}
             </FormDescription>
           </div>

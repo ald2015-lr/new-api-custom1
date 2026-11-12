@@ -3004,7 +3004,7 @@
     "Generate": "Создать",
     "Generate images with NovelAI's official API (native and OpenAI formats)": "Генерация изображений через официальный API NovelAI (нативный формат и формат OpenAI)",
     "Do not add NovelAI quality tags and negative presets": "Не добавлять теги качества и негативные пресеты NovelAI",
-    "Applies to OpenAI-format image and chat requests. A request can still ask for them with qualityToggle or ucPresetId.": "Действует для запросов изображений и чата в формате OpenAI. Запрос по-прежнему может включить их через qualityToggle или ucPresetId.",
+    "Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.": "Действует для запросов изображений и чата в формате OpenAI, кроме негативного пресета, который V5 Full Medium использует всегда. Запрос по-прежнему может включить их через qualityToggle или ucPresetId.",
     "Generate Lyrics": "Создать текст песни",
     "Generate Midjourney images through MjProxy": "Генерация изображений Midjourney через MjProxy",
     "Generate Midjourney images through MjProxyPlus": "Генерация изображений Midjourney через MjProxyPlus",

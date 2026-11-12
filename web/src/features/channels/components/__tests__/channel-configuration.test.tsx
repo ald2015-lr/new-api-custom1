@@ -1663,24 +1663,46 @@ test('configuration from fields unsupported by the selected provider stays unmar
     settings:
       '{"allow_speed":true,"allow_service_tier":true,"upstream_model_update_check_enabled":true,"ollama_openai_chat":true,"novelai_presets_disabled":true}',
   }
+  const user = userEvent.setup()
   render(<ConfigurationHarness currentRow={editingChannel} />)
   await screen.findByDisplayValue('Existing channel')
-  expect(
-    screen.getByRole('tab', { name: /Request & Response/ })
-  ).not.toHaveAccessibleName(/Configured/)
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
   expect(
     screen.getByRole('tab', { name: /Other Settings/ })
   ).not.toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const processing = screen.getByRole('group', { name: 'Request processing' })
   expect(
-    screen.queryByRole('switch', {
+    within(processing).queryByRole('switch', {
       name: 'Use OpenAI-compatible Ollama chat API',
     })
   ).not.toBeInTheDocument()
   expect(
-    screen.queryByRole('switch', {
+    within(processing).queryByRole('switch', {
       name: 'Do not add NovelAI quality tags and negative presets',
     })
   ).not.toBeInTheDocument()
+})
+
+test('an OpenAI channel saved with the NovelAI presets setting saves its other settings without it', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: 1,
+    settings: '{"novelai_presets_disabled":true,"future_option":{"level":2}}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).not.toHaveProperty('novelai_presets_disabled')
+  expect(settings).toMatchObject({ future_option: { level: 2 } })
 })
 
 test('a NovelAI channel marks saved disabled prompt presets in Request & Response and saves the toggled value with the other settings intact', async () => {
@@ -1702,6 +1724,8 @@ test('a NovelAI channel marks saved disabled prompt presets in Request & Respons
     name: 'Do not add NovelAI quality tags and negative presets',
   })
   expect(toggle).toBeChecked()
+  // V5 Full Medium keeps the negative preset NovelAI requires of it.
+  expect(toggle).toHaveAccessibleDescription(/V5 Full Medium/)
   await user.click(toggle)
   expect(toggle).not.toBeChecked()
   expect(requestTab).not.toHaveAccessibleName(/Configured/)

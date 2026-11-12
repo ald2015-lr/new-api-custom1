@@ -3004,7 +3004,7 @@
     "Generate": "生成",
     "Generate images with NovelAI's official API (native and OpenAI formats)": "接入 NovelAI 官方图像生成接口（原生与 OpenAI 格式）",
     "Do not add NovelAI quality tags and negative presets": "不自动添加 NovelAI 质量标签和负面预设",
-    "Applies to OpenAI-format image and chat requests. A request can still ask for them with qualityToggle or ucPresetId.": "作用于 OpenAI 格式的图像与对话请求。请求仍可通过 qualityToggle 或 ucPresetId 启用它们。",
+    "Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.": "作用于 OpenAI 格式的图像与对话请求，V5 Full Medium 始终使用的负面预设除外。请求仍可通过 qualityToggle 或 ucPresetId 启用它们。",
     "Generate Lyrics": "生成歌词",
     "Generate Midjourney images through MjProxy": "通过 MjProxy 接入 Midjourney 图片生成",
     "Generate Midjourney images through MjProxyPlus": "通过 MjProxyPlus 接入 Midjourney 图片生成",
