@@ -62,10 +62,13 @@ func setupBonusTest(t *testing.T) {
 var bonusTestRefSeq int
 
 // grantTestBonus credits a reward through the ledger at the given time, exactly
-// like a check-in or an invite grant would, and returns its grant.
+// like a check-in or an invite grant would, and returns its grant. Its ref id
+// is negative: real grants reference auto-increment checkins / invite_rewards
+// ids, so a test grant never takes the unique (ref_type, ref_id, source) slot
+// of a real check-in made later in the same test.
 func grantTestBonus(t *testing.T, userId int, source string, amount int64, days int, at int64) *BonusGrant {
 	t.Helper()
-	bonusTestRefSeq++
+	bonusTestRefSeq--
 	spec := bonusGrantSpec{Source: source, Amount: amount, ExpireDays: days, RefType: BonusRefCheckin, RefId: bonusTestRefSeq}
 	var grant *BonusGrant
 	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
@@ -1107,6 +1110,20 @@ func TestRefundOfInFlightChargeGoesBackToTheReward(t *testing.T) {
 			restored := getBonusGrant(t, old.Id)
 			assert.Equal(t, BonusStatusActive, restored.Status)
 			assert.EqualValues(t, 1_000, restored.Remaining)
+			require.Equal(t, 2_000, getUserQuotaFromDB(t, user.Id), "both rewards are back in the wallet")
+			if common.RedisEnabled {
+				// RefundUserQuota credits the cached balance in a background
+				// goroutine, and the expiry never deducts more than the cached
+				// balance. Wait for the credit: an expiry that reads the cache
+				// before it lands sees 1,000 and closes the second reward without
+				// deducting it (an under-deduction, never one of paid money).
+				// A cache entry that expired meanwhile is a miss, and the expiry
+				// then caps at the DB balance, so that is fine too.
+				require.Eventually(t, func() bool {
+					cached, err := cacheGetUserBase(user.Id)
+					return err != nil || cached.Quota == 2_000
+				}, 5*time.Second, time.Millisecond, "the refund never reached the cached balance")
+			}
 			later := common.GetTimestamp() + 40*bonusTestDay
 			require.NoError(t, ExpireUserBonusGrants(user.Id, later, later))
 			assert.Zero(t, getUserQuotaFromDB(t, user.Id), "nothing was used, so every reward expired")
