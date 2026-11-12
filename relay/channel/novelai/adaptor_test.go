@@ -973,10 +973,11 @@ func TestBuildGenerationEditImages(t *testing.T) {
 // before anything decodes, and the source decodes only once everything else
 // is valid, after the mask, so a mask that selects nothing (a free 400)
 // costs no source decode. The work of all requests shares imageWork: a
-// request waits while other requests hold the memory it needs and ends when
-// its client leaves. The resize holds about its canvas and the crop's rows,
-// not a buffer of 32 bytes for each canvas column and crop row, and a
-// mask's pixels are read without an allocation each.
+// request reserves the memory its work holds (to the byte), waits while
+// other requests hold it, and ends when its client leaves. The resize holds
+// about its canvas and the crop's rows, not a buffer of 32 bytes for each
+// canvas column and crop row, and a mask's pixels are read without an
+// allocation each.
 func TestBuildGenerationBoundsImageWork(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	area := testImage(64, 64, func(x, y int) color.Color {
@@ -1035,6 +1036,46 @@ func TestBuildGenerationBoundsImageWork(t *testing.T) {
 	require.NotNil(t, apiErr)
 	assert.Contains(t, apiErr.Error(), context.Canceled.Error())
 	assert.True(t, types.IsSkipRetryError(apiErr), "its client left")
+
+	// An edit reserves the memory its work holds and runs once that much is
+	// free: the decoded 128x128 image and 64x64 mask at 4 bytes a pixel
+	// (65536 and 16384), the resize's columns, as wide as the 64x64 canvas
+	// and as high as the 128-row crop (32768), and three RGBA canvases
+	// (49152), 163840 bytes. With a byte less free it waits (TryAcquire(0)
+	// fails only while a request waits); that byte lets it run.
+	const reserved = 163840
+	held := int64(imageWorkBudget - reserved + 1)
+	require.True(t, imageWork.TryAcquire(held))
+	waiting, stop := context.WithCancel(context.Background())
+	defer stop()
+	client, _ := gin.CreateTestContext(httptest.NewRecorder())
+	client.Request = httptest.NewRequestWithContext(waiting, http.MethodPost, "/v1/images/edits", nil)
+	sized := GenerationIntent{Model: "nai-diffusion-4-5-full", N: 1, Image: testImage(128, 128, solid(color.White)), Mask: area, Size: "64x64"}
+	built := make(chan *types.NewAPIError, 1)
+	go func() {
+		_, buildErr := BuildGeneration(client, sized)
+		built <- buildErr
+	}()
+	for imageWork.TryAcquire(0) {
+		select {
+		case buildErr := <-built:
+			imageWork.Release(held)
+			require.Failf(t, "the edit ran with a byte less than it reserves free", "error: %v", buildErr)
+		default:
+			runtime.Gosched()
+		}
+	}
+	imageWork.Release(1)
+	ran := imageWork.TryAcquire(0)
+	if !ran {
+		stop()
+	}
+	apiErr = <-built
+	imageWork.Release(held - 1)
+	require.True(t, ran, "a byte more let the edit run")
+	assert.Nil(t, apiErr)
+	require.True(t, imageWork.TryAcquire(imageWorkBudget), "the edit gave back the memory it took")
+	imageWork.Release(imageWorkBudget)
 
 	// Red | green | blue thirds of 6144x2048: the 2048x2048 green centre of
 	// a square canvas.
