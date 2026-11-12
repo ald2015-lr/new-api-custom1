@@ -727,7 +727,7 @@ test('NovelAI is a built-in provider with its logo, description and type number'
 
   const novelAI = screen.getByRole('option', { name: 'NovelAI Built-in #64' })
   expect(novelAI).toHaveAccessibleDescription(
-    "Generate images with NovelAI's official API (native format)"
+    "Generate images with NovelAI's official API (native and OpenAI formats)"
   )
   // The NovelAI logo is an SVG titled NovelAI, next to the titled label.
   await waitFor(() =>
@@ -739,7 +739,7 @@ test('NovelAI is a built-in provider with its logo, description and type number'
   )
   await act(() => language.changeLanguage('zhCN'))
   expect(novelAI).toHaveAccessibleDescription(
-    '接入 NovelAI 官方图像生成接口（原生格式）'
+    '接入 NovelAI 官方图像生成接口（原生与 OpenAI 格式）'
   )
   await user.click(novelAI)
   expect(select).toHaveBeenCalledWith({ kind: 'builtin', type: 64 })

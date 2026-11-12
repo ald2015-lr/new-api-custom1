@@ -94,7 +94,7 @@ export const STATIC_I18N_KEYS = [
   'vLLM server address, without /v1',
   'vLLM API key, or EMPTY if authentication is disabled',
   'NovelAI',
-  "Generate images with NovelAI's official API (native format)",
+  "Generate images with NovelAI's official API (native and OpenAI formats)",
   'NovelAI persistent API token (pst-...)',
   // NovelAI account (channel test and balance) messages sent by the backend.
   'NovelAI account request failed: {{error}}',

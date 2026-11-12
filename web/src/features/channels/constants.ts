@@ -187,7 +187,7 @@ export const CHANNEL_PROVIDER_PRESENTATION: Partial<
   63: { descriptionKey: 'Connect to self-hosted models served by SGLang' },
   64: {
     descriptionKey:
-      "Generate images with NovelAI's official API (native format)",
+      "Generate images with NovelAI's official API (native and OpenAI formats)",
   },
 } satisfies Record<
   Exclude<keyof typeof CHANNEL_TYPES, 0 | typeof CHANNEL_TYPE_TASK_PLUGIN>,

@@ -21,6 +21,7 @@ import { z } from 'zod'
 import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
@@ -291,6 +292,7 @@ export const channelFormSchema = z
     allow_speed: z.boolean().optional(), // Anthropic: speed mode control
     claude_beta_query: z.boolean().optional(), // Anthropic: beta query passthrough
     ollama_openai_chat: z.boolean().optional(), // Ollama: OpenAI-compatible /v1/chat/completions instead of native /api/chat
+    novelai_presets_disabled: z.boolean().optional(), // NovelAI: no quality tags or UC preset on OpenAI-format requests by default
     disable_task_polling_sleep: z.boolean().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
@@ -486,6 +488,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   allow_speed: false,
   claude_beta_query: false,
   ollama_openai_chat: false,
+  novelai_presets_disabled: false,
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
@@ -563,6 +566,7 @@ export function transformChannelToFormDefaults(
   let allowSpeed = false
   let claudeBetaQuery = false
   let ollamaOpenAIChat = false
+  let novelAIPresetsDisabled = false
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
@@ -588,6 +592,7 @@ export function transformChannelToFormDefaults(
       allowSpeed = parsed.allow_speed === true
       claudeBetaQuery = parsed.claude_beta_query === true
       ollamaOpenAIChat = parsed.ollama_openai_chat === true
+      novelAIPresetsDisabled = parsed.novelai_presets_disabled === true
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
@@ -650,6 +655,7 @@ export function transformChannelToFormDefaults(
     allow_speed: allowSpeed,
     claude_beta_query: claudeBetaQuery,
     ollama_openai_chat: ollamaOpenAIChat,
+    novelai_presets_disabled: novelAIPresetsDisabled,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
@@ -813,6 +819,14 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     settingsObj.ollama_openai_chat = formData.ollama_openai_chat === true
   } else if ('ollama_openai_chat' in settingsObj) {
     delete settingsObj.ollama_openai_chat
+  }
+
+  // Only the NovelAI adaptor adds the web client's prompt presets.
+  if (formData.type === CHANNEL_TYPE_NOVELAI) {
+    settingsObj.novelai_presets_disabled =
+      formData.novelai_presets_disabled === true
+  } else if ('novelai_presets_disabled' in settingsObj) {
+    delete settingsObj.novelai_presets_disabled
   }
 
   settingsObj.disable_task_polling_sleep =
