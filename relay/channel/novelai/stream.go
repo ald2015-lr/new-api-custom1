@@ -88,8 +88,9 @@ type heldFinal struct {
 //
 // With HD or the upscale each final is validated and rendered as it
 // arrives but held back (bases); once every sample arrived, each image goes
-// through them in turn and its completed event follows its passes, with its
-// own size. A stream that broke gets neither: the finals that arrived are
+// through them in turn, and once the last one's passes answered (the key is
+// then free) the completed events follow in sample order, each with its own
+// size. A stream that broke gets neither: the finals that arrived are
 // delivered as they came, which the upscale counts as failed.
 //
 // The billed quantity is the completed events delivered once upstream ended
@@ -272,20 +273,21 @@ func (s *imageStream) write(event openAIImageStreamEvent) error {
 	return helper.ResponseChunkData(s.c, dto.ResponsesStreamResponse{Type: event.Type}, string(payload))
 }
 
-// deliver sends the completed event of sample's image once the passes
-// (enhancer.deliver) made it, base as NovelAI streamed it and final its
-// rendering; err is the client's leaving.
-func (s *imageStream) deliver(sample int, base []byte, final renderedImage, last bool) error {
-	final, err := s.enhancer.deliver(sample, base, final, s.output.OutputFormat, s.output.Compression, last)
-	if err != nil {
-		return err
-	}
-	releaseDelivery, err := s.enhancer.holdDelivery(last)
+// completeAll sends the completed events of the images in sample order once
+// the passes made every one of them (enhancer.deliverAll), bases as NovelAI
+// sent them and finals their renderings; err is the client's leaving.
+func (s *imageStream) completeAll(bases [][]byte, finals []renderedImage) error {
+	releaseDelivery, err := s.enhancer.deliverAll(bases, finals, s.output.OutputFormat, s.output.Compression)
 	if err != nil {
 		return err
 	}
 	defer releaseDelivery()
-	return s.complete(sample, final, last)
+	for sample, final := range finals {
+		if err := s.complete(sample, final, sample == len(finals)-1); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // usage is the generation's usage for the quantity the request settles at.
@@ -295,18 +297,18 @@ func (s *imageStream) usage() *dto.Usage {
 
 // finish settles a relayed stream once it ended. With HD or the upscale, a
 // stream that delivered every final has its images go through them and
-// complete one by one; any other keeps the finals that arrived for the
+// complete (completeAll); any other keeps the finals that arrived for the
 // delivery below.
 func (s *imageStream) finish() (*dto.Usage, *types.NewAPIError) {
 	status := s.info.StreamStatus
 	if s.enhancer != nil {
 		if len(s.bases) == s.generation.NSamples && s.failure == nil && s.clientGone == nil {
-			for sample := range s.generation.NSamples {
-				last := sample == s.generation.NSamples-1
-				if err := s.deliver(sample, s.bases[sample].data, s.bases[sample].rendered, last); err != nil {
-					s.clientGone = err
-					break
-				}
+			bases, finals := make([][]byte, s.generation.NSamples), make([]renderedImage, s.generation.NSamples)
+			for sample, held := range s.bases {
+				bases[sample], finals[sample] = held.data, held.rendered
+			}
+			if err := s.completeAll(bases, finals); err != nil {
+				s.clientGone = err
 			}
 		} else {
 			for sample, held := range s.bases {
@@ -398,12 +400,10 @@ func (s *imageStream) synthesize(resp *http.Response) (*dto.Usage, *types.NewAPI
 	s.info.SetFirstResponseTime()
 	helper.SetEventStreamHeaders(s.c)
 	s.c.Status(http.StatusOK)
-	for i, final := range finals {
-		if err := s.deliver(i, images[i], final, i == len(finals)-1); err != nil {
-			s.info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
-			logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, len(finals), s.info.RequestedImageCount()))
-			return s.usage(), nil
-		}
+	if err := s.completeAll(images, finals); err != nil {
+		s.info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
+		logger.LogWarn(s.c, common.LogText("NovelAI client left the stream after %d of %d images, billing the reserved %d images", s.delivered, len(finals), s.info.RequestedImageCount()))
+		return s.usage(), nil
 	}
 	s.info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	s.info.UpdateImageCount(int64(s.delivered))

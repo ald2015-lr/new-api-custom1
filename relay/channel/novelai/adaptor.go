@@ -279,7 +279,8 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 
 // ConsumeLogContent is what the consume log says about the HD pass and the
 // upscale. HD: the HD canvas when every image was enhanced, how many were
-// when some were, and that HD was unavailable when it was due and none was.
+// when some were, and that HD was unavailable when it was due and none was
+// (delivered at the standard size, unless the upscale enlarged some image).
 // The upscale, when the channel has it on and the request did not opt out:
 // how many images were upscaled, and how many were not for want of Anlas,
 // for not qualifying, or for a failure. Nothing for a pass that was not due,
@@ -291,6 +292,8 @@ func (a *Adaptor) ConsumeLogContent() []*common.Message {
 	result := a.hdResult
 	switch {
 	case result.info == nil || result.delivered == 0 || clientLeftRequest(result.info):
+	case result.enhanced == 0 && a.upscaleResult.counts[upscaleApplied] > 0:
+		content = append(content, common.NewMessage("HD unavailable"))
 	case result.enhanced == 0:
 		content = append(content, common.NewMessage("HD unavailable, delivered at the standard size"))
 	case result.enhanced == result.delivered:

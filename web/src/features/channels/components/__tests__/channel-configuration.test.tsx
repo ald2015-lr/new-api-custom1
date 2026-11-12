@@ -1894,7 +1894,7 @@ test('a new NovelAI channel starts with the upscale off', async () => {
   ).toBeChecked()
 })
 
-test('the NovelAI upscale switch is locked without sensitive channel write permission', async () => {
+test('the NovelAI switches and queue limit are locked without sensitive channel write permission', async () => {
   editingChannel = {
     ...editingChannel,
     type: CHANNEL_TYPE_NOVELAI,
@@ -1921,6 +1921,20 @@ test('the NovelAI upscale switch is locked without sensitive channel write permi
   expect(upscale).toHaveAttribute('aria-disabled', 'true')
   await user.click(upscale)
   expect(upscale).not.toBeChecked()
+  const hd = screen.getByRole('switch', { name: 'NovelAI HD (1.5× Enhance)' })
+  expect(hd).toHaveAttribute('aria-disabled', 'true')
+  await user.click(hd)
+  expect(hd).toBeChecked()
+  const presets = screen.getByRole('switch', {
+    name: 'Do not add NovelAI quality tags and negative presets',
+  })
+  expect(presets).toHaveAttribute('aria-disabled', 'true')
+  await user.click(presets)
+  expect(presets).not.toBeChecked()
+  const limit = screen.getByRole('spinbutton', { name: 'Queue limit per key' })
+  expect(limit).toBeDisabled()
+  await user.type(limit, '3')
+  expect(limit).toHaveValue(10)
 })
 
 test.each([

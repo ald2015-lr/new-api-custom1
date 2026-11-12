@@ -364,16 +364,7 @@ func imagesResponse(c *gin.Context, resp *http.Response, info *relaycommon.Relay
 		}
 		finals = append(finals, renderedImage{rendered, format, generation.Size()})
 	}
-	var err error
-	for i, data := range images {
-		if finals[i], err = e.deliver(i, data, finals[i], output.OutputFormat, output.Compression, i == len(images)-1); err != nil {
-			break
-		}
-	}
-	releaseDelivery := func() {}
-	if err == nil {
-		releaseDelivery, err = e.holdDelivery(true)
-	}
+	releaseDelivery, err := e.deliverAll(images, finals, output.OutputFormat, output.Compression)
 	if err != nil {
 		openai.NovelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))

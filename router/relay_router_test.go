@@ -1082,6 +1082,22 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.True(t, strings.HasSuffix(parameters["negative_prompt"].(string), ", bad hands"))
 		assert.Equal(t, 10_000, lastLog().Quota)
 		assert.Equal(t, before-20_000, walletQuota())
+
+		// Another client's canvas, guidance and steps past NovelAI's range
+		// are fitted into it, as size is, and the quality tags it wrote are
+		// not added again, whatever their order.
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		response = decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"masterpiece, 1girl, very aesthetic",`+
+			`"width":1000,"height":1000,"cfg_scale":12,"num_inference_steps":60}`)))
+
+		assert.Equal(t, "1024x1024", response.Size)
+		sent = upstream.last()
+		assert.Equal(t, "masterpiece, 1girl, very aesthetic, no text", sent.body["input"])
+		parameters = sent.body["parameters"].(map[string]any)
+		assert.Equal(t, [4]any{float64(1024), float64(1024), float64(50), float64(10)}, [4]any{parameters["width"], parameters["height"], parameters["steps"], parameters["scale"]})
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, before-30_000, walletQuota())
 	})
 
 	t.Run("url and jpeg, settled by expression", func(t *testing.T) {

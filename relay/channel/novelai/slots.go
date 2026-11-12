@@ -361,6 +361,19 @@ func noteGenerationAnswer(c *gin.Context, info *relaycommon.RelayInfo, status in
 	}
 }
 
+// notePassAnswer records NovelAI's answer to an HD enhance or an upscale, a
+// call a request makes on its key once its base pass succeeded, as
+// noteGenerationAnswer does, but for a 402: the base showed that the key
+// still generates, and the pass falls back to the image before it, so an
+// account short of Anlas for the extra pass is no reason for new requests to
+// wait behind the channel's other keys while this one is idle.
+func notePassAnswer(c *gin.Context, info *relaycommon.RelayInfo, status int) {
+	if status == http.StatusPaymentRequired {
+		return
+	}
+	noteGenerationAnswer(c, info, status)
+}
+
 // StopGenerationQueues answers every request waiting for a NovelAI key, and
 // every later one, with a 503 that is never sent upstream, so nothing new
 // starts generating while the server shuts down. Requests already

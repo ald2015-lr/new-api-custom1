@@ -3266,6 +3266,7 @@
     "Image count {{count}}": "Количество изображений {{count}}",
     "HD {{size}}": "HD {{size}}",
     "HD {{size}} for {{count}} of {{total}} images": "HD {{size}} для {{count}} из {{total}} изображений",
+    "HD unavailable": "HD недоступно",
     "HD unavailable, delivered at the standard size": "HD недоступно, выдано в обычном размере",
     "Upscaled 2x: {{count}}": "Увеличено в 2 раза: {{count}}",
     "Not upscaled, not enough Anlas: {{count}}": "Не увеличено, не хватает Anlas: {{count}}",

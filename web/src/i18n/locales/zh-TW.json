@@ -3266,6 +3266,7 @@
     "Image count {{count}}": "生成數量 {{count}}",
     "HD {{size}}": "高畫質 {{size}}",
     "HD {{size}} for {{count}} of {{total}} images": "高畫質 {{size}}（{{total}} 張中 {{count}} 張）",
+    "HD unavailable": "高畫質不可用",
     "HD unavailable, delivered at the standard size": "高畫質不可用，已按一般尺寸回傳",
     "Upscaled 2x: {{count}}": "已放大 2 倍：{{count}} 張",
     "Not upscaled, not enough Anlas: {{count}}": "未放大（Anlas 不足）：{{count}} 張",

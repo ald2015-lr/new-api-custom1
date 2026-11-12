@@ -308,8 +308,8 @@ func (u *upscaler) call(sample int, body []byte) (upscaleAnswer, error) {
 // send makes one upscale call to the channel's base URL, as the generation
 // goes: the key as a Bearer token, then the channel's header override, and
 // its proxy. A redirect is returned, not followed, so the key never reaches
-// another host. NovelAI's answer is noted for the key on its own host, as a
-// generation's is.
+// another host. NovelAI's answer is noted for the key on its own host
+// (notePassAnswer).
 func (u *upscaler) send(body []byte) (upscaleAnswer, error) {
 	ctx, cancel := context.WithTimeout(u.c.Request.Context(), upscaleTimeout)
 	defer cancel()
@@ -349,7 +349,7 @@ func (u *upscaler) send(body []byte) (upscaleAnswer, error) {
 	}
 	defer service.CloseResponseBodyGracefully(resp)
 	if isNovelAIImageHost(u.info.ChannelBaseUrl) {
-		noteGenerationAnswer(u.c, u.info, resp.StatusCode)
+		notePassAnswer(u.c, u.info, resp.StatusCode)
 	}
 	answer := upscaleAnswer{status: resp.StatusCode}
 	succeeded := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated
@@ -390,27 +390,19 @@ func renderUpscaled(ctx context.Context, data []byte, outputFormat string, quali
 }
 
 // holdDelivery takes the memory a response needs to hand its client the
-// upscaled images rendered since the last hold: four times their bytes, for
-// the bytes, their base64 and the JSON or event around them, at most the
-// whole budget. It returns the release, a no-op when there are none. Only a
-// request that no longer holds its key waits (wait); one that does goes on
-// without the hold when the memory is taken, so that a key never waits for
-// it. err is the client's leaving during the wait.
-func (e *enhancer) holdDelivery(wait bool) (func(), error) {
+// upscaled images it delivers: four times their bytes, for the bytes, their
+// base64 and the JSON or event around them, at most the whole budget. It
+// returns the release, a no-op when there are none. It is called once the
+// key is free (deliverAll), so a key never waits for the memory; err is the
+// client's leaving during the wait.
+func (e *enhancer) holdDelivery() (func(), error) {
 	if e == nil || e.upscaledBytes == 0 {
 		return func() {}, nil
 	}
 	weight := min(upscaleDeliveryBudget, 4*e.upscaledBytes)
 	e.upscaledBytes = 0
-	switch {
-	case !wait:
-		if !upscaleDelivery.TryAcquire(weight) {
-			return func() {}, nil
-		}
-	default:
-		if err := upscaleDelivery.Acquire(e.c.Request.Context(), weight); err != nil {
-			return nil, err
-		}
+	if err := upscaleDelivery.Acquire(e.c.Request.Context(), weight); err != nil {
+		return nil, err
 	}
 	return sync.OnceFunc(func() { upscaleDelivery.Release(weight) }), nil
 }

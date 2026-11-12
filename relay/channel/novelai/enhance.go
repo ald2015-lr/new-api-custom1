@@ -489,8 +489,8 @@ type enhancer struct {
 	plan    *hdPlan
 	upscale *upscaler
 	release func()
-	// upscaledBytes are the bytes of the upscaled images delivered since the
-	// last holdDelivery.
+	// upscaledBytes are the bytes of the upscaled images delivered, for
+	// holdDelivery.
 	upscaledBytes int64
 	// started is when the first image's preparation started, moved on by
 	// the time the upscales in between took: hdBudget counts from it.
@@ -580,7 +580,7 @@ func (e *enhancer) image(sample int, base []byte) ([]byte, error) {
 	}
 	defer service.CloseResponseBodyGracefully(resp)
 	if isNovelAIImageHost(e.info.ChannelBaseUrl) {
-		noteGenerationAnswer(e.c, e.info, resp.StatusCode)
+		notePassAnswer(e.c, e.info, resp.StatusCode)
 	}
 	switch {
 	case resp.StatusCode == http.StatusPaymentRequired:
@@ -728,6 +728,24 @@ func (e *enhancer) deliver(sample int, base []byte, final renderedImage, outputF
 		e.finish()
 	}
 	return final, nil
+}
+
+// deliverAll runs every image through deliver, bases as NovelAI returned
+// them and finals their renderings, which it replaces with what the client
+// gets, then takes the memory the upscaled images need while they are
+// written (holdDelivery), and returns its release. Every pass runs before
+// the caller writes any image, a stream's included: the key is free before
+// the first write, so a client that reads slowly or not at all never holds
+// it. err is the client's leaving. A nil enhancer keeps finals.
+func (e *enhancer) deliverAll(bases [][]byte, finals []renderedImage, outputFormat string, quality int) (func(), error) {
+	for sample := range finals {
+		final, err := e.deliver(sample, bases[sample], finals[sample], outputFormat, quality, sample == len(finals)-1)
+		if err != nil {
+			return nil, err
+		}
+		finals[sample] = final
+	}
+	return e.holdDelivery()
 }
 
 // finish releases the key's slot (once) and settles the outcomes for the

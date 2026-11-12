@@ -506,6 +506,12 @@ func TestBuildGenerationSizeAndCount(t *testing.T) {
 		{"top-level width and height over size", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"width": raw("832"), "height": raw("1216")}}, 832, 1216},
 		{"one top-level side", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"height": raw("1216")}}, 1024, 1216},
 		{"parameters over the top level", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"width": raw("832"), "height": raw("1216")}, Parameters: map[string]json.RawMessage{"width": raw("1216")}}, 1216, 1216},
+		// Other clients' sides are fitted as size is, not refused.
+		{"top-level sides rounded to 64", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"width": raw("1000"), "height": raw("1000")}}, 1024, 1024},
+		{"one top-level side rounded", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"height": raw("1500.4")}}, 1024, 1472},
+		{"top-level sides scaled into the area", GenerationIntent{Size: "512x512", Extras: map[string]json.RawMessage{"width": raw("2048"), "height": raw("2048")}}, 1728, 1728},
+		{"top-level sides as strings", GenerationIntent{Extras: map[string]json.RawMessage{"width": raw(`"832"`), "height": raw(`"1216"`)}}, 832, 1216},
+		{"a small top-level side held at 64", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"width": raw("8")}}, 64, 1024},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.intent.Model = "nai-diffusion-4-5-full"
@@ -542,15 +548,15 @@ func TestBuildGenerationSizeAndCount(t *testing.T) {
 	}
 
 	for name, intent := range map[string]GenerationIntent{
-		"n_samples other than n":     {Size: "512x512", N: 2, Parameters: map[string]json.RawMessage{"n_samples": raw("3")}},
-		"n past the tier of width":   {Size: "512x512", N: 8, Parameters: map[string]json.RawMessage{"width": raw("1024"), "height": raw("1024")}},
-		"width not a multiple of 64": {Parameters: map[string]json.RawMessage{"width": raw("1000")}},
-		"canvas past the area":       {Parameters: map[string]json.RawMessage{"width": raw("2048"), "height": raw("2048")}},
-		"top-level height off 64":    {Size: "1024x1024", Extras: map[string]json.RawMessage{"height": raw("1000")}},
-		"top-level past the area":    {Extras: map[string]json.RawMessage{"width": raw("2048"), "height": raw("2048")}},
-		"top-level width of 0":       {Extras: map[string]json.RawMessage{"width": raw("0")}},
-		"size not WxH":               {Size: "large"},
-		"size side past the bound":   {Size: "100000x64"},
+		"n_samples other than n":            {Size: "512x512", N: 2, Parameters: map[string]json.RawMessage{"n_samples": raw("3")}},
+		"n past the tier of width":          {Size: "512x512", N: 8, Parameters: map[string]json.RawMessage{"width": raw("1024"), "height": raw("1024")}},
+		"width not a multiple of 64":        {Parameters: map[string]json.RawMessage{"width": raw("1000")}},
+		"canvas past the area":              {Parameters: map[string]json.RawMessage{"width": raw("2048"), "height": raw("2048")}},
+		"top-level width of 0":              {Extras: map[string]json.RawMessage{"width": raw("0")}},
+		"top-level width past size's bound": {Extras: map[string]json.RawMessage{"width": raw("100000")}},
+		"top-level height not a number":     {Extras: map[string]json.RawMessage{"height": raw(`"tall"`)}},
+		"size not WxH":                      {Size: "large"},
+		"size side past the bound":          {Size: "100000x64"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			intent.Model = "nai-diffusion-4-5-full"
@@ -706,6 +712,21 @@ func TestParseExtensions(t *testing.T) {
 		{"a null counts as absent",
 			map[string]json.RawMessage{"negative_prompt": raw("null"), "negative": raw("null"), "negativePrompt": raw(`"b"`), "steps": raw("null"), "num_inference_steps": raw("28"), "seed": raw("null")},
 			map[string]json.RawMessage{"negative_prompt": raw(`"b"`), "steps": raw("28"), "seed": raw("null")}},
+		// Other clients' ranges are wider than NovelAI's: their numbers are
+		// brought into it, a step count to a whole number, rather than
+		// refused; a NovelAI name keeps its value, and its range.
+		{"an alias's number past NovelAI's range",
+			map[string]json.RawMessage{"num_inference_steps": raw("60"), "cfg_scale": raw("12")},
+			map[string]json.RawMessage{"steps": raw("50"), "scale": raw("10")}},
+		{"an alias's number below NovelAI's range",
+			map[string]json.RawMessage{"num_inference_steps": raw("0.4"), "guidance_scale": raw("-2")},
+			map[string]json.RawMessage{"steps": raw("1"), "scale": raw("0")}},
+		{"a step count rounded, a guidance kept",
+			map[string]json.RawMessage{"num_inference_steps": raw("28.6"), "guidance_scale": raw(`"7.5"`)},
+			map[string]json.RawMessage{"steps": raw("29"), "scale": raw("7.5")}},
+		{"an alias that is no number, and NovelAI's names, as sent",
+			map[string]json.RawMessage{"num_inference_steps": raw(`"many"`), "scale": raw("12")},
+			map[string]json.RawMessage{"steps": raw(`"many"`), "scale": raw("12")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for range 32 {
@@ -870,10 +891,11 @@ func TestBuildGenerationPresets(t *testing.T) {
 		assert.Equal(t, tc.want, input, tc.prompt)
 	}
 
-	// The quality suffix and the transparency tag go in once: a prompt that
-	// holds them where they would go, in any case or spacing and with
-	// full-width commas, keeps them as written; inside a longer word, in a
-	// Text: block or in another character field they do not count.
+	// The quality tags and the transparency tag go in once each: a prompt
+	// that holds some of them where they would go, in any order, case,
+	// spacing or weight, with full-width commas or line breaks, keeps them
+	// as written and gets only the others; inside a longer tag, in a Text:
+	// block or in another character field they do not count.
 	for _, tc := range []struct {
 		name, model, prompt, want string
 		extras                    map[string]json.RawMessage
@@ -884,9 +906,15 @@ func TestBuildGenerationPresets(t *testing.T) {
 		{name: "case and spacing", model: "nai-diffusion-4-5-full", prompt: "1girl,Very Aesthetic ,  masterpiece,\nNO TEXT", want: "1girl,Very Aesthetic ,  masterpiece,\nNO TEXT"},
 		{name: "full-width commas", model: "nai-diffusion-4-5-full", prompt: "1girl，very aesthetic，masterpiece，no text", want: "1girl，very aesthetic，masterpiece，no text"},
 		{name: "a second occurrence", model: "nai-diffusion-4-5-full", prompt: "avery aesthetic, masterpiece, no text, very aesthetic, masterpiece, no text", want: "avery aesthetic, masterpiece, no text, very aesthetic, masterpiece, no text"},
-		{name: "inside a word before", model: "nai-diffusion-4-5-full", prompt: "1girl, avery aesthetic, masterpiece, no text", want: "1girl, avery aesthetic, masterpiece, no text, " + qualityV5Standard},
-		{name: "inside a word after", model: "nai-diffusion-4-5-full", prompt: "very aesthetic, masterpiece, no texture", want: "very aesthetic, masterpiece, no texture, " + qualityV5Standard},
-		{name: "another preset's tags", model: "nai-diffusion-5-full", prompt: "1girl, " + qualityV5Standard, want: "1girl, " + qualityV5Standard + ", " + qualityV5Light, extras: map[string]json.RawMessage{"qualityPresetId": raw(`"light"`)}},
+		{name: "inside a word before", model: "nai-diffusion-4-5-full", prompt: "1girl, avery aesthetic, masterpiece, no text", want: "1girl, avery aesthetic, masterpiece, no text, very aesthetic"},
+		{name: "inside a word after", model: "nai-diffusion-4-5-full", prompt: "very aesthetic, masterpiece, no texture", want: "very aesthetic, masterpiece, no texture, no text"},
+		{name: "inside a longer tag", model: "nai-diffusion-4-5-full", prompt: "1girl, not very aesthetic, masterpiece art, no text bubbles", want: "1girl, not very aesthetic, masterpiece art, no text bubbles, " + qualityV5Standard},
+		{name: "some of the tags in another order", model: "nai-diffusion-4-5-full", prompt: "1girl, masterpiece, very aesthetic", want: "1girl, masterpiece, very aesthetic, no text"},
+		{name: "another client's quality tags", model: "nai-diffusion-4-5-full", prompt: "masterpiece, best quality, very aesthetic, 1girl", want: "masterpiece, best quality, very aesthetic, 1girl, no text"},
+		{name: "weighted tags", model: "nai-diffusion-4-5-full", prompt: "1girl, {{masterpiece}}, 1.2::very aesthetic::, [[no text]]", want: "1girl, {{masterpiece}}, 1.2::very aesthetic::, [[no text]]"},
+		{name: "another client's weight", model: "nai-diffusion-4-5-full", prompt: "(masterpiece:1.2), 1girl", want: "(masterpiece:1.2), 1girl, very aesthetic, no text"},
+		{name: "one tag a line", model: "nai-diffusion-4-5-full", prompt: "1girl\nmasterpiece\r\nvery aesthetic", want: "1girl\nmasterpiece\r\nvery aesthetic, no text"},
+		{name: "another preset's tags", model: "nai-diffusion-5-full", prompt: "1girl, " + qualityV5Standard, want: "1girl, " + qualityV5Standard + ", amazing quality", extras: map[string]json.RawMessage{"qualityPresetId": raw(`"light"`)}},
 		{name: "Curated's suffix", model: "nai-diffusion-4-5-curated", prompt: "1girl, " + strings.ToUpper(qualityV45Curated), want: "1girl, " + strings.ToUpper(qualityV45Curated)},
 		{name: "before a Text: block", model: "nai-diffusion-4-5-full", prompt: "1girl, very aesthetic, masterpiece, no text, Text: OPEN", want: "1girl, very aesthetic, masterpiece, no text, Text: OPEN"},
 		{name: "only in the Text: block", model: "nai-diffusion-4-5-full", prompt: "a sign, Text: very aesthetic, masterpiece, no text", want: "a sign, " + qualityV5Standard + ". Text: very aesthetic, masterpiece, no text"},
@@ -902,15 +930,18 @@ func TestBuildGenerationPresets(t *testing.T) {
 		})
 	}
 
-	// The UC preset goes in once too, and so does "nsfw, ": a negative
-	// prompt that holds the preset keeps it as written, with "nsfw, " in
-	// front of it unless the prompt or the negative prompt has nsfw.
+	// The UC preset's tags go in once each too, and so does "nsfw, ": a
+	// negative prompt that holds some of them keeps them as written behind
+	// the others, with "nsfw, " in front unless the prompt or the negative
+	// prompt has nsfw. A tag inside a longer one does not count.
 	for _, tc := range []struct{ name, model, negative, want string }{
 		{"the web client's UC", "nai-diffusion-5-full", "nsfw, " + ucV5Heavy + ", bad hands", "nsfw, " + ucV5Heavy + ", bad hands"},
 		{"the preset without nsfw", "nai-diffusion-5-full", "bad hands, " + ucV5Heavy, "nsfw, bad hands, " + ucV5Heavy},
 		{"case and spacing", "nai-diffusion-4-5-full", strings.ToUpper(strings.ReplaceAll(ucV5Heavy, ", ", " ,")), "nsfw, " + strings.ToUpper(strings.ReplaceAll(ucV5Heavy, ", ", " ,"))},
 		{"nsfw in the negative prompt", "nai-diffusion-5-full", "NSFW, bad hands", ucV5Heavy + ", NSFW, bad hands"},
-		{"part of the preset", "nai-diffusion-5-full", "lowres, artistic error", "nsfw, " + ucV5Heavy + ", lowres, artistic error"},
+		{"part of the preset", "nai-diffusion-5-full", "lowres, artistic error", "nsfw, " + strings.TrimPrefix(ucV5Heavy, "lowres, artistic error, ") + ", lowres, artistic error"},
+		{"part of the preset in another order", "nai-diffusion-5-full", "worst quality, bad hands, LOWRES", "nsfw, " + strings.NewReplacer("lowres, ", "", "worst quality, ", "").Replace(ucV5Heavy) + ", worst quality, bad hands, LOWRES"},
+		{"inside a longer tag", "nai-diffusion-4-full", "artistic error, white blank page", "nsfw, " + strings.Replace(ucV4FullHeavy, "white blank page, ", "", 1) + ", artistic error, white blank page"},
 		{"a Curated preset", "nai-diffusion-4-5-curated", ucV45CurHeavy, ucV45CurHeavy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4103,23 +4134,26 @@ func (w *eventLog) count(needle string) int {
 }
 
 // counting is an enhance answer that records how often needle had reached
-// the client when the enhance came, then answers as NovelAI does.
-func counting(log *eventLog, needle string, seen *[]int, mu *sync.Mutex) func(http.ResponseWriter, *http.Request, hdCall) {
-	return func(w http.ResponseWriter, r *http.Request, call hdCall) {
+// the client when the enhance came, then answers with an HD image of fill.
+func counting(log *eventLog, needle string, seen *[]int, mu *sync.Mutex, fill color.Color) func(http.ResponseWriter, *http.Request, hdCall) {
+	return func(w http.ResponseWriter, _ *http.Request, call hdCall) {
 		mu.Lock()
 		*seen = append(*seen, log.count(needle))
 		mu.Unlock()
-		hdAnswered(w, r, call)
+		width, height := call.canvas()
+		w.Header().Set("Content-Type", "application/zip")
+		_, _ = w.Write(hdZip(hdPNG(width, height, fill)))
 	}
 }
 
-// An images stream with HD relays the base pass's previews as they come,
-// then each image's completed event right after its enhance, with its own
-// size, the usage on the last one: no completed event before the base
-// stream ended, and the second enhance only once the first image went out. A
-// base stream that broke, or a final that is no image, gets no HD and ends
-// as today. A client that leaves during an enhance keeps the reservation,
-// and a whole answer to a stream request is enhanced too.
+// An images stream with HD relays the base pass's previews as they come;
+// once the base stream ended, every image is enhanced in sample order at
+// /ai/generate-image (JSON, no Accept), and only then, the key free, do the
+// completed events follow in sample order, each with its own size and seed,
+// the usage on the last one. A base stream that broke, or a final that is
+// no image, gets no HD and ends as today. A client that leaves during an
+// enhance keeps the reservation, and a whole answer to a stream request is
+// enhanced too.
 func TestImagesStreamHD(t *testing.T) {
 	resetHD(t)
 	upstream, server := newHDUpstream(t)
@@ -4142,7 +4176,7 @@ func TestImagesStreamHD(t *testing.T) {
 	}
 	const request = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","n":2,"stream":true,"partial_images":2}`
 
-	t.Run("previews first, then each image after its enhance", func(t *testing.T) {
+	t.Run("previews first, then the images once every enhance answered", func(t *testing.T) {
 		// The default 28 steps split in three: previews after steps 10 and 19.
 		answerWith(t, "text/event-stream", sseEvents(t,
 			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 9, "image": preview},
@@ -4151,13 +4185,26 @@ func TestImagesStreamHD(t *testing.T) {
 		log := &eventLog{}
 		var mu sync.Mutex
 		var seen []int
-		upstream.enhance(counting(log, "event: image_generation.completed", &seen, &mu), counting(log, "event: image_generation.completed", &seen, &mu))
-		run := runHD(t, context.Background(), meta("pst-hd-stream"), "/v1/images/generations", request, func(c *gin.Context) {
+		fills := []color.Color{hdColor, color.NRGBA{R: 30, G: 200, B: 240, A: 255}}
+		upstream.enhance(counting(log, "event: image_generation.completed", &seen, &mu, fills[0]), counting(log, "event: image_generation.completed", &seen, &mu, fills[1]))
+		before := len(upstream.recorded())
+		run := runHD(t, context.Background(), meta("pst-hd-stream"), "/v1/images/generations", request[:len(request)-1]+`,"seed":100}`, func(c *gin.Context) {
 			log.ResponseWriter = c.Writer
 			c.Writer = log
 		})
 
 		require.Nil(t, run.apiErr)
+		calls := upstream.recorded()[before:]
+		require.Len(t, calls, 3)
+		assert.Equal(t, generateImageStreamPath, calls[0].path)
+		assert.Equal(t, "text/event-stream", calls[0].header.Get("Accept"))
+		for i, call := range calls[1:] {
+			assert.Equal(t, ActionImg2Img, call.body["action"])
+			assert.Equal(t, generateImagePath, call.path, "enhance %d goes to the zip endpoint, whatever the base streamed", i)
+			assert.False(t, call.acceptSent, "enhance %d asks for no event stream", i)
+			assert.Equal(t, "application/json", call.contentType)
+			assert.Equal(t, float64(hdSeed(int64(100+i))), call.parameter("seed"), "enhance %d is image %d's", i, i)
+		}
 		events := streamedEvents(t, run.recorder.Body.String())
 		require.Len(t, events, 4)
 		names := []string{events[0].name, events[1].name, events[2].name, events[3].name}
@@ -4165,14 +4212,15 @@ func TestImagesStreamHD(t *testing.T) {
 		assert.Equal(t, "8x8", events[0].data["size"], "a preview has its own size")
 		for i, event := range events[2:] {
 			assert.Equal(t, "768x768", event.data["size"])
+			assert.Equal(t, float64(100+i), event.data["seed"], "image %d comes in sample order", i)
 			data, err := base64.StdEncoding.DecodeString(event.data["b64_json"].(string))
 			require.NoError(t, err)
-			assert.Equal(t, hdPNG(768, 768, hdColor), data, "image %d", i)
+			assert.Equal(t, hdPNG(768, 768, fills[i]), data, "image %d is its own enhance", i)
 		}
 		assert.Equal(t, float64(0), events[2].data["usage"].(map[string]any)["output_tokens"])
 		assert.Equal(t, float64(2*323), events[3].data["usage"].(map[string]any)["output_tokens"], "the base canvas's usage of both images")
 		mu.Lock()
-		assert.Equal(t, []int{0, 1}, seen, "no image before the base stream ended, and the second enhance after the first image")
+		assert.Equal(t, []int{0, 0}, seen, "no image before every enhance answered")
 		mu.Unlock()
 		assert.Equal(t, 2, *run.info.BillingImageCount)
 		assert.Equal(t, []*common.Message{common.NewMessage("HD {{size}}", map[string]any{"size": "768x768"})}, run.adaptor.ConsumeLogContent())
@@ -4251,7 +4299,7 @@ func TestImagesStreamHD(t *testing.T) {
 		}
 	}
 
-	t.Run("previews first, then each image after its upscale", func(t *testing.T) {
+	t.Run("previews first, then the images once every upscale answered", func(t *testing.T) {
 		answerWith(t, "text/event-stream", sseEvents(t,
 			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 9, "image": preview},
 			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 18, "image": preview},
@@ -4279,7 +4327,7 @@ func TestImagesStreamHD(t *testing.T) {
 		assert.Equal(t, float64(0), events[2].data["usage"].(map[string]any)["output_tokens"])
 		assert.Equal(t, float64(2*323), events[3].data["usage"].(map[string]any)["output_tokens"], "the base canvas's usage of both images")
 		mu.Lock()
-		assert.Equal(t, []int{0, 1}, seen, "no image before the base stream ended, and the second upscale after the first image")
+		assert.Equal(t, []int{0, 0}, seen, "no image before every upscale answered")
 		mu.Unlock()
 		assert.Equal(t, 2, *run.info.BillingImageCount)
 		assert.Equal(t, []*common.Message{upscaleNote(upscaleApplied, 2)}, run.adaptor.ConsumeLogContent())
@@ -4301,11 +4349,21 @@ func TestImagesStreamHD(t *testing.T) {
 	})
 
 	t.Run("a V3 stream's whole answer is upscaled too", func(t *testing.T) {
+		log := &eventLog{}
+		var mu sync.Mutex
+		var seen []int
+		upstream.upscale(countingUpscale(log, &seen, &mu), countingUpscale(log, &seen, &mu))
 		before := len(upstream.recorded())
-		run := runHD(t, context.Background(), upscaleMeta("pst-up-v3"), "/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"1girl","size":"512x512","n":2,"stream":true}`)
+		run := runHD(t, context.Background(), upscaleMeta("pst-up-v3"), "/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"1girl","size":"512x512","n":2,"stream":true}`, func(c *gin.Context) {
+			log.ResponseWriter = c.Writer
+			c.Writer = log
+		})
 
 		require.Nil(t, run.apiErr)
 		assert.Len(t, upstream.upscaleCalls(before), 2)
+		mu.Lock()
+		assert.Equal(t, []int{0, 0}, seen, "no image before every upscale answered")
+		mu.Unlock()
 		events := streamedEvents(t, run.recorder.Body.String())
 		require.Len(t, events, 2)
 		for _, event := range events {
@@ -4317,8 +4375,9 @@ func TestImagesStreamHD(t *testing.T) {
 }
 
 // A chat gets HD as the images routes do: the Markdown images are the HD
-// ones, a stream sends each image's chunk right after its enhance, and the
-// usage is the base canvas's. A refused enhance delivers the base PNG.
+// ones, a stream sends the images' chunks in sample order once every
+// enhance answered, and the usage is the base canvas's. A refused enhance
+// delivers the base PNG.
 func TestChatResponseHD(t *testing.T) {
 	resetHD(t)
 	upstream, server := newHDUpstream(t)
@@ -4350,11 +4409,12 @@ func TestChatResponseHD(t *testing.T) {
 		assert.Equal(t, []*common.Message{common.NewMessage("HD {{size}}", map[string]any{"size": "768x768"})}, run.adaptor.ConsumeLogContent())
 	})
 
-	t.Run("a stream sends each image once enhanced", func(t *testing.T) {
+	t.Run("a stream sends the images once every one is enhanced", func(t *testing.T) {
 		log := &eventLog{}
 		var mu sync.Mutex
 		var seen []int
-		upstream.enhance(counting(log, "![image]", &seen, &mu), counting(log, "![image]", &seen, &mu))
+		fills := []color.NRGBA{hdColor, {R: 30, G: 200, B: 240, A: 255}}
+		upstream.enhance(counting(log, "![image]", &seen, &mu, fills[0]), counting(log, "![image]", &seen, &mu, fills[1]))
 		run := runHD(t, context.Background(), meta("pst-hd-chat-stream"), "/v1/chat/completions", `{`+messages+`,"n":2,"stream":true}`, func(c *gin.Context) {
 			log.ResponseWriter = c.Writer
 			c.Writer = log
@@ -4367,13 +4427,16 @@ func TestChatResponseHD(t *testing.T) {
 			return events[i].data["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
 		}
 		assert.Equal(t, "assistant", delta(0)["role"])
-		assert.Equal(t, []string{"768x768"}, markdownSizes(t, delta(1)["content"].(string)))
-		assert.Equal(t, []string{"768x768"}, markdownSizes(t, delta(2)["content"].(string)))
+		for i := range 2 {
+			content := delta(1 + i)["content"].(string)
+			assert.Equal(t, []string{"768x768"}, markdownSizes(t, content))
+			assert.Contains(t, content, base64.StdEncoding.EncodeToString(hdPNG(768, 768, fills[i])), "chunk %d is image %d's enhance", i, i)
+		}
 		assert.Equal(t, "stop", events[3].data["choices"].([]any)[0].(map[string]any)["finish_reason"])
 		assert.Equal(t, float64(2*323), events[4].data["usage"].(map[string]any)["completion_tokens"])
 		assert.Equal(t, true, events[5].data["[DONE]"])
 		mu.Lock()
-		assert.Equal(t, []int{0, 1}, seen, "the first image went out before the second enhance")
+		assert.Equal(t, []int{0, 0}, seen, "no image before every enhance answered")
 		mu.Unlock()
 	})
 
@@ -4449,8 +4512,9 @@ func TestChatResponseHD(t *testing.T) {
 // answer arrived, before the client got anything; after a failed enhance;
 // after a base answer the relay does not take (any status but 200, a 202
 // included, so a retry on the key does not wait behind its own attempt); and
-// when the client leaves. A refused enhance marks the key as a refused base
-// pass does.
+// when the client leaves. An enhance NovelAI refuses for the account (a 429)
+// marks the key as a refused base pass does; one it refuses for want of
+// Anlas (a 402) does not, as the key still generates.
 func TestAdaptorHoldsTheSlotAcrossHD(t *testing.T) {
 	resetGenerationQueue(t)
 	resetHD(t)
@@ -4589,16 +4653,23 @@ func TestAdaptorHoldsTheSlotAcrossHD(t *testing.T) {
 		assert.Equal(t, []*common.Message{common.NewMessage("HD unavailable, delivered at the standard size")}, adaptor.ConsumeLogContent())
 	})
 
-	t.Run("a refused enhance marks the key", func(t *testing.T) {
-		const key = "pst-hd-refused"
-		upstream.enhance(hdAnswer(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`)))
-		send(key, 0, "")
-		awaitRun(t)
-		generationLinesMu.Lock()
-		_, refused := generationRefused[sha256.Sum256([]byte(key))]
-		generationLinesMu.Unlock()
-		assert.True(t, refused)
-	})
+	for _, tc := range []struct {
+		status int
+		marked bool
+	}{{http.StatusTooManyRequests, true}, {http.StatusPaymentRequired, false}} {
+		t.Run(fmt.Sprintf("an enhance refused with %d", tc.status), func(t *testing.T) {
+			key := fmt.Sprintf("pst-hd-refused-%d", tc.status)
+			upstream.enhance(hdAnswer(tc.status, "application/json", []byte(fmt.Sprintf(`{"statusCode":%d,"message":"refused"}`, tc.status))))
+			send(key, 0, "")
+			run := awaitRun(t)
+			response, _ := run.images(t)
+			assert.Equal(t, "512x512", response.Size, "the base is delivered")
+			generationLinesMu.Lock()
+			_, refused := generationRefused[sha256.Sum256([]byte(key))]
+			generationLinesMu.Unlock()
+			assert.Equal(t, tc.marked, refused)
+		})
+	}
 
 	for _, status := range []int{http.StatusInternalServerError, http.StatusAccepted} {
 		t.Run(fmt.Sprintf("a %d base frees the key at once", status), func(t *testing.T) {
@@ -5056,13 +5127,71 @@ func TestUpscaleExclusionsAreNoted(t *testing.T) {
 	}
 }
 
+// With HD and the upscale both on, each pass falls back to the image before
+// it: an upscale after a refused enhance enlarges the base, and an upscaled
+// image that cannot be rendered leaves the HD image, not the base. The
+// consume log names what the client got: an image the upscale enlarged was
+// not delivered at the standard size.
+func TestHDAndTheUpscaleFallBackToTheImageBefore(t *testing.T) {
+	resetUpscale(t)
+	upstream, server := newHDUpstream(t)
+	refused := hdAnswer(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`))
+	for _, tc := range []struct {
+		name, key, output string
+		enhance, upscale  func(http.ResponseWriter, *http.Request, hdCall)
+		size, format      string
+		notes             []*common.Message
+	}{
+		{name: "the base upscaled after a refused enhance", key: "pst-both-hd-refused", enhance: refused, size: "1024x1024", format: formatPNG,
+			notes: []*common.Message{common.NewMessage("HD unavailable"), upscaleNote(upscaleApplied, 1)}},
+		{name: "the base after a refused enhance and a failed upscale", key: "pst-both-none", enhance: refused,
+			upscale: hdAnswer(http.StatusBadRequest, "application/json", []byte(`{"statusCode":400,"message":"bad image"}`)), size: "512x512", format: formatPNG,
+			notes: []*common.Message{common.NewMessage("HD unavailable, delivered at the standard size"), upscaleNote(upscaleFailed, 1)}},
+		{name: "the HD image when the upscaled one does not render", key: "pst-both-render", output: formatJPEG,
+			upscale: func(w http.ResponseWriter, _ *http.Request, call hdCall) {
+				width, height := call.upscaleInput()
+				w.Header().Set("Content-Type", "application/zip")
+				_, _ = w.Write(hdZip(pngHeader(2*width, 2*height, 8, 0)))
+			}, size: "768x768", format: formatJPEG,
+			notes: []*common.Message{common.NewMessage("HD {{size}}", map[string]any{"size": "768x768"}), upscaleNote(upscaleFailed, 1)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.enhance != nil {
+				upstream.enhance(tc.enhance)
+			}
+			if tc.upscale != nil {
+				upstream.upscale(tc.upscale)
+			}
+			body := `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512"`
+			if tc.output != "" {
+				body += `,"output_format":"` + tc.output + `"`
+			}
+			run := runHD(t, context.Background(), relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: tc.key, ChannelOtherSettings: dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}},
+				"/v1/images/generations", body+"}")
+
+			response, images := run.images(t)
+			require.Len(t, images, 1)
+			assert.Equal(t, tc.size, sizeOf(t, images[0]))
+			assert.Equal(t, tc.format, SniffImageFormat(images[0]))
+			assert.Equal(t, tc.size, response.Data[0].Size)
+			assert.Equal(t, tc.size, response.Size)
+			assert.Equal(t, 323, response.Usage.OutputTokens, "the base canvas's usage")
+			assert.Equal(t, tc.notes, run.adaptor.ConsumeLogContent())
+		})
+	}
+}
+
 // On NovelAI's own host the upscale is the request's next generation on its
 // key: the key stays held from the base send through the last upscale
 // answer, so another request waits behind it, and with HD each image is
 // enhanced and then upscaled, in sample order, on the same key. The key is
 // free once NovelAI's last answer arrived, before the client got anything,
-// and at once after a base answer the relay does not take. A refused upscale
-// marks the key, and a key HD skips for its 402 still gets the upscale.
+// and at once after a base answer the relay does not take; on a stream, the
+// key is free before the first image is written. An upscale NovelAI refuses
+// for the account (a 429 that lasts) marks the key; one it refuses for want
+// of Anlas (a 402) does not, so an idle key whose account cannot pay for
+// upscales still takes the next request. A key HD skips for its 402 still
+// gets the upscale.
 func TestAdaptorHoldsTheKeyThroughTheUpscale(t *testing.T) {
 	resetGenerationQueue(t)
 	resetUpscale(t)
@@ -5247,15 +5376,75 @@ func TestAdaptorHoldsTheKeyThroughTheUpscale(t *testing.T) {
 		assert.Equal(t, formatJPEG, SniffImageFormat(images[0]))
 	})
 
-	t.Run("a refused upscale marks the key", func(t *testing.T) {
+	t.Run("an upscale refused with 429 marks the key", func(t *testing.T) {
 		const key = "pst-up-refused"
-		upstream.upscale(hdAnswer(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`)))
+		locked := hdAnswer(http.StatusTooManyRequests, "application/json", []byte(`{"statusCode":429,"message":"Concurrent generation is locked"}`))
+		upstream.upscale(locked, locked, locked)
 		send(official(key, 0, upscaleOnly), "")
 		awaitRun(t)
 		generationLinesMu.Lock()
 		_, refused := generationRefused[sha256.Sum256([]byte(key))]
 		generationLinesMu.Unlock()
 		assert.True(t, refused)
+	})
+
+	t.Run("an upscale refused with 402 leaves the idle key first in line", func(t *testing.T) {
+		const key, other = "pst-up-poor", "pst-up-busy"
+		upstream.upscale(hdAnswer(http.StatusPaymentRequired, "application/json", []byte(`{"statusCode":402,"message":"Insufficient Anlas"}`)))
+		send(official(key, 10, upscaleOnly), "")
+		run := awaitRun(t)
+		response, _ := run.images(t)
+		assert.Equal(t, "512x512", response.Size, "the base is delivered")
+		generationLinesMu.Lock()
+		_, refused := generationRefused[sha256.Sum256([]byte(key))]
+		generationLinesMu.Unlock()
+		assert.False(t, refused)
+
+		free := occupy(t, other, 9)
+		defer free()
+		ticket, err := enterGenerationLine([]generationKey{{index: 0, key: key}, {index: 1, key: other}}, 1, constant.MultiKeyModePolling, 10)
+		require.NoError(t, err)
+		if ticket.waiter == nil {
+			releaseGenerationKey(ticket.id)
+		} else {
+			left, leave := context.WithCancel(context.Background())
+			leave()
+			_, _ = ticket.wait(left)
+		}
+		assert.Equal(t, 0, ticket.key.index, "the idle key takes the request, not place %d behind the other key", ticket.position)
+	})
+
+	t.Run("a stream's key is free before its first image is written", func(t *testing.T) {
+		const key = "pst-up-stream-stalled"
+		upstream.answerBase(t, hdAnswer(http.StatusOK, "text/event-stream", []byte(sseEvents(t,
+			map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(0)))},
+			map[string]any{"event_type": "final", "samp_ix": 1, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(1)))}))))
+		client := &stalledClient{entered: make(chan struct{}), unblock: make(chan struct{})}
+		unblock := sync.OnceFunc(func() { close(client.unblock) })
+		t.Cleanup(unblock)
+		before := len(upstream.recorded())
+		go func() {
+			runs <- runHD(t, context.Background(), official(key, 0, dto.ChannelOtherSettings{NovelAIUpscaleEnabled: true}), "/v1/images/generations", request+`,"n":2,"stream":true}`, func(c *gin.Context) {
+				client.ResponseWriter = c.Writer
+				c.Writer = client
+			})
+		}()
+		select {
+		case <-client.entered:
+		case <-time.After(time.Minute):
+			require.FailNow(t, "the relay never wrote to its client")
+		}
+		assert.True(t, keyIsFree(key), "free while the client has read nothing")
+		assert.Equal(t, []string{ActionGenerate, ActionImg2Img, "upscale 768x768", ActionImg2Img, "upscale 768x768"}, kinds(upstream.recorded()[before:]),
+			"both images went through HD and the upscale before the first write")
+		unblock()
+		run := awaitRun(t)
+		require.Nil(t, run.apiErr)
+		events := streamedEvents(t, run.recorder.Body.String())
+		require.Len(t, events, 2)
+		for i, event := range events {
+			assert.Equal(t, "1536x1536", event.data["size"], "image %d", i)
+		}
 	})
 
 	t.Run("a 500 base frees the key at once", func(t *testing.T) {
@@ -5345,11 +5534,11 @@ func TestRenderUpscaledImages(t *testing.T) {
 }
 
 // A response takes the memory it needs to hand over its upscaled images,
-// four times their bytes, of upscaleDelivery: a non-stream response once the
-// key is free, before it builds its JSON; a stream for each image, waiting
-// only for the last one, the others going out while the key is held without
-// waiting. A client that leaves during the wait gets nothing more and keeps
-// the reservation. The memory is free again once the response was written.
+// four times their bytes, of upscaleDelivery once the key is free, before
+// anything is written: a non-stream response before it builds its JSON, a
+// stream before its first completed event. A client that leaves during the
+// wait gets nothing more and keeps the reservation. The memory is free again
+// once the response was written.
 func TestUpscaleDeliveryTakesItsMemory(t *testing.T) {
 	resetUpscale(t)
 	upstream, server := newHDUpstream(t)
@@ -5384,17 +5573,31 @@ func TestUpscaleDeliveryTakesItsMemory(t *testing.T) {
 		upscaleDelivery.Release(upscaleDeliveryBudget)
 	})
 
-	t.Run("a stream waits only for its last image", func(t *testing.T) {
+	stream := func(t *testing.T) {
 		upstream.answerBase(t, hdAnswer(http.StatusOK, "text/event-stream", []byte(sseEvents(t,
 			map[string]any{"event_type": "final", "samp_ix": 0, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(0)))},
 			map[string]any{"event_type": "final", "samp_ix": 1, "image": base64.StdEncoding.EncodeToString(hdPNG(512, 512, hdBaseColor(1)))}))))
-		result := run(t, upscaleDeliveryBudget, 5*time.Second, images+`,"n":2,"stream":true}`)
+	}
+
+	t.Run("a stream waits for the memory of all its images", func(t *testing.T) {
+		stream(t)
+		result := run(t, upscaleDeliveryBudget-2*weight+1, time.Second, images+`,"n":2,"stream":true}`)
 		require.Nil(t, result.apiErr)
-		events := streamedEvents(t, result.recorder.Body.String())
-		require.Len(t, events, 1, "the first image went out without waiting")
-		assert.Equal(t, "1024x1024", events[0].data["size"])
+		assert.Empty(t, streamedEvents(t, result.recorder.Body.String()), "no image goes out before the memory of both is free")
 		assert.Equal(t, relaycommon.StreamEndReasonClientGone, result.info.StreamStatus.EndReason)
 		assert.Nil(t, result.info.BillingImageCount)
+	})
+
+	t.Run("a stream with its memory", func(t *testing.T) {
+		stream(t)
+		result := run(t, upscaleDeliveryBudget-2*weight, time.Minute, images+`,"n":2,"stream":true}`)
+		require.Nil(t, result.apiErr)
+		events := streamedEvents(t, result.recorder.Body.String())
+		require.Len(t, events, 2)
+		assert.Equal(t, "1024x1024", events[1].data["size"])
+		assert.Equal(t, 2, *result.info.BillingImageCount)
+		assert.True(t, upscaleDelivery.TryAcquire(upscaleDeliveryBudget), "the memory is free again")
+		upscaleDelivery.Release(upscaleDeliveryBudget)
 	})
 }
 

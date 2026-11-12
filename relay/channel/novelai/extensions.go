@@ -2,6 +2,7 @@ package novelai
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -38,6 +39,10 @@ var extensionAliases = []struct{ name, key string }{
 	{"characters", "characterPrompts"},
 }
 
+// aliasRanges are NovelAI's ranges of the extension keys whose aliases carry
+// other clients' numbers, which range wider: their guidance and step counts.
+var aliasRanges = map[string][2]float64{"steps": {1, maxSteps}, "scale": {0, maxScale}}
+
 // stringKeys are the extension keys whose value is a string, which a
 // multipart form sends as is; the other form values are JSON (numbers,
 // booleans, lists).
@@ -59,7 +64,10 @@ var ambiguousKeys = []string{"cfg", "SMEA", "DYN", "addition"}
 // FormFields): the extension keys under their NovelAI names, or else under
 // their first alias the request sets (image_config.aspect_ratio,
 // OpenRouter's name, when aspect_ratio is absent), and the parameters
-// object. A null counts as absent: a later alias replaces it.
+// object. A null counts as absent: a later alias replaces it. An alias's
+// number of steps or guidance is brought into NovelAI's range (aliasRanges),
+// a step count to a whole number, as size is fitted to NovelAI's grid,
+// rather than refused: other clients' ranges are wider.
 func ParseExtensions(c *gin.Context, fields map[string]json.RawMessage) (map[string]json.RawMessage, map[string]json.RawMessage, *types.NewAPIError) {
 	for _, key := range ambiguousKeys {
 		if _, ok := fields[key]; ok {
@@ -76,6 +84,17 @@ func ParseExtensions(c *gin.Context, fields map[string]json.RawMessage) (map[str
 		value, ok := fields[alias.name]
 		if current, set := extras[alias.key]; !ok || set && !isJSONNull(current) {
 			continue
+		}
+		if limits, ranged := aliasRanges[alias.key]; ranged {
+			if number, ok := jsonNumber(value); ok {
+				number = min(max(number, limits[0]), limits[1])
+				if alias.key == "steps" {
+					number = math.Round(number)
+				}
+				if fitted, err := common.Marshal(number); err == nil {
+					value = fitted
+				}
+			}
 		}
 		extras[alias.key] = value
 	}
