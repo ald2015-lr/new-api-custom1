@@ -1661,7 +1661,7 @@ test('configuration from fields unsupported by the selected provider stays unmar
     setting:
       '{"task_plugin_key":"video-a","force_format":true,"responses_websocket_enabled":true}',
     settings:
-      '{"allow_speed":true,"allow_service_tier":true,"upstream_model_update_check_enabled":true,"ollama_openai_chat":true,"novelai_presets_disabled":true}',
+      '{"allow_speed":true,"allow_service_tier":true,"upstream_model_update_check_enabled":true,"ollama_openai_chat":true,"novelai_presets_disabled":true,"novelai_queue_limit":3}',
   }
   const user = userEvent.setup()
   render(<ConfigurationHarness currentRow={editingChannel} />)
@@ -1683,13 +1683,19 @@ test('configuration from fields unsupported by the selected provider stays unmar
       name: 'Do not add NovelAI quality tags and negative presets',
     })
   ).not.toBeInTheDocument()
+  expect(
+    within(processing).queryByRole('spinbutton', {
+      name: 'Queue limit per key',
+    })
+  ).not.toBeInTheDocument()
 })
 
-test('an OpenAI channel saved with the NovelAI presets setting saves its other settings without it', async () => {
+test('an OpenAI channel saved with the NovelAI settings saves its other settings without them', async () => {
   editingChannel = {
     ...editingChannel,
     type: 1,
-    settings: '{"novelai_presets_disabled":true,"future_option":{"level":2}}',
+    settings:
+      '{"novelai_presets_disabled":true,"novelai_queue_limit":3,"future_option":{"level":2}}',
   }
   const put = vi
     .spyOn(api, 'put')
@@ -1702,6 +1708,7 @@ test('an OpenAI channel saved with the NovelAI presets setting saves its other s
   const payload = put.mock.calls[0]?.[1] as { settings: string }
   const settings = JSON.parse(payload.settings)
   expect(settings).not.toHaveProperty('novelai_presets_disabled')
+  expect(settings).not.toHaveProperty('novelai_queue_limit')
   expect(settings).toMatchObject({ future_option: { level: 2 } })
 })
 
@@ -1737,6 +1744,108 @@ test('a NovelAI channel marks saved disabled prompt presets in Request & Respons
     future_option: { level: 2 },
   })
 })
+
+test.each([
+  ['{"novelai_queue_limit":3}', 3, true],
+  ['{}', 10, false],
+  ['{"novelai_queue_limit":5000}', 100, true],
+])(
+  'a NovelAI channel saved with settings %s shows a queue limit per key of %i, marked as configured: %s',
+  async (settings, shown, configured) => {
+    editingChannel = { ...editingChannel, type: CHANNEL_TYPE_NOVELAI, settings }
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+    if (configured) {
+      expect(requestTab).toHaveAccessibleName(/Configured/)
+    } else {
+      expect(requestTab).not.toHaveAccessibleName(/Configured/)
+    }
+    await user.click(requestTab)
+    expect(
+      screen.getByRole('spinbutton', { name: 'Queue limit per key' })
+    ).toHaveValue(shown)
+  }
+)
+
+test('a NovelAI channel queue limit set back to the default of 10 is no longer marked as configured', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: CHANNEL_TYPE_NOVELAI,
+    settings: '{"novelai_queue_limit":3}',
+  }
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const limit = screen.getByRole('spinbutton', { name: 'Queue limit per key' })
+  await user.clear(limit)
+  await user.type(limit, '10')
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+})
+
+test.each([
+  ['0', 0],
+  ['100', 100],
+])(
+  'a NovelAI channel saves a queue limit per key of %s with the other settings intact',
+  async (typed, saved) => {
+    editingChannel = {
+      ...editingChannel,
+      type: CHANNEL_TYPE_NOVELAI,
+      settings: '{"future_option":{"level":2}}',
+    }
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+    const limit = screen.getByRole('spinbutton', {
+      name: 'Queue limit per key',
+    })
+    await user.clear(limit)
+    await user.type(limit, typed)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    const payload = put.mock.calls[0]?.[1] as { settings: string }
+    expect(JSON.parse(payload.settings)).toMatchObject({
+      novelai_queue_limit: saved,
+      future_option: { level: 2 },
+    })
+  }
+)
+
+test.each(['-1', '101', '2.5'])(
+  'a NovelAI channel with a queue limit per key of %s is not saved and shows the allowed range',
+  async (typed) => {
+    editingChannel = { ...editingChannel, type: CHANNEL_TYPE_NOVELAI }
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+    const limit = screen.getByRole('spinbutton', {
+      name: 'Queue limit per key',
+    })
+    await user.clear(limit)
+    await user.type(limit, typed)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    expect(
+      await screen.findByText(
+        'Queue limit per key must be a whole number from 0 to 100'
+      )
+    ).toBeVisible()
+    expect(limit).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  }
+)
 
 test('an Ollama channel marks a saved OpenAI-compatible chat setting in Request & Response and saves the toggled value', async () => {
   editingChannel = {

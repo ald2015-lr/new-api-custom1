@@ -30,6 +30,8 @@ import {
   ERROR_MESSAGES,
   FIELD_PASSTHROUGH_TYPES,
   MODEL_FETCHABLE_TYPES,
+  NOVELAI_QUEUE_LIMIT_DEFAULT,
+  NOVELAI_QUEUE_LIMIT_MAX,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../constants'
 import type { Channel } from '../types'
@@ -293,6 +295,10 @@ export const channelFormSchema = z
     claude_beta_query: z.boolean().optional(), // Anthropic: beta query passthrough
     ollama_openai_chat: z.boolean().optional(), // Ollama: OpenAI-compatible /v1/chat/completions instead of native /api/chat
     novelai_presets_disabled: z.boolean().optional(), // NovelAI: no quality tags or UC preset on OpenAI-format requests by default
+    // NovelAI: requests that may wait for each busy key; null is a cleared
+    // field, saved as the default (react-hook-form shows the default value
+    // again for undefined).
+    novelai_queue_limit: z.number().nullable().optional(),
     disable_task_polling_sleep: z.boolean().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
@@ -424,6 +430,21 @@ export const channelFormSchema = z
         ERROR_MESSAGES.INVALID_HTTP1_WITH_SHARDS
       )
     }
+
+    const queueLimit = data.novelai_queue_limit
+    if (
+      data.type === CHANNEL_TYPE_NOVELAI &&
+      queueLimit != null &&
+      (!Number.isInteger(queueLimit) ||
+        queueLimit < 0 ||
+        queueLimit > NOVELAI_QUEUE_LIMIT_MAX)
+    ) {
+      addRequiredIssue(
+        ctx,
+        'novelai_queue_limit',
+        ERROR_MESSAGES.INVALID_NOVELAI_QUEUE_LIMIT
+      )
+    }
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
@@ -489,6 +510,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   claude_beta_query: false,
   ollama_openai_chat: false,
   novelai_presets_disabled: false,
+  novelai_queue_limit: NOVELAI_QUEUE_LIMIT_DEFAULT,
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
@@ -567,6 +589,7 @@ export function transformChannelToFormDefaults(
   let claudeBetaQuery = false
   let ollamaOpenAIChat = false
   let novelAIPresetsDisabled = false
+  let novelAIQueueLimit = NOVELAI_QUEUE_LIMIT_DEFAULT
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
@@ -593,6 +616,17 @@ export function transformChannelToFormDefaults(
       claudeBetaQuery = parsed.claude_beta_query === true
       ollamaOpenAIChat = parsed.ollama_openai_chat === true
       novelAIPresetsDisabled = parsed.novelai_presets_disabled === true
+      // The limit the server applies: unset or invalid is the default, and
+      // a stored value above the maximum acts as the maximum.
+      if (
+        Number.isInteger(parsed.novelai_queue_limit) &&
+        parsed.novelai_queue_limit >= 0
+      ) {
+        novelAIQueueLimit = Math.min(
+          parsed.novelai_queue_limit,
+          NOVELAI_QUEUE_LIMIT_MAX
+        )
+      }
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
@@ -656,6 +690,7 @@ export function transformChannelToFormDefaults(
     claude_beta_query: claudeBetaQuery,
     ollama_openai_chat: ollamaOpenAIChat,
     novelai_presets_disabled: novelAIPresetsDisabled,
+    novelai_queue_limit: novelAIQueueLimit,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
@@ -821,12 +856,16 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     delete settingsObj.ollama_openai_chat
   }
 
-  // Only the NovelAI adaptor adds the web client's prompt presets.
+  // Only the NovelAI adaptor adds the web client's prompt presets and
+  // queues generations per key.
   if (formData.type === CHANNEL_TYPE_NOVELAI) {
     settingsObj.novelai_presets_disabled =
       formData.novelai_presets_disabled === true
-  } else if ('novelai_presets_disabled' in settingsObj) {
+    settingsObj.novelai_queue_limit =
+      formData.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT
+  } else {
     delete settingsObj.novelai_presets_disabled
+    delete settingsObj.novelai_queue_limit
   }
 
   settingsObj.disable_task_polling_sleep =

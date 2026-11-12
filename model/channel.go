@@ -297,6 +297,24 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	}
 }
 
+// EnabledMultiKeys returns the keys of a multi-key channel and the indexes
+// of the enabled ones, in index order. The status list is read under the
+// channel's polling lock, which UpdateChannelStatus holds while it changes
+// the cached channel's list.
+func (channel *Channel) EnabledMultiKeys() (keys []string, enabled []int) {
+	keys = channel.GetKeys()
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+	for i := range keys {
+		status, ok := channel.ChannelInfo.MultiKeyStatusList[i]
+		if !ok || status == common.ChannelStatusEnabled {
+			enabled = append(enabled, i)
+		}
+	}
+	return keys, enabled
+}
+
 func (channel *Channel) SaveChannelInfo() error {
 	return DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error
 }
@@ -1060,6 +1078,9 @@ func (channel *Channel) ValidateSettings() error {
 		}
 	}
 	if err := channelOtherSettings.ValidateToolLossPolicy(); err != nil {
+		return err
+	}
+	if err := channelOtherSettings.ValidateNovelAIQueueLimit(); err != nil {
 		return err
 	}
 	if preset := common.GetAdvancedCustomPreset(channel.Type); preset != nil {

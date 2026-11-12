@@ -40,6 +40,12 @@ export const CHANNEL_TYPE_SGLANG = 63
 
 export const CHANNEL_TYPE_NOVELAI = 64
 
+// Requests that may wait for each busy key of a NovelAI channel, the
+// generating one aside (settings.novelai_queue_limit; the server applies the
+// same default and bounds).
+export const NOVELAI_QUEUE_LIMIT_DEFAULT = 10
+export const NOVELAI_QUEUE_LIMIT_MAX = 100
+
 export const CHANNEL_TYPES = {
   0: 'Unknown',
   1: 'OpenAI',
@@ -372,6 +378,8 @@ export const ERROR_MESSAGES = {
     'HTTP/2 connection shards must be between 1 and 8',
   INVALID_HTTP1_WITH_SHARDS:
     'HTTP/2 connection shards must be 1 when HTTP/1.1 is selected',
+  INVALID_NOVELAI_QUEUE_LIMIT:
+    'Queue limit per key must be a whole number from 0 to 100',
   CREATE_FAILED: 'Failed to create channel',
   UPDATE_FAILED: 'Failed to update channel',
   DELETE_FAILED: 'Failed to delete channel',

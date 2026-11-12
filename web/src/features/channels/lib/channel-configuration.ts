@@ -23,6 +23,7 @@ import {
   CHANNEL_TYPE_OLLAMA,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   MODEL_FETCHABLE_TYPES,
+  NOVELAI_QUEUE_LIMIT_DEFAULT,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../constants'
 import { CHANNEL_TYPE_ADVANCED_CUSTOM } from './advanced-custom'
@@ -64,6 +65,7 @@ const CONFIGURATION_BLOCKS = {
       'responses_websocket_enabled',
       'ollama_openai_chat',
       'novelai_presets_disabled',
+      'novelai_queue_limit',
       'system_prompt',
       'system_prompt_override',
     ],
@@ -161,7 +163,9 @@ export function getChannelConfigurationState(
         values.responses_websocket_enabled) ||
       (values.type === CHANNEL_TYPE_OLLAMA && values.ollama_openai_chat) ||
       (values.type === CHANNEL_TYPE_NOVELAI &&
-        values.novelai_presets_disabled) ||
+        (values.novelai_presets_disabled ||
+          (values.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT) !==
+            NOVELAI_QUEUE_LIMIT_DEFAULT)) ||
       values.system_prompt?.trim() ||
       values.system_prompt_override
     ),

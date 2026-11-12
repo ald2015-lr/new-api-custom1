@@ -145,6 +145,40 @@ type ChannelOtherSettings struct {
 	// requests on a NovelAI channel; a request can still ask for them with
 	// qualityToggle, qualityPresetId or ucPresetId.
 	NovelAIPresetsDisabled bool `json:"novelai_presets_disabled,omitempty"`
+	// NovelAIQueueLimit is how many requests may wait for each busy key of a
+	// NovelAI channel on NovelAI's host, the generating one aside; nil means
+	// NovelAIQueueLimitDefault, 0 no waiting.
+	NovelAIQueueLimit *int `json:"novelai_queue_limit,omitempty"`
+}
+
+const (
+	// NovelAIQueueLimitDefault is the queue limit per key of a NovelAI
+	// channel that sets none.
+	NovelAIQueueLimitDefault = 10
+	// NovelAIQueueLimitMax bounds the queue limit per key: a waiter further
+	// back than this would wait longer than a generation's longest wait.
+	NovelAIQueueLimitMax = 100
+)
+
+// EffectiveNovelAIQueueLimit is the queue limit per key a NovelAI channel
+// uses: the default when unset or negative, at most NovelAIQueueLimitMax.
+func (s *ChannelOtherSettings) EffectiveNovelAIQueueLimit() int {
+	if s == nil || s.NovelAIQueueLimit == nil || *s.NovelAIQueueLimit < 0 {
+		return NovelAIQueueLimitDefault
+	}
+	return min(*s.NovelAIQueueLimit, NovelAIQueueLimitMax)
+}
+
+// ValidateNovelAIQueueLimit rejects a queue limit per key outside 0 to
+// NovelAIQueueLimitMax; unset keeps the default.
+func (s *ChannelOtherSettings) ValidateNovelAIQueueLimit() error {
+	if s == nil || s.NovelAIQueueLimit == nil {
+		return nil
+	}
+	if limit := *s.NovelAIQueueLimit; limit < 0 || limit > NovelAIQueueLimitMax {
+		return fmt.Errorf("novelai_queue_limit must be between 0 and %d", NovelAIQueueLimitMax)
+	}
+	return nil
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {

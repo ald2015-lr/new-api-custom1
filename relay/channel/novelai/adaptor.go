@@ -39,7 +39,8 @@ const generateImagePath = "/ai/generate-image"
 // shape, billed per image received.
 //
 // Every other route fails with a 400. On NovelAI's own host the generations
-// of one key run one at a time (holdGeneration).
+// of one key run one at a time, and the others wait in line for a key of the
+// channel (holdGeneration).
 type Adaptor struct {
 	// generation describes the converted request, set by
 	// ConvertImageRequest or ConvertOpenAIRequest; output is how an images
@@ -105,9 +106,10 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *
 	return nil
 }
 
-// DoRequest sends the request once the key's generation slot is free on
-// NovelAI's own host. A send that failed after it may have reached NovelAI
-// is final: NovelAI may have spent Anlas on it.
+// DoRequest sends the request once its turn for a key of the channel came on
+// NovelAI's own host (holdGeneration), and records NovelAI's answer for that
+// key (noteGenerationAnswer). A send that failed after it may have reached
+// NovelAI is final: NovelAI may have spent Anlas on it.
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
 	// Checked here as well as by the request conversions, which a pass-through
 	// body skips.
@@ -132,8 +134,9 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		return nil, err
 	}
 	if isNovelAIImageHost(info.ChannelBaseUrl) {
-		// The key's slot is free once NovelAI's answer arrived, whatever
-		// the client still has to receive.
+		noteGenerationAnswer(c, info, resp.StatusCode)
+		// The key is free for the next in line once NovelAI's answer
+		// arrived, whatever the client still has to receive.
 		resp.Body = newGenerationBody(resp.Body, release)
 	}
 	if !isConvertedMode(info.RelayMode) {
@@ -147,7 +150,7 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		// The image and chat relays read an error answer whole, and leave it
 		// open when the read fails: it is read here, bounded as on the
-		// native routes, and closed, which frees the slot for a retry.
+		// native routes, and closed, which frees the key for a retry.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyLimit))
 		service.CloseResponseBodyGracefully(resp)
 		resp.Body = io.NopCloser(bytes.NewReader(body))

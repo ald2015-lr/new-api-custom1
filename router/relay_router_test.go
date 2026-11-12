@@ -11,6 +11,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"maps"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/bytedance/gopkg/util/gopool"
@@ -1614,6 +1616,385 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Contains(t, recorder.Body.String(), i18n.Translate("", i18n.MsgNovelAINoImage))
 		assert.Equal(t, calls+1, upstream.calls())
 		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+	})
+}
+
+// novelAIQueueUpstream is NovelAI's image host for the queue test, reached
+// through a channel's proxy: it records the key of every generation, holds
+// the requests of a closed key until the test opens it, and answers a key's
+// queued statuses before its default answer, a zip of one PNG.
+type novelAIQueueUpstream struct {
+	mu      sync.Mutex
+	seen    map[string]int
+	held    map[string]int
+	gates   map[string]chan struct{}
+	answers map[string][]int
+	zip     []byte
+}
+
+func (u *novelAIQueueUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.ReadAll(r.Body)
+	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	u.mu.Lock()
+	u.seen[key]++
+	status := http.StatusOK
+	if queued := u.answers[key]; len(queued) > 0 {
+		status, u.answers[key] = queued[0], queued[1:]
+	}
+	gate := u.gates[key]
+	if gate != nil {
+		u.held[key]++
+	}
+	u.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+		}
+		u.mu.Lock()
+		u.held[key]--
+		u.mu.Unlock()
+	}
+	if status != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"statusCode":%d,"message":"refused"}`, status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	_, _ = w.Write(u.zip)
+}
+
+// close holds the next requests of keys until open.
+func (u *novelAIQueueUpstream) close(keys ...string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, key := range keys {
+		if u.gates[key] == nil {
+			u.gates[key] = make(chan struct{})
+		}
+	}
+}
+
+// open answers the held requests of keys, and their next ones at once.
+func (u *novelAIQueueUpstream) open(keys ...string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, key := range keys {
+		if gate := u.gates[key]; gate != nil {
+			close(gate)
+			delete(u.gates, key)
+		}
+	}
+}
+
+func (u *novelAIQueueUpstream) answer(key string, statuses ...int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.answers[key] = append(u.answers[key], statuses...)
+}
+
+// requests is how many generations reached NovelAI with key.
+func (u *novelAIQueueUpstream) requests(key string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.seen[key]
+}
+
+// holding is how many generations with key NovelAI holds right now.
+func (u *novelAIQueueUpstream) holding(key string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.held[key]
+}
+
+// A NovelAI channel on NovelAI's host generates one request at a time per
+// key and queues the others, up to the channel's queue limit per key, on the
+// least loaded enabled key of a multi-key channel. A request past every
+// key's limit fails at once with a 429 that disables neither the channel nor
+// a key, charges nothing, and goes to the next channel when retries are on.
+// The key the queue chose is the attempt's key: NovelAI gets it, and an
+// automatic disable and the error log name it. A retry after NovelAI's error
+// answer does not wait behind its own attempt. The queue works alike with
+// the channels read from the database and from the memory cache.
+func TestNovelAIChannelQueuesGenerationsPerKey(t *testing.T) {
+	for _, run := range []struct {
+		name        string
+		memoryCache bool
+	}{{"database", false}, {"memory cache", true}} {
+		t.Run(run.name, func(t *testing.T) {
+			testNovelAIQueue(t, strings.ReplaceAll(run.name, " ", "-"), run.memoryCache)
+		})
+	}
+}
+
+func testNovelAIQueue(t *testing.T, tag string, memoryCache bool) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate, cacheEnabled := common.LogConsumeEnabled, common.BatchUpdateEnabled, common.MemoryCacheEnabled
+	autoDisable, errorLog, retryTimes := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
+	disableCodes := operation_setting.AutomaticDisableStatusCodesToString()
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.BatchUpdateEnabled, common.MemoryCacheEnabled = logConsume, batchUpdate, cacheEnabled
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = autoDisable, errorLog, retryTimes
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(disableCodes))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled = true, true
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401,429"))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"nai-diffusion-4-5-full":0.02,"nai-queue-retry":0.02,"nai-queue-c":0.02,"nai-queue-self":0.02,"nai-diffusion-3":0.02}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+
+	upstream := &novelAIQueueUpstream{seen: map[string]int{}, held: map[string]int{}, gates: map[string]chan struct{}{}, answers: map[string][]int{},
+		zip: novelAIZip(t, novelAIPNG(t, 64, 64, color.RGBA{R: 200, A: 255}))}
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	// Refunds, quota updates and automatic disables finish on gopool
+	// workers, and a failed test may leave a generation held: both end
+	// before the fixture goes.
+	var keys []string
+	t.Cleanup(func() {
+		upstream.open(keys...)
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+	})
+	q0, q1, b, r0, r1, d := "pst-q0-"+tag, "pst-q1-"+tag, "pst-b-"+tag, "pst-r0-"+tag, "pst-r1-"+tag, "pst-d-"+tag
+	keys = []string{q0, q1, b, r0, r1, d}
+
+	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-queue", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaiqueuekey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	// Every channel is on NovelAI's host, which the proxy plays.
+	host, proxy := "http://image.novelai.net", `{"proxy":"`+server.URL+`"}`
+	create := func(channel model.Channel, priority int64) model.Channel {
+		channel.Type, channel.Status, channel.Group = constant.ChannelTypeNovelAI, common.ChannelStatusEnabled, "default"
+		channel.BaseURL, channel.Setting, channel.Priority, channel.AutoBan = &host, &proxy, &priority, common.GetPointer(1)
+		require.NoError(t, model.DB.Create(&channel).Error)
+		for _, name := range channel.GetModels() {
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true, Priority: &priority}).Error)
+		}
+		return channel
+	}
+	multiKey := model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+	channelA := create(model.Channel{Name: "novelai-queue-a", Key: q0 + "\n" + q1, Models: "nai-diffusion-4-5-full,nai-queue-retry", OtherSettings: `{"novelai_queue_limit":1}`, ChannelInfo: multiKey}, 10)
+	create(model.Channel{Name: "novelai-queue-b", Key: b, Models: "nai-queue-retry"}, 0)
+	withDisabledKey := multiKey
+	withDisabledKey.MultiKeyStatusList = map[int]int{1: common.ChannelStatusManuallyDisabled}
+	create(model.Channel{Name: "novelai-queue-c", Key: r0 + "\n" + r1, Models: "nai-queue-c", OtherSettings: `{"novelai_queue_limit":1}`, ChannelInfo: withDisabledKey}, 0)
+	create(model.Channel{Name: "novelai-queue-d", Key: d, Models: "nai-queue-self,nai-diffusion-3"}, 0)
+	if memoryCache {
+		common.MemoryCacheEnabled = true
+		model.InitChannelCache()
+	}
+
+	// pointPollingAt makes channelID's next polling pick its key index.
+	pointPollingAt := func(channelID, index int) {
+		lock := model.GetChannelPollingLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+		if memoryCache {
+			channel, err := model.CacheGetChannel(channelID)
+			require.NoError(t, err)
+			channel.ChannelInfo.MultiKeyPollingIndex = index
+			return
+		}
+		channel, err := model.GetChannelById(channelID, true)
+		require.NoError(t, err)
+		channel.ChannelInfo.MultiKeyPollingIndex = index
+		require.NoError(t, channel.SaveChannelInfo())
+	}
+	// keyStatus is channelID's status and its keys' status list.
+	keyStatus := func(channelID int) (int, map[int]int) {
+		if !memoryCache {
+			channel, err := model.GetChannelById(channelID, true)
+			require.NoError(t, err)
+			return channel.Status, channel.ChannelInfo.MultiKeyStatusList
+		}
+		channel, err := model.CacheGetChannel(channelID)
+		require.NoError(t, err)
+		lock := model.GetChannelPollingLock(channelID)
+		lock.Lock()
+		defer lock.Unlock()
+		return channel.Status, maps.Clone(channel.ChannelInfo.MultiKeyStatusList)
+	}
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	// /v1/images/generations is a host protocol route.
+	SetTaskPluginProtocolRouter(engine)
+	send := func(path, body string, responses chan<- *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer novelaiqueuekey")
+		engine.ServeHTTP(recorder, request)
+		responses <- recorder
+	}
+	native := func(modelName string) string {
+		return `{"input":"a cat","model":"` + modelName + `","action":"generate","parameters":{"n_samples":1}}`
+	}
+	// awaitResponse is the next response, failing the test after 5 s.
+	awaitResponse := func(responses <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+		t.Helper()
+		select {
+		case recorder := <-responses:
+			return recorder
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "no response")
+			return nil
+		}
+	}
+	walletQuota := func() int {
+		quota, err := model.GetUserQuota(user.Id, true)
+		require.NoError(t, err)
+		return quota
+	}
+	setRetryTimes := func(t *testing.T, times int) {
+		common.RetryTimes = times
+		t.Cleanup(func() { common.RetryTimes = retryTimes })
+	}
+
+	t.Run("a full queue answers 429 and disables nothing", func(t *testing.T) {
+		setRetryTimes(t, 0)
+		upstream.close(q0, q1)
+		before := walletQuota()
+		responses := make(chan *httptest.ResponseRecorder, 5)
+		for range 5 {
+			go send("/ai/generate-image", native("nai-diffusion-4-5-full"), responses)
+		}
+
+		rejected := awaitResponse(responses)
+		require.Equal(t, http.StatusTooManyRequests, rejected.Code, rejected.Body.String())
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(rejected.Body.Bytes(), &payload))
+		assert.Equal(t, float64(http.StatusTooManyRequests), payload["statusCode"])
+		assert.Contains(t, payload["message"], i18n.Translate("", i18n.MsgNovelAIQueueFull))
+		require.Eventually(t, func() bool { return upstream.holding(q0) == 1 && upstream.holding(q1) == 1 }, 5*time.Second, 5*time.Millisecond, "each key generates one request")
+		images := make(chan *httptest.ResponseRecorder, 1)
+		send("/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"a cat","n":1,"size":"1024x1024"}`, images)
+		openAI := <-images
+		require.Equal(t, http.StatusTooManyRequests, openAI.Code, openAI.Body.String())
+		var openAIPayload map[string]map[string]any
+		require.NoError(t, common.Unmarshal(openAI.Body.Bytes(), &openAIPayload))
+		assert.Equal(t, "novelai_key_busy", openAIPayload["error"]["code"])
+
+		upstream.open(q0, q1)
+		for range 4 {
+			recorder := awaitResponse(responses)
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		assert.Equal(t, 2, upstream.requests(q0))
+		assert.Equal(t, 2, upstream.requests(q1))
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		status, keys := keyStatus(channelA.Id)
+		assert.Equal(t, common.ChannelStatusEnabled, status, "the queue's 429 is not the channel's")
+		assert.Empty(t, keys)
+		assert.Eventually(t, func() bool { return walletQuota() == before-4*10_000 }, 5*time.Second, 10*time.Millisecond, "four images at $0.02, the rejected requests refunded")
+	})
+
+	t.Run("a request past the limit goes to the next channel", func(t *testing.T) {
+		setRetryTimes(t, 1)
+		upstream.close(q0, q1)
+		responses := make(chan *httptest.ResponseRecorder, 5)
+		for range 5 {
+			go send("/ai/generate-image", native("nai-queue-retry"), responses)
+		}
+
+		retried := awaitResponse(responses)
+		require.Equal(t, http.StatusOK, retried.Code, retried.Body.String())
+		assert.Equal(t, 1, upstream.requests(b), "the one request that found the channel full")
+		upstream.open(q0, q1)
+		for range 4 {
+			recorder := awaitResponse(responses)
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		assert.Equal(t, 1, upstream.requests(b))
+		assert.Equal(t, 4, upstream.requests(q0))
+		assert.Equal(t, 4, upstream.requests(q1))
+	})
+
+	t.Run("the key the queue chose is the attempt's key", func(t *testing.T) {
+		setRetryTimes(t, 0)
+		upstream.close(q0)
+		pointPollingAt(channelA.Id, 0)
+		held := make(chan *httptest.ResponseRecorder, 1)
+		go send("/ai/generate-image", native("nai-diffusion-4-5-full"), held)
+		require.Eventually(t, func() bool { return upstream.holding(q0) == 1 }, 5*time.Second, 5*time.Millisecond)
+
+		// The distributor picks the busy q0 again; the queue sends to q1.
+		pointPollingAt(channelA.Id, 0)
+		upstream.answer(q1, http.StatusUnauthorized)
+		sentToQ1 := upstream.requests(q1)
+		refused := make(chan *httptest.ResponseRecorder, 1)
+		go send("/ai/generate-image", native("nai-diffusion-4-5-full"), refused)
+		recorder := awaitResponse(refused)
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code, recorder.Body.String())
+		assert.Equal(t, sentToQ1+1, upstream.requests(q1))
+		assert.Eventually(t, func() bool {
+			status, keys := keyStatus(channelA.Id)
+			_, q0Disabled := keys[0]
+			return status == common.ChannelStatusEnabled && keys[1] == common.ChannelStatusAutoDisabled && !q0Disabled
+		}, 5*time.Second, 10*time.Millisecond, "q1 is disabled, q0 and the channel stay enabled")
+		var errorLog model.Log
+		require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", user.Id, model.LogTypeError).Order("id desc").First(&errorLog).Error)
+		var other map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(errorLog.Other, &other))
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok, errorLog.Other)
+		assert.Equal(t, float64(1), adminInfo["multi_key_index"])
+
+		upstream.open(q0)
+		recorder = awaitResponse(held)
+		assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	})
+
+	t.Run("a disabled key gets no requests", func(t *testing.T) {
+		setRetryTimes(t, 0)
+		upstream.close(r0)
+		held := make(chan *httptest.ResponseRecorder, 1)
+		go send("/ai/generate-image", native("nai-queue-c"), held)
+		require.Eventually(t, func() bool { return upstream.holding(r0) == 1 }, 5*time.Second, 5*time.Millisecond)
+
+		// One of two more requests waits for r0, the other finds its line
+		// full: r1 is not a candidate.
+		responses := make(chan *httptest.ResponseRecorder, 2)
+		go send("/ai/generate-image", native("nai-queue-c"), responses)
+		go send("/ai/generate-image", native("nai-queue-c"), responses)
+		rejected := awaitResponse(responses)
+		assert.Equal(t, http.StatusTooManyRequests, rejected.Code, rejected.Body.String())
+		assert.Equal(t, 1, upstream.requests(r0), "the waiting request has not reached NovelAI")
+
+		upstream.open(r0)
+		for _, recorder := range []*httptest.ResponseRecorder{awaitResponse(held), awaitResponse(responses)} {
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		assert.Equal(t, 2, upstream.requests(r0))
+		assert.Zero(t, upstream.requests(r1))
+	})
+
+	// The generation wait is not shortened: an attempt that kept its key
+	// would keep the retry waiting past the test's 5 s.
+	t.Run("a retry does not wait behind its own attempt", func(t *testing.T) {
+		setRetryTimes(t, 1)
+		for i, request := range []struct{ path, body string }{
+			{"/ai/generate-image", native("nai-queue-self")},
+			{"/v1/images/generations", `{"model":"nai-diffusion-3","prompt":"a cat","n":1,"size":"1024x1024"}`},
+		} {
+			upstream.answer(d, http.StatusInternalServerError)
+			responses := make(chan *httptest.ResponseRecorder, 1)
+			go send(request.path, request.body, responses)
+			recorder := awaitResponse(responses)
+			assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			assert.Equal(t, 2*(i+1), upstream.requests(d), "the failed attempt and its retry")
+		}
 	})
 }
 

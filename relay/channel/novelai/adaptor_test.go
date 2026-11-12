@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1226,85 +1228,573 @@ func TestParseAndRenderImages(t *testing.T) {
 	assert.Equal(t, formatPNG, SniffImageFormat(rendered))
 }
 
-// On NovelAI's own host one key generates one request at a time: the next
-// waits for the slot (released when the response body closes, or when the
-// client's request ends), fails with a retryable 429 after the bounded wait,
-// and stops waiting with its client. Other hosts are not serialized.
-func TestGenerationSlotSerializesNovelAIKeys(t *testing.T) {
+// resetGenerationQueue restores the generation queue's globals after a test
+// that uses them, which must have released every key it took.
+func resetGenerationQueue(t *testing.T) {
+	t.Helper()
 	require.NoError(t, i18n.Init())
-	savedWait := generationWait
-	generationWait = 50 * time.Millisecond
-	t.Cleanup(func() { generationWait = savedWait })
-	request := func(ctx context.Context) *gin.Context {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/generations", nil)
-		return c
+	savedMaxWait, savedCooldown := generationMaxWait, generationCooldown
+	t.Cleanup(func() {
+		generationLinesMu.Lock()
+		assert.Empty(t, generationLines, "every key the test took was released")
+		generationRefused = map[[sha256.Size]byte]time.Time{}
+		generationStopped = false
+		generationLinesMu.Unlock()
+		generationMaxWait, generationCooldown = savedMaxWait, savedCooldown
+	})
+}
+
+// queuedRequest is a client request that lasts as long as ctx.
+func queuedRequest(ctx context.Context) *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/images/generations", nil)
+	return c
+}
+
+// officialKey is a request for key on a single-key NovelAI channel on
+// NovelAI's host with the given queue limit per key (nil: the default).
+func officialKey(key string, limit *int) *relaycommon.RelayInfo {
+	return &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+		ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: key,
+		ChannelOtherSettings: dto.ChannelOtherSettings{NovelAIQueueLimit: limit},
+	}}
+}
+
+// waitingFor is how many requests wait for key, or -1 while it is free.
+func waitingFor(key string) int {
+	generationLinesMu.Lock()
+	defer generationLinesMu.Unlock()
+	line, held := generationLines[sha256.Sum256([]byte(key))]
+	if !held {
+		return -1
 	}
-	official := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-slot-test"}}
+	return line.waiting.Len()
+}
 
-	release, apiErr := holdGeneration(request(context.Background()), official)
+// keyIsFree takes key and gives it back at once when nobody holds it, and
+// tells whether it could; it never waits.
+func keyIsFree(key string) bool {
+	ticket, err := enterGenerationLine([]generationKey{{key: key}}, 0, "", 0)
+	if err != nil {
+		return false
+	}
+	releaseGenerationKey(ticket.id)
+	return true
+}
+
+// grantedKey is what a waiter got when its wait ended.
+type grantedKey struct {
+	position int
+	release  func()
+	err      error
+}
+
+// awaitGrant is the next waiter's grant, failing the test after 5 s.
+func awaitGrant(t *testing.T, grants <-chan grantedKey) grantedKey {
+	t.Helper()
+	select {
+	case grant := <-grants:
+		return grant
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "no waiter got the key")
+		return grantedKey{}
+	}
+}
+
+// rejectedAtOnce is the error of a hold that must fail without waiting,
+// failing the test after 5 s.
+func rejectedAtOnce(t *testing.T, info *relaycommon.RelayInfo) *types.NewAPIError {
+	t.Helper()
+	rejected := make(chan *types.NewAPIError, 1)
+	go func() {
+		release, apiErr := holdGeneration(queuedRequest(context.Background()), info)
+		if apiErr == nil {
+			release()
+		}
+		rejected <- apiErr
+	}()
+	select {
+	case apiErr := <-rejected:
+		require.NotNil(t, apiErr, "the hold took the key")
+		return apiErr
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "a request past the limit waited")
+		return nil
+	}
+}
+
+// On NovelAI's own host one key generates one request at a time, and the
+// requests that find it busy get it in the order they came: a release hands
+// the key to the head of its line, so a newcomer never takes it first. A
+// client that leaves stops waiting; a closed response body and the end of the
+// client's request release the key. Other keys have their own line, and
+// other hosts are not queued.
+func TestGenerationQueueServesAKeyInArrivalOrder(t *testing.T) {
+	resetGenerationQueue(t)
+	key := []generationKey{{key: "pst-fifo"}}
+	holder, err := enterGenerationLine(key, 0, "", 10)
+	require.NoError(t, err)
+	assert.Zero(t, holder.position, "the key was free")
+	release, err := holder.wait(context.Background())
+	require.NoError(t, err)
+
+	grants := make(chan grantedKey)
+	for want := 1; want <= 3; want++ {
+		ticket, err := enterGenerationLine(key, 0, "", 10)
+		require.NoError(t, err)
+		require.Equal(t, want, ticket.position)
+		go func() {
+			release, err := ticket.wait(context.Background())
+			grants <- grantedKey{ticket.position, release, err}
+		}()
+	}
+	other, err := enterGenerationLine([]generationKey{{key: "pst-fifo-other"}}, 0, "", 10)
+	require.NoError(t, err)
+	assert.Nil(t, other.waiter, "another key has its own line")
+	releaseGenerationKey(other.id)
+
+	for want := 1; want <= 3; want++ {
+		release()
+		_, err := enterGenerationLine(key, 0, "", 0)
+		assert.ErrorIs(t, err, errGenerationQueueFull, "the key went to the head of its line, not to whoever comes next")
+		grant := awaitGrant(t, grants)
+		require.NoError(t, grant.err)
+		assert.Equal(t, want, grant.position, "first come, first served")
+		release = grant.release
+	}
+	release()
+	assert.Equal(t, -1, waitingFor("pst-fifo"), "a key nobody waits for is free")
+
+	official := officialKey("pst-fifo", common.GetPointer(0))
+	release, apiErr := holdGeneration(queuedRequest(context.Background()), official)
 	require.Nil(t, apiErr)
-	_, apiErr = holdGeneration(request(context.Background()), official)
-	require.NotNil(t, apiErr, "the key is busy")
-	assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
-	assert.False(t, types.IsSkipRetryError(apiErr), "another channel may take it")
-	assert.Equal(t, i18n.Translate("", i18n.MsgNovelAIAccountBusy), apiErr.Error())
-
-	other := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-other-key"}}
-	releaseOther, apiErr := holdGeneration(request(context.Background()), other)
-	require.Nil(t, apiErr, "another key has its own slot")
-	releaseOther()
-	forwarder := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://10.0.0.2:3585", ApiKey: "pst-slot-test"}}
-	releaseForwarder, apiErr := holdGeneration(request(context.Background()), forwarder)
+	forwarder := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://10.0.0.2:3585", ApiKey: "pst-fifo"}}
+	releaseForwarder, apiErr := holdGeneration(queuedRequest(context.Background()), forwarder)
 	require.Nil(t, apiErr, "a forwarder queues for itself")
 	releaseForwarder()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	waiting := make(chan *types.NewAPIError)
+	left := make(chan *types.NewAPIError)
 	go func() {
-		_, apiErr := holdGeneration(request(ctx), official)
-		waiting <- apiErr
+		_, apiErr := holdGeneration(queuedRequest(ctx), officialKey("pst-fifo", nil))
+		left <- apiErr
 	}()
+	assert.Eventually(t, func() bool { return waitingFor("pst-fifo") == 1 }, 5*time.Second, time.Millisecond)
 	cancel()
-	apiErr = <-waiting
+	apiErr = <-left
 	require.NotNil(t, apiErr, "a client that left stops waiting")
+	assert.Equal(t, context.Canceled.Error(), apiErr.Error())
+	assert.Equal(t, 0, waitingFor("pst-fifo"), "and leaves the line")
 
-	// A response body closing releases the slot for the next request, also
+	// A response body closing releases the key for the next request, also
 	// while NovelAI is still answering.
 	answering, _ := io.Pipe()
 	body := newGenerationBody(answering, release)
 	require.NoError(t, body.Close())
 	require.NoError(t, body.Close())
-	next, apiErr := holdGeneration(request(context.Background()), official)
+	next, apiErr := holdGeneration(queuedRequest(context.Background()), official)
 	require.Nil(t, apiErr)
 
-	// The end of the client's request releases a slot nothing closed.
+	// The end of the client's request releases a key nothing closed.
 	ended, end := context.WithCancel(context.Background())
 	next()
-	_, apiErr = holdGeneration(request(ended), official)
+	_, apiErr = holdGeneration(queuedRequest(ended), official)
 	require.Nil(t, apiErr)
 	end()
-	assert.Eventually(t, func() bool {
-		release, apiErr := holdGeneration(request(context.Background()), official)
-		if apiErr != nil {
-			return false
-		}
-		release()
-		return true
-	}, time.Second, 10*time.Millisecond)
+	assert.Eventually(t, func() bool { return keyIsFree("pst-fifo") }, 5*time.Second, time.Millisecond)
 }
 
-// A NovelAI channel on NovelAI's image host holds its key's generation slot
-// from the send until NovelAI's answer ended or the response body closes, on
-// the native routes as on the converted ones: a second generation meanwhile
-// gets the retryable 429. The fake proxy plays NovelAI's host, which the
-// test cannot reach; it answers the first generation until finish closes.
+// The channel's queue limit per key is how many requests may wait for a busy
+// key, the generating one aside: unset or negative is 10, 0 is no waiting,
+// and a stored value above 100 acts as 100. One more fails at once, without
+// waiting for anyone, with a 429 another channel may take. The limit of the
+// request's channel applies to it, so an edited limit applies to new
+// arrivals and leaves the requests already waiting in their place.
+func TestGenerationQueueLimit(t *testing.T) {
+	resetGenerationQueue(t)
+	for _, tc := range []struct {
+		name    string
+		limit   *int
+		waiting int
+	}{
+		{"unset", nil, 10},
+		{"negative", common.GetPointer(-1), 10},
+		{"no waiting", common.GetPointer(0), 0},
+		{"three", common.GetPointer(3), 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := "pst-limit-" + tc.name
+			info := officialKey(key, tc.limit)
+			release, apiErr := holdGeneration(queuedRequest(context.Background()), info)
+			require.Nil(t, apiErr, "a free key is taken whatever the limit")
+			var waiters sync.WaitGroup
+			cancels := make([]context.CancelFunc, 0, tc.waiting)
+			for n := 1; n <= tc.waiting; n++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancels = append(cancels, cancel)
+				waiters.Go(func() {
+					_, apiErr := holdGeneration(queuedRequest(ctx), officialKey(key, tc.limit))
+					if assert.NotNil(t, apiErr) {
+						assert.Equal(t, context.Canceled.Error(), apiErr.Error())
+					}
+				})
+				require.Eventually(t, func() bool { return waitingFor(key) == n }, 5*time.Second, time.Millisecond)
+			}
+
+			apiErr = rejectedAtOnce(t, officialKey(key, tc.limit))
+			assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
+			assert.Equal(t, types.ErrorCodeNovelAIKeyBusy, apiErr.GetErrorCode())
+			assert.False(t, types.IsSkipRetryError(apiErr), "another channel may take it")
+			assert.Equal(t, i18n.Translate("", i18n.MsgNovelAIQueueFull), apiErr.Error())
+			assert.Equal(t, tc.waiting, waitingFor(key))
+
+			for _, cancel := range cancels {
+				cancel()
+			}
+			waiters.Wait()
+			release()
+		})
+	}
+	assert.Equal(t, 100, (&dto.ChannelOtherSettings{NovelAIQueueLimit: common.GetPointer(5000)}).EffectiveNovelAIQueueLimit())
+
+	t.Run("an edited limit applies to new arrivals", func(t *testing.T) {
+		const key = "pst-limit-edited"
+		release, apiErr := holdGeneration(queuedRequest(context.Background()), officialKey(key, common.GetPointer(5)))
+		require.Nil(t, apiErr)
+		grants := make(chan grantedKey)
+		for n := 1; n <= 3; n++ {
+			go func() {
+				release, apiErr := holdGeneration(queuedRequest(context.Background()), officialKey(key, common.GetPointer(5)))
+				grant := grantedKey{position: n, release: release}
+				if apiErr != nil {
+					grant.err = apiErr
+				}
+				grants <- grant
+			}()
+			require.Eventually(t, func() bool { return waitingFor(key) == n }, 5*time.Second, time.Millisecond)
+		}
+		apiErr = rejectedAtOnce(t, officialKey(key, common.GetPointer(2)))
+		assert.Equal(t, types.ErrorCodeNovelAIKeyBusy, apiErr.GetErrorCode(), "three wait, more than the new limit")
+		for n := 1; n <= 3; n++ {
+			release()
+			grant := awaitGrant(t, grants)
+			require.NoError(t, grant.err)
+			assert.Equal(t, n, grant.position, "the waiters keep their place")
+			release = grant.release
+		}
+		release()
+	})
+}
+
+// A request that stops waiting leaves its line: it gets its client's error,
+// and the key goes to the next in line. A turn that comes as the client
+// leaves passes the key on, so a turn is never lost and the key is never
+// held twice. A wait ends after generationMaxWait with a retryable 429. At
+// shutdown every waiting request, and every later one, gets a 503 that is
+// final and never reaches NovelAI, while the request generating finishes.
+func TestGenerationQueueCancellation(t *testing.T) {
+	resetGenerationQueue(t)
+
+	t.Run("a waiter that leaves", func(t *testing.T) {
+		const key = "pst-cancel-leave"
+		release, apiErr := holdGeneration(queuedRequest(context.Background()), officialKey(key, nil))
+		require.Nil(t, apiErr)
+		grants := make(chan grantedKey)
+		leave, cancel := context.WithCancel(context.Background())
+		for n := 1; n <= 3; n++ {
+			ctx := context.Background()
+			if n == 2 {
+				ctx = leave
+			}
+			go func() {
+				release, apiErr := holdGeneration(queuedRequest(ctx), officialKey(key, nil))
+				grant := grantedKey{position: n, release: release}
+				if apiErr != nil {
+					grant.err = apiErr
+				}
+				grants <- grant
+			}()
+			require.Eventually(t, func() bool { return waitingFor(key) == n }, 5*time.Second, time.Millisecond)
+		}
+		cancel()
+		left := awaitGrant(t, grants)
+		assert.Equal(t, 2, left.position)
+		assert.EqualError(t, left.err, context.Canceled.Error())
+		assert.Equal(t, 2, waitingFor(key), "it left the line")
+		for _, want := range []int{1, 3} {
+			release()
+			grant := awaitGrant(t, grants)
+			require.NoError(t, grant.err)
+			assert.Equal(t, want, grant.position)
+			release = grant.release
+		}
+		release()
+		assert.Equal(t, -1, waitingFor(key))
+	})
+
+	// The turn and the cancellation are both there before the waiter looks,
+	// so its select takes either: over 20 rounds it takes the cancellation
+	// in some, and must then pass the key on.
+	t.Run("a turn that comes as the client leaves", func(t *testing.T) {
+		key := []generationKey{{key: "pst-cancel-race"}}
+		left := 0
+		for range 20 {
+			holder, err := enterGenerationLine(key, 0, "", 10)
+			require.NoError(t, err)
+			release, err := holder.wait(context.Background())
+			require.NoError(t, err)
+			waiter, err := enterGenerationLine(key, 0, "", 10)
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(context.Background())
+			release()
+			cancel()
+			granted, err := waiter.wait(ctx)
+			if err != nil {
+				assert.ErrorIs(t, err, context.Canceled)
+				left++
+			} else {
+				granted()
+			}
+			require.True(t, keyIsFree("pst-cancel-race"), "the key is free once both are done")
+		}
+		assert.Positive(t, left, "the cancellation won some rounds")
+	})
+
+	t.Run("a wait past generationMaxWait", func(t *testing.T) {
+		generationMaxWait = 20 * time.Millisecond
+		t.Cleanup(func() { generationMaxWait = 30 * time.Minute })
+		const key = "pst-cancel-timeout"
+		release, apiErr := holdGeneration(queuedRequest(context.Background()), officialKey(key, nil))
+		require.Nil(t, apiErr)
+		_, apiErr = holdGeneration(queuedRequest(context.Background()), officialKey(key, nil))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
+		assert.Equal(t, types.ErrorCodeNovelAIKeyBusy, apiErr.GetErrorCode())
+		assert.False(t, types.IsSkipRetryError(apiErr))
+		assert.Equal(t, i18n.Translate("", i18n.MsgNovelAIQueueTimeout, map[string]any{"Minutes": 0}), apiErr.Error())
+		assert.Equal(t, 0, waitingFor(key), "it left the line")
+		release()
+		assert.Equal(t, -1, waitingFor(key))
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		t.Cleanup(func() {
+			generationLinesMu.Lock()
+			generationStopped = false
+			generationLinesMu.Unlock()
+		})
+		const key = "pst-cancel-stop"
+		release, apiErr := holdGeneration(queuedRequest(context.Background()), officialKey(key, nil))
+		require.Nil(t, apiErr)
+		grants := make(chan grantedKey)
+		for n := 1; n <= 2; n++ {
+			go func() {
+				release, apiErr := holdGeneration(queuedRequest(context.Background()), officialKey(key, nil))
+				grant := grantedKey{position: n, release: release}
+				if apiErr != nil {
+					grant.err = apiErr
+				}
+				grants <- grant
+			}()
+			require.Eventually(t, func() bool { return waitingFor(key) == n }, 5*time.Second, time.Millisecond)
+		}
+
+		StopGenerationQueues()
+
+		stoppedMessage := i18n.Translate("", i18n.MsgNovelAIQueueStopped)
+		for range 2 {
+			grant := awaitGrant(t, grants)
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, grant.err, &apiErr)
+			assert.Nil(t, grant.release)
+			assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+			assert.Equal(t, types.ErrorCodeNovelAIKeyBusy, apiErr.GetErrorCode())
+			assert.True(t, types.IsSkipRetryError(apiErr), "the server that would retry it is stopping")
+			assert.Equal(t, stoppedMessage, apiErr.Error())
+		}
+		_, apiErr = holdGeneration(queuedRequest(context.Background()), officialKey("pst-cancel-stop-free", nil))
+		require.NotNil(t, apiErr, "a free key takes no new generation either")
+		assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+		assert.Equal(t, stoppedMessage, apiErr.Error())
+		release()
+		assert.Equal(t, -1, waitingFor(key), "the generating request finished, and nothing was granted")
+	})
+}
+
+// occupy holds key for another request and queues waiting more behind it,
+// and returns what gives them all up again.
+func occupy(t *testing.T, key string, waiting int) func() {
+	t.Helper()
+	holder, err := enterGenerationLine([]generationKey{{key: key}}, 0, "", dto.NovelAIQueueLimitMax)
+	require.NoError(t, err)
+	require.Nil(t, holder.waiter, "%s was free", key)
+	waiters := make([]*generationTicket, waiting)
+	for i := range waiters {
+		waiters[i], err = enterGenerationLine([]generationKey{{key: key}}, 0, "", dto.NovelAIQueueLimitMax)
+		require.NoError(t, err)
+	}
+	return func() {
+		left, leave := context.WithCancel(context.Background())
+		leave()
+		for _, waiter := range waiters {
+			_, err := waiter.wait(left)
+			require.ErrorIs(t, err, context.Canceled)
+		}
+		releaseGenerationKey(holder.id)
+	}
+}
+
+// A multi-key channel sends a request to its least loaded key (holding and
+// waiting, across every channel with the same key) that has room in its line,
+// and to a key NovelAI refused (401, 402, 403 or 429) only when no other has
+// room, for generationCooldown. Ties go to the distributor's pick, then to
+// the next tie after it under polling, a random tie under random, and the
+// first tie otherwise. A request fails only when every key's line is full.
+func TestGenerationQueuePicksTheLeastLoadedKey(t *testing.T) {
+	resetGenerationQueue(t)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	answer := func(key string, status int) {
+		// From another channel with the same key.
+		noteGenerationAnswer(c, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 7, ApiKey: key}}, status)
+	}
+	for _, tc := range []struct {
+		name      string
+		busy      map[string]int // key → requests waiting behind its holder
+		answers   []string       // "key status", in order
+		cooldown  time.Duration
+		preferred int
+		mode      constant.MultiKeyMode
+		limit     int
+		chosen    []string // the keys the choice may be
+		queued    bool
+		full      bool
+	}{
+		{name: "all idle: the distributor's pick", preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"b"}},
+		{name: "polling passes over a busy pick", busy: map[string]int{"a": 0}, preferred: 0, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"b"}},
+		{name: "polling takes the next tie after the pick", busy: map[string]int{"b": 0}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"c"}},
+		{name: "polling wraps around", busy: map[string]int{"c": 0}, preferred: 2, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"a"}},
+		{name: "random takes a tie", busy: map[string]int{"a": 0}, preferred: 0, mode: constant.MultiKeyModeRandom, limit: 1, chosen: []string{"b", "c"}},
+		{name: "any other mode takes the first tie", busy: map[string]int{"a": 0}, preferred: -1, limit: 1, chosen: []string{"b"}},
+		{name: "the least loaded key with room", busy: map[string]int{"a": 1, "b": 0, "c": 2}, preferred: 0, mode: constant.MultiKeyModePolling, limit: 3, chosen: []string{"b"}, queued: true},
+		{name: "a key shared with another channel counts its load", busy: map[string]int{"a": 0, "b": 1, "c": 1}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 3, chosen: []string{"a"}, queued: true},
+		{name: "every line full", busy: map[string]int{"a": 1, "b": 1, "c": 1}, preferred: 0, mode: constant.MultiKeyModePolling, limit: 1, full: true},
+		{name: "a refused key waits behind the others", busy: map[string]int{"a": 0, "c": 0}, answers: []string{"b 402"}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"c"}, queued: true},
+		{name: "a refused key takes the overflow", busy: map[string]int{"a": 1, "c": 1}, answers: []string{"b 429"}, preferred: 0, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"b"}},
+		{name: "a refusal of every key with room", busy: map[string]int{"c": 1}, answers: []string{"a 401", "b 403"}, preferred: -1, limit: 1, chosen: []string{"a"}},
+		{name: "a success clears a refusal", busy: map[string]int{"a": 0, "c": 0}, answers: []string{"b 402", "b 201"}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"b"}},
+		{name: "a refusal ends after generationCooldown", busy: map[string]int{"a": 0, "c": 0}, answers: []string{"b 402"}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"b"}},
+		{name: "other answers leave a refusal", busy: map[string]int{"a": 0, "c": 0}, answers: []string{"b 402", "b 400", "b 500"}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"c"}, queued: true},
+		{name: "other answers refuse nothing", busy: map[string]int{"a": 0, "c": 0}, answers: []string{"b 400", "b 500"}, preferred: 1, mode: constant.MultiKeyModePolling, limit: 1, chosen: []string{"b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			generationCooldown = time.Minute
+			if tc.name == "a refusal ends after generationCooldown" {
+				generationCooldown = 0
+			}
+			prefix := "pst-pick-" + strings.ReplaceAll(tc.name, " ", "-") + "-"
+			for key, waiting := range tc.busy {
+				t.Cleanup(occupy(t, prefix+key, waiting))
+			}
+			for _, answered := range tc.answers {
+				key, status, _ := strings.Cut(answered, " ")
+				code, err := strconv.Atoi(status)
+				require.NoError(t, err)
+				answer(prefix+key, code)
+			}
+			keys := []generationKey{{0, prefix + "a"}, {1, prefix + "b"}, {2, prefix + "c"}}
+
+			ticket, err := enterGenerationLine(keys, tc.preferred, tc.mode, tc.limit)
+
+			if tc.full {
+				require.ErrorIs(t, err, errGenerationQueueFull)
+				return
+			}
+			require.NoError(t, err)
+			chosen := strings.TrimPrefix(ticket.key.key, prefix)
+			assert.Contains(t, tc.chosen, chosen)
+			assert.Equal(t, int(chosen[0]-'a'), ticket.key.index)
+			assert.Equal(t, tc.queued, ticket.waiter != nil)
+			if ticket.waiter != nil {
+				left, leave := context.WithCancel(context.Background())
+				leave()
+				_, err := ticket.wait(left)
+				require.ErrorIs(t, err, context.Canceled)
+				return
+			}
+			releaseGenerationKey(ticket.id)
+		})
+	}
+}
+
+// Requests arriving at once see each other's choice: with two keys and a
+// limit of 10, exactly two take a key, ten wait for each, and the other 18
+// fail, and every waiter gets its key exactly once.
+func TestGenerationQueueUnderConcurrentArrivals(t *testing.T) {
+	resetGenerationQueue(t)
+	keys := []generationKey{{0, "pst-arrivals-a"}, {1, "pst-arrivals-b"}}
+	start := make(chan struct{})
+	tickets := make(chan *generationTicket, 40)
+	var rejected atomic.Int32
+	var arrivals sync.WaitGroup
+	for range 40 {
+		arrivals.Go(func() {
+			<-start
+			ticket, err := enterGenerationLine(keys, -1, constant.MultiKeyModeRandom, 10)
+			if err != nil {
+				assert.ErrorIs(t, err, errGenerationQueueFull)
+				rejected.Add(1)
+				return
+			}
+			tickets <- ticket
+		})
+	}
+	close(start)
+	arrivals.Wait()
+	close(tickets)
+
+	holders, waiting := 0, map[string]int{}
+	var served sync.WaitGroup
+	var granted atomic.Int32
+	for ticket := range tickets {
+		if ticket.waiter == nil {
+			holders++
+		} else {
+			waiting[ticket.key.key]++
+		}
+		served.Go(func() {
+			release, err := ticket.wait(context.Background())
+			assert.NoError(t, err)
+			granted.Add(1)
+			release()
+		})
+	}
+	assert.Equal(t, 2, holders)
+	assert.Equal(t, map[string]int{"pst-arrivals-a": 10, "pst-arrivals-b": 10}, waiting)
+	assert.Equal(t, int32(18), rejected.Load())
+	done := make(chan struct{})
+	go func() {
+		served.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "a waiter never got its key")
+	}
+	assert.Equal(t, int32(22), granted.Load())
+}
+
+// A NovelAI channel on NovelAI's image host holds its key from the send
+// until NovelAI's answer ended or the response body closes, on the native
+// routes as on the converted ones: with no waiting allowed a second
+// generation meanwhile gets the retryable 429, and with room in the line it
+// reaches NovelAI only once the first answer ended. NovelAI's refusals of a
+// key mark it, a success clears the mark, and other answers leave it. The
+// fake proxy plays NovelAI's host, which the test cannot reach; it answers
+// the first generation until finish closes.
 func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
-	require.NoError(t, i18n.Init())
+	resetGenerationQueue(t)
 	service.InitHttpClient()
-	savedWait := generationWait
-	generationWait = 50 * time.Millisecond
-	t.Cleanup(func() { generationWait = savedWait })
 	var requests atomic.Int32
 	finish := make(chan struct{})
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1319,11 +1809,12 @@ func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 		}
 	}))
 	defer proxy.Close()
-	info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeNovelAIGenerateImage, ChannelMeta: &relaycommon.ChannelMeta{
-		ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://image.novelai.net", ApiKey: "pst-serialized",
-		ChannelSetting: dto.ChannelSettings{Proxy: proxy.URL},
-	}}
-	send := func() (*http.Response, error) {
+	send := func(limit int) (*http.Response, error) {
+		info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeNovelAIGenerateImage, ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://image.novelai.net", ApiKey: "pst-serialized",
+			ChannelSetting:       dto.ChannelSettings{Proxy: proxy.URL},
+			ChannelOtherSettings: dto.ChannelOtherSettings{NovelAIQueueLimit: &limit},
+		}}
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/ai/generate-image", strings.NewReader("{}"))
 		resp, err := (&Adaptor{}).DoRequest(c, info, strings.NewReader(`{"input":"a cat"}`))
@@ -1333,25 +1824,77 @@ func TestAdaptorSerializesGenerationsOnNovelAIsHost(t *testing.T) {
 		return resp.(*http.Response), nil
 	}
 
-	first, err := send()
+	first, err := send(0)
 	require.NoError(t, err)
-	_, err = send()
+	_, err = send(0)
 	var apiErr *types.NewAPIError
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
+	assert.Equal(t, types.ErrorCodeNovelAIKeyBusy, apiErr.GetErrorCode())
 	assert.Equal(t, int32(1), requests.Load(), "the second generation never reached NovelAI")
 
 	require.NoError(t, first.Body.Close())
-	second, err := send()
-	require.NoError(t, err, "a closed response frees the slot")
-	_, err = send()
-	require.ErrorAs(t, err, &apiErr, "the second generation holds the slot while NovelAI answers it")
+	second, err := send(0)
+	require.NoError(t, err, "a closed response frees the key")
+	_, err = send(0)
+	require.ErrorAs(t, err, &apiErr, "the second generation holds the key while NovelAI answers it")
+
+	type sent struct {
+		resp *http.Response
+		err  error
+	}
+	waited := make(chan sent)
+	go func() {
+		resp, err := send(1)
+		waited <- sent{resp, err}
+	}()
+	require.Eventually(t, func() bool { return waitingFor("pst-serialized") == 1 }, 5*time.Second, time.Millisecond)
+	assert.Equal(t, int32(2), requests.Load(), "a waiting generation has not reached NovelAI")
 	close(finish)
-	third, err := send()
-	require.NoError(t, err, "an ended answer frees the slot, though nothing read it")
+	var third sent
+	select {
+	case third = <-waited:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "an ended answer did not free the key")
+	}
+	require.NoError(t, third.err, "an ended answer frees the key, though nothing read it")
 	require.NoError(t, second.Body.Close())
-	require.NoError(t, third.Body.Close())
+	require.NoError(t, third.resp.Body.Close())
 	assert.Equal(t, int32(3), requests.Load())
+
+	t.Run("NovelAI's answers mark and clear a refused key", func(t *testing.T) {
+		statuses := make(chan int, 4)
+		refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(<-statuses)
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		t.Cleanup(refusing.Close)
+		id := sha256.Sum256([]byte("pst-refused"))
+		marked := func() bool {
+			generationLinesMu.Lock()
+			defer generationLinesMu.Unlock()
+			_, refused := generationRefused[id]
+			return refused
+		}
+		for _, answer := range []struct {
+			status int
+			marked bool
+		}{{http.StatusPaymentRequired, true}, {http.StatusCreated, false}, {http.StatusPaymentRequired, true}, {http.StatusInternalServerError, true}} {
+			statuses <- answer.status
+			info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeNovelAIGenerateImage, ChannelMeta: &relaycommon.ChannelMeta{
+				ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://image.novelai.net", ApiKey: "pst-refused",
+				ChannelSetting: dto.ChannelSettings{Proxy: refusing.URL},
+			}}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/ai/generate-image", strings.NewReader("{}"))
+			resp, err := (&Adaptor{}).DoRequest(c, info, strings.NewReader(`{"input":"a cat"}`))
+			require.NoError(t, err)
+			assert.Equal(t, answer.status, resp.(*http.Response).StatusCode)
+			assert.Equal(t, answer.marked, marked(), "after %d", answer.status)
+			require.NoError(t, resp.(*http.Response).Body.Close())
+		}
+	})
 }
 
 // stalledClient is a client that never reads: every write blocks until
@@ -1396,11 +1939,8 @@ func (r *endTracker) Read(p []byte) (int, error) {
 // most 1 MiB, and closed even when it breaks off, so the retry of the
 // request on the same key does not wait for its own slot.
 func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
-	require.NoError(t, i18n.Init())
+	resetGenerationQueue(t)
 	service.InitHttpClient()
-	savedWait := generationWait
-	generationWait = time.Second
-	t.Cleanup(func() { generationWait = savedWait })
 	// A PNG of noise: about 1 MiB, which no compression shrinks.
 	large := testImage(512, 512, func(x, y int) color.Color {
 		v := crc32.ChecksumIEEE([]byte{byte(x), byte(x >> 8), byte(y), byte(y >> 8)})
@@ -1464,11 +2004,7 @@ func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 				t.Fatal("the relay never wrote to its client")
 			}
 
-			next, _ := gin.CreateTestContext(httptest.NewRecorder())
-			next.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
-			releaseNext, apiErr := holdGeneration(next, info)
-			require.Nil(t, apiErr, "the key is free while the client has read nothing")
-			releaseNext()
+			assert.Eventually(t, func() bool { return keyIsFree(info.ApiKey) }, 5*time.Second, time.Millisecond, "the key is free while the client has read nothing")
 			assert.True(t, upstream.ended.Load(), "NovelAI's answer was read to its end")
 		})
 	}
@@ -1476,14 +2012,10 @@ func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 	t.Run("what waits for the relay is bounded", func(t *testing.T) {
 		savedAhead := generationReadAhead
 		generationReadAhead = 64 << 10
-		generationWait = 50 * time.Millisecond
-		t.Cleanup(func() {
-			generationReadAhead = savedAhead
-			generationWait = time.Second
-		})
+		t.Cleanup(func() { generationReadAhead = savedAhead })
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/ai/generate-image", nil)
-		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "https://image.novelai.net", ApiKey: "pst-read-ahead"}}
+		info := officialKey("pst-read-ahead", common.GetPointer(0))
 		release, apiErr := holdGeneration(c, info)
 		require.Nil(t, apiErr)
 		upstream := &endTracker{Reader: strings.NewReader(zipped)}
@@ -1496,9 +2028,7 @@ func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 		read, err := io.ReadAll(body)
 		require.NoError(t, err)
 		assert.Equal(t, zipped, string(read), "the answer arrives whole and in order")
-		releaseNext, apiErr := holdGeneration(c, info)
-		require.Nil(t, apiErr)
-		releaseNext()
+		assert.Eventually(t, func() bool { return keyIsFree(info.ApiKey) }, 5*time.Second, time.Millisecond)
 
 		// A read waiting on a NovelAI that sends nothing more ends when the
 		// body closes (the idle timeout and the stream cleanup close it),
@@ -1514,17 +2044,22 @@ func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 		}()
 		require.NoError(t, waiting.Close())
 		assert.ErrorIs(t, <-readErr, errGenerationBodyClosed)
-		releaseNext, apiErr = holdGeneration(c, info)
-		require.Nil(t, apiErr)
-		releaseNext()
+		assert.True(t, keyIsFree(info.ApiKey))
 	})
 
 	t.Run("an error answer that breaks off", func(t *testing.T) {
 		var requests atomic.Int32
+		ended := make(chan struct{})
 		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if requests.Add(1) > 1 {
+				// More than the relay keeps, and no end before the test's.
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write(bytes.Repeat([]byte("x"), 3<<20))
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-ended:
+				}
 				return
 			}
 			// A 500 that promises more than it sends.
@@ -1536,9 +2071,13 @@ func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 			}
 		}))
 		t.Cleanup(proxy.Close)
+		t.Cleanup(func() { close(ended) })
+		// No waiting: a key the failed attempt kept would fail the retry
+		// with a 429 at once.
 		info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesGenerations, ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelType: constant.ChannelTypeNovelAI, ChannelBaseUrl: "http://image.novelai.net", ApiKey: "pst-error-answer",
-			ChannelSetting: dto.ChannelSettings{Proxy: proxy.URL},
+			ChannelSetting:       dto.ChannelSettings{Proxy: proxy.URL},
+			ChannelOtherSettings: dto.ChannelOtherSettings{NovelAIQueueLimit: common.GetPointer(0)},
 		}}
 		generation, apiErr := BuildGeneration(nil, GenerationIntent{Model: "nai-diffusion-4-5-full", Prompt: "a cat", N: 1})
 		require.Nil(t, apiErr)
@@ -1559,6 +2098,7 @@ func TestGenerationSlotFreesOnceNovelAIAnswered(t *testing.T) {
 		body, err := io.ReadAll(resp.(*http.Response).Body)
 		require.NoError(t, err)
 		assert.Len(t, body, 1<<20, "an error answer is kept up to 1 MiB")
+		assert.True(t, keyIsFree(info.ApiKey), "the rest of the answer was not waited for: closing it freed the key")
 		assert.Equal(t, int32(2), requests.Load())
 	})
 }

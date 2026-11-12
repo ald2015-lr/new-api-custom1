@@ -153,6 +153,7 @@ import {
   FIELD_DESCRIPTIONS,
   FIELD_PLACEHOLDERS,
   MODEL_FETCHABLE_TYPES,
+  NOVELAI_QUEUE_LIMIT_DEFAULT,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../../constants'
 import { useChannelKeyDisclosure } from '../../hooks/use-channel-key-disclosure'
@@ -317,6 +318,7 @@ const SENSITIVE_FORM_FIELDS = [
   'claude_beta_query',
   'ollama_openai_chat',
   'novelai_presets_disabled',
+  'novelai_queue_limit',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -2012,32 +2014,69 @@ export function ChannelMutateDrawer({
     />
   )
 
-  const novelAIPresetsFields = currentType === CHANNEL_TYPE_NOVELAI && (
-    <FormField
-      control={form.control}
-      name='novelai_presets_disabled'
-      render={({ field }) => (
-        <FormItem className='flex items-center justify-between px-4 py-3'>
-          <div className='space-y-0.5'>
-            <FormLabel>
-              {t('Do not add NovelAI quality tags and negative presets')}
-            </FormLabel>
+  const novelAIFields = currentType === CHANNEL_TYPE_NOVELAI && (
+    <>
+      <FormField
+        control={form.control}
+        name='novelai_presets_disabled'
+        render={({ field }) => (
+          <FormItem className='flex items-center justify-between px-4 py-3'>
+            <div className='space-y-0.5'>
+              <FormLabel>
+                {t('Do not add NovelAI quality tags and negative presets')}
+              </FormLabel>
+              <FormDescription>
+                {t(
+                  'Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value === true}
+                onCheckedChange={field.onChange}
+              />
+            </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name='novelai_queue_limit'
+        render={({ field }) => (
+          <FormItem className='px-4 py-3'>
+            <FormLabel>{t('Queue limit per key')}</FormLabel>
+            <FormControl>
+              {/* No min, max or step: the browser's own check would stop
+                  the submit before the form shows its message for the
+                  field. */}
+              <Input
+                type='number'
+                inputMode='numeric'
+                placeholder={String(NOVELAI_QUEUE_LIMIT_DEFAULT)}
+                disabled={sensitiveLocked}
+                name={field.name}
+                ref={field.ref}
+                onBlur={field.onBlur}
+                value={field.value ?? ''}
+                onChange={(e) =>
+                  field.onChange(
+                    e.target.value === '' ? null : Number(e.target.value)
+                  )
+                }
+              />
+            </FormControl>
             <FormDescription>
               {t(
-                'Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.'
+                "NovelAI generates one request at a time per key. Further requests wait in line for the least busy key; once every key has this many requests waiting, new ones fail with 429, which goes to another channel when retries are on. 0 turns waiting off. Applies on NovelAI's own host."
               )}
             </FormDescription>
-          </div>
-          <FormControl>
-            <Switch
-              disabled={sensitiveLocked}
-              checked={field.value === true}
-              onCheckedChange={field.onChange}
-            />
-          </FormControl>
-        </FormItem>
-      )}
-    />
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </>
   )
 
   const notesFields = (
@@ -4821,7 +4860,7 @@ export function ChannelMutateDrawer({
                 />
                 {formatFields}
                 {ollamaOpenAIChatFields}
-                {novelAIPresetsFields}
+                {novelAIFields}
                 {thinkingFields}
                 {passthroughFields}
                 {systemPromptFields}
