@@ -48,33 +48,67 @@ const endpointMap = {
 }
 
 // Providers such as NovelAI and gpt-image models answer with b64_json and no
-// url, so a sample that only reads data[0].url prints nothing useful. The
-// SDK samples throw on an error answer; curl hands it to jq, so the cURL
-// sample prints the whole answer when it has neither (jq -e fails on null).
+// url, so a sample that only reads data[0].url prints nothing useful, and an
+// error answer carries no image at all. Each sample's handling of the answer
+// is pinned line by line: b64_json is decoded to image.png, otherwise the url
+// is printed, otherwise (cURL, fetch) the answer is printed as received; the
+// SDKs throw on an error answer themselves. The cURL sample pipes with
+// printf: zsh, dash and bash with xpg_echo turn the \n escapes of JSON
+// strings in an echo into newlines, which jq rejects.
 describe('model details image code sample', () => {
   it.each([
     {
       tab: 'cURL',
-      b64: `if image=$(echo "$response" | jq -er '.data[0].b64_json'); then\n  echo "$image" | base64 --decode > image.png`,
-      url: `jq -r '.data[0].url // .'`,
+      request: `response=$(curl -sS https://gateway.example.com/v1/images/generations \\`,
+      handling: [
+        String.raw`if image=$(printf '%s\n' "$response" | jq -er '.data[0].b64_json'); then`,
+        `  printf '%s' "$image" | base64 --decode > image.png`,
+        `else`,
+        String.raw`  printf '%s\n' "$response" | jq -r '.data[0].url // .'`,
+        `fi`,
+      ],
     },
     {
       tab: 'Python',
-      b64: 'f.write(base64.b64decode(image.b64_json))',
-      url: 'print(image.url)',
+      request: `client = OpenAI(base_url="https://gateway.example.com/v1", api_key="<YOUR_API_KEY>")`,
+      handling: [
+        'image = response.data[0]',
+        'if image.b64_json:',
+        '    with open("image.png", "wb") as f:',
+        '        f.write(base64.b64decode(image.b64_json))',
+        'else:',
+        '    print(image.url)',
+      ],
     },
     {
       tab: 'TypeScript',
-      b64: `writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
-      url: 'console.log(image?.url)',
+      request: `  baseURL: 'https://gateway.example.com/v1',`,
+      handling: [
+        `const image = response.data?.[0]`,
+        `if (image?.b64_json) {`,
+        `  writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
+        `} else {`,
+        `  console.log(image?.url)`,
+        `}`,
+      ],
     },
     {
       tab: 'JavaScript',
-      b64: `writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
-      url: 'console.log(image.url)',
+      request: `const response = await fetch('https://gateway.example.com/v1/images/generations', {`,
+      handling: [
+        `const body = await response.text()`,
+        `const image = response.ok ? JSON.parse(body).data?.[0] : undefined`,
+        `if (image?.b64_json) {`,
+        `  writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
+        `} else if (image?.url) {`,
+        `  console.log(image.url)`,
+        `} else {`,
+        `  console.error(response.status, body)`,
+        `}`,
+      ],
     },
   ])(
-    'copying the $tab sample saves b64_json when present and falls back to url',
+    'the copied $tab sample saves b64_json to image.png, else prints the url or the error answer',
     async (sample) => {
       const user = userEvent.setup()
       render(<ModelDetailsApi model={imageModel} endpointMap={endpointMap} />)
@@ -82,12 +116,11 @@ describe('model details image code sample', () => {
       await user.click(screen.getByRole('tab', { name: sample.tab }))
       await user.click(screen.getByRole('button', { name: 'Copy code' }))
       const code = await navigator.clipboard.readText()
+      const lines = code.split('\n')
 
-      expect(code).toContain('https://gateway.example.com')
+      expect(lines).toContain(sample.request)
       expect(code).toContain('nai-diffusion-4-5-full')
-      expect(code).toContain(sample.b64)
-      expect(code).toContain(sample.url)
-      expect(code.indexOf('b64_json')).toBeLessThan(code.lastIndexOf('url'))
+      expect(lines.slice(-sample.handling.length)).toEqual(sample.handling)
     }
   )
 })

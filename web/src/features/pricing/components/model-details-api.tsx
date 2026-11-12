@@ -353,7 +353,8 @@ function buildEmbeddingSample(lang: Lang, ctx: SampleContext): string {
 
 // Providers answer an image as base64 (b64_json, the default of gpt-image
 // models and NovelAI) or as a URL, so every sample saves or prints whichever
-// the response carries.
+// the response carries. The cURL and fetch samples print an answer without
+// an image (an error) as received; the SDKs throw on one themselves.
 function buildImageSample(lang: Lang, ctx: SampleContext): string {
   const url = `${ctx.baseUrl}${ctx.endpointPath}`
   const prompt = 'A serene koi pond at sunset, ukiyo-e style.'
@@ -365,16 +366,18 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
       2
     )
     // b64_json is saved to image.png; otherwise the url is printed, or the
-    // whole answer when it carries no image (an error).
+    // whole answer when it carries no image (an error). printf, not echo:
+    // zsh, dash and bash with xpg_echo turn the \n escapes of JSON strings
+    // into newlines, which jq rejects.
     return [
       `response=$(curl -sS ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
       `  -d '${body.replaceAll('\n', '\n     ')}')`,
-      `if image=$(echo "$response" | jq -er '.data[0].b64_json'); then`,
-      `  echo "$image" | base64 --decode > image.png`,
+      `if image=$(printf '%s\\n' "$response" | jq -er '.data[0].b64_json'); then`,
+      `  printf '%s' "$image" | base64 --decode > image.png`,
       `else`,
-      `  echo "$response" | jq -r '.data[0].url // .'`,
+      `  printf '%s\\n' "$response" | jq -r '.data[0].url // .'`,
       `fi`,
     ].join('\n')
   }
@@ -443,12 +446,14 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
     `  }),`,
     `})`,
     '',
-    `const data = await response.json()`,
-    `const image = data.data[0]`,
-    `if (image.b64_json) {`,
+    `const body = await response.text()`,
+    `const image = response.ok ? JSON.parse(body).data?.[0] : undefined`,
+    `if (image?.b64_json) {`,
     `  writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
-    `} else {`,
+    `} else if (image?.url) {`,
     `  console.log(image.url)`,
+    `} else {`,
+    `  console.error(response.status, body)`,
     `}`,
   ].join('\n')
 }
