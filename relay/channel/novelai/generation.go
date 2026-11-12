@@ -45,8 +45,11 @@ const (
 	// MaxSeed is the largest seed NovelAI takes; it reads the seed unsigned,
 	// and 0 draws a random image while its metadata says 0.
 	MaxSeed = 4_294_967_288
+	// defaultSteps is the most steps Opus generates for free (one image a
+	// request, at up to 1 MP), which most NovelAI clients and relays default
+	// to; the web client's 23 spends fewer Anlas only where an image is paid.
+	defaultSteps = 28
 
-	defaultSteps     = 23
 	mediumSteps      = 14
 	defaultSampler   = "k_euler_ancestral"
 	defaultSchedule  = "karras"
@@ -178,17 +181,19 @@ var relayOwnedParameters = map[string]bool{
 
 // BuildGeneration turns an intent into the NovelAI request. Precedence,
 // highest first: the relay's own keys (model, action, image, mask, stream,
-// n_samples = N, ...), the parameters object, the top-level extension keys,
-// the OpenAI fields (size, n, output format, background), the model's
-// defaults. The model's rules apply last: V5 always uses karras and has no
-// SMEA, Variety+ or decrisper, V5 Full Medium fixes its steps, sampler and UC,
-// V3 has no V4 captions or characters. Presets are expanded as the NovelAI
-// web client does (the server does not): the quality tags go after the
-// prompt (withPresetTags) and the UC preset in front of the negative prompt,
-// unless the request turns them off. A failure is a 400 that skips retries:
-// another channel would reject the request the same way. An edit's image
-// and mask are decoded last, once the request holds the memory they need of
-// imageWork; a client that leaves while it waits ends the build.
+// n_samples = N, ...), the parameters object, the top-level extension keys
+// (their NovelAI names over their aliases, ParseExtensions), the OpenAI
+// fields (size, n, output format, background), the model's defaults. The
+// model's rules apply last: V5 always uses karras and has no SMEA, Variety+
+// or decrisper, V5 Full Medium fixes its steps, sampler and UC, V3 has no V4
+// captions or characters. Presets are expanded as the NovelAI web client
+// does (the server does not): the quality tags go after the prompt
+// (withPresetTags) and the UC preset in front of the negative prompt, unless
+// the request turns them off or already holds them (containsTags). A
+// failure is a 400 that skips retries: another channel would reject the
+// request the same way. An edit's image and mask are decoded last, once the
+// request holds the memory they need of imageWork; a client that leaves
+// while it waits ends the build.
 func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *types.NewAPIError) {
 	model := intent.Model
 	modelProfile, ok := profiles[model]
@@ -391,7 +396,8 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 
 	// The prompts: the request's V4 captions verbatim when it sends them,
 	// otherwise the prompt with the transparency tag and the quality tags,
-	// and the negative prompt behind the UC preset.
+	// and the negative prompt behind the UC preset, each added only where the
+	// client did not write it already.
 	explicitPrompt, apiErr := fields.caption("v4_prompt", modelProfile)
 	if apiErr != nil {
 		return nil, apiErr
@@ -404,11 +410,11 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	if explicitPrompt != nil {
 		prompt = explicitPrompt.baseCaption
 	} else {
-		tags := modelProfile.quality[quality]
+		transparency := ""
 		if intent.Transparent {
-			tags = joinTags(transparentTag, tags)
+			transparency = transparentTag
 		}
-		prompt = withPresetTags(prompt, tags, modelProfile.family == familyV3)
+		prompt = withPresetTags(prompt, modelProfile.family == familyV3, transparency, modelProfile.quality[quality])
 	}
 	userNegative, apiErr := fields.str("negative_prompt")
 	if apiErr != nil {
@@ -422,12 +428,16 @@ func BuildGeneration(c *gin.Context, intent GenerationIntent) (*Generation, *typ
 	if explicitNegative != nil {
 		negative = explicitNegative.baseCaption
 	} else {
-		prefix := modelProfile.uc[uc]
+		preset := modelProfile.uc[uc]
 		if uc == presetNone && userNegative != "" {
+			preset = ""
+		}
+		prefix := preset
+		if containsTags(userNegative, preset) {
 			prefix = ""
 		}
 		negative = joinTags(prefix, userNegative)
-		if !modelProfile.curated && uc != presetNone && prefix != "" && !strings.Contains(strings.ToLower(prompt), nsfwTag) {
+		if !modelProfile.curated && uc != presetNone && preset != "" && !strings.Contains(strings.ToLower(prompt), nsfwTag) && !containsTags(negative, nsfwTag) {
 			negative = nsfwTag + ", " + negative
 		}
 	}
@@ -911,24 +921,26 @@ func joinTags(prompt, tags string) string {
 // mixWeight is the trailing :weight of a V3 mixed prompt.
 var mixWeight = regexp.MustCompile(`:-?[0-9.]+\s*$`)
 
-// withPresetTags adds the preset tags (the transparency tag and the quality
-// suffix) to a prompt where the web client puts them. From V4 on they go to
-// the base prompt only, the first character field, and before a Text: block,
-// whose text NovelAI draws literally: the tags then end with a period. On V3,
-// whose | mixes prompts, every mixed prompt gets them before its :weight.
-func withPresetTags(prompt, tags string, v3 bool) string {
-	if tags == "" {
-		return prompt
-	}
+// withPresetTags adds the preset tags, groups such as the transparency tag
+// and the quality suffix, to a prompt where the web client puts them, but
+// for a group the prompt already holds there (missingTags): a client that
+// writes the quality tags itself does not get them twice. From V4 on they go
+// to the base prompt only, the first character field, and before a Text:
+// block, whose text NovelAI draws literally (and which therefore holds no
+// tags): the tags then end with a period. On V3, whose | mixes prompts,
+// every mixed prompt gets them before its :weight.
+func withPresetTags(prompt string, v3 bool, groups ...string) string {
 	fields := promptFields(prompt)
 	if !v3 {
 		field := fields[0]
 		if start := textBlockStart(field); start >= 0 {
 			head := strings.TrimRightFunc(field[:start], func(r rune) bool { return unicode.IsSpace(r) || r == ',' || r == '.' })
-			fields[0] = joinTags(head, tags) + ". " + field[start:]
+			if tags := missingTags(head, groups); tags != "" {
+				fields[0] = joinTags(head, tags) + ". " + field[start:]
+			}
 		} else {
 			head := strings.TrimRightFunc(field, unicode.IsSpace)
-			fields[0] = joinTags(head, tags) + field[len(head):]
+			fields[0] = joinTags(head, missingTags(head, groups)) + field[len(head):]
 		}
 		return strings.Join(fields, "|")
 	}
@@ -940,9 +952,55 @@ func withPresetTags(prompt, tags string, v3 bool) string {
 			}
 		}
 		head := strings.TrimRightFunc(field, unicode.IsSpace)
-		fields[i] = joinTags(head, tags) + field[len(head):] + weight
+		fields[i] = joinTags(head, missingTags(head, groups)) + field[len(head):] + weight
 	}
 	return strings.Join(fields, "|")
+}
+
+// missingTags joins the groups of preset tags that text does not hold yet.
+func missingTags(text string, groups []string) string {
+	tags := ""
+	for _, group := range groups {
+		if !containsTags(text, group) {
+			tags = joinTags(tags, group)
+		}
+	}
+	return tags
+}
+
+// containsTags tells whether text already holds tags, a preset's
+// comma-separated text, as a client may have written it: in any case, with
+// any whitespace around and inside the tags, with full-width commas, and
+// not as part of a longer word ("no text" is not in "no texture"). Empty
+// tags are never held.
+func containsTags(text, tags string) bool {
+	normalized := [2]string{text, tags}
+	for i, value := range normalized {
+		value = strings.Join(strings.Fields(strings.ToLower(strings.ReplaceAll(value, "，", ","))), " ")
+		normalized[i] = strings.ReplaceAll(strings.ReplaceAll(value, " ,", ","), ", ", ",")
+	}
+	haystack, needle := normalized[0], normalized[1]
+	if needle == "" {
+		return false
+	}
+	for from := 0; ; {
+		found := strings.Index(haystack[from:], needle)
+		if found < 0 {
+			return false
+		}
+		begin, end := from+found, from+found+len(needle)
+		// At either end of text the rune is RuneError, which is no letter.
+		before, _ := utf8.DecodeLastRuneInString(haystack[:begin])
+		after, _ := utf8.DecodeRuneInString(haystack[end:])
+		inWord := false
+		for _, r := range []rune{before, after} {
+			inWord = inWord || unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+		}
+		if !inWord {
+			return true
+		}
+		from = begin + 1
+	}
 }
 
 // promptFields splits a prompt at its single bars, which mix prompts on V3

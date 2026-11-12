@@ -1048,6 +1048,42 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 		assert.Equal(t, before-10_000, walletQuota())
 	})
 
+	// Other clients' names for the steps, the scale, the negative prompt and
+	// the canvas reach NovelAI from the top level, extra_fields or
+	// extra_body; presets the client wrote are sent once; a request without
+	// steps gets 28. The price stays the per-call price.
+	t.Run("other clients' field names and presets they wrote, at the per-call price", func(t *testing.T) {
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		before := walletQuota()
+
+		response := decode(send("/v1/images/generations", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","prompt":"1girl, Very Aesthetic, masterpiece, no text",`+
+			`"size":"1024x1024","width":832,"height":1216,"extra_body":{"num_inference_steps":30,"cfg_scale":6,"negativePrompt":"nsfw, bad hands"}}`)))
+
+		assert.Equal(t, "832x1216", response.Size)
+		sent := upstream.last()
+		assert.Equal(t, "1girl, Very Aesthetic, masterpiece, no text", sent.body["input"], "the quality tags the prompt holds are not added again")
+		parameters := sent.body["parameters"].(map[string]any)
+		assert.Equal(t, [4]any{float64(832), float64(1216), float64(30), float64(6)}, [4]any{parameters["width"], parameters["height"], parameters["steps"], parameters["scale"]})
+		negative := parameters["negative_prompt"].(string)
+		assert.True(t, strings.HasPrefix(negative, "lowres, ") && strings.HasSuffix(negative, ", nsfw, bad hands"), negative)
+		assert.Equal(t, 1, strings.Count(negative, "nsfw"), "the client's nsfw is not added again")
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Contains(t, lastLog().Content, "Image count 1")
+		assert.Equal(t, 1245, lastLog().CompletionTokens, "one 832x1216 image")
+		assert.Equal(t, promptText(sent.body), lastLog().PromptTokens)
+		assert.Equal(t, before-10_000, walletQuota())
+
+		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, red))
+		recorder := send("/v1/chat/completions", "application/json", []byte(`{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"extra_fields":{"guidance_scale":4,"uc":"bad hands"}}`))
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		parameters = upstream.last().body["parameters"].(map[string]any)
+		assert.Equal(t, [2]any{float64(28), float64(4)}, [2]any{parameters["steps"], parameters["scale"]}, "the default 28 steps")
+		assert.True(t, strings.HasSuffix(parameters["negative_prompt"].(string), ", bad hands"))
+		assert.Equal(t, 10_000, lastLog().Quota)
+		assert.Equal(t, before-20_000, walletQuota())
+	})
+
 	t.Run("url and jpeg, settled by expression", func(t *testing.T) {
 		upstream.queue(http.StatusOK, "application/zip", novelAIZip(t, blue, red))
 		before := walletQuota()
@@ -1223,9 +1259,10 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 	}
 
 	t.Run("stream generation relays NovelAI's events, billed per completed image", func(t *testing.T) {
+		// One partial of the default 28 steps previews after step 14.
 		upstream.queue(http.StatusOK, "text/event-stream", sse(
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 10, "image": encode(blue)},
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 11, "image": encode(blue)},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 12, "image": encode(blue)},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 13, "image": encode(blue)},
 			map[string]any{"event_type": "final", "samp_ix": 0, "image": encode(red)},
 			map[string]any{"event_type": "final", "samp_ix": 1, "image": encode(blue)},
 		))

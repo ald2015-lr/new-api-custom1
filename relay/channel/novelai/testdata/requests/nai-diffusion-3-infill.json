@@ -31,7 +31,7 @@
     "skip_cfg_above_sigma": null,
     "sm": false,
     "sm_dyn": false,
-    "steps": 23,
+    "steps": 28,
     "tag_hint_qt": 1,
     "tag_hint_uc_preset": 2,
     "ucPresetId": "heavy",

@@ -30,7 +30,7 @@
     "sampler": "k_euler_ancestral",
     "scale": 7,
     "seed": 1234567890,
-    "steps": 23,
+    "steps": 28,
     "straight_alpha": true,
     "tag_hint_qt": 1,
     "tag_hint_uc_preset": 2,

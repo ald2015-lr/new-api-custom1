@@ -31,7 +31,7 @@
     "scale": 5.5,
     "seed": 1234567890,
     "skip_cfg_above_sigma": null,
-    "steps": 23,
+    "steps": 28,
     "strength": 0.5,
     "tag_hint_qt": 1,
     "tag_hint_uc_preset": 2,

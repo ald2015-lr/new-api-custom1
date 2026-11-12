@@ -54,16 +54,17 @@ var rejectedImageFields = []string{"markup", "frame_count", "frame_duration_ms",
 // or /v1/images/edits as JSON or multipart, into a GenerationIntent and the
 // output it asks for. Edits take one image (image, image[] or images[0]),
 // and a mask makes them inpaint; a generation with the extension image is
-// an edit. The NovelAI keys come from the top level or the extra_fields
-// object, the top level first. quality, moderation, style, user,
-// input_fidelity and similar fields are ignored.
+// an edit. The NovelAI keys come from the top level, the extra_fields
+// object or the extra_body object, in that order (mergeNestedFields).
+// quality, moderation, style, user, input_fidelity and similar fields are
+// ignored.
 func imageGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *dto.ImageRequest) (GenerationIntent, ImageOutput, *types.NewAPIError) {
 	var output ImageOutput
 	fields, files, apiErr := imageRequestFields(c)
 	if apiErr != nil {
 		return GenerationIntent{}, output, apiErr
 	}
-	if apiErr := mergeNestedFields(c, fields, "extra_fields"); apiErr != nil {
+	if apiErr := mergeNestedFields(c, fields, "extra_fields", "extra_body"); apiErr != nil {
 		return GenerationIntent{}, output, apiErr
 	}
 	present := func(key string) bool {

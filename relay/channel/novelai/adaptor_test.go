@@ -474,7 +474,8 @@ func buildRejected(t *testing.T, intent GenerationIntent) string {
 // generation (aspect_ratio's preset canvas, or its ratio at about that
 // area) and the source's aspect ratio within 1024x1024's area for an edit,
 // other sizes round to multiples of 64 and shrink into 3,145,728 pixels;
-// parameters.width / height set it exactly. n is never clamped: billing
+// parameters.width / height set it exactly, and so do the top-level width /
+// height under them, each side on its own. n is never clamped: billing
 // reserved it, so a count past NovelAI's limit for the area (8 up to
 // 360,448 px, 6 up to 409,600, else 4) or a different parameters.n_samples
 // is rejected.
@@ -502,6 +503,9 @@ func TestBuildGenerationSizeAndCount(t *testing.T) {
 		{"edit past NovelAI's aspect still gets an auto size", GenerationIntent{Image: testImage(2400, 1, solid(color.White))}, 16384, 64},
 		{"edit at an explicit size", GenerationIntent{Image: wide, Size: "512x512"}, 512, 512},
 		{"parameters set the canvas", GenerationIntent{Size: "1024x1024", Parameters: map[string]json.RawMessage{"width": raw("832"), "height": raw("1216")}}, 832, 1216},
+		{"top-level width and height over size", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"width": raw("832"), "height": raw("1216")}}, 832, 1216},
+		{"one top-level side", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"height": raw("1216")}}, 1024, 1216},
+		{"parameters over the top level", GenerationIntent{Size: "1024x1024", Extras: map[string]json.RawMessage{"width": raw("832"), "height": raw("1216")}, Parameters: map[string]json.RawMessage{"width": raw("1216")}}, 1216, 1216},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.intent.Model = "nai-diffusion-4-5-full"
@@ -542,6 +546,9 @@ func TestBuildGenerationSizeAndCount(t *testing.T) {
 		"n past the tier of width":   {Size: "512x512", N: 8, Parameters: map[string]json.RawMessage{"width": raw("1024"), "height": raw("1024")}},
 		"width not a multiple of 64": {Parameters: map[string]json.RawMessage{"width": raw("1000")}},
 		"canvas past the area":       {Parameters: map[string]json.RawMessage{"width": raw("2048"), "height": raw("2048")}},
+		"top-level height off 64":    {Size: "1024x1024", Extras: map[string]json.RawMessage{"height": raw("1000")}},
+		"top-level past the area":    {Extras: map[string]json.RawMessage{"width": raw("2048"), "height": raw("2048")}},
+		"top-level width of 0":       {Extras: map[string]json.RawMessage{"width": raw("0")}},
 		"size not WxH":               {Size: "large"},
 		"size side past the bound":   {Size: "100000x64"},
 	} {
@@ -578,6 +585,13 @@ func TestBuildGenerationPassthroughPrecedence(t *testing.T) {
 	assert.Equal(t, []any{0.6}, parameters["reference_strength_multiple"], "unknown keys are forwarded verbatim")
 	assert.Equal(t, false, parameters["add_original_image"], "a forwarded key replaces the relay's default")
 	assert.Equal(t, map[string]any{"a": float64(1)}, parameters["future_flag"])
+
+	_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full"})
+	assert.Equal(t, float64(28), parameters["steps"], "28 steps by default, Opus's free limit")
+	for _, steps := range []string{"1", "23", "50"} {
+		_, parameters = buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Extras: map[string]json.RawMessage{"steps": raw(steps)}})
+		assert.Equal(t, steps, string(mustMarshal(t, parameters["steps"])), "requested steps are sent as asked")
+	}
 
 	for _, unset := range []string{"0", "-1", "null"} {
 		generation, parameters := buildParameters(t, GenerationIntent{Model: "nai-diffusion-4-5-full", Extras: map[string]json.RawMessage{"seed": raw(unset)}})
@@ -647,9 +661,10 @@ func TestBuildGenerationPassthroughPrecedence(t *testing.T) {
 }
 
 // The extension keys come from an allowlist under NovelAI's names; an alias
-// counts only when the NovelAI name is absent, other top-level keys are
-// ignored, and keys whose meaning is unknown are rejected. A multipart form
-// gives the same fields, with SDK bracket keys for parameters.
+// counts only when the NovelAI name is absent or null, the first alias set
+// winning, other top-level keys are ignored, and keys whose meaning is
+// unknown are rejected. A multipart form gives the same fields, with SDK
+// bracket keys for parameters.
 func TestParseExtensions(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	// Go visits a map in random order: the result must not depend on it.
@@ -664,6 +679,41 @@ func TestParseExtensions(t *testing.T) {
 			"negative_prompt": raw(`"canonical"`), "characterPrompts": raw(`[{"prompt":"a"}]`), "ucPresetId": raw(`"light"`), "steps": raw("28"),
 		}, extras)
 		require.Equal(t, map[string]json.RawMessage{"scale": raw("6")}, parameters)
+	}
+
+	// Other clients' names for the steps, the scale, the negative prompt and
+	// the canvas, in their precedence order.
+	for _, tc := range []struct {
+		name   string
+		fields map[string]json.RawMessage
+		want   map[string]json.RawMessage
+	}{
+		{"diffusers and SD WebUI names",
+			map[string]json.RawMessage{"num_inference_steps": raw("28"), "cfg_scale": raw("6"), "negativePrompt": raw(`"bad hands"`), "width": raw("832"), "height": raw("1216")},
+			map[string]json.RawMessage{"steps": raw("28"), "scale": raw("6"), "negative_prompt": raw(`"bad hands"`), "width": raw("832"), "height": raw("1216")}},
+		{"guidance_scale and uc",
+			map[string]json.RawMessage{"guidance_scale": raw("4.5"), "uc": raw(`"lowres"`)},
+			map[string]json.RawMessage{"scale": raw("4.5"), "negative_prompt": raw(`"lowres"`)}},
+		{"NovelAI's names win over the aliases",
+			map[string]json.RawMessage{"steps": raw("23"), "num_inference_steps": raw("40"), "scale": raw("5"), "cfg_scale": raw("6"), "guidance_scale": raw("7"), "negative_prompt": raw(`"mine"`), "negative": raw(`"a"`), "negativePrompt": raw(`"b"`), "uc": raw(`"c"`)},
+			map[string]json.RawMessage{"steps": raw("23"), "scale": raw("5"), "negative_prompt": raw(`"mine"`)}},
+		{"an earlier alias over a later one",
+			map[string]json.RawMessage{"cfg_scale": raw("6"), "guidance_scale": raw("7"), "negative": raw(`"a"`), "negativePrompt": raw(`"b"`), "uc": raw(`"c"`)},
+			map[string]json.RawMessage{"scale": raw("6"), "negative_prompt": raw(`"a"`)}},
+		{"negativePrompt over uc",
+			map[string]json.RawMessage{"negativePrompt": raw(`"b"`), "uc": raw(`"c"`)},
+			map[string]json.RawMessage{"negative_prompt": raw(`"b"`)}},
+		{"a null counts as absent",
+			map[string]json.RawMessage{"negative_prompt": raw("null"), "negative": raw("null"), "negativePrompt": raw(`"b"`), "steps": raw("null"), "num_inference_steps": raw("28"), "seed": raw("null")},
+			map[string]json.RawMessage{"negative_prompt": raw(`"b"`), "steps": raw("28"), "seed": raw("null")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for range 32 {
+				extras, _, apiErr := ParseExtensions(nil, tc.fields)
+				require.Nil(t, apiErr)
+				require.Equal(t, tc.want, extras)
+			}
+		})
 	}
 
 	for _, key := range []string{"cfg", "SMEA", "DYN", "addition"} {
@@ -684,8 +734,10 @@ func TestParseExtensions(t *testing.T) {
 
 	fields := FormFields(map[string][]string{
 		"negative_prompt": {"123"}, "steps": {"28"}, "qualityToggle": {"false"}, "parameters[scale]": {"6"}, "parameters[sampler]": {"k_euler"}, "prompt": {"true"},
+		"negativePrompt": {"1"}, "uc": {"2"}, "num_inference_steps": {"30"}, "width": {"832"},
 	})
 	assert.Equal(t, raw(`"123"`), fields["negative_prompt"], "a string key keeps its text")
+	assert.Equal(t, [4]json.RawMessage{raw(`"1"`), raw(`"2"`), raw("30"), raw("832")}, [4]json.RawMessage{fields["negativePrompt"], fields["uc"], fields["num_inference_steps"], fields["width"]}, "a negative prompt's aliases stay text, the others are JSON")
 	assert.Equal(t, raw("28"), fields["steps"])
 	assert.Equal(t, raw("false"), fields["qualityToggle"])
 	assert.Equal(t, raw(`"true"`), fields["prompt"])
@@ -694,10 +746,11 @@ func TestParseExtensions(t *testing.T) {
 	assert.Equal(t, map[string]json.RawMessage{"scale": raw("6"), "sampler": raw(`"k_euler"`)}, formParameters)
 }
 
-// An OpenAI images request takes NovelAI's keys from its top level or from
-// new-api's extra_fields object, the top level first. Edits take one image
-// and one mask: a request with more is rejected before any is read, so a
-// list of URLs downloads nothing.
+// An OpenAI images request takes NovelAI's keys from its top level, from
+// new-api's extra_fields object, or from an extra_body object, in that order
+// (a null falls through), and a NovelAI name in any of them over an alias.
+// Edits take one image and one mask: a request with more is rejected before
+// any is read, so a list of URLs downloads nothing.
 func TestImageGenerationIntent(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	service.InitHttpClient()
@@ -732,6 +785,12 @@ func TestImageGenerationIntent(t *testing.T) {
 	got, apiErr := intent("/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","steps":30,"extra_fields":{"negative_prompt":"bad hands","steps":10,"seed":5}}`)
 	require.Nil(t, apiErr)
 	assert.Equal(t, map[string]json.RawMessage{"negative_prompt": raw(`"bad hands"`), "seed": raw("5"), "steps": raw("30")}, got.Extras)
+	got, apiErr = intent("/v1/images/generations", `{"model":"nai-diffusion-4-5-full","prompt":"1girl","seed":null,"guidance_scale":8,`+
+		`"extra_fields":{"seed":5,"scale":6},"extra_body":{"seed":9,"scale":7,"num_inference_steps":28,"negativePrompt":"bad hands","width":832,"height":1216}}`)
+	require.Nil(t, apiErr)
+	assert.Equal(t, map[string]json.RawMessage{
+		"seed": raw("5"), "scale": raw("6"), "steps": raw("28"), "negative_prompt": raw(`"bad hands"`), "width": raw("832"), "height": raw("1216"),
+	}, got.Extras)
 
 	url := func(i int) string { return fmt.Sprintf(`{"image_url":"%s/image.png?%d"}`, server.URL, i) }
 	for _, tc := range []struct{ name, body, message string }{
@@ -768,7 +827,8 @@ func TestImageGenerationIntent(t *testing.T) {
 // first on non-Curated models unless the prompt mentions nsfw. A request
 // turns them off with qualityToggle false, qualityPresetId or ucPresetId
 // "none" (V3's none is "lowres" without a negative prompt), a channel can
-// make them opt-in, and V4 captions a request sends are used verbatim.
+// make them opt-in, and V4 captions a request sends are used verbatim. Tags
+// the client wrote itself where they would go are not added again.
 func TestBuildGenerationPresets(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	prompts := func(intent GenerationIntent) (string, string) {
@@ -808,6 +868,55 @@ func TestBuildGenerationPresets(t *testing.T) {
 	} {
 		input, _ := prompts(GenerationIntent{Model: tc.model, Prompt: tc.prompt})
 		assert.Equal(t, tc.want, input, tc.prompt)
+	}
+
+	// The quality suffix and the transparency tag go in once: a prompt that
+	// holds them where they would go, in any case or spacing and with
+	// full-width commas, keeps them as written; inside a longer word, in a
+	// Text: block or in another character field they do not count.
+	for _, tc := range []struct {
+		name, model, prompt, want string
+		extras                    map[string]json.RawMessage
+		transparent               bool
+	}{
+		{name: "at the end", model: "nai-diffusion-4-5-full", prompt: "1girl, very aesthetic, masterpiece, no text", want: "1girl, very aesthetic, masterpiece, no text"},
+		{name: "in front", model: "nai-diffusion-5-full", prompt: "very aesthetic, masterpiece, no text, 1girl", want: "very aesthetic, masterpiece, no text, 1girl"},
+		{name: "case and spacing", model: "nai-diffusion-4-5-full", prompt: "1girl,Very Aesthetic ,  masterpiece,\nNO TEXT", want: "1girl,Very Aesthetic ,  masterpiece,\nNO TEXT"},
+		{name: "full-width commas", model: "nai-diffusion-4-5-full", prompt: "1girl，very aesthetic，masterpiece，no text", want: "1girl，very aesthetic，masterpiece，no text"},
+		{name: "a second occurrence", model: "nai-diffusion-4-5-full", prompt: "avery aesthetic, masterpiece, no text, very aesthetic, masterpiece, no text", want: "avery aesthetic, masterpiece, no text, very aesthetic, masterpiece, no text"},
+		{name: "inside a word before", model: "nai-diffusion-4-5-full", prompt: "1girl, avery aesthetic, masterpiece, no text", want: "1girl, avery aesthetic, masterpiece, no text, " + qualityV5Standard},
+		{name: "inside a word after", model: "nai-diffusion-4-5-full", prompt: "very aesthetic, masterpiece, no texture", want: "very aesthetic, masterpiece, no texture, " + qualityV5Standard},
+		{name: "another preset's tags", model: "nai-diffusion-5-full", prompt: "1girl, " + qualityV5Standard, want: "1girl, " + qualityV5Standard + ", " + qualityV5Light, extras: map[string]json.RawMessage{"qualityPresetId": raw(`"light"`)}},
+		{name: "Curated's suffix", model: "nai-diffusion-4-5-curated", prompt: "1girl, " + strings.ToUpper(qualityV45Curated), want: "1girl, " + strings.ToUpper(qualityV45Curated)},
+		{name: "before a Text: block", model: "nai-diffusion-4-5-full", prompt: "1girl, very aesthetic, masterpiece, no text, Text: OPEN", want: "1girl, very aesthetic, masterpiece, no text, Text: OPEN"},
+		{name: "only in the Text: block", model: "nai-diffusion-4-5-full", prompt: "a sign, Text: very aesthetic, masterpiece, no text", want: "a sign, " + qualityV5Standard + ". Text: very aesthetic, masterpiece, no text"},
+		{name: "only in a character field", model: "nai-diffusion-4-5-full", prompt: "girl | boy, very aesthetic, masterpiece, no text", want: "girl, " + qualityV5Standard + " | boy, very aesthetic, masterpiece, no text"},
+		{name: "in one V3 mixed prompt", model: "nai-diffusion-3", prompt: "cat, " + qualityV3 + ":0.6 | dog:0.4", want: "cat, " + qualityV3 + ":0.6 | dog, " + qualityV3 + ":0.4"},
+		{name: "the transparency tag", model: "nai-diffusion-5-full", prompt: "1girl, Transparent Background", want: "1girl, Transparent Background, " + qualityV5Standard, transparent: true},
+		{name: "both", model: "nai-diffusion-5-full", prompt: "1girl, " + qualityV5Standard + ", transparent background", want: "1girl, " + qualityV5Standard + ", transparent background", transparent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			generation, _ := buildParameters(t, GenerationIntent{Model: tc.model, Prompt: tc.prompt, Extras: tc.extras, Transparent: tc.transparent})
+			assert.Equal(t, tc.want, generation.Body["input"])
+			assert.Equal(t, tc.want, generation.Prompt)
+		})
+	}
+
+	// The UC preset goes in once too, and so does "nsfw, ": a negative
+	// prompt that holds the preset keeps it as written, with "nsfw, " in
+	// front of it unless the prompt or the negative prompt has nsfw.
+	for _, tc := range []struct{ name, model, negative, want string }{
+		{"the web client's UC", "nai-diffusion-5-full", "nsfw, " + ucV5Heavy + ", bad hands", "nsfw, " + ucV5Heavy + ", bad hands"},
+		{"the preset without nsfw", "nai-diffusion-5-full", "bad hands, " + ucV5Heavy, "nsfw, bad hands, " + ucV5Heavy},
+		{"case and spacing", "nai-diffusion-4-5-full", strings.ToUpper(strings.ReplaceAll(ucV5Heavy, ", ", " ,")), "nsfw, " + strings.ToUpper(strings.ReplaceAll(ucV5Heavy, ", ", " ,"))},
+		{"nsfw in the negative prompt", "nai-diffusion-5-full", "NSFW, bad hands", ucV5Heavy + ", NSFW, bad hands"},
+		{"part of the preset", "nai-diffusion-5-full", "lowres, artistic error", "nsfw, " + ucV5Heavy + ", lowres, artistic error"},
+		{"a Curated preset", "nai-diffusion-4-5-curated", ucV45CurHeavy, ucV45CurHeavy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, negative := prompts(GenerationIntent{Model: tc.model, Prompt: "1girl", Extras: map[string]json.RawMessage{"negative_prompt": mustMarshal(t, tc.negative)}})
+			assert.Equal(t, tc.want, negative)
+		})
 	}
 
 	// A channel can make the presets opt-in.
@@ -2594,8 +2703,8 @@ func chatContext(t *testing.T, body string) (*gin.Context, *httptest.ResponseRec
 // its text parts joined by newlines; the system prompt and the history,
 // which carries earlier images as base64, are left out. An image in that
 // message makes it img2img; n is the number of images and size the canvas.
-// NovelAI's extension keys come from the top level or extra_body, the top
-// level first.
+// NovelAI's extension keys come from the top level, extra_body or
+// extra_fields, in that order, and their aliases count too.
 func TestChatGenerationIntent(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	source := testImage(32, 32, solid(color.NRGBA{G: 255, A: 255}))
@@ -2613,6 +2722,7 @@ func TestChatGenerationIntent(t *testing.T) {
 		{"string content", `{"model":"nai-diffusion-4-5-full","messages":[` + history + `,{"role":"user","content":"1girl, smile"}]}`, "1girl, smile", false, 1, "", map[string]string{}},
 		{"text parts and an image", `{"model":"nai-diffusion-4-5-full","messages":[` + history + `,{"role":"user","content":[{"type":"text","text":"1girl"},{"type":"image_url","image_url":{"url":"` + dataURL + `"}},{"type":"text","text":"smile"}]}]}`, "1girl\nsmile", true, 1, "", map[string]string{}},
 		{"n, size, extension keys and extra_body", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"n":2,"size":"832x1216","seed":7,"steps":10,"extra_body":{"steps":20,"negative_prompt":"bad hands"},"temperature":0.5}`, "a cat", false, 2, "832x1216", map[string]string{"seed": "7", "steps": "10", "negative_prompt": `"bad hands"`}},
+		{"extra_fields after extra_body, and aliases", `{"model":"nai-diffusion-4-5-full","messages":[{"role":"user","content":"a cat"}],"extra_body":{"steps":20},"extra_fields":{"steps":10,"cfg_scale":6,"uc":"lowres","width":832}}`, "a cat", false, 1, "", map[string]string{"steps": "20", "scale": "6", "negative_prompt": `"lowres"`, "width": "832"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _, request := chatContext(t, tc.body)
@@ -3795,10 +3905,10 @@ func TestImagesResponseHD(t *testing.T) {
 		assert.Equal(t, "1216x832", response.Data[0].Size)
 		assert.Equal(t, hdPNG(1216, 832, hdBaseColor(0)), images[0])
 		assert.Equal(t, 1245, response.Usage.OutputTokens)
-		fellBack(t, run, "NovelAI answered 402 (insufficient Anlas); 0 of 1 images enhanced at 1856x1280 (about 20 Anlas each); HD off for this key until ")
+		fellBack(t, run, "NovelAI answered 402 (insufficient Anlas); 0 of 1 images enhanced at 1856x1280 (about 23 Anlas each); HD off for this key until ")
 		refusal, refused := hdRefused(key)
 		require.True(t, refused)
-		assert.Equal(t, 20, refusal.needed)
+		assert.Equal(t, 23, refusal.needed, "the price at the default 28 steps")
 
 		before = len(upstream.recorded())
 		run = generate(t, key, "")
@@ -3808,9 +3918,9 @@ func TestImagesResponseHD(t *testing.T) {
 		NoteAnlas(key, 5)
 		before = len(upstream.recorded())
 		generate(t, key, "")
-		assert.Len(t, upstream.recorded(), before+1, "5 Anlas do not pay a 20-Anlas enhance")
+		assert.Len(t, upstream.recorded(), before+1, "5 Anlas do not pay a 23-Anlas enhance")
 
-		NoteAnlas(key, 20)
+		NoteAnlas(key, 23)
 		before = len(upstream.recorded())
 		run = generate(t, key, "")
 		assert.Len(t, upstream.recorded(), before+2)
@@ -4033,9 +4143,10 @@ func TestImagesStreamHD(t *testing.T) {
 	const request = `{"model":"nai-diffusion-4-5-full","prompt":"1girl","size":"512x512","n":2,"stream":true,"partial_images":2}`
 
 	t.Run("previews first, then each image after its enhance", func(t *testing.T) {
+		// The default 28 steps split in three: previews after steps 10 and 19.
 		answerWith(t, "text/event-stream", sseEvents(t,
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 7, "image": preview},
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 15, "image": preview},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 9, "image": preview},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 18, "image": preview},
 			final(0, hdPNG(512, 512, hdBaseColor(0))), final(1, hdPNG(512, 512, hdBaseColor(1)))))
 		log := &eventLog{}
 		var mu sync.Mutex
@@ -4142,8 +4253,8 @@ func TestImagesStreamHD(t *testing.T) {
 
 	t.Run("previews first, then each image after its upscale", func(t *testing.T) {
 		answerWith(t, "text/event-stream", sseEvents(t,
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 7, "image": preview},
-			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 15, "image": preview},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 9, "image": preview},
+			map[string]any{"event_type": "intermediate", "samp_ix": 0, "step_ix": 18, "image": preview},
 			final(0, hdPNG(512, 512, hdBaseColor(0))), final(1, hdPNG(512, 512, hdBaseColor(1)))))
 		log := &eventLog{}
 		var mu sync.Mutex

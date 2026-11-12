@@ -1774,6 +1774,10 @@ test('a NovelAI channel without an HD setting shows HD on, unmarked, and turning
   expect(hd).toBeChecked()
   // A request opts out on its own.
   expect(hd).toHaveAccessibleDescription(/"hd": false/)
+  // What it spends at the relay's default 28 steps.
+  expect(hd).toHaveAccessibleDescription(
+    /about 23 on V4\/V4\.5 and 35 on V5 at 28 steps/
+  )
   await user.click(hd)
   expect(hd).not.toBeChecked()
   expect(requestTab).toHaveAccessibleName(/Configured/)

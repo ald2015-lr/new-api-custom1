@@ -25,8 +25,9 @@ import (
 // image in that message (image_url: a data URL, base64, or an http(s) URL
 // through the SSRF-protected downloader) makes it img2img. n is the number
 // of images, size the canvas. The NovelAI extension keys and parameters
-// come from the request's top level or its extra_body object, the top level
-// first, as the chat request type keeps no unknown key.
+// come from the request's top level, its extra_body object or its
+// extra_fields object, in that order (mergeNestedFields), read from the
+// body, as the chat request type keeps no unknown key.
 func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (GenerationIntent, *types.NewAPIError) {
 	var message *dto.Message
 	for i := len(request.Messages) - 1; i >= 0; i-- {
@@ -73,7 +74,7 @@ func chatGenerationIntent(c *gin.Context, info *relaycommon.RelayInfo, request *
 	if err := common.Unmarshal(body, &fields); err != nil {
 		return GenerationIntent{}, invalid
 	}
-	if apiErr := mergeNestedFields(c, fields, "extra_body"); apiErr != nil {
+	if apiErr := mergeNestedFields(c, fields, "extra_body", "extra_fields"); apiErr != nil {
 		return GenerationIntent{}, apiErr
 	}
 	extras, parameters, apiErr := ParseExtensions(c, fields)
