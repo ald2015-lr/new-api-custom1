@@ -2,9 +2,11 @@ package controller
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,5 +69,40 @@ func TestModelPricingConversionAcceptsDeclaredEndpointArray(t *testing.T) {
 			assert.Equal(t, tc.wantImageCt, response.Data.BillingDetails.ImageCount,
 				"declared image-generation endpoint must drive image-count billing")
 		})
+	}
+}
+
+// The NovelAI relay charges a per-call price for each image, so a per-call
+// price on a model a NovelAI channel serves converts to a per-image
+// expression, whatever the model is called, and so does a NovelAI model an
+// OpenAI-type channel in front of a NovelAI-compatible forwarder serves.
+func TestModelPricingConversionBillsNovelAIChannelModelsPerImage(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	previousQuota := common.QuotaPerUnit
+	common.QuotaPerUnit = 500000
+	t.Cleanup(func() { common.QuotaPerUnit = previousQuota })
+	for channelType, models := range map[int][]string{
+		constant.ChannelTypeNovelAI: {"nai-diffusion-4-5-full", "anime-v4"},
+		constant.ChannelTypeOpenAI:  {"nai-diffusion-3", "nai-diffusion-4-5-full-inpainting"},
+	} {
+		channel := model.Channel{Type: channelType, Key: "pst-test", Name: "novelai", Status: common.ChannelStatusEnabled, Group: "default", Models: strings.Join(models, ",")}
+		require.NoError(t, db.Create(&channel).Error)
+		for _, name := range models {
+			require.NoError(t, db.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true}).Error)
+		}
+	}
+
+	for _, name := range []string{"nai-diffusion-4-5-full", "anime-v4", "nai-diffusion-3", "nai-diffusion-4-5-full-inpainting"} {
+		var response struct {
+			Success bool
+			Data    model.ModelPricingConversion
+		}
+		modelManagementRequest(t, PreviewModelPricingConversion, http.MethodPost, "/api/option/model_pricing/convert",
+			map[string]any{"model_name": name, "pricing": model.PricingValues{"ModelPrice": 0.02}}, &response)
+
+		require.True(t, response.Success)
+		require.Empty(t, response.Data.UnsupportedReason)
+		assert.True(t, response.Data.BillingDetails.ImageCount, name)
+		assert.Equal(t, `tier("image", fixed(0.02)) * image_count`, response.Data.Expression, name)
 	}
 }

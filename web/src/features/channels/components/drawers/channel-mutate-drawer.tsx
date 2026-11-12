@@ -141,6 +141,7 @@ import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_TASK_PLUGIN,
@@ -315,6 +316,7 @@ const SENSITIVE_FORM_FIELDS = [
   'allow_speed',
   'claude_beta_query',
   'ollama_openai_chat',
+  'novelai_presets_disabled',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -733,8 +735,14 @@ export function ChannelMutateDrawer({
         (model) => model.startsWith('gpt-') || model.startsWith('text-')
       )
     }
+    // A NovelAI channel serves only the models of NovelAI's adaptor.
+    if (currentType === CHANNEL_TYPE_NOVELAI) {
+      return (allModelsData?.data ?? [])
+        .filter((model) => model.owned_by === 'novelai')
+        .map((model) => model.id)
+    }
     return allModelsList
-  }, [allModelsList, currentType])
+  }, [allModelsData, allModelsList, currentType])
 
   // Get prefill groups
   const prefillGroups = useMemo(
@@ -1989,6 +1997,34 @@ export function ChannelMutateDrawer({
             <FormDescription>
               {t(
                 'Send chat completions to the OpenAI-compatible /v1/chat/completions instead of the native Ollama /api/chat'
+              )}
+            </FormDescription>
+          </div>
+          <FormControl>
+            <Switch
+              disabled={sensitiveLocked}
+              checked={field.value === true}
+              onCheckedChange={field.onChange}
+            />
+          </FormControl>
+        </FormItem>
+      )}
+    />
+  )
+
+  const novelAIPresetsFields = currentType === CHANNEL_TYPE_NOVELAI && (
+    <FormField
+      control={form.control}
+      name='novelai_presets_disabled'
+      render={({ field }) => (
+        <FormItem className='flex items-center justify-between px-4 py-3'>
+          <div className='space-y-0.5'>
+            <FormLabel>
+              {t('Do not add NovelAI quality tags and negative presets')}
+            </FormLabel>
+            <FormDescription>
+              {t(
+                'Applies to OpenAI-format image and chat requests, except the negative preset V5 Full Medium always uses. A request can still ask for them with qualityToggle or ucPresetId.'
               )}
             </FormDescription>
           </div>
@@ -4785,6 +4821,7 @@ export function ChannelMutateDrawer({
                 />
                 {formatFields}
                 {ollamaOpenAIChatFields}
+                {novelAIPresetsFields}
                 {thinkingFields}
                 {passthroughFields}
                 {systemPromptFields}

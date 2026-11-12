@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel/advancedcustom"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -535,6 +537,23 @@ func updateChannelNewAPIBalance(channel *model.Channel) (float64, error) {
 	return balance, nil
 }
 
+// updateChannelNovelAIBalance stores the NovelAI account's Anlas as the
+// channel balance. Anlas are not USD: the web console shows a NovelAI balance
+// as Anlas, and a balance of 0 does not disable the channel (see
+// updateAllChannelsBalance).
+func updateChannelNovelAIBalance(channel *model.Channel) (float64, error) {
+	subscription, apiErr := novelai.FetchSubscription(context.Background(), channel.GetBaseURL(), strings.TrimSpace(channel.Key), channel.GetSetting(), channel.GetHeaderOverride())
+	if apiErr != nil {
+		return 0, apiErr
+	}
+	if subscription.Anlas == nil {
+		return 0, common.NewMessage("NovelAI account response carries no valid Anlas balance")
+	}
+	balance := float64(*subscription.Anlas)
+	channel.UpdateBalance(balance)
+	return balance, nil
+}
+
 func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, error) {
 	key := strings.TrimSpace(channel.Key)
 	info := &relaycommon.RelayInfo{
@@ -663,6 +682,8 @@ func updateStandardChannelBalance(channel *model.Channel) (float64, error) {
 		return updateChannelSub2APIBalance(channel)
 	case constant.ChannelTypeNewAPI:
 		return updateChannelNewAPIBalance(channel)
+	case constant.ChannelTypeNovelAI:
+		return updateChannelNovelAIBalance(channel)
 	default:
 		return 0, common.NewMessage("Not implemented yet")
 	}
@@ -753,8 +774,11 @@ func updateAllChannelsBalance() error {
 		result, err := updateChannelBalance(channel)
 		if err != nil {
 			continue
-		} else if result.RawResponse == "" {
-			// err is nil & balance <= 0 means quota is used up
+		} else if result.RawResponse == "" && channel.Type != constant.ChannelTypeNovelAI {
+			// err is nil & balance <= 0 means quota is used up. A NovelAI
+			// balance is Anlas, and an account without Anlas still generates
+			// what its subscription covers; one it cannot pay for fails at
+			// relay time.
 			if result.Balance <= 0 {
 				service.DisableChannel(*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, "", channel.GetAutoBan()), "Insufficient balance")
 			}

@@ -52,6 +52,22 @@ var errNovelAIArchiveTooLarge = errors.New("the archive expands beyond the respo
 
 const novelAIWriteChunk = 32 << 10
 
+// SetNovelAIContentHeaders completes the headers channel.SetupApiRequestHeader
+// copied from a NovelAI generate-image request. A NovelAI JSON body may come
+// without a Content-Type, which the request validator reads as JSON: it goes
+// upstream typed application/json instead of with an empty Content-Type, so
+// upstream parses the body the way billing did. A request without an Accept
+// accepts any type, the zip NovelAI answers by default, so none is sent; an
+// empty Accept would name none.
+func SetNovelAIContentHeaders(c *gin.Context, header *http.Header) {
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "application/json")
+	}
+	if c.Request.Header.Get("Accept") == "" {
+		header.Del("Accept")
+	}
+}
+
 // NovelAIImageHandler relays a successful NovelAI generate-image response.
 //
 // Response format: /ai/generate-image answers as NovelAI does, with a zip of
@@ -167,7 +183,7 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 					info.SetFirstResponseTime()
 					c.Writer.WriteHeader(resp.StatusCode)
 					if err := forward(converted); err != nil {
-						novelAIClientLeft(info, err)
+						NovelAIClientLeft(info, err)
 						logger.LogWarn(c, common.LogText("NovelAI response stopped after %d bytes, billing the reserved %d images: %s", written, info.RequestedImageCount(), err.Error()))
 						return &dto.Usage{}, nil
 					}
@@ -198,7 +214,7 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				writeNovelAIResponseHeader(c, resp)
 			}
 			if err := forward(data); err != nil {
-				novelAIClientLeft(info, err)
+				NovelAIClientLeft(info, err)
 				logger.LogWarn(c, common.LogText("NovelAI response stopped after %d bytes, billing the reserved %d images: %s", written, info.RequestedImageCount(), err.Error()))
 				return &dto.Usage{}, nil
 			}
@@ -224,7 +240,7 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 		if c.Request.Context().Err() != nil {
 			// The client left, which also ended the upstream read.
-			novelAIClientLeft(info, readErr)
+			NovelAIClientLeft(info, readErr)
 		}
 		logger.LogWarn(c, common.LogText("NovelAI response stopped after %d bytes, billing the reserved %d images: %s", written, info.RequestedImageCount(), readErr.Error()))
 		return &dto.Usage{}, nil
@@ -249,18 +265,19 @@ func NovelAIImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 // stream endpoint opens with its headers before it generates anything.
 func novelAIReadFailed(c *gin.Context, info *relaycommon.RelayInfo, bodyStarted bool, err error) (*dto.Usage, *types.NewAPIError) {
 	if bodyStarted && c.Request.Context().Err() != nil {
-		novelAIClientLeft(info, err)
+		NovelAIClientLeft(info, err)
 		logger.LogWarn(c, common.LogText("NovelAI client left before the response reached it, billing the reserved %d images: %s", info.RequestedImageCount(), err.Error()))
 		return &dto.Usage{}, nil
 	}
 	return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 }
 
-// novelAIClientLeft records that the client left before it received the whole
-// response. Billing keeps the reserved quantity either way; the client-gone
-// end reason lets perf metrics, as on the relay streams, take the request for
-// a cancellation instead of a success sample cut short at the abort.
-func novelAIClientLeft(info *relaycommon.RelayInfo, err error) {
+// NovelAIClientLeft records that the client left before it received the whole
+// response, on the native routes and on the NovelAI channel's converted ones.
+// Billing keeps the reserved quantity either way; the client-gone end reason
+// lets perf metrics, as on the relay streams, take the request for a
+// cancellation instead of a success sample cut short at the abort.
+func NovelAIClientLeft(info *relaycommon.RelayInfo, err error) {
 	if info.StreamStatus == nil {
 		info.StreamStatus = relaycommon.NewStreamStatus()
 	}

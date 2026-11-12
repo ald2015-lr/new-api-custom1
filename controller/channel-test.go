@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/relay"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -179,6 +180,22 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 
+	if channel.Type == constant.ChannelTypeNovelAI {
+		// A test generation would spend Anlas on every manual and automatic
+		// test, so a NovelAI channel is tested by reading its account with
+		// the selected key, which is free. A rejected key fails with the
+		// upstream status, which the automatic disable rules act on.
+		key := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		if _, accountErr := novelai.FetchSubscription(ctx, channel.GetBaseURL(), key, channel.GetSetting(), channel.GetHeaderOverride()); accountErr != nil {
+			return testResult{
+				context:     c,
+				localErr:    accountErr,
+				newAPIError: accountErr,
+			}
+		}
+		return testResult{context: c}
+	}
+
 	// Determine relay format based on endpoint type or request path
 	var relayFormat types.RelayFormat
 	if endpointType != "" {
@@ -296,7 +313,21 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	//logInfo.ApiKey = ""
 	common.SysLog(common.LogText("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
 
-	priceData, err := helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
+	// The test prompt is estimated as a relay estimates it, so a test against an
+	// upstream that reports no usage, or no prompt tokens, logs the prompt
+	// instead of 0.
+	tokenMeta := request.GetTokenCountMeta()
+	promptTokens, err := service.EstimateRequestToken(c, tokenMeta, info)
+	if err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewError(err, types.ErrorCodeCountTokenFailed),
+		}
+	}
+	info.SetEstimatePromptTokens(promptTokens)
+
+	priceData, err := helper.ModelPriceHelper(c, info, promptTokens, tokenMeta)
 	if err != nil {
 		return testResult{
 			context:     c,
@@ -877,16 +908,14 @@ func TestChannel(c *gin.Context) {
 		requestCtx = c.Request.Context()
 	}
 	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
+	// A failure that is a web console message (a NovelAI account error) also
+	// carries message_key and message_params, which the console translates.
 	if result.localErr != nil {
-		resp := gin.H{
-			"success": false,
-			"message": result.localErr.Error(),
-			"time":    0.0,
-		}
+		fields := gin.H{"time": 0.0}
 		if result.newAPIError != nil {
-			resp["error_code"] = result.newAPIError.GetErrorCode()
+			fields["error_code"] = result.newAPIError.GetErrorCode()
 		}
-		c.JSON(http.StatusOK, resp)
+		common.ApiErrorStatus(c, http.StatusOK, result.localErr, fields)
 		return
 	}
 	tok := time.Now()
@@ -894,12 +923,7 @@ func TestChannel(c *gin.Context) {
 	go channel.UpdateResponseTime(milliseconds)
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success":    false,
-			"message":    result.newAPIError.Error(),
-			"time":       consumedTime,
-			"error_code": result.newAPIError.GetErrorCode(),
-		})
+		common.ApiErrorStatus(c, http.StatusOK, result.newAPIError, gin.H{"time": consumedTime, "error_code": result.newAPIError.GetErrorCode()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

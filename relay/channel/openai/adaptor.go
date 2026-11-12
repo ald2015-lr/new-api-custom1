@@ -195,18 +195,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *relaycommon.RelayInfo) error {
 	channel.SetupApiRequestHeader(info, c, header)
 	if _, ok := relayconstant.NovelAIPath(info.RelayMode); ok {
-		// A NovelAI JSON body may come without a Content-Type, which the
-		// request validator reads as JSON. Say so upstream instead of sending
-		// an empty Content-Type, so the forwarder parses the body the way
-		// billing did.
-		if header.Get("Content-Type") == "" {
-			header.Set("Content-Type", "application/json")
-		}
-		// No Accept means any type, the zip NovelAI answers by default; an
-		// empty Accept would name none.
-		if c.Request.Header.Get("Accept") == "" {
-			header.Del("Accept")
-		}
+		SetNovelAIContentHeaders(c, header)
 	}
 	if info.ChannelType == constant.ChannelTypeAzure {
 		header.Set("api-key", info.ApiKey)

@@ -3,9 +3,12 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -13,10 +16,13 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -122,6 +128,31 @@ func TestNewAPIChannelRegistration(t *testing.T) {
 	assert.Equal(t, "New API", constant.GetChannelTypeName(constant.ChannelTypeNewAPI))
 	require.Greater(t, len(constant.ChannelBaseURLs), constant.ChannelTypeNewAPI)
 	assert.Empty(t, constant.ChannelBaseURLs[constant.ChannelTypeNewAPI])
+}
+
+// NovelAI is built-in type 64: its own API type and adaptor, NovelAI's image
+// host as the default base URL, OpenAI image generation and chat completions
+// (converted) and the NovelAI native endpoint for every model but the
+// inpainting ones, which only the native endpoint (and a masked edit) serves,
+// and the official models offered without asking an upstream for a list.
+func TestNovelAIChannelRegistration(t *testing.T) {
+	apiType, ok := common.ChannelType2APIType(constant.ChannelTypeNovelAI)
+
+	require.True(t, ok)
+	assert.Equal(t, 64, constant.ChannelTypeNovelAI)
+	assert.Equal(t, constant.APITypeNovelAI, apiType)
+	assert.Equal(t, "NovelAI", constant.GetChannelTypeName(constant.ChannelTypeNovelAI))
+	assert.Equal(t, "https://image.novelai.net", constant.GetChannelBaseURL(constant.ChannelTypeNovelAI))
+	imageEndpoints := []constant.EndpointType{constant.EndpointTypeImageGeneration, constant.EndpointTypeOpenAI, constant.EndpointTypeNovelAI}
+	assert.Equal(t, imageEndpoints, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, "nai-diffusion-4-5-full"))
+	assert.Equal(t, imageEndpoints, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, "gpt-image-2"))
+	for _, inpainting := range []string{"nai-diffusion-4-5-full-inpainting", "nai-diffusion-5-full-medium-inpainting"} {
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeNovelAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeNovelAI, inpainting), inpainting)
+	}
+	assert.Equal(t, novelai.ModelList, channelId2Models[constant.ChannelTypeNovelAI])
+	models, err := fetchChannelUpstreamModelIDs(&model.Channel{Type: constant.ChannelTypeNovelAI, Key: "pst-test"})
+	require.NoError(t, err)
+	assert.Equal(t, novelai.ModelList, models)
 }
 
 func TestResponsesCompactChannelSupport(t *testing.T) {
@@ -533,4 +564,205 @@ func TestHealthCheckIgnoresTestsThatNeverReachTheChannel(t *testing.T) {
 	})
 
 	assert.Equal(t, channelTestSummary{}, summary)
+}
+
+// A NovelAI channel test, manual or automatic, reads the account with the
+// channel key (GET /user/subscription), which spends no Anlas, and never
+// generates. A rejected key fails with NovelAI's 401, which the automatic
+// disable rules act on.
+func TestNovelAIChannelTestReadsTheAccountInsteadOfGenerating(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	originalAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = originalAutoDisable })
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer pst-valid" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"statusCode":401,"message":"Invalid accessToken."}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"tier":3,"active":true,"trainingStepsLeft":{"fixedTrainingStepsLeft":10000,"purchasedTrainingSteps":0}}`))
+	}))
+	t.Cleanup(server.Close)
+	user := model.User{Username: "novelai-tester", Status: common.UserStatusEnabled, Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+
+	for _, tc := range []struct {
+		key        string
+		wantStatus int
+	}{
+		{key: "pst-valid"},
+		{key: "pst-revoked", wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			paths = nil
+			channel := &model.Channel{Type: constant.ChannelTypeNovelAI, Key: tc.key, Name: "novelai", Status: common.ChannelStatusEnabled,
+				Group: "default", Models: "nai-diffusion-4-5-full", BaseURL: common.GetPointer(server.URL)}
+			require.NoError(t, db.Create(channel).Error)
+
+			result := testChannel(context.Background(), channel, user.Id, "", "", false)
+
+			require.NotNil(t, result.context, "the test reached the channel")
+			assert.Equal(t, []string{"GET /user/subscription"}, paths)
+			if tc.wantStatus == 0 {
+				require.NoError(t, result.localErr)
+				assert.Nil(t, result.newAPIError)
+				return
+			}
+			require.NotNil(t, result.newAPIError)
+			assert.Equal(t, tc.wantStatus, result.newAPIError.StatusCode)
+			assert.Equal(t, "NovelAI account answered HTTP 401: Invalid accessToken.", result.localErr.Error())
+			assert.True(t, service.ShouldDisableChannel(result.newAPIError))
+		})
+	}
+
+	// The console shows the failure of a test it runs in its own language.
+	t.Run("the console receives the failure as a translatable message", func(t *testing.T) {
+		channel := &model.Channel{Type: constant.ChannelTypeNovelAI, Key: "pst-revoked", Name: "novelai", Status: common.ChannelStatusEnabled,
+			Group: "default", Models: "nai-diffusion-4-5-full", BaseURL: common.GetPointer(server.URL)}
+		require.NoError(t, db.Create(channel).Error)
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("id", user.Id)
+		ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+		ctx.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/channel/test/%d", channel.Id), nil)
+
+		TestChannel(ctx)
+
+		var response struct {
+			Success       bool           `json:"success"`
+			Message       string         `json:"message"`
+			MessageKey    string         `json:"message_key"`
+			MessageParams map[string]any `json:"message_params"`
+			ErrorCode     string         `json:"error_code"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		assert.False(t, response.Success)
+		assert.Equal(t, "NovelAI account answered HTTP 401: Invalid accessToken.", response.Message)
+		assert.Equal(t, "NovelAI account answered HTTP {{status}}: {{message}}", response.MessageKey)
+		assert.Equal(t, map[string]any{"status": float64(http.StatusUnauthorized), "message": "Invalid accessToken."}, response.MessageParams)
+		assert.Equal(t, "bad_response_status_code", response.ErrorCode)
+	})
+}
+
+// A forwarder in front of NovelAI answers chat with the image as Markdown
+// base64, 541,232 characters here, often without usage. Channel tests of it
+// logged "0 / 206,049": the test prompt was never estimated and the base64 was
+// counted as completion text. A forwarder that counts characters in a streamed
+// usage chunk logged "0 / 541,232". The fake mirrors the forwarder used to
+// reproduce the report: the model name picks the usage shape.
+func TestChannelTestCountsInlineImagesAsImages(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	models := []string{"nai-md-nousage", "nai-md-zerousage", "nai-md-lencount", "nai-md-usage"}
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	ratios, err := common.Marshal(map[string]float64{models[0]: 1, models[1]: 1, models[2]: 1, models[3]: 1})
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratios)))
+	originalLogConsume, originalCountToken, originalTimeout := common.LogConsumeEnabled, constant.CountToken, constant.StreamingTimeout
+	common.LogConsumeEnabled, constant.CountToken, constant.StreamingTimeout = true, true, 30
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, constant.CountToken, constant.StreamingTimeout = originalLogConsume, originalCountToken, originalTimeout
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios))
+	})
+
+	rng := rand.New(rand.NewPCG(1, 2))
+	payload := make([]byte, 405_900)
+	for i := range payload {
+		payload[i] = byte(rng.UintN(256))
+	}
+	content := "![image](data:image/png;base64," + base64.StdEncoding.EncodeToString(payload) + ")"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		if err := common.DecodeJson(r.Body, &request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var usage map[string]int
+		switch request.Model {
+		case "nai-md-zerousage":
+			usage = map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+		case "nai-md-lencount":
+			usage = map[string]int{"prompt_tokens": 0, "completion_tokens": len(content), "total_tokens": len(content)}
+		case "nai-md-usage":
+			usage = map[string]int{"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13}
+		}
+		if !request.Stream {
+			response := map[string]any{"id": "chatcmpl-x", "object": "chat.completion", "created": 1, "model": request.Model,
+				"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": content}, "finish_reason": "stop"}}}
+			if usage != nil {
+				response["usage"] = usage
+			}
+			body, _ := common.Marshal(response)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(body)
+			return
+		}
+		events := []map[string]any{
+			{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}},
+			{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": content}}}},
+			{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}},
+		}
+		if usage != nil {
+			events = append(events, map[string]any{"choices": []any{}, "usage": usage})
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range events {
+			event["id"], event["object"], event["created"], event["model"] = "chatcmpl-x", "chat.completion.chunk", 1, request.Model
+			body, _ := common.Marshal(event)
+			_, _ = w.Write([]byte("data: " + string(body) + "\n\n"))
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	user := model.User{Username: "forwarder-tester", Status: common.UserStatusEnabled, Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "sk-test", Name: "nai-forwarder", Status: common.ChannelStatusEnabled,
+		Group: "default", Models: strings.Join(models, ","), BaseURL: common.GetPointer(server.URL)}
+	require.NoError(t, db.Create(channel).Error)
+
+	// What a relay reserves for the test request ("hi").
+	estimateContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(estimateContext, constant.ContextKeyOriginalModel, models[0])
+	promptEstimate, err := service.CountRequestToken(estimateContext, buildTestRequest(models[0], "", channel, false).GetTokenCountMeta(),
+		&relaycommon.RelayInfo{RelayFormat: relaytypes.RelayFormatOpenAI})
+	require.NoError(t, err)
+	require.Positive(t, promptEstimate)
+
+	for _, tc := range []struct {
+		model          string
+		stream         bool
+		wantPrompt     int
+		wantCompletion int
+	}{
+		// No usage, or only zeros: was "0 / 206,049".
+		{model: "nai-md-nousage", wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		{model: "nai-md-nousage", stream: true, wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		{model: "nai-md-zerousage", wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		{model: "nai-md-zerousage", stream: true, wantPrompt: promptEstimate, wantCompletion: service.InlineImageCompletionTokens},
+		// Upstream's own completion count is kept; its missing prompt was "0".
+		{model: "nai-md-lencount", wantPrompt: promptEstimate, wantCompletion: len(content)},
+		{model: "nai-md-lencount", stream: true, wantPrompt: promptEstimate, wantCompletion: len(content)},
+		// Complete upstream usage is kept as it is.
+		{model: "nai-md-usage", wantPrompt: 12, wantCompletion: 1},
+		{model: "nai-md-usage", stream: true, wantPrompt: 12, wantCompletion: 1},
+	} {
+		t.Run(fmt.Sprintf("%s stream=%v", tc.model, tc.stream), func(t *testing.T) {
+			result := testChannel(context.Background(), channel, user.Id, tc.model, "", tc.stream)
+
+			require.NoError(t, result.localErr)
+			var log model.Log
+			require.NoError(t, db.Order("id desc").First(&log).Error)
+			assert.Equal(t, tc.model, log.ModelName)
+			assert.Equal(t, tc.stream, log.IsStream)
+			assert.Equal(t, tc.wantPrompt, log.PromptTokens)
+			assert.Equal(t, tc.wantCompletion, log.CompletionTokens)
+		})
+	}
 }

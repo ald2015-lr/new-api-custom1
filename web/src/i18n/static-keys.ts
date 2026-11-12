@@ -93,6 +93,16 @@ export const STATIC_I18N_KEYS = [
   'Connect to self-hosted models served by vLLM',
   'vLLM server address, without /v1',
   'vLLM API key, or EMPTY if authentication is disabled',
+  'NovelAI',
+  "Generate images with NovelAI's official API (native and OpenAI formats)",
+  'NovelAI persistent API token (pst-...)',
+  // NovelAI account (channel test and balance) messages sent by the backend.
+  'NovelAI account request failed: {{error}}',
+  'NovelAI account answered HTTP {{status}}',
+  'NovelAI account answered HTTP {{status}}: {{message}}',
+  'NovelAI account response exceeds {{limit}} bytes',
+  'NovelAI account response is not a subscription',
+  'NovelAI account response carries no valid Anlas balance',
 
   'Price per image',
   'Per image',

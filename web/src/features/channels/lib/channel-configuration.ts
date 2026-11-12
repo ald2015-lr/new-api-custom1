@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import type { FieldErrors, FieldPath } from 'react-hook-form'
 
 import {
+  CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   MODEL_FETCHABLE_TYPES,
@@ -62,6 +63,7 @@ const CONFIGURATION_BLOCKS = {
       'pass_through_body_enabled',
       'responses_websocket_enabled',
       'ollama_openai_chat',
+      'novelai_presets_disabled',
       'system_prompt',
       'system_prompt_override',
     ],
@@ -158,6 +160,8 @@ export function getChannelConfigurationState(
       (supportsResponsesWebSocket(values.type) &&
         values.responses_websocket_enabled) ||
       (values.type === CHANNEL_TYPE_OLLAMA && values.ollama_openai_chat) ||
+      (values.type === CHANNEL_TYPE_NOVELAI &&
+        values.novelai_presets_disabled) ||
       values.system_prompt?.trim() ||
       values.system_prompt_override
     ),

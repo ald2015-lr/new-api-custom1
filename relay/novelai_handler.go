@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -38,12 +37,14 @@ func (e *NovelAIUpstreamError) Error() string { return e.Err.Error() }
 
 func (e *NovelAIUpstreamError) Unwrap() error { return e.Err }
 
-// NovelAIImageHelper relays the NovelAI native generate-image endpoints. The
-// client body (JSON, or multipart with its original boundary) goes to the
-// channel base URL + the NovelAI path byte for byte, so model mapping and
-// parameter overrides do not apply. The call is billed like an OpenAI image
-// request: parameters.n_samples is reserved as the image count before each
-// attempt, and a successful response settles at the images it carries.
+// NovelAIImageHelper relays the NovelAI native generate-image endpoints, to a
+// NovelAI channel (NovelAI's official API) or to an OpenAI-type channel whose
+// base URL is a NovelAI-compatible forwarder. The client body (JSON, or
+// multipart with its original boundary) goes to the channel base URL + the
+// NovelAI path byte for byte, so model mapping and parameter overrides do not
+// apply. The call is billed like an OpenAI image request: parameters.n_samples
+// is reserved as the image count before each attempt, and a successful
+// response settles at the images it carries.
 //
 // Another channel is tried only when this one answered with an error status
 // (under the usual retry policy) or provably received nothing; once the
@@ -56,8 +57,10 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	// transport write SSE headers and pings into a binary response.
 	info.IsStream = false
 
-	// Only the OpenAI adaptor on a plain base URL builds the NovelAI path.
-	if info.ApiType != constant.APITypeOpenAI || info.ChannelType == constant.ChannelTypeAzure || info.ChannelType == constant.ChannelTypeCustom {
+	// A NovelAI channel, or the OpenAI adaptor on a plain base URL (a
+	// NovelAI-compatible forwarder), builds the NovelAI path.
+	forwarder := info.ApiType == constant.APITypeOpenAI && info.ChannelType != constant.ChannelTypeAzure && info.ChannelType != constant.ChannelTypeCustom
+	if info.ApiType != constant.APITypeNovelAI && !forwarder {
 		// Retryable: another channel of the model may serve it.
 		return types.NewError(errors.New(i18n.T(c, i18n.MsgNovelAIChannelUnsupported)), types.ErrorCodeInvalidRequest)
 	}
@@ -87,23 +90,11 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 
 	// NovelAI has no idempotency guarantee: a request that may have reached
 	// it may already have spent Anlas, so it is never sent a second time.
-	// Only a failure that proves nothing was sent stays retryable: one raised
-	// before the round trip (the transport reports its own failures as a
-	// *url.Error; a URL that does not parse is one too, with Op "parse"), or
-	// a connection that could not be made: a dial failure anywhere in the
-	// chain, which a SOCKS proxy wraps in its own "socks connect" error.
+	// Only a failure that proves nothing was sent stays retryable.
 	resp, err := adaptor.DoRequest(c, info, common.NewReplayableBodyReader(storage))
 	if err != nil {
 		apiErr := types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
-		var roundTripErr *url.Error
-		var dialErr *net.OpError
-		var dnsErr *net.DNSError
-		attempted := errors.As(err, &roundTripErr) && roundTripErr.Op != "parse"
-		notConnected := errors.As(err, &dnsErr)
-		for chain := err; !notConnected && errors.As(chain, &dialErr); chain = dialErr.Err {
-			notConnected = dialErr.Op == "dial" || dialErr.Op == "proxyconnect"
-		}
-		if attempted && !notConnected {
+		if novelai.RequestMayHaveReachedUpstream(err) {
 			types.ErrOptionWithSkipRetry()(apiErr)
 		}
 		return apiErr

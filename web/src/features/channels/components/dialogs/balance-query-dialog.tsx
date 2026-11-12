@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, DollarSign } from 'lucide-react'
+import { Coins, Loader2, RefreshCw, DollarSign } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -30,12 +30,14 @@ import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { IconBadge } from '@/components/ui/icon-badge'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatCurrencyFromUSD } from '@/lib/currency'
-import { formatTimestampToDate } from '@/lib/format'
+import { formatNumber, formatTimestampToDate } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getCodexUsage, updateChannelBalance } from '../../api'
+import { CHANNEL_TYPE_NOVELAI } from '../../constants'
 import { channelsQueryKeys } from '../../lib'
 import { useChannels } from '../channels-provider'
 import {
@@ -50,7 +52,7 @@ type BalanceQueryDialogProps = {
 }
 
 export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const { currentRow, setCurrentRow } = useChannels()
   const queryClient = useQueryClient()
   const [isQuerying, setIsQuerying] = useState(false)
@@ -65,6 +67,8 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
     useState<CodexUsageDialogData | null>(null)
 
   const isCodex = currentRow?.type === 57
+  // A NovelAI channel's balance is its account's Anlas, not USD.
+  const isAnlasBalance = currentRow?.type === CHANNEL_TYPE_NOVELAI
 
   const handleQueryCodexUsage = async () => {
     const row = currentRow
@@ -136,12 +140,21 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
     props.onOpenChange(false)
   }
 
-  const formatBalance = (bal: number) =>
-    formatCurrencyFromUSD(bal, {
+  const formatBalance = (bal: number) => {
+    if (isAnlasBalance) {
+      return t('{{anlas}} Anlas', {
+        anlas: formatNumber(
+          bal,
+          toIntlLocale(i18n.resolvedLanguage || i18n.language)
+        ),
+      })
+    }
+    return formatCurrencyFromUSD(bal, {
       digitsLarge: 2,
       digitsSmall: 4,
       abbreviate: false,
     })
+  }
 
   const formatDate = (timestamp: number) => {
     if (!timestamp) return 'Never'
@@ -210,7 +223,7 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
             <div className='bg-muted/50 rounded-lg border p-4'>
               <div className='text-muted-foreground mb-2 flex items-center gap-2 text-sm'>
                 <IconBadge tone='success' size='xs'>
-                  <DollarSign />
+                  {isAnlasBalance ? <Coins /> : <DollarSign />}
                 </IconBadge>
                 <span>{t('Current Balance')}</span>
               </div>

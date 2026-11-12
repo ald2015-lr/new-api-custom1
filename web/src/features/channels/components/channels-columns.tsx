@@ -52,7 +52,11 @@ import {
   formatQuotaWithCurrency,
   getCurrencyLabel,
 } from '@/lib/currency'
-import { formatNumber, formatTimestampToDate } from '@/lib/format'
+import {
+  formatCompactNumber,
+  formatNumber,
+  formatTimestampToDate,
+} from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import {
   createServerError,
@@ -63,6 +67,7 @@ import { cn, truncateText } from '@/lib/utils'
 import { getCodexUsage, updateChannelBalance } from '../api'
 import {
   CHANNEL_STATUS_CONFIG,
+  CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
@@ -417,11 +422,11 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     )
   }
   const usedFull = formatQuotaFull(usedQuota)
-  const remainingFull = withSuffix(
+  let remainingFull = withSuffix(
     formatCurrencyFromUSD(balance, balanceFormatOptions)
   )
   const usedDisplay = formatQuotaInline(usedQuota)
-  const remainingDisplay =
+  let remainingDisplay =
     remainingFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
           formatCurrencyFromUSD(balance, {
@@ -431,6 +436,16 @@ export function BalanceCell({ channel }: { channel: Channel }) {
           })
         )
       : remainingFull
+  // A NovelAI channel's balance is its account's Anlas, not USD.
+  const isAnlasBalance = channel.type === CHANNEL_TYPE_NOVELAI
+  if (isAnlasBalance) {
+    const anlas = formatNumber(balance, locale)
+    remainingFull = t('{{anlas}} Anlas', { anlas })
+    remainingDisplay =
+      anlas.length > MAX_INLINE_BALANCE_CHARS
+        ? t('{{anlas}} Anlas', { anlas: formatCompactNumber(balance, locale) })
+        : remainingFull
+  }
   const usedLabel = `${t('Used:')} ${usedFull}`
   const remainingLabel = `${t('Remaining:')} ${remainingFull}`
   const maskedUsedLabel = `${t('Used:')} ${SENSITIVE_MASK}`
@@ -466,7 +481,10 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   }
 
   // Regular channel row: show used and remaining with click to update
-  const variant = getBalanceVariant(balance)
+  let variant = getBalanceVariant(balance)
+  if (isAnlasBalance) {
+    variant = balance > 0 ? 'success' : 'neutral'
+  }
   const isInferenceChannel =
     channel.type === CHANNEL_TYPE_VLLM || channel.type === CHANNEL_TYPE_SGLANG
   const inferenceStatusLabel =
@@ -502,14 +520,17 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     try {
       const response = await updateChannelBalance(channel.id)
       if (response.success && response.balance !== undefined) {
-        toast.success(
-          t('Balance updated: {{balance}}', {
-            balance: formatCurrencyFromUSD(response.balance, {
+        const updatedBalance = isAnlasBalance
+          ? t('{{anlas}} Anlas', {
+              anlas: formatNumber(response.balance, locale),
+            })
+          : formatCurrencyFromUSD(response.balance, {
               digitsLarge: 2,
               digitsSmall: 4,
               abbreviate: false,
-            }),
-          })
+            })
+        toast.success(
+          t('Balance updated: {{balance}}', { balance: updatedBalance })
         )
         void queryClient.invalidateQueries({
           queryKey: channelsQueryKeys.lists(),

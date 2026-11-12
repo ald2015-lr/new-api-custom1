@@ -109,7 +109,7 @@ function buildChatSample(lang: Lang, ctx: SampleContext): string {
       `curl ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${bodyJson.replace(/\n/g, '\n     ')}'`,
+      `  -d '${bodyJson.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
 
@@ -177,7 +177,7 @@ function buildAnthropicSample(lang: Lang, ctx: SampleContext): string {
       `  -H "x-api-key: $${ctx.apiKeyEnv}" \\`,
       `  -H "anthropic-version: 2023-06-01" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -249,7 +249,7 @@ function buildGeminiSample(lang: Lang, ctx: SampleContext): string {
     return [
       `curl '${url}' \\`,
       `  -H 'Content-Type: application/json' \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -299,7 +299,7 @@ function buildEmbeddingSample(lang: Lang, ctx: SampleContext): string {
       `curl ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -351,6 +351,12 @@ function buildEmbeddingSample(lang: Lang, ctx: SampleContext): string {
   ].join('\n')
 }
 
+// Providers answer an image as base64 (b64_json, the default of gpt-image
+// models and NovelAI) or as a URL, so every sample saves or prints whichever
+// the response carries. An answer without an image (an error) is printed:
+// the fetch sample prints its status and body as received, the cURL sample
+// prints a JSON error through jq (a non-JSON one, such as a proxy's HTML
+// page, leaves only jq's parse error). The SDKs throw on one themselves.
 function buildImageSample(lang: Lang, ctx: SampleContext): string {
   const url = `${ctx.baseUrl}${ctx.endpointPath}`
   const prompt = 'A serene koi pond at sunset, ukiyo-e style.'
@@ -361,15 +367,26 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
       null,
       2
     )
+    // b64_json is saved to image.png; otherwise the url is printed, or the
+    // whole answer when it carries no image (an error). printf, not echo:
+    // zsh, dash and bash with xpg_echo turn the \n escapes of JSON strings
+    // into newlines, which jq rejects.
     return [
-      `curl ${url} \\`,
+      `response=$(curl -sS ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}')`,
+      `if image=$(printf '%s\\n' "$response" | jq -er '.data[0].b64_json'); then`,
+      `  printf '%s' "$image" | base64 --decode > image.png`,
+      `else`,
+      `  printf '%s\\n' "$response" | jq -r '.data[0].url // .'`,
+      `fi`,
     ].join('\n')
   }
   if (lang === 'python') {
     return [
+      'import base64',
+      '',
       'from openai import OpenAI',
       '',
       `client = OpenAI(base_url="${ctx.baseUrl}/v1", api_key="<YOUR_API_KEY>")`,
@@ -381,11 +398,17 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
       `    n=1,`,
       ')',
       '',
-      'print(response.data[0].url)',
+      'image = response.data[0]',
+      'if image.b64_json:',
+      '    with open("image.png", "wb") as f:',
+      '        f.write(base64.b64decode(image.b64_json))',
+      'else:',
+      '    print(image.url)',
     ].join('\n')
   }
   if (lang === 'typescript') {
     return [
+      `import { writeFileSync } from 'node:fs'`,
       `import OpenAI from 'openai'`,
       '',
       `const client = new OpenAI({`,
@@ -400,10 +423,17 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
       `  n: 1,`,
       `})`,
       '',
-      `console.log(response.data[0].url)`,
+      `const image = response.data?.[0]`,
+      `if (image?.b64_json) {`,
+      `  writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
+      `} else {`,
+      `  console.log(image?.url)`,
+      `}`,
     ].join('\n')
   }
   return [
+    `import { writeFileSync } from 'node:fs'`,
+    '',
     `const response = await fetch('${url}', {`,
     `  method: 'POST',`,
     `  headers: {`,
@@ -418,8 +448,15 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
     `  }),`,
     `})`,
     '',
-    `const data = await response.json()`,
-    `console.log(data.data[0].url)`,
+    `const body = await response.text()`,
+    `const image = response.ok ? JSON.parse(body).data?.[0] : undefined`,
+    `if (image?.b64_json) {`,
+    `  writeFileSync('image.png', Buffer.from(image.b64_json, 'base64'))`,
+    `} else if (image?.url) {`,
+    `  console.log(image.url)`,
+    `} else {`,
+    `  console.error(response.status, body)`,
+    `}`,
   ].join('\n')
 }
 
@@ -430,8 +467,9 @@ function buildSample(
 ): string {
   if (endpointType === 'anthropic') return buildAnthropicSample(lang, ctx)
   if (endpointType === 'gemini') return buildGeminiSample(lang, ctx)
-  if (endpointType === 'embeddings' || endpointType === 'jina-rerank')
+  if (endpointType === 'embeddings' || endpointType === 'jina-rerank') {
     return buildEmbeddingSample(lang, ctx)
+  }
   if (endpointType === 'image-generation') return buildImageSample(lang, ctx)
   return buildChatSample(lang, ctx)
 }

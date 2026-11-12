@@ -160,6 +160,12 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7
+	} else if usage.PromptTokens == 0 && usage.CompletionTokens > 0 {
+		// Some forwarders report only completion tokens. The prompt was still
+		// sent, so it is filled from the request estimate, as OpenaiHandler does
+		// for a non-stream response; the relayed usage chunk stays as received.
+		usage.PromptTokens = info.GetEstimatePromptTokens()
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(usageFrame))
@@ -285,8 +291,9 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 		completionTokens := simpleResponse.Usage.CompletionTokens
 		if completionTokens == 0 {
 			for _, choice := range simpleResponse.Choices {
-				ctkm := tokenkit.Count(info.UpstreamModelName, choice.Message.StringContent()+choice.Message.GetReasoningContent())
-				completionTokens += ctkm
+				// An image returned as Markdown base64 counts as one image.
+				text, images := service.StripInlineImages(choice.Message.StringContent() + choice.Message.GetReasoningContent())
+				completionTokens += tokenkit.Count(info.UpstreamModelName, text) + len(images)*service.InlineImageCompletionTokens
 			}
 		}
 		fallbackUsage := &dto.Usage{

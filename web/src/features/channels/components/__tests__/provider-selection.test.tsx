@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { act, render, screen, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
@@ -697,6 +697,52 @@ test('every built-in provider has a description and Anthropic includes compatibl
   expect(
     within(anthropic).getByText('接入 Anthropic API 或兼容其接口的服务')
   ).toBeVisible()
+})
+
+test('NovelAI is a built-in provider with its logo, description and type number', async () => {
+  const language = createInstance()
+  await language.init({
+    lng: 'en',
+    fallbackLng: 'en',
+    resources: { en: { translation: {} }, zhCN: zh },
+  })
+  const select = vi.fn()
+  const user = userEvent.setup()
+  render(
+    <I18nextProvider i18n={language}>
+      <ChannelProviderPicker
+        isCreating
+        plugins={[]}
+        canBindPlugin={false}
+        loading={false}
+        failed={false}
+        disabled={false}
+        onRetry={vi.fn()}
+        onSelect={select}
+      />
+    </I18nextProvider>
+  )
+  await user.click(screen.getByRole('tab', { name: 'Built-in' }))
+  await user.type(screen.getByRole('combobox'), '64')
+
+  const novelAI = screen.getByRole('option', { name: 'NovelAI Built-in #64' })
+  expect(novelAI).toHaveAccessibleDescription(
+    "Generate images with NovelAI's official API (native and OpenAI formats)"
+  )
+  // The NovelAI logo is an SVG titled NovelAI, next to the titled label.
+  await waitFor(() =>
+    expect(
+      within(novelAI)
+        .getAllByTitle('NovelAI')
+        .some((element) => element.closest('svg') !== null)
+    ).toBe(true)
+  )
+  await act(() => language.changeLanguage('zhCN'))
+  expect(novelAI).toHaveAccessibleDescription(
+    '接入 NovelAI 官方图像生成接口（原生与 OpenAI 格式）'
+  )
+  await user.click(novelAI)
+  expect(select).toHaveBeenCalledWith({ kind: 'builtin', type: 64 })
 })
 
 test('deprecated and flexible integration badges preserve provider selection and expose the full explanation', async () => {

@@ -20,6 +20,7 @@ import {
   CHANNEL_TYPES,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
+  CHANNEL_TYPE_NOVELAI,
 } from '../constants'
 
 // ============================================================================
@@ -178,6 +179,14 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       baseUrl: 'Base URL is required for this channel type',
       key: 'Enter API key for this channel',
       models: 'Models',
+    },
+  },
+  [CHANNEL_TYPE_NOVELAI]: {
+    id: CHANNEL_TYPE_NOVELAI,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_NOVELAI],
+    icon: 'NovelAI',
+    hints: {
+      key: 'NovelAI persistent API token (pst-...)',
     },
   },
 }

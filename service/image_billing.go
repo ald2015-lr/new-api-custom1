@@ -13,6 +13,24 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// PrepareChatImageBilling reserves, before each attempt, the images a chat
+// completion asks for from a channel that answers chat with generated
+// images (NovelAI). Per-call prices and image_count expressions reserve
+// count images as image requests do, and settle through UpdateImageCount; a
+// price that does not depend on the quantity keeps the chat's reservation,
+// and the count only reaches the consume log. count 1 turns a later attempt
+// on another channel back into a plain chat call.
+func PrepareChatImageBilling(c *gin.Context, info *relaycommon.RelayInfo, count int) *types.NewAPIError {
+	if snap := info.TieredBillingSnapshot; info.PriceData.UsePrice || snap != nil && snap.BillingMode == "tiered_expr" {
+		return PrepareImageBillingForRequest(c, info, count)
+	}
+	if count < 1 || count > dto.MaxImageN {
+		return types.NewErrorWithStatusCode(fmt.Errorf("image_count must be an integer between 1 and %d", dto.MaxImageN), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	info.ImageRequestCount = count
+	return nil
+}
+
 // PrepareImageBillingForRequest reserves the effective outbound image quantity
 // before each attempt, including channel retries and parameter overrides. The
 // client request body stays frozen; only the independent quantity is refreshed.

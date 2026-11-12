@@ -35,7 +35,7 @@ type Channel struct {
 	ResponseTime       int     `json:"response_time"` // in milliseconds
 	BaseURL            *string `json:"base_url" gorm:"column:base_url;default:''"`
 	Other              string  `json:"other"`
-	Balance            float64 `json:"balance"` // in USD
+	Balance            float64 `json:"balance"` // in USD; a NovelAI channel's is its account's Anlas
 	BalanceUpdatedTime int64   `json:"balance_updated_time" gorm:"bigint"`
 	Models             string  `json:"models"`
 	Group              string  `json:"group" gorm:"type:varchar(64);default:'default'"`
@@ -78,6 +78,8 @@ type ChannelSortOptions struct {
 	IDSort    bool
 }
 
+// The balance sort compares the stored numbers, which are in mixed units: USD
+// for most channels and Anlas for NovelAI channels.
 var channelSortColumns = map[string]string{
 	"id":            "id",
 	"name":          "name",
@@ -630,6 +632,17 @@ func (channel *Channel) UpdateBalance(balance float64) {
 	if err != nil {
 		common.SysLog(common.LogText("failed to update balance: channel_id=%d, error=%v", channel.Id, err))
 	}
+}
+
+// ClearBalance forgets the channel's balance, as if it had never been
+// queried, for a balance whose unit no longer matches the channel type.
+func (channel *Channel) ClearBalance() {
+	err := DB.Model(channel).Select("balance_updated_time", "balance").Updates(Channel{}).Error
+	if err != nil {
+		common.SysLog(common.LogText("failed to clear balance: channel_id=%d, error=%v", channel.Id, err))
+		return
+	}
+	channel.Balance, channel.BalanceUpdatedTime = 0, 0
 }
 
 func (channel *Channel) Delete() error {

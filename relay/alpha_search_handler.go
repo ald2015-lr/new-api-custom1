@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -26,6 +27,8 @@ func AlphaSearchHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError
 		constant.ChannelTypeNewAPI,
 		constant.ChannelTypeCodex,
 		constant.ChannelTypeAdvancedCustom:
+	case constant.ChannelTypeNovelAI:
+		return novelai.ErrNativeOnly(c)
 	default:
 		// Allow retry onto another channel that may support this endpoint.
 		return types.NewError(

@@ -45,6 +45,14 @@ func WriteStreamError(c *gin.Context, relayFormat types.RelayFormat, apiErr *typ
 			return
 		}
 		_ = ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "error"}, string(payload))
+	case types.RelayFormatOpenAIImage:
+		// OpenAI's image streams end with an error event, typed like their
+		// other events, and send no [DONE].
+		payload, err := common.Marshal(gin.H{"type": "error", "error": apiErr.ToOpenAIError(upstreamURLs...)})
+		if err != nil {
+			return
+		}
+		_ = ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "error"}, string(payload))
 	case types.RelayFormatGemini:
 		// The envelope Google APIs use for errors, status included.
 		_ = ObjectData(c, gin.H{"error": gin.H{

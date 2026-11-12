@@ -467,6 +467,7 @@
   "failed to check the successful request limit: %s": "检查成功请求数限制失败: %s",
   "failed to check the total request limit: %s": "检查总请求数限制失败: %s",
   "failed to cleanup expired perf metrics: %s": "清理过期性能指标失败: %s",
+  "failed to clear balance: channel_id=%d, error=%v": "清除余额失败: channel_id=%d, error=%v",
   "failed to clone channel: %s": "复制渠道失败: %s",
   "failed to close database: %s": "关闭数据库失败: %s",
   "failed to close response body: %s": "关闭响应体失败: %s",
