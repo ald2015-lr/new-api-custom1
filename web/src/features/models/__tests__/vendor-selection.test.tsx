@@ -30,6 +30,7 @@ import type { BuiltinVendor, Vendor } from '../types'
 
 const builtinVendors: BuiltinVendor[] = [
   { name: 'OpenAI', icon: 'OpenAI' },
+  { name: 'Google', icon: 'Gemini.Color' },
   { name: 'NovelAI', icon: 'NovelAI' },
 ]
 
@@ -126,6 +127,19 @@ describe('vendor selection in the model editor', () => {
         { skipBusinessError: true, skipErrorHandler: true }
       )
     )
+  })
+
+  it('narrows the built-in vendors to the names that contain the typed text', async () => {
+    mockVendorApi()
+    const { user, vendor } = await renderNewModel('nai-diffusion')
+
+    await user.type(vendor, 'n')
+    expect(
+      await screen.findByRole('option', { name: /^NovelAI/ })
+    ).toBeVisible()
+    expect(
+      screen.queryByRole('option', { name: /^Google/ })
+    ).not.toBeInTheDocument()
   })
 
   it('creates a typed vendor name that no vendor has in any case and selects it', async () => {

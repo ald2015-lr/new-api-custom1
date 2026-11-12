@@ -29,7 +29,9 @@ import { vendorsQueryKeys } from '../lib'
 import type { BuiltinVendor, Vendor } from '../types'
 import { vendorErrorMessage } from '../vendor-api'
 
-const BUILTIN_VALUE_PREFIX = 'builtin:'
+// The combobox also searches option values, so the prefix holds no letter or
+// digit that typed text could match on every built-in vendor.
+const BUILTIN_VALUE_PREFIX = '#'
 
 type VendorSelectProps = {
   vendors: readonly Vendor[]
