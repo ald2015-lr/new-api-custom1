@@ -353,8 +353,10 @@ function buildEmbeddingSample(lang: Lang, ctx: SampleContext): string {
 
 // Providers answer an image as base64 (b64_json, the default of gpt-image
 // models and NovelAI) or as a URL, so every sample saves or prints whichever
-// the response carries. The cURL and fetch samples print an answer without
-// an image (an error) as received; the SDKs throw on one themselves.
+// the response carries. An answer without an image (an error) is printed:
+// the fetch sample prints its status and body as received, the cURL sample
+// prints a JSON error through jq (a non-JSON one, such as a proxy's HTML
+// page, leaves only jq's parse error). The SDKs throw on one themselves.
 function buildImageSample(lang: Lang, ctx: SampleContext): string {
   const url = `${ctx.baseUrl}${ctx.endpointPath}`
   const prompt = 'A serene koi pond at sunset, ukiyo-e style.'

@@ -1038,44 +1038,65 @@ func TestBuildGenerationBoundsImageWork(t *testing.T) {
 	assert.True(t, types.IsSkipRetryError(apiErr), "its client left")
 
 	// An edit reserves the memory its work holds and runs once that much is
-	// free: the decoded 128x128 image and 64x64 mask at 4 bytes a pixel
-	// (65536 and 16384), the resize's columns, as wide as the 64x64 canvas
-	// and as high as the 128-row crop (32768), and three RGBA canvases
-	// (49152), 163840 bytes. With a byte less free it waits (TryAcquire(0)
-	// fails only while a request waits); that byte lets it run.
-	const reserved = 163840
-	held := int64(imageWorkBudget - reserved + 1)
-	require.True(t, imageWork.TryAcquire(held))
-	waiting, stop := context.WithCancel(context.Background())
-	defer stop()
-	client, _ := gin.CreateTestContext(httptest.NewRecorder())
-	client.Request = httptest.NewRequestWithContext(waiting, http.MethodPost, "/v1/images/edits", nil)
-	sized := GenerationIntent{Model: "nai-diffusion-4-5-full", N: 1, Image: testImage(128, 128, solid(color.White)), Mask: area, Size: "64x64"}
-	built := make(chan *types.NewAPIError, 1)
-	go func() {
-		_, buildErr := BuildGeneration(client, sized)
-		built <- buildErr
-	}()
-	for imageWork.TryAcquire(0) {
-		select {
-		case buildErr := <-built:
-			imageWork.Release(held)
-			require.Failf(t, "the edit ran with a byte less than it reserves free", "error: %v", buildErr)
-		default:
-			runtime.Gosched()
-		}
+	// free: the decoded image and mask at 4 bytes a pixel, the resize's
+	// columns (as wide as the canvas and as high as the crop of the image),
+	// and three RGBA canvases. With a byte less free it waits (TryAcquire(0)
+	// fails only while a request waits); that byte lets it run. The 64x64
+	// mask is 16384 bytes in every case; the canvas and the crop differ.
+	for _, tc := range []struct {
+		name     string
+		image    []byte
+		size     string
+		reserved int64
+	}{
+		// 65536 + 16384 + 4*64*(128 crop rows + 3*64) = 163840.
+		{name: "square image on a square canvas", image: testImage(128, 128, solid(color.White)), size: "64x64", reserved: 163840},
+		// The crop of a square image for a 64x128 canvas is 64 wide and 128
+		// high: 65536 + 16384 + 4*64*(128 + 3*128) = 212992.
+		{name: "portrait canvas", image: testImage(128, 128, solid(color.White)), size: "64x128", reserved: 212992},
+		// For a 128x64 canvas it is 128 wide and 64 high:
+		// 65536 + 16384 + 4*128*(64 + 3*64) = 212992.
+		{name: "landscape canvas", image: testImage(128, 128, solid(color.White)), size: "128x64", reserved: 212992},
+		// A 64x256 image crops to its 64x64 centre: the columns cover the
+		// crop's 64 rows, not the image's 256. 65536 + 16384 + 4*64*(64 +
+		// 3*64) = 147456.
+		{name: "tall image on a square canvas", image: testImage(64, 256, solid(color.White)), size: "64x64", reserved: 147456},
+	} {
+		t.Run("reserves its work: "+tc.name, func(t *testing.T) {
+			held := imageWorkBudget - tc.reserved + 1
+			require.True(t, imageWork.TryAcquire(held))
+			waiting, stop := context.WithCancel(context.Background())
+			defer stop()
+			client, _ := gin.CreateTestContext(httptest.NewRecorder())
+			client.Request = httptest.NewRequestWithContext(waiting, http.MethodPost, "/v1/images/edits", nil)
+			sized := GenerationIntent{Model: "nai-diffusion-4-5-full", N: 1, Image: tc.image, Mask: area, Size: tc.size}
+			built := make(chan *types.NewAPIError, 1)
+			go func() {
+				_, buildErr := BuildGeneration(client, sized)
+				built <- buildErr
+			}()
+			for imageWork.TryAcquire(0) {
+				select {
+				case buildErr := <-built:
+					imageWork.Release(held)
+					require.Failf(t, "the edit ran with a byte less than it reserves free", "error: %v", buildErr)
+				default:
+					runtime.Gosched()
+				}
+			}
+			imageWork.Release(1)
+			ran := imageWork.TryAcquire(0)
+			if !ran {
+				stop()
+			}
+			buildErr := <-built
+			imageWork.Release(held - 1)
+			require.True(t, ran, "a byte more let the edit run")
+			assert.Nil(t, buildErr)
+			require.True(t, imageWork.TryAcquire(imageWorkBudget), "the edit gave back the memory it took")
+			imageWork.Release(imageWorkBudget)
+		})
 	}
-	imageWork.Release(1)
-	ran := imageWork.TryAcquire(0)
-	if !ran {
-		stop()
-	}
-	apiErr = <-built
-	imageWork.Release(held - 1)
-	require.True(t, ran, "a byte more let the edit run")
-	assert.Nil(t, apiErr)
-	require.True(t, imageWork.TryAcquire(imageWorkBudget), "the edit gave back the memory it took")
-	imageWork.Release(imageWorkBudget)
 
 	// Red | green | blue thirds of 6144x2048: the 2048x2048 green centre of
 	// a square canvas.
