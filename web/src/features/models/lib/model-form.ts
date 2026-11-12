@@ -30,7 +30,9 @@ import { parseModelTags as parseTagsFromUtils } from './model-utils'
  */
 export const modelFormSchema = z.object({
   id: z.number().optional(),
-  model_name: z.string().min(1, 'Model name is required'),
+  // Channel models are listed without surrounding spaces, so a saved space
+  // would keep a matching rule from matching any of them.
+  model_name: z.string().trim().min(1, 'Model name is required'),
   description: z.string().default(''),
   icon: z.string().default(''),
   tags: z.array(z.string()).default([]),

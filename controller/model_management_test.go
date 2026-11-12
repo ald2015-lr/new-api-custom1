@@ -853,6 +853,45 @@ export function parseTaskResult() { return {}; }
 
 			})
 
+			t.Run("metadata_names_are_saved_without_surrounding_spaces", func(t *testing.T) {
+				channel := model.Channel{Name: "Trim route", Type: constant.ChannelTypeNovelAI, Key: "fixture", Models: "trim-diffusion-5-full", Group: "default", Status: common.ChannelStatusEnabled}
+				require.NoError(t, channel.Insert())
+				t.Cleanup(func() {
+					require.NoError(t, db.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+					require.NoError(t, db.Delete(&model.Channel{}, channel.Id).Error)
+					require.NoError(t, db.Unscoped().Where("model_name LIKE ?", "%trim-diffusion%").Delete(&model.Model{}).Error)
+					model.RefreshPricing()
+				})
+				type savedResponse struct {
+					Success bool
+					Message string
+					Data    model.Model
+				}
+				matched := func(id int) []string {
+					var record model.Model
+					require.NoError(t, db.First(&record, id).Error)
+					require.NoError(t, enrichModels([]*model.Model{&record}))
+					return record.MatchedModels
+				}
+
+				var created savedResponse
+				modelManagementRequest(t, CreateModelMeta, http.MethodPost, "/api/models/", model.Model{ModelName: "trim-diffusion ", NameRule: model.NameRulePrefix, Status: 1}, &created)
+				require.True(t, created.Success, created.Message)
+				assert.Equal(t, "trim-diffusion", created.Data.ModelName)
+				assert.Equal(t, []string{"trim-diffusion-5-full"}, matched(created.Data.Id))
+
+				var updated savedResponse
+				modelManagementRequest(t, UpdateModelMeta, http.MethodPut, "/api/models/", model.Model{Id: created.Data.Id, ModelName: "\ttrim-diffusion-5 ", NameRule: model.NameRulePrefix, Status: 1}, &updated)
+				require.True(t, updated.Success, updated.Message)
+				assert.Equal(t, []string{"trim-diffusion-5-full"}, matched(created.Data.Id))
+
+				var blank savedResponse
+				modelManagementRequest(t, CreateModelMeta, http.MethodPost, "/api/models/", model.Model{ModelName: "   ", NameRule: model.NameRulePrefix, Status: 1}, &blank)
+				assert.False(t, blank.Success)
+				var count int64
+				require.NoError(t, db.Model(&model.Model{}).Where("model_name LIKE ?", "%trim-diffusion%").Count(&count).Error)
+				assert.Equal(t, int64(1), count)
+			})
 			t.Run("pricing_saves_zero_switches_modes_and_rejects_stale_batches", func(t *testing.T) {
 				before, err := model.GetModelPricingSnapshot([]string{"matrix-priced", "matrix-other"})
 				require.NoError(t, err)
@@ -1189,6 +1228,23 @@ func TestVendorManagementDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, vendors[0].ID, model.GetVendors()[0].ID)
 				require.NoError(t, db.Model(&model.Vendor{}).Count(&count).Error)
 				assert.Zero(t, count, "refresh must not recreate a deleted vendor")
+			})
+			t.Run("vendor_list_offers_builtin_vendors", func(t *testing.T) {
+				var listed struct {
+					Success bool
+					Data    struct {
+						Items          []model.Vendor
+						Total          int
+						BuiltinVendors []model.BuiltinVendor `json:"builtin_vendors"`
+					}
+				}
+				modelManagementRequest(t, GetAllVendors, http.MethodGet, "/api/vendors/?p=1&page_size=1000", nil, &listed)
+				require.True(t, listed.Success)
+				assert.Contains(t, listed.Data.BuiltinVendors, model.BuiltinVendor{Name: "NovelAI", Icon: "NovelAI"})
+				assert.Contains(t, listed.Data.BuiltinVendors, model.BuiltinVendor{Name: "Anthropic", Icon: "Claude.Color"})
+				var count int64
+				require.NoError(t, db.Model(&model.Vendor{}).Count(&count).Error)
+				assert.Equal(t, int(count), listed.Data.Total, "listing built-in vendors must not save them")
 			})
 			t.Run("metadata_ownership_preview_merge_delete_and_rollback", func(t *testing.T) {
 				source := model.Vendor{Name: "  Vendor Source  ", Icon: "Gemini.Color"}

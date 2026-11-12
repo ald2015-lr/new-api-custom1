@@ -3,6 +3,8 @@ package model
 import (
 	"slices"
 	"strings"
+
+	"github.com/QuantumNous/new-api/constant"
 )
 
 // 简化的供应商映射规则
@@ -37,6 +39,10 @@ var defaultVendorRules = map[string]string{
 	"kling":    "快手",
 	"jimeng":   "即梦",
 	"vidu":     "Vidu",
+
+	// NovelAI's image models, and aliases that carry its name.
+	"nai-diffusion": "NovelAI",
+	"novelai":       "NovelAI",
 }
 
 // 供应商默认图标映射
@@ -64,9 +70,17 @@ var defaultVendorIcons = map[string]string{
 	"快手":         "Kling.Color",
 	"即梦":         "Jimeng.Color",
 	"Vidu":       "Vidu",
+	"NovelAI":    "NovelAI",
 	"微软":         "AzureAI",
 	"Microsoft":  "AzureAI",
 	"Azure":      "AzureAI",
+}
+
+// defaultChannelTypeVendors names the vendor of a channel type that serves
+// only that vendor's models. It applies when no name rule matches, so a model
+// renamed on a NovelAI channel still lists under NovelAI.
+var defaultChannelTypeVendors = map[int]string{
+	constant.ChannelTypeNovelAI: "NovelAI",
 }
 
 // initDefaultVendorMapping 简化的默认供应商映射
@@ -81,9 +95,16 @@ func initDefaultVendorMapping(metaMap map[string]*Model, vendorMap map[int]*Vend
 		}
 		return strings.Compare(a, b)
 	})
+	inferred := make(map[string]bool)
 	for _, ability := range enableAbilities {
 		modelName := ability.Model
-		if _, exists := metaMap[modelName]; exists {
+		channelVendor := defaultChannelTypeVendors[ability.ChannelType]
+		if meta, exists := metaMap[modelName]; exists {
+			// A model inferred without a vendor from an earlier ability takes
+			// the vendor of a single-vendor channel that also serves it.
+			if inferred[modelName] && meta.VendorID == 0 && channelVendor != "" {
+				meta.VendorID = getDisplayVendor(channelVendor, vendorMap)
+			}
 			continue
 		}
 
@@ -97,6 +118,9 @@ func initDefaultVendorMapping(metaMap map[string]*Model, vendorMap map[int]*Vend
 				break
 			}
 		}
+		if vendorID == 0 && channelVendor != "" {
+			vendorID = getDisplayVendor(channelVendor, vendorMap)
+		}
 
 		// 创建模型元数据
 		metaMap[modelName] = &Model{
@@ -105,6 +129,7 @@ func initDefaultVendorMapping(metaMap map[string]*Model, vendorMap map[int]*Vend
 			Status:    1,
 			NameRule:  NameRuleExact,
 		}
+		inferred[modelName] = true
 	}
 }
 
@@ -134,6 +159,31 @@ var defaultVendorDisplayIDs = map[string]int{
 	"讯飞":         -1021,
 	"阿里巴巴":       -1022,
 	"零一万物":       -1023,
+	"NovelAI":    -1024,
+}
+
+// BuiltinVendor is a vendor the catalog infers from model names or channel
+// types without a saved record. Choosing one saves an ordinary vendor record
+// with this icon; its display ID is never stored on a model.
+type BuiltinVendor struct {
+	Name string `json:"name"`
+	Icon string `json:"icon,omitempty"`
+}
+
+// BuiltinVendors lists the inferred vendors in display ID order.
+func BuiltinVendors() []BuiltinVendor {
+	names := make([]string, 0, len(defaultVendorDisplayIDs))
+	for name := range defaultVendorDisplayIDs {
+		names = append(names, name)
+	}
+	slices.SortFunc(names, func(a, b string) int {
+		return defaultVendorDisplayIDs[b] - defaultVendorDisplayIDs[a]
+	})
+	vendors := make([]BuiltinVendor, 0, len(names))
+	for _, name := range names {
+		vendors = append(vendors, BuiltinVendor{Name: name, Icon: getDefaultVendorIcon(name)})
+	}
+	return vendors
 }
 
 func getDisplayVendor(vendorName string, vendorMap map[int]*Vendor) int {

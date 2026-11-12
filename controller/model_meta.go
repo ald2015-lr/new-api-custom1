@@ -110,6 +110,9 @@ func CreateModelMeta(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// Channel models are listed without surrounding spaces, so a stored space
+	// would keep the record from matching any of them.
+	m.ModelName = strings.TrimSpace(m.ModelName)
 	if m.ModelName == "" {
 		common.ApiErrorT(c, "Model name cannot be empty")
 		return
@@ -161,7 +164,8 @@ func UpdateModelMeta(c *gin.Context) {
 			return
 		}
 	} else {
-		if strings.TrimSpace(m.ModelName) == "" {
+		m.ModelName = strings.TrimSpace(m.ModelName)
+		if m.ModelName == "" {
 			common.ApiErrorT(c, "Model name cannot be empty")
 			return
 		}
