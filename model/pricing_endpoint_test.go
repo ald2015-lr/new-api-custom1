@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -322,4 +323,72 @@ func TestPricingListsDuplicateVendorNamesOnce(t *testing.T) {
 		{ID: 9, Name: "OpenAI", Icon: "OpenAI"},
 	}, GetVendors())
 	assert.Equal(t, map[string]int{"claude-saved": 3, "claude-inferred": 3, "gpt-4o": 9}, vendorByModel)
+}
+
+func TestPricingListsNovelAIModelsUnderNovelAI(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	insertPricingEndpointChannel(t, 106, constant.ChannelTypeNovelAI, dto.ChannelOtherSettings{})
+	for _, name := range []string{"nai-diffusion-5-full", "nai-diffusion-4-5-full", "anime-v4"} {
+		insertPricingEndpointAbility(t, 106, name)
+	}
+	insertPricingEndpointChannel(t, 107, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	insertPricingEndpointAbility(t, 107, "gpt-4o")
+	InitChannelCache()
+	vendorByModel := func() map[string]int {
+		vendors := make(map[string]int)
+		for _, pricing := range GetPricing() {
+			vendors[pricing.ModelName] = pricing.VendorID
+		}
+		return vendors
+	}
+
+	// No vendor is saved: the built-in NovelAI vendor carries its icon, and the
+	// alias without a name rule follows its NovelAI channel.
+	assert.Equal(t, []PricingVendor{
+		{ID: -1012, Name: "OpenAI", Icon: "OpenAI"},
+		{ID: -1024, Name: "NovelAI", Icon: "NovelAI"},
+	}, GetVendors())
+	assert.Equal(t, map[string]int{"nai-diffusion-5-full": -1024, "nai-diffusion-4-5-full": -1024, "anime-v4": -1024, "gpt-4o": -1012}, vendorByModel())
+
+	// A saved vendor of the same name replaces the built-in one.
+	require.NoError(t, DB.Create(&Vendor{Id: 4, Name: "novelai", Icon: "NovelAI", Status: 1}).Error)
+	InvalidatePricingCache()
+	assert.Equal(t, map[string]int{"nai-diffusion-5-full": 4, "nai-diffusion-4-5-full": 4, "anime-v4": 4, "gpt-4o": -1012}, vendorByModel())
+	assert.Equal(t, []PricingVendor{
+		{ID: 4, Name: "novelai", Icon: "NovelAI"},
+		{ID: -1012, Name: "OpenAI", Icon: "OpenAI"},
+	}, GetVendors())
+}
+
+func TestDefaultVendorMappingUsesSingleVendorChannelsInAnyAbilityOrder(t *testing.T) {
+	ability := func(name string, channelType int) AbilityWithChannel {
+		return AbilityWithChannel{Ability: Ability{Model: name}, ChannelType: channelType}
+	}
+	abilities := []AbilityWithChannel{
+		ability("anime-v4", constant.ChannelTypeOpenAI),
+		ability("anime-v4", constant.ChannelTypeNovelAI),
+		ability("nai-diffusion-4-5-full", constant.ChannelTypeOpenAI),
+		ability("gpt-4o", constant.ChannelTypeNovelAI),
+		ability("saved-alias", constant.ChannelTypeNovelAI),
+	}
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed_%t", reversed), func(t *testing.T) {
+			ordered := slices.Clone(abilities)
+			if reversed {
+				slices.Reverse(ordered)
+			}
+			// A saved record keeps its vendor, even an empty one.
+			metaMap := map[string]*Model{"saved-alias": {ModelName: "saved-alias", Status: 1}}
+			initDefaultVendorMapping(metaMap, map[int]*Vendor{}, ordered)
+
+			vendors := make(map[string]int, len(metaMap))
+			for name, meta := range metaMap {
+				vendors[name] = meta.VendorID
+			}
+			// Name rules come before the channel type, and name NovelAI models
+			// that an OpenAI-compatible channel serves.
+			assert.Equal(t, map[string]int{"anime-v4": -1024, "nai-diffusion-4-5-full": -1024, "gpt-4o": -1012, "saved-alias": 0}, vendors)
+		})
+	}
 }

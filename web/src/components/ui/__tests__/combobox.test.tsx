@@ -184,6 +184,40 @@ describe('searchable single selection', () => {
   })
 })
 
+describe('creating an option', () => {
+  it('offers typed text that no label matches in any case, passes it trimmed, and keeps the value until the caller selects one', async () => {
+    const create = vi.fn()
+    const change = vi.fn()
+    render(
+      <Combobox
+        options={options}
+        value='openai'
+        onValueChange={change}
+        onCreate={create}
+        createLabel='Create provider "{{value}}"'
+        aria-label='Provider'
+      />
+    )
+    const user = userEvent.setup()
+    const input = screen.getByRole('combobox', { name: 'Provider' })
+    await user.click(input)
+    await user.type(input, ' GOOGLE ')
+    expect(screen.getByRole('option', { name: 'Google' })).toBeVisible()
+    expect(
+      screen.queryByRole('option', { name: /Create provider/ })
+    ).not.toBeInTheDocument()
+
+    await user.clear(input)
+    await user.type(input, ' Mistral ')
+    await user.click(
+      screen.getByRole('option', { name: 'Create provider "Mistral"' })
+    )
+    expect(create).toHaveBeenCalledExactlyOnceWith('Mistral')
+    expect(change).not.toHaveBeenCalled()
+    await waitFor(() => expect(input).toHaveValue('OpenAI'))
+  })
+})
+
 const pluginOptions = [
   {
     value: 'alpha',

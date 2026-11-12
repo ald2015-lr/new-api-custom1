@@ -368,6 +368,38 @@ describe('metadata editing', () => {
     }
   )
 
+  it('saves a model name without the spaces around it so a matching rule can match channel models', async () => {
+    useAuthStore.getState().auth.setUser({ id: 2, username: 'admin', role: 10 })
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: { items: [] } },
+    })
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true } })
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <ModelMutateDrawer open onOpenChange={() => {}} />
+      </QueryClientProvider>
+    )
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Model Name *'), ' nai-diffusion ')
+    await user.click(screen.getByRole('button', { name: 'Save metadata' }))
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/models/',
+        expect.objectContaining({ model_name: 'nai-diffusion' }),
+        { skipBusinessError: true, skipErrorHandler: true }
+      )
+    )
+    client.clear()
+  })
+
   it.each([undefined, 0])(
     'does not copy a vendor to the next model when its vendor_id is %s',
     async (vendorId) => {

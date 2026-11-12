@@ -21,9 +21,15 @@ func SearchVendors(c *gin.Context) {
 		vendorAPIError(c, err)
 		return
 	}
-	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(vendors)
-	common.ApiSuccess(c, pageInfo)
+	common.ApiSuccess(c, gin.H{
+		"items":     vendors,
+		"total":     total,
+		"page":      pageInfo.GetPage(),
+		"page_size": pageInfo.GetPageSize(),
+		// The model editor offers the inferred vendors that have no saved
+		// record yet and saves the one chosen.
+		"builtin_vendors": model.BuiltinVendors(),
+	})
 }
 
 // GetVendorMeta 根据 ID 获取供应商

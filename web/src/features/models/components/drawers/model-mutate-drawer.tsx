@@ -82,6 +82,7 @@ import {
 } from '../../lib/model-form'
 import type { Model } from '../../types'
 import { ModelConnections } from '../model-connections'
+import { VendorSelect } from '../vendor-select'
 
 export function ModelMutateDrawer(props: {
   open: boolean
@@ -387,21 +388,24 @@ export function ModelMutateDrawer(props: {
                           <FormItem>
                             <FormLabel>{t('Vendor')}</FormLabel>
                             <FormControl>
-                              <Combobox
-                                options={vendors.map((vendor) => ({
-                                  value: String(vendor.id),
-                                  label: vendor.name,
-                                }))}
-                                onValueChange={(value) =>
-                                  field.onChange(
-                                    value ? Number.parseInt(value) : 0
-                                  )
+                              <VendorSelect
+                                vendors={vendors}
+                                builtinVendors={
+                                  vendorsQuery.data?.data?.builtin_vendors ?? []
                                 }
-                                value={field.value ? String(field.value) : null}
-                                className='w-full'
-                                placeholder={t('Select vendor')}
+                                value={field.value}
+                                onChange={(vendorId) => {
+                                  form.clearErrors('vendor_id')
+                                  field.onChange(vendorId)
+                                }}
+                                onCreateError={(message) =>
+                                  form.setError('vendor_id', { message })
+                                }
                               />
                             </FormControl>
+                            <FormDescription>
+                              {t('Type a new name to create a vendor.')}
+                            </FormDescription>
                             <FormMessage />
                           </FormItem>
                         )}
@@ -471,6 +475,9 @@ export function ModelMutateDrawer(props: {
                             <FormDescription>
                               {t(
                                 'Matching rules apply to metadata. Pricing is configured for each concrete model.'
+                              )}{' '}
+                              {t(
+                                'Only models on enabled channels count as matches. Matching is case-sensitive.'
                               )}
                             </FormDescription>
                             <FormMessage />
