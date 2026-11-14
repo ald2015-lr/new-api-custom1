@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -62,6 +63,36 @@ func TestChannelValidateSettingsBoundsTheNovelAIQueueLimit(t *testing.T) {
 	} {
 		t.Run(settings, func(t *testing.T) {
 			channel := &Channel{Type: constant.ChannelTypeNovelAI, OtherSettings: settings}
+			err := channel.ValidateSettings()
+			if wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), wantErr)
+		})
+	}
+}
+
+// Saving any channel rejects an upstream balance error message over 500
+// characters once trimmed and a status outside 400 to 599, naming the field;
+// the switch alone, a blank message and the default status are accepted.
+func TestChannelValidateSettingsBoundsTheUpstreamQuotaError(t *testing.T) {
+	long := strings.Repeat("额", 500)
+	for settings, wantErr := range map[string]string{
+		`{}`: "",
+		`{"upstream_quota_error_mask_enabled":true}`:                                          "",
+		`{"upstream_quota_error_message":"  ` + long + `  "}`:                                 "",
+		`{"upstream_quota_error_message":"` + long + `x"}`:                                    "upstream_quota_error_message must be at most 500 characters",
+		`{"upstream_quota_error_status_code":0}`:                                              "",
+		`{"upstream_quota_error_status_code":400}`:                                            "",
+		`{"upstream_quota_error_status_code":599}`:                                            "",
+		`{"upstream_quota_error_status_code":399}`:                                            "upstream_quota_error_status_code must be between 400 and 599",
+		`{"upstream_quota_error_status_code":600}`:                                            "upstream_quota_error_status_code must be between 400 and 599",
+		`{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_status_code":"403"}`: "upstream_quota_error_status_code",
+	} {
+		t.Run(settings[:min(len(settings), 80)], func(t *testing.T) {
+			channel := &Channel{Type: constant.ChannelTypeOpenAI, OtherSettings: settings}
 			err := channel.ValidateSettings()
 			if wantErr == "" {
 				require.NoError(t, err)

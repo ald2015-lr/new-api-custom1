@@ -69,7 +69,7 @@ func TestProcessChannelErrorUsesSnapshotWithoutLeakingChannelMetadata(t *testing
 	}
 	apiErr := types.NewOpenAIError(errors.New("upstream failed"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
 
-	processChannelError(ctx, channelSnapshot, apiErr, nil)
+	processChannelError(ctx, channelSnapshot, apiErr, nil, nil)
 
 	var stored model.Log
 	require.NoError(t, database.First(&stored).Error)

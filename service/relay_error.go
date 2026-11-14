@@ -79,9 +79,23 @@ func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTi
 	return DecideRelayRetry(c, openaiErr, retryTimes).Action == "retry"
 }
 
-func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+// ProcessChannelError disables the channel when err calls for it and records
+// the failed attempt in the user's error log. userErr is what the user is told
+// in place of err, such as the channel's message for an upstream balance
+// error (MaskUpstreamQuotaError), or nil for err itself. The disable decision,
+// its reason and the server log always use err; with userErr the error log
+// shows userErr and keeps err, its upstream request id included, for
+// administrators only.
+func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err, userErr *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
 	if err == nil {
 		return
+	}
+	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
+	if userErr != nil && upstreamRequestId != "" {
+		// The hidden answer's request id stays out of every later log of the
+		// request too, such as the consume log of a retry on a channel whose
+		// upstream sends none.
+		c.Set(common.UpstreamRequestIdKey, "")
 	}
 	upstreamURLs := common.UpstreamAddresses(c)
 	logger.LogError(c, common.LogText("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode(upstreamURLs...))))
@@ -102,9 +116,20 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		if c.Request != nil && c.Request.URL != nil {
 			other.SetPublic("request_path", c.Request.URL.Path)
 		}
-		other.SetPublic("error_type", err.GetErrorType())
-		other.SetPublic("error_code", err.GetErrorCode())
-		other.SetPublic("status_code", err.StatusCode)
+		shown := err
+		if userErr != nil {
+			shown = userErr
+			other.SetAdmin("upstream_error", err.MaskSensitiveErrorWithStatusCode(upstreamURLs...))
+			other.SetAdmin("upstream_status_code", err.StatusCode)
+			other.SetAdmin("upstream_error_code", err.GetErrorCode())
+			if upstreamRequestId != "" {
+				other.SetAdmin("upstream_request_id", upstreamRequestId)
+				upstreamRequestId = ""
+			}
+		}
+		other.SetPublic("error_type", shown.GetErrorType())
+		other.SetPublic("error_code", shown.GetErrorCode())
+		other.SetPublic("status_code", shown.StatusCode)
 		AppendRelayLogAdminInfo(c, relayInfo, other)
 		AppendResponseModelLogInfo(relayInfo, other)
 		AppendTaskPluginContextAuditInfo(c, other)
@@ -113,6 +138,6 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			startTime = time.Now()
 		}
 		useTimeSeconds := int(time.Since(startTime).Seconds())
-		model.RecordErrorLog(c, userId, channelError.ChannelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(upstreamURLs...), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+		model.RecordErrorLog(c, userId, channelError.ChannelId, modelName, tokenName, shown.MaskSensitiveErrorWithStatusCode(upstreamURLs...), upstreamRequestId, tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}
 }

@@ -1245,6 +1245,12 @@ func respondPluginProtocolSubmissionError(c *gin.Context, taskErr *dto.TaskError
 	if taskErr != nil && taskErr.StatusCode >= 400 && taskErr.StatusCode <= 599 {
 		status = taskErr.StatusCode
 	}
+	if taskErr != nil && taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted) {
+		// The channel's own message for an upstream balance error, under any
+		// status the channel chose.
+		respondPluginProtocolError(c, status, taskErr.Code, common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey)))
+		return
+	}
 	switch status {
 	case http.StatusBadRequest:
 		message := "Invalid task protocol request"

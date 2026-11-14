@@ -18,6 +18,7 @@ import (
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -689,4 +690,33 @@ func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {
 	assert.Equal(t, []string{"reserve", "refund"}, events)
 	assert.Equal(t, 1, billing.refunds)
 	assert.False(t, c.Writer.Written())
+}
+
+// A task submission whose upstream balance error the channel hides reaches
+// the client of each host presenter as the channel's message, code and
+// status, with new-api's request id: a status of 429 does not turn it into
+// the group saturation notice, and the Responses bridge and the OpenAI Images
+// protocol do not replace it with their generic texts.
+func TestTaskPresentersShowTheChannelMessageOfAHiddenBalanceError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		present func(*gin.Context, *dto.TaskError)
+		want    string
+	}{
+		{"task JSON", respondTaskError, `{"code":"service_quota_exhausted","message":"余额维护中 (request id: req-uqe)","data":null}`},
+		{"Responses bridge", respondPluginProtocolSubmissionError, `{"error":{"message":"余额维护中 (request id: req-uqe)","type":"new_api_error","code":"service_quota_exhausted"}}`},
+		{"OpenAI Images protocol", respondTaskPluginImageError, `{"error":{"message":"余额维护中 (request id: req-uqe)","type":"new_api_error","code":"service_quota_exhausted"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{}`))
+			c.Set(common.RequestIdKey, "req-uqe")
+
+			tc.present(c, &dto.TaskError{Code: string(kittypes.ErrorCodeServiceQuotaExhausted), Message: "余额维护中", StatusCode: http.StatusTooManyRequests})
+
+			assert.Equal(t, http.StatusTooManyRequests, recorder.Code)
+			assert.JSONEq(t, tc.want, recorder.Body.String())
+		})
+	}
 }

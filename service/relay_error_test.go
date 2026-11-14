@@ -109,7 +109,7 @@ func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://private.example.com")
 	apiErr := types.NewErrorWithStatusCode(errors.New("upstream https://private.example.com/path?token=review-token api_key:review-secret"), types.ErrorCodeChannelNoAvailableKey, http.StatusUnauthorized)
-	ProcessChannelError(c, types.ChannelError{ChannelId: channel.Id, ChannelName: channel.Name, AutoBan: true}, apiErr, nil)
+	ProcessChannelError(c, types.ChannelError{ChannelId: channel.Id, ChannelName: channel.Name, AutoBan: true}, apiErr, nil, nil)
 	var notification WebhookPayload
 	select {
 	case payload := <-notifications:
@@ -338,4 +338,141 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	other := model.NewLogOther()
 	AppendRelayLogAdminInfo(untouched, nil, other)
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
+}
+
+// An upstream's answer that its own account is out of balance or quota is
+// recognised by 402, by a balance code or type, or by a balance phrase of the
+// upstreams new-api meets, in any case and in Chinese, unless it is a rate
+// limit (Gemini's free tier says "exceeded your current quota" of per-minute
+// limits). new-api's own errors and channel errors never count, whatever
+// they say.
+func TestIsUpstreamQuotaExhaustedError(t *testing.T) {
+	upstream := func(status int, code any, errorType, message string) *types.NewAPIError {
+		return types.WithOpenAIError(types.OpenAIError{Message: message, Type: errorType, Code: code}, status)
+	}
+	for _, tc := range []struct {
+		name string
+		err  *types.NewAPIError
+		want bool
+	}{
+		{"new-api pre-consume (zh-CN)", upstream(http.StatusForbidden, "pre_consume_token_quota_failed", "new_api_error", "预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000 (request id: 20261104012629802206256826)"), true},
+		{"new-api pre-consume message alone", upstream(http.StatusForbidden, nil, "", "预扣费额度失败, 用户剩余额度: ＄0.120000"), true},
+		{"new-api pre-consume (en)", upstream(http.StatusForbidden, nil, "", "Not enough quota to pre-consume for this request: $0.12 remaining, $0.28 required"), true},
+		{"new-api pre-consume (zh-TW)", upstream(http.StatusForbidden, nil, "", "預扣費額度失敗，使用者剩餘額度：＄0.12"), true},
+		{"new-api user quota code", upstream(http.StatusForbidden, "insufficient_user_quota", "new_api_error", "remaining: $0"), true},
+		{"new-api user quota (en)", upstream(http.StatusForbidden, nil, "", "Insufficient user quota, remaining quota: $0.000000"), true},
+		{"new-api subscription quota (zh-CN)", upstream(http.StatusForbidden, nil, "", "订阅额度不足或未配置订阅: no active subscription"), true},
+		{"new-api subscription quota (en)", upstream(http.StatusForbidden, nil, "", "Subscription quota is insufficient or no subscription is configured: none"), true},
+		{"one-api token exhausted", upstream(http.StatusForbidden, nil, "", "该令牌额度已用尽 TokenStatusExhausted[sk-abc]"), true},
+		{"one-api token quota", upstream(http.StatusForbidden, nil, "", "令牌额度不足"), true},
+		{"one-api user quota", upstream(http.StatusForbidden, nil, "", "user quota is not enough"), true},
+		{"new-api token quota", upstream(http.StatusForbidden, nil, "", "token quota is not enough, token remain quota: $0.01, need quota: $0.28"), true},
+		{"OpenAI insufficient_quota under 429", upstream(http.StatusTooManyRequests, "insufficient_quota", "insufficient_quota", "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors."), true},
+		{"OpenAI billing not active", upstream(http.StatusTooManyRequests, "billing_not_active", "", "Your account is not active, please check your billing details on our website."), true},
+		{"Anthropic credit balance", types.WithClaudeError(types.ClaudeError{Type: "invalid_request_error", Message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}, http.StatusBadRequest), true},
+		{"DeepSeek 402", upstream(http.StatusPaymentRequired, "invalid_request_error", "", "Insufficient Balance"), true},
+		{"402 alone", upstream(http.StatusPaymentRequired, nil, "", "Payment Required"), true},
+		{"OpenRouter credits", upstream(http.StatusForbidden, nil, "", "Insufficient credits. Add more using https://openrouter.ai/settings/credits"), true},
+		{"SiliconFlow balance", upstream(http.StatusForbidden, float64(30001), "", "Sorry, your account balance is insufficient"), true},
+		{"Zhipu arrears under 429", upstream(http.StatusTooManyRequests, "1113", "", "您的账户已欠费，请充值后重试。"), true},
+		{"Volcengine overdue code", upstream(http.StatusForbidden, "AccountOverdueError", "Forbidden", "The request failed because your account has an overdue balance."), true},
+		{"Moonshot quota type", upstream(http.StatusTooManyRequests, nil, "exceeded_current_quota_error", "Your account org-abc <ak-abc> is suspended, please check your plan and billing details"), true},
+		{"DashScope arrearage code", upstream(http.StatusBadRequest, "Arrearage", "", "Access denied, please make sure your account is in good standing."), true},
+		{"insufficient_balance code", upstream(http.StatusBadRequest, "insufficient_balance", "", "balance check failed"), true},
+		{"generic balance (zh-CN)", upstream(http.StatusBadRequest, nil, "", "账户余额不足"), true},
+		{"generic balance (zh-TW)", upstream(http.StatusBadRequest, nil, "", "帳戶餘額不足"), true},
+		{"generic quota used up", upstream(http.StatusBadRequest, nil, "", "本月额度已用尽"), true},
+		{"upper case phrase and code", upstream(http.StatusBadRequest, "INSUFFICIENT_QUOTA", "", "INSUFFICIENT BALANCE"), true},
+		{"Gemini free tier rate limit", upstream(http.StatusTooManyRequests, float64(429), "", "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/usage?tab=rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 10, model: gemini-2.5-flash\nPlease retry in 43.659002305s."), false},
+		{"RESOURCE_EXHAUSTED type", upstream(http.StatusTooManyRequests, nil, "RESOURCE_EXHAUSTED", "You exceeded your current quota"), false},
+		{"rate limit wording", upstream(http.StatusTooManyRequests, "insufficient_quota", "", "Rate limit reached: exceeded your current quota"), false},
+		{"RPM limit", upstream(http.StatusTooManyRequests, nil, "", "You exceeded your current quota: 3 RPM"), false},
+		{"tokens per minute", upstream(http.StatusTooManyRequests, nil, "", "Insufficient balance of tokens per min for this model"), false},
+		{"Chinese rate limit", upstream(http.StatusTooManyRequests, nil, "", "请求过于频繁，额度不足"), false},
+		{"Chinese frequency limit", upstream(http.StatusTooManyRequests, nil, "", "调用频率超限，余额不足"), false},
+		{"quota exceeded alone", upstream(http.StatusForbidden, nil, "", "quota exceeded"), false},
+		{"unrelated upstream error", upstream(http.StatusInternalServerError, "server_error", "", "The server had an error while processing your request"), false},
+		{"own pre-consume failure", types.NewErrorWithStatusCode(errors.New("预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000"), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog()), false},
+		{"own user quota", types.NewErrorWithStatusCode(errors.New("用户额度不足, 剩余额度: ＄0.000000"), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog()), false},
+		{"own error under 402", types.NewErrorWithStatusCode(errors.New("insufficient balance"), types.ErrorCodeInsufficientUserQuota, http.StatusPaymentRequired), false},
+		{"channel error", upstream(http.StatusPaymentRequired, string(types.ErrorCodeChannelInvalidKey), "", "余额不足"), false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsUpstreamQuotaExhaustedError(tc.err))
+		})
+	}
+}
+
+// A task submission's upstream answer reaches the host as a fail_to_fetch_task
+// error with the vendor's body as its message; its code, type, status and
+// message count wherever the body puts them. Local rejections and the user's
+// own pre-consume failure (whose code the host copies in) never count.
+func TestIsUpstreamQuotaExhaustedTaskError(t *testing.T) {
+	upstream := func(status int, body string) *dto.TaskError {
+		return &dto.TaskError{Code: "fail_to_fetch_task", Message: body, StatusCode: status, Error: errors.New(body)}
+	}
+	for _, tc := range []struct {
+		name    string
+		taskErr *dto.TaskError
+		want    bool
+	}{
+		{"new-api task body", upstream(http.StatusForbidden, `{"code":"pre_consume_token_quota_failed","message":"预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000","data":null}`), true},
+		{"new-api relay body", upstream(http.StatusForbidden, `{"error":{"message":"预扣费额度失败 (request id: X)","type":"new_api_error","code":"pre_consume_token_quota_failed"}}`), true},
+		{"escaped Chinese message", upstream(http.StatusBadRequest, `{"error":{"message":"账户余额不足","code":"x"}}`), true},
+		{"Volcengine overdue code", upstream(http.StatusForbidden, `{"error":{"code":"AccountOverdueError","message":"The request failed because your account has an overdue balance."}}`), true},
+		{"numeric code with arrears", upstream(http.StatusBadRequest, `{"code":1102,"message":"账户欠费"}`), true},
+		{"402", upstream(http.StatusPaymentRequired, `payment required`), true},
+		{"Gemini rate limit", upstream(http.StatusTooManyRequests, `{"error":{"code":429,"message":"You exceeded your current quota","status":"RESOURCE_EXHAUSTED"}}`), false},
+		{"unrelated failure", upstream(http.StatusBadRequest, `{"code":"invalid_prompt","message":"prompt rejected"}`), false},
+		{"local rejection", &dto.TaskError{Code: string(types.ErrorCodeInsufficientUserQuota), Message: "insufficient quota for adjusted task cost", StatusCode: http.StatusForbidden, LocalError: true}, false},
+		{"own pre-consume failure", TaskErrorFromAPIError(types.NewErrorWithStatusCode(errors.New("预扣费额度失败, 用户剩余额度: ＄0.120000"), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden)), false},
+		{"own user quota", TaskErrorFromAPIError(types.NewErrorWithStatusCode(errors.New("用户额度不足, 剩余额度: ＄0"), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden)), false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsUpstreamQuotaExhaustedTaskError(tc.taskErr))
+		})
+	}
+}
+
+// Only a channel with the switch on hides an upstream balance error, behind
+// its message and status or the defaults; with the switch off, unsaved or
+// saved off with a message, nothing is replaced.
+func TestMaskUpstreamQuotaErrorFollowsTheChannelSetting(t *testing.T) {
+	balance := types.WithOpenAIError(types.OpenAIError{Message: "预扣费额度失败, 用户剩余额度: ＄0.120000 (request id: X)", Type: "new_api_error", Code: "pre_consume_token_quota_failed"}, http.StatusForbidden)
+	balanceTask := &dto.TaskError{Code: "fail_to_fetch_task", Message: `{"code":"pre_consume_token_quota_failed","message":"预扣费额度失败"}`, StatusCode: http.StatusForbidden}
+	for _, tc := range []struct {
+		name        string
+		settings    *kitdto.ChannelOtherSettings
+		wantMessage string
+		wantStatus  int
+	}{
+		{name: "no channel settings"},
+		{name: "switch unsaved", settings: &kitdto.ChannelOtherSettings{}},
+		{name: "switch off with a saved message", settings: &kitdto.ChannelOtherSettings{UpstreamQuotaErrorMessage: "余额维护中", UpstreamQuotaErrorStatusCode: 429}},
+		{name: "switch on", settings: &kitdto.ChannelOtherSettings{UpstreamQuotaErrorMaskEnabled: true}, wantMessage: "上游tokens数量不足", wantStatus: http.StatusForbidden},
+		{name: "switch on with a custom message and status", settings: &kitdto.ChannelOtherSettings{UpstreamQuotaErrorMaskEnabled: true, UpstreamQuotaErrorMessage: " 余额维护中，请稍后再试 ", UpstreamQuotaErrorStatusCode: 429}, wantMessage: "余额维护中，请稍后再试", wantStatus: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			if tc.settings != nil {
+				common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, *tc.settings)
+			}
+			for _, masked := range []*types.NewAPIError{MaskUpstreamQuotaError(c, balance), MaskUpstreamQuotaTaskError(c, balanceTask)} {
+				if tc.wantMessage == "" {
+					assert.Nil(t, masked)
+					continue
+				}
+				require.NotNil(t, masked)
+				assert.Equal(t, tc.wantStatus, masked.StatusCode)
+				assert.Equal(t, types.ErrorTypeNewAPIError, masked.GetErrorType())
+				assert.Equal(t, types.ErrorCodeServiceQuotaExhausted, masked.GetErrorCode())
+				assert.Equal(t, types.OpenAIError{Message: tc.wantMessage, Type: "new_api_error", Code: types.ErrorCodeServiceQuotaExhausted}, masked.ToOpenAIError())
+				assert.Equal(t, types.ClaudeError{Message: tc.wantMessage, Type: "new_api_error"}, masked.ToClaudeError())
+			}
+			on := tc.settings != nil && tc.settings.UpstreamQuotaErrorMaskEnabled
+			assert.Nil(t, MaskUpstreamQuotaError(c, types.NewErrorWithStatusCode(errors.New("预扣费额度失败"), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden)), "the user's own balance shows, switch on: %v", on)
+		})
+	}
 }

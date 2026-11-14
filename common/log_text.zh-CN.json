@@ -861,6 +861,7 @@
   "updateVideoSingleTask response: %s": "updateVideoSingleTask 响应: %s",
   "updating all channels": "开始更新所有渠道的余额",
   "updating dashboard data...": "正在更新数据看板数据...",
+  "upstream balance error hidden behind the message of channel #%d": "上游余额不足的报错已替换为渠道 #%d 的自定义报错",
   "upstream model update check failed: channel_id=%d channel_name=%s err=%v": "检查渠道的上游模型变化失败: channel_id=%d channel_name=%s err=%v",
   "upstream model update notification skipped in 24h window: changed_channels=%d failed_channels=%d": "24 小时内已发过相同内容的上游模型更新通知，本次不发送: changed_channels=%d failed_channels=%d",
   "upstream model update notifications sent: %d": "已发送 %d 条上游模型更新通知",

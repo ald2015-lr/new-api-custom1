@@ -421,3 +421,110 @@ func TestDoubaoRelayedImageStreamSettlement(t *testing.T) {
 		})
 	}
 }
+
+// A Kling channel that hides upstream balance errors answers the upstream's
+// out-of-balance error on submission with its own message and status in
+// Kling's error shape, even a 5xx status for which the plugin's error carries
+// only a generic text, and the user's error log shows only that message while
+// the upstream's answer stays for administrators; the reservation is refunded
+// as for any failed submission.
+func TestKlingNativeRouteHidesTheUpstreamBalanceError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.InitHttpClient()
+
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousMemoryCache, previousRedisEnabled := common.MemoryCacheEnabled, common.RedisEnabled
+	previousErrorLog, previousRetryTimes := constant.ErrorLogEnabled, common.RetryTimes
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
+	model.DB, model.LOG_DB = database, database
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	constant.ErrorLogEnabled, common.RetryTimes = true, 0
+	previousModelRatios := ratio_setting.ModelRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"kling-v3":1}`))
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.MemoryCacheEnabled, common.RedisEnabled = previousMemoryCache, previousRedisEnabled
+		constant.ErrorLogEnabled, common.RetryTimes = previousErrorLog, previousRetryTimes
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousModelRatios))
+	})
+	require.NoError(t, database.Create(&model.User{Id: 7, Username: "native-route-user", Group: "default", Quota: 1_000_000}).Error)
+
+	const upstreamBody = `{"code":"pre_consume_token_quota_failed","message":"预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000","data":null}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, upstreamBody)
+	}))
+	defer upstream.Close()
+	channel := model.Channel{
+		Type:          constant.ChannelTypeKling,
+		Name:          "kling-balance",
+		Key:           "sk-test",
+		BaseURL:       &upstream.URL,
+		Status:        common.ChannelStatusEnabled,
+		Models:        "kling-v3",
+		Group:         "default",
+		OtherSettings: `{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"服务繁忙，请稍后再试","upstream_quota_error_status_code":503}`,
+	}
+	require.NoError(t, database.Create(&channel).Error)
+
+	generation := pluginruntime.DefaultRegistry.Generation()
+	require.NotNil(t, generation)
+	submitBinding, found := generation.LookupDeclaredRoute(http.MethodPost, "/kling/v1/videos/text2video")
+	require.True(t, found)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/kling/v1/videos/text2video", bytes.NewBufferString(`{"model_name":"kling-v3","prompt":"a lighthouse"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(common.RequestIdKey, "req-kling-balance")
+	c.Set(pluginruntime.ContextKeyPinnedRoute, pluginruntime.PinnedRoute{Generation: generation, Plugin: submitBinding.Plugin, Route: submitBinding.Route})
+	common.SetContextKey(c, constant.ContextKeyUserId, 7)
+	common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyUserQuota, 1_000_000)
+	middleware.PrepareTaskPluginRoute()(c)
+	require.False(t, c.IsAborted(), recorder.Body.String())
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, &channel, "kling-v3"))
+	billing := &nativeRouteBilling{userID: 7}
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:          7,
+		UserGroup:       "default",
+		UsingGroup:      "default",
+		UserQuota:       1_000_000,
+		TokenGroup:      "default",
+		OriginModelName: "kling-v3",
+		Billing:         billing,
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{
+			Action:        c.GetString("task_action"),
+			PublicTaskID:  "task_kling_balance",
+			LockedChannel: &channel,
+		},
+	}
+
+	outcome, taskErr := executeTaskSubmissionWith(c, relayInfo, relay.RelayTaskSubmit)
+	require.Nil(t, outcome)
+	require.NotNil(t, taskErr)
+	respondTaskSubmissionError(c, taskErr)
+
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.JSONEq(t, `{"code":5001,"message":"服务繁忙，请稍后再试","request_id":"req-kling-balance"}`, recorder.Body.String())
+	assert.Equal(t, []string{"refund"}, billing.events)
+	var errorLog model.Log
+	require.NoError(t, database.Where("type = ?", model.LogTypeError).First(&errorLog).Error)
+	assert.Equal(t, "status_code=503, 服务繁忙，请稍后再试", errorLog.Content)
+	other, err := common.StrToMap(errorLog.Other)
+	require.NoError(t, err)
+	assert.Equal(t, "service_quota_exhausted", other["error_code"])
+	adminInfo, ok := other["admin_info"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "status_code=403, "+upstreamBody, adminInfo["upstream_error"])
+	logs, _, err := model.GetUserLogs(7, model.LogFilter{}, 0, 10)
+	require.NoError(t, err)
+	userView, err := common.Marshal(logs)
+	require.NoError(t, err)
+	assert.NotContains(t, string(userView), "预扣费额度失败")
+	assert.NotContains(t, string(userView), "0.12")
+}

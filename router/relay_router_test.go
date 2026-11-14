@@ -2,6 +2,7 @@ package router
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
@@ -2538,5 +2541,367 @@ func setupRelayRouterTestDB(t *testing.T) {
 		} else {
 			require.NoError(t, os.Unsetenv("SQL_DSN"))
 		}
+	})
+}
+
+// upstreamQuotaBody is new-api's own answer when the account a channel uses
+// on it cannot pay for the request.
+const upstreamQuotaBody = `{"error":{"message":"预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000 (request id: 20261104012629802206256826)","type":"new_api_error","code":"pre_consume_token_quota_failed"}}`
+
+const upstreamQuotaRequestID = "20261104012629802206256826"
+
+// A channel with "hide upstream balance errors" on answers an upstream's
+// out-of-balance error with its own message (上游tokens数量不足 unless it
+// sets one, with new-api's request id) and status (403 unless it sets one)
+// in every response shape, and the user's error log shows only that, while
+// the upstream's answer stays for administrators. Retries and automatic
+// disabling still go by the upstream's answer. With the switch off (the
+// default, also on a channel saved before it existed or saved off with a
+// message), the user's own balance shortfall, and a rate limit worded as
+// quota, nothing changes.
+func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	autoDisable, errorLog, retryTimes := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
+	disableCodes, disableKeywords := operation_setting.AutomaticDisableStatusCodesToString(), operation_setting.AutomaticDisableKeywordsToString()
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		// Refunds and automatic disables finish on gopool workers.
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = autoDisable, errorLog, retryTimes
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(disableCodes))
+		operation_setting.AutomaticDisableKeywordsFromString(disableKeywords)
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = true, true, 0
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401"))
+	operation_setting.AutomaticDisableKeywordsFromString("")
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+
+	// answering is an upstream that answers every request alike and counts them.
+	type answering struct {
+		*httptest.Server
+		calls atomic.Int32
+	}
+	// Each answer carries the upstream's request id when it is new-api.
+	answer := func(status int, body, requestID string) *answering {
+		upstream := &answering{}
+		upstream.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstream.calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			if requestID != "" {
+				w.Header().Set(common.RequestIdKey, requestID)
+			}
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		}))
+		t.Cleanup(upstream.Close)
+		return upstream
+	}
+	broke := answer(http.StatusForbidden, upstreamQuotaBody, upstreamQuotaRequestID)
+	// An upstream that sends no request id of its own.
+	served := answer(http.StatusOK, `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"uqe-retry","choices":[{"index":0,"message":{"role":"assistant","content":"served by the second channel"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, "")
+	geminiQuotaMessage := "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. Please retry in 43.659002305s."
+	rateLimited := answer(http.StatusTooManyRequests, `{"error":{"code":429,"message":"`+geminiQuotaMessage+`","status":"RESOURCE_EXHAUSTED"}}`, "")
+
+	user := model.User{Id: 6500000 + int(relayRouterTestUsers.Add(1)), Username: "uqe-user", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "uqetestkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	poor := model.User{Id: 6500000 + int(relayRouterTestUsers.Add(1)), Username: "uqe-poor", AffCode: "uqe-poor", Status: common.UserStatusEnabled, Group: "default", Quota: 100}
+	require.NoError(t, model.DB.Create(&poor).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: poor.Id, Key: "uqepoorkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+
+	prices := map[string]float64{}
+	create := func(name, modelName string, upstream *answering, settings string, priority int64, autoBan int) model.Channel {
+		channel := model.Channel{Name: name, Key: "sk-" + name, Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: modelName, BaseURL: &upstream.URL, OtherSettings: settings, Priority: &priority, AutoBan: &autoBan}
+		require.NoError(t, model.DB.Create(&channel).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: modelName, Group: "default", Enabled: true, Priority: &priority}).Error)
+		prices[modelName] = 0.01
+		return channel
+	}
+	const on = `{"upstream_quota_error_mask_enabled":true}`
+	hiding := create("uqe-default", "uqe-default", broke, on, 0, 0)
+	create("uqe-custom", "uqe-custom", broke, `{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"  余额维护中，请稍后再试  "}`, 0, 0)
+	create("uqe-status", "uqe-status", broke, `{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_status_code":429}`, 0, 0)
+	create("uqe-unsaved", "uqe-unsaved", broke, "", 0, 0)
+	create("uqe-legacy", "uqe-legacy", broke, `{"novelai_hd_disabled":true}`, 0, 0)
+	create("uqe-saved-off", "uqe-saved-off", broke, `{"upstream_quota_error_message":"余额维护中","upstream_quota_error_status_code":429}`, 0, 0)
+	create("uqe-rate-limited", "uqe-rate-limited", rateLimited, on, 0, 0)
+	first := create("uqe-retry-first", "uqe-retry", broke, on, 10, 0)
+	create("uqe-retry-second", "uqe-retry", served, on, 0, 0)
+	byKeyword := create("uqe-disable-keyword", "uqe-disable-keyword", broke, on, 0, 1)
+	byStatus := create("uqe-disable-status", "uqe-disable-status", broke, `{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_status_code":429}`, 0, 1)
+	// An upstream that answers only once the test lets it, so that the
+	// relay's keepalive goes out first.
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	held := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, upstreamQuotaBody)
+	}))
+	t.Cleanup(held.Close)
+	create("uqe-keepalive", "uqe-keepalive", &answering{Server: held}, on, 0, 0)
+	priceJSON, err := common.Marshal(prices)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(priceJSON)))
+
+	engine := gin.New()
+	engine.Use(middleware.RequestId())
+	SetRelayRouter(engine)
+	send := func(key, path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+key)
+		engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+	chat := func(modelName string) *httptest.ResponseRecorder {
+		return send("uqetestkey", "/v1/chat/completions", `{"model":"`+modelName+`","messages":[{"role":"user","content":"hi"}]}`)
+	}
+	type openAIError struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	}
+	errorOf := func(recorder *httptest.ResponseRecorder) openAIError {
+		var payload struct {
+			Error openAIError `json:"error"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload), recorder.Body.String())
+		return payload.Error
+	}
+	// assertHidden checks that nothing of the upstream's answer is in text.
+	assertHidden := func(t *testing.T, text string) {
+		t.Helper()
+		for _, upstreamPart := range []string{"预扣费额度失败", "0.12", upstreamQuotaRequestID, "pre_consume_token_quota_failed"} {
+			assert.NotContains(t, text, upstreamPart)
+		}
+	}
+	lastErrorLog := func(t *testing.T, channelID int) model.Log {
+		t.Helper()
+		var errorLog model.Log
+		require.NoError(t, model.LOG_DB.Where("type = ? AND channel_id = ?", model.LogTypeError, channelID).Order("id desc").First(&errorLog).Error)
+		return errorLog
+	}
+	userView := func(t *testing.T) string {
+		t.Helper()
+		logs, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 1000)
+		require.NoError(t, err)
+		view, err := common.Marshal(logs)
+		require.NoError(t, err)
+		return string(view)
+	}
+
+	t.Run("the channel's default message replaces the upstream's balance error", func(t *testing.T) {
+		recorder := chat("uqe-default")
+
+		require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+		ours := recorder.Header().Get(common.RequestIdKey)
+		require.NotEmpty(t, ours)
+		assert.Equal(t, openAIError{Message: "上游tokens数量不足 (request id: " + ours + ")", Type: "new_api_error", Code: "service_quota_exhausted"}, errorOf(recorder))
+		assertHidden(t, recorder.Body.String())
+
+		errorLog := lastErrorLog(t, hiding.Id)
+		assert.Equal(t, "status_code=403, 上游tokens数量不足", errorLog.Content)
+		assert.Equal(t, ours, errorLog.RequestId)
+		assert.Empty(t, errorLog.UpstreamRequestId)
+		other, err := common.StrToMap(errorLog.Other)
+		require.NoError(t, err)
+		assert.Equal(t, "new_api_error", other["error_type"])
+		assert.Equal(t, "service_quota_exhausted", other["error_code"])
+		assert.Equal(t, float64(http.StatusForbidden), other["status_code"])
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "status_code=403, 预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000 (request id: 20261104012629802206256826)", adminInfo["upstream_error"])
+		assert.Equal(t, float64(http.StatusForbidden), adminInfo["upstream_status_code"])
+		assert.Equal(t, "pre_consume_token_quota_failed", adminInfo["upstream_error_code"])
+		assert.Equal(t, upstreamQuotaRequestID, adminInfo["upstream_request_id"])
+		assertHidden(t, userView(t))
+	})
+
+	for _, tc := range []struct {
+		name, model, message string
+		status               int
+	}{
+		{"a custom Chinese message replaces it", "uqe-custom", "余额维护中，请稍后再试", http.StatusForbidden},
+		{"a custom status replaces its status", "uqe-status", "上游tokens数量不足", http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := chat(tc.model)
+
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			ours := recorder.Header().Get(common.RequestIdKey)
+			assert.Equal(t, openAIError{Message: tc.message + " (request id: " + ours + ")", Type: "new_api_error", Code: "service_quota_exhausted"}, errorOf(recorder))
+			assertHidden(t, recorder.Body.String())
+			var errorLog model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ? AND request_id = ?", model.LogTypeError, ours).First(&errorLog).Error)
+			assert.Equal(t, fmt.Sprintf("status_code=%d, %s", tc.status, tc.message), errorLog.Content)
+		})
+	}
+
+	t.Run("the Claude format gets the channel's message as a Claude error", func(t *testing.T) {
+		recorder := send("uqetestkey", "/v1/messages", `{"model":"uqe-default","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+
+		require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+		ours := recorder.Header().Get(common.RequestIdKey)
+		assert.JSONEq(t, `{"type":"error","error":{"type":"new_api_error","message":"上游tokens数量不足 (request id: `+ours+`)"}}`, recorder.Body.String())
+	})
+
+	t.Run("a stream that fails before its first byte gets the channel's message as JSON", func(t *testing.T) {
+		recorder := send("uqetestkey", "/v1/chat/completions", `{"model":"uqe-default","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+		require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+		assert.True(t, strings.HasPrefix(recorder.Header().Get("Content-Type"), "application/json"), recorder.Header().Get("Content-Type"))
+		ours := recorder.Header().Get(common.RequestIdKey)
+		assert.Equal(t, openAIError{Message: "上游tokens数量不足 (request id: " + ours + ")", Type: "new_api_error", Code: "service_quota_exhausted"}, errorOf(recorder))
+		assertHidden(t, recorder.Body.String())
+	})
+
+	t.Run("the Gemini format gets the channel's message", func(t *testing.T) {
+		recorder := send("uqetestkey", "/v1beta/models/uqe-default:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+
+		require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+		ours := recorder.Header().Get(common.RequestIdKey)
+		assert.Equal(t, openAIError{Message: "上游tokens数量不足 (request id: " + ours + ")", Type: "new_api_error", Code: "service_quota_exhausted"}, errorOf(recorder))
+	})
+
+	t.Run("a NovelAI client gets the channel's message in NovelAI's error shape, not the upstream body", func(t *testing.T) {
+		recorder := send("uqetestkey", "/ai/generate-image", `{"input":"a cat","model":"uqe-default","action":"generate","parameters":{"n_samples":1}}`)
+
+		require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+		ours := recorder.Header().Get(common.RequestIdKey)
+		assert.JSONEq(t, `{"statusCode":403,"message":"上游tokens数量不足 (request id: `+ours+`)"}`, recorder.Body.String())
+	})
+
+	t.Run("a stream committed by a keepalive ends with the channel's message as an event", func(t *testing.T) {
+		settings := operation_setting.GetGeneralSetting()
+		pingEnabled, pingSeconds := settings.PingIntervalEnabled, settings.PingIntervalSeconds
+		settings.PingIntervalEnabled, settings.PingIntervalSeconds = true, 1
+		t.Cleanup(func() { settings.PingIntervalEnabled, settings.PingIntervalSeconds = pingEnabled, pingSeconds })
+		server := httptest.NewServer(engine)
+		t.Cleanup(server.Close)
+		request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"uqe-keepalive","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+		require.NoError(t, err)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer uqetestkey")
+
+		response, err := http.DefaultClient.Do(request)
+		require.NoError(t, err)
+		defer response.Body.Close()
+		reader := bufio.NewReader(response.Body)
+		keepAlive, err := reader.ReadString('\n')
+		require.NoError(t, err)
+		require.Equal(t, ": PING\n", keepAlive)
+		releaseOnce.Do(func() { close(release) })
+		rest, err := io.ReadAll(reader)
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusOK, response.StatusCode, "the keepalive committed the stream")
+		ours := response.Header.Get(common.RequestIdKey)
+		assert.Contains(t, string(rest), `data: {"error":{"message":"上游tokens数量不足 (request id: `+ours+`)","type":"new_api_error","param":"","code":"service_quota_exhausted"}}`)
+		assertHidden(t, string(rest))
+	})
+
+	t.Run("a retry serves the request on the next channel and the failed attempt's log is hidden too", func(t *testing.T) {
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = 0 })
+		brokeCalls, servedCalls := broke.calls.Load(), served.calls.Load()
+
+		recorder := chat("uqe-retry")
+
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), "served by the second channel")
+		assert.Equal(t, brokeCalls+1, broke.calls.Load())
+		assert.Equal(t, servedCalls+1, served.calls.Load())
+		errorLog := lastErrorLog(t, first.Id)
+		assert.Equal(t, "status_code=403, 上游tokens数量不足", errorLog.Content)
+		assert.Equal(t, recorder.Header().Get(common.RequestIdKey), errorLog.RequestId)
+		assertHidden(t, userView(t))
+	})
+
+	// The upstream's answer matches the keyword and the status rule; the
+	// channel's message and its status 429 match neither.
+	for _, tc := range []struct {
+		name, model, keywords, codes string
+		channel                      model.Channel
+	}{
+		{"a disable keyword of the upstream's answer still disables the channel", "uqe-disable-keyword", "预扣费额度失败", "401", byKeyword},
+		{"the upstream's status still disables the channel", "uqe-disable-status", "", "401,403", byStatus},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			operation_setting.AutomaticDisableKeywordsFromString(tc.keywords)
+			require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(tc.codes))
+			t.Cleanup(func() {
+				operation_setting.AutomaticDisableKeywordsFromString("")
+				require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401"))
+			})
+
+			recorder := chat(tc.model)
+
+			assert.NotContains(t, recorder.Body.String(), "预扣费额度失败")
+			assert.Eventually(t, func() bool {
+				channel, err := model.GetChannelById(tc.channel.Id, true)
+				require.NoError(t, err)
+				return channel.Status == common.ChannelStatusAutoDisabled
+			}, 5*time.Second, 10*time.Millisecond)
+			channel, err := model.GetChannelById(tc.channel.Id, true)
+			require.NoError(t, err)
+			assert.Contains(t, channel.GetOtherInfo()["status_reason"], "预扣费额度失败", "administrators read the upstream's answer")
+		})
+	}
+
+	// The default: the upstream's error goes through as it does without the
+	// setting, also on a channel whose settings predate it or that saved a
+	// message with the switch off.
+	for _, modelName := range []string{"uqe-unsaved", "uqe-legacy", "uqe-saved-off"} {
+		t.Run("with the switch off the upstream's answer goes through: "+modelName, func(t *testing.T) {
+			recorder := chat(modelName)
+
+			require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+			assert.Equal(t, openAIError{Message: "预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000 (request id: 20261104012629802206256826)", Type: "new_api_error", Code: "pre_consume_token_quota_failed"}, errorOf(recorder))
+			var errorLog model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ? AND request_id = ?", model.LogTypeError, recorder.Header().Get(common.RequestIdKey)).First(&errorLog).Error)
+			assert.Contains(t, errorLog.Content, "预扣费额度失败")
+			assert.Equal(t, upstreamQuotaRequestID, errorLog.UpstreamRequestId)
+		})
+	}
+
+	t.Run("the user's own balance shortfall still tells the user", func(t *testing.T) {
+		calls := broke.calls.Load()
+
+		recorder := send("uqepoorkey", "/v1/chat/completions", `{"model":"uqe-default","messages":[{"role":"user","content":"hi"}]}`)
+
+		require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+		assert.Equal(t, openAIError{
+			Message: i18n.Translate("", i18n.MsgQuotaPreConsumeInsufficient, map[string]any{"Remaining": logger.FormatQuota(100), "Required": logger.FormatQuota(5000)}) + " (request id: " + recorder.Header().Get(common.RequestIdKey) + ")",
+			Type:    "new_api_error",
+			Code:    "insufficient_user_quota",
+		}, errorOf(recorder))
+		assert.Equal(t, calls, broke.calls.Load(), "the request never reached the upstream")
+	})
+
+	t.Run("a rate limit worded as quota goes through", func(t *testing.T) {
+		recorder := chat("uqe-rate-limited")
+
+		require.Equal(t, http.StatusTooManyRequests, recorder.Code, recorder.Body.String())
+		assert.Equal(t, geminiQuotaMessage, errorOf(recorder).Message)
 	})
 }

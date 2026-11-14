@@ -354,7 +354,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
 				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
 				if !clientGone {
-					service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
+					service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, service.MaskUpstreamQuotaError(c, apiErr), info)
 				}
 				if decision.Action == "retry" {
 					continue

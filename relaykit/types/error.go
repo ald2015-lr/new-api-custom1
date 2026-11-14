@@ -91,6 +91,11 @@ const (
 	// quota error
 	ErrorCodeInsufficientUserQuota      ErrorCode = "insufficient_user_quota"
 	ErrorCodePreConsumeTokenQuotaFailed ErrorCode = "pre_consume_token_quota_failed"
+	// ErrorCodeServiceQuotaExhausted replaces the code of an upstream's
+	// out-of-balance error on a channel that hides those errors (the
+	// channel's upstream_quota_error_mask_enabled setting). It names no
+	// upstream and does not tell the user that their own quota is short.
+	ErrorCodeServiceQuotaExhausted ErrorCode = "service_quota_exhausted"
 )
 
 type NewAPIError struct {

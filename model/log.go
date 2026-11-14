@@ -275,12 +275,14 @@ func RecordTopupLog(userId int, content *common.Message, callerIp string, paymen
 	}
 }
 
-func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
+// RecordErrorLog stores a failed relay attempt. upstreamRequestId is the
+// user-visible upstream request id; the caller leaves it empty when the
+// upstream's answer is hidden from the user.
+func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, upstreamRequestId string, tokenId int, useTimeSeconds int,
 	isStream bool, group string, other *LogOther) {
 	logger.LogInfo(c, common.LogText("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
-	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	otherStr := other.JSONString()
 	// 判断是否需要记录 IP
 	needRecordIp := false
