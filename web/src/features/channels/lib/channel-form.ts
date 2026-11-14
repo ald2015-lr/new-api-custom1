@@ -33,6 +33,9 @@ import {
   NOVELAI_QUEUE_LIMIT_DEFAULT,
   NOVELAI_QUEUE_LIMIT_MAX,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
+  UPSTREAM_QUOTA_ERROR_MESSAGE_MAX,
+  UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX,
+  UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN,
 } from '../constants'
 import type { Channel } from '../types'
 import {
@@ -301,6 +304,12 @@ export const channelFormSchema = z
     // field, saved as the default (react-hook-form shows the default value
     // again for undefined).
     novelai_queue_limit: z.number().nullable().optional(),
+    // Any channel type: hide an upstream's out-of-balance error behind the
+    // message and status below (stored in settings JSON). A cleared status
+    // is null, saved as the default.
+    upstream_quota_error_mask_enabled: z.boolean().optional(),
+    upstream_quota_error_message: z.string().optional(),
+    upstream_quota_error_status_code: z.number().nullable().optional(),
     disable_task_polling_sleep: z.boolean().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
@@ -447,6 +456,31 @@ export const channelFormSchema = z
         ERROR_MESSAGES.INVALID_NOVELAI_QUEUE_LIMIT
       )
     }
+
+    // Characters, not UTF-16 units, as the server counts them.
+    if (
+      [...(data.upstream_quota_error_message?.trim() ?? '')].length >
+      UPSTREAM_QUOTA_ERROR_MESSAGE_MAX
+    ) {
+      addRequiredIssue(
+        ctx,
+        'upstream_quota_error_message',
+        ERROR_MESSAGES.INVALID_UPSTREAM_QUOTA_ERROR_MESSAGE
+      )
+    }
+    const quotaErrorStatus = data.upstream_quota_error_status_code
+    if (
+      quotaErrorStatus != null &&
+      (!Number.isInteger(quotaErrorStatus) ||
+        quotaErrorStatus < UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN ||
+        quotaErrorStatus > UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX)
+    ) {
+      addRequiredIssue(
+        ctx,
+        'upstream_quota_error_status_code',
+        ERROR_MESSAGES.INVALID_UPSTREAM_QUOTA_ERROR_STATUS_CODE
+      )
+    }
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
@@ -515,6 +549,9 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   novelai_hd_disabled: false,
   novelai_upscale_enabled: false,
   novelai_queue_limit: NOVELAI_QUEUE_LIMIT_DEFAULT,
+  upstream_quota_error_mask_enabled: false,
+  upstream_quota_error_message: '',
+  upstream_quota_error_status_code: null,
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
@@ -596,6 +633,9 @@ export function transformChannelToFormDefaults(
   let novelAIHDDisabled = false
   let novelAIUpscaleEnabled = false
   let novelAIQueueLimit = NOVELAI_QUEUE_LIMIT_DEFAULT
+  let upstreamQuotaErrorMaskEnabled = false
+  let upstreamQuotaErrorMessage = ''
+  let upstreamQuotaErrorStatusCode: number | null = null
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
@@ -634,6 +674,19 @@ export function transformChannelToFormDefaults(
           parsed.novelai_queue_limit,
           NOVELAI_QUEUE_LIMIT_MAX
         )
+      }
+      upstreamQuotaErrorMaskEnabled =
+        parsed.upstream_quota_error_mask_enabled === true
+      upstreamQuotaErrorMessage =
+        typeof parsed.upstream_quota_error_message === 'string'
+          ? parsed.upstream_quota_error_message
+          : ''
+      // 0 or absent is the default, shown as the placeholder.
+      if (
+        Number.isInteger(parsed.upstream_quota_error_status_code) &&
+        parsed.upstream_quota_error_status_code !== 0
+      ) {
+        upstreamQuotaErrorStatusCode = parsed.upstream_quota_error_status_code
       }
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       upstreamModelUpdateCheckEnabled =
@@ -701,6 +754,9 @@ export function transformChannelToFormDefaults(
     novelai_hd_disabled: novelAIHDDisabled,
     novelai_upscale_enabled: novelAIUpscaleEnabled,
     novelai_queue_limit: novelAIQueueLimit,
+    upstream_quota_error_mask_enabled: upstreamQuotaErrorMaskEnabled,
+    upstream_quota_error_message: upstreamQuotaErrorMessage,
+    upstream_quota_error_status_code: upstreamQuotaErrorStatusCode,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
@@ -881,6 +937,27 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     delete settingsObj.novelai_hd_disabled
     delete settingsObj.novelai_upscale_enabled
     delete settingsObj.novelai_queue_limit
+  }
+
+  // Every channel type can hide upstream balance errors. Only what differs
+  // from the defaults is written, so an untouched channel saves no key; the
+  // message and status are kept while the switch is off.
+  if (formData.upstream_quota_error_mask_enabled === true) {
+    settingsObj.upstream_quota_error_mask_enabled = true
+  } else {
+    delete settingsObj.upstream_quota_error_mask_enabled
+  }
+  const quotaErrorMessage = formData.upstream_quota_error_message?.trim()
+  if (quotaErrorMessage) {
+    settingsObj.upstream_quota_error_message = quotaErrorMessage
+  } else {
+    delete settingsObj.upstream_quota_error_message
+  }
+  if (formData.upstream_quota_error_status_code) {
+    settingsObj.upstream_quota_error_status_code =
+      formData.upstream_quota_error_status_code
+  } else {
+    delete settingsObj.upstream_quota_error_status_code
   }
 
   settingsObj.disable_task_polling_sleep =

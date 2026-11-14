@@ -46,6 +46,17 @@ export const CHANNEL_TYPE_NOVELAI = 64
 export const NOVELAI_QUEUE_LIMIT_DEFAULT = 10
 export const NOVELAI_QUEUE_LIMIT_MAX = 100
 
+// What a channel that hides upstream balance errors answers in their place
+// when it sets nothing (settings.upstream_quota_error_message and
+// upstream_quota_error_status_code; the server applies the same defaults and
+// bounds). The default message is the operator's response text, so it is not
+// translated.
+export const UPSTREAM_QUOTA_ERROR_MESSAGE_DEFAULT = '上游tokens数量不足'
+export const UPSTREAM_QUOTA_ERROR_MESSAGE_MAX = 500
+export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_DEFAULT = 403
+export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN = 400
+export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX = 599
+
 export const CHANNEL_TYPES = {
   0: 'Unknown',
   1: 'OpenAI',
@@ -380,6 +391,10 @@ export const ERROR_MESSAGES = {
     'HTTP/2 connection shards must be 1 when HTTP/1.1 is selected',
   INVALID_NOVELAI_QUEUE_LIMIT:
     'Queue limit per key must be a whole number from 0 to 100',
+  INVALID_UPSTREAM_QUOTA_ERROR_MESSAGE:
+    'The error returned to users must be at most 500 characters',
+  INVALID_UPSTREAM_QUOTA_ERROR_STATUS_CODE:
+    'The status code must be a whole number from 400 to 599',
   CREATE_FAILED: 'Failed to create channel',
   UPDATE_FAILED: 'Failed to update channel',
   DELETE_FAILED: 'Failed to delete channel',

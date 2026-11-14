@@ -146,6 +146,12 @@ export interface LogOtherData {
     }
     // Reject / intercept reason (admin only)
     reject_reason?: string
+    // The upstream's own balance error that the channel hid from the user
+    // behind its message (error logs, admin only).
+    upstream_error?: string
+    upstream_status_code?: number
+    upstream_error_code?: string
+    upstream_request_id?: string
     task_plugin?: TaskPluginInfo
   }
   root_info?: {

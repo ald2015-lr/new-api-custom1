@@ -114,6 +114,11 @@ export interface ChannelOtherSettings {
   novelai_hd_disabled?: boolean
   novelai_upscale_enabled?: boolean
   novelai_queue_limit?: number
+  // Hide an upstream's out-of-balance error behind the channel's message
+  // and status (any channel type); off when unset.
+  upstream_quota_error_mask_enabled?: boolean
+  upstream_quota_error_message?: string
+  upstream_quota_error_status_code?: number
   disable_task_polling_sleep?: boolean
   upstream_model_update_check_enabled?: boolean
   upstream_model_update_auto_sync_enabled?: boolean

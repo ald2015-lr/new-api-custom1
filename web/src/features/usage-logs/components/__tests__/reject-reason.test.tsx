@@ -52,7 +52,14 @@ function makeLog(other: LogOtherData): UsageLog {
   }
 }
 
-function renderDetails(isAdmin: boolean): void {
+function renderDetails(
+  isAdmin: boolean,
+  other: LogOtherData = {
+    admin_info: {
+      reject_reason: 'blocked by channel policy',
+    },
+  }
+): void {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -63,11 +70,7 @@ function renderDetails(isAdmin: boolean): void {
   render(
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
-        log={makeLog({
-          admin_info: {
-            reject_reason: 'blocked by channel policy',
-          },
-        })}
+        log={makeLog(other)}
         isAdmin={isAdmin}
         isRoot={false}
         open
@@ -97,5 +100,43 @@ describe('usage log reject reason', () => {
 
     expect(screen.queryByText('Reject Reason')).toBeNull()
     expect(screen.queryByText('blocked by channel policy')).toBeNull()
+  })
+})
+
+// A channel that hides upstream balance errors stores the upstream's own
+// answer under admin_info of the error log; the user sees only the channel's
+// message in the log content.
+describe('usage log upstream original error', () => {
+  const hidden: LogOtherData = {
+    admin_info: {
+      upstream_error:
+        'status_code=403, 预扣费额度失败, 用户剩余额度: ＄0.120000 (request id: upstream-req-1)',
+      upstream_status_code: 403,
+      upstream_error_code: 'pre_consume_token_quota_failed',
+      upstream_request_id: 'upstream-req-1',
+    },
+  }
+
+  test('shows the upstream original error, code and request id to admins', () => {
+    renderDetails(true, hidden)
+
+    expect(screen.getByText('Upstream original error')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'status_code=403, 预扣费额度失败, 用户剩余额度: ＄0.120000 (request id: upstream-req-1)'
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('pre_consume_token_quota_failed')
+    ).toBeInTheDocument()
+    expect(screen.getByText('upstream-req-1')).toBeInTheDocument()
+  })
+
+  test('hides the upstream original error from non-admin users', () => {
+    renderDetails(false, hidden)
+
+    expect(screen.queryByText('Upstream original error')).toBeNull()
+    expect(screen.queryByText(/预扣费额度失败/)).toBeNull()
+    expect(screen.queryByText('upstream-req-1')).toBeNull()
   })
 })
