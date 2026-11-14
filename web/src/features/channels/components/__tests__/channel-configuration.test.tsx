@@ -3391,3 +3391,345 @@ test('AWS interface selection is disabled without sensitive channel write permis
     await screen.findByRole('combobox', { name: 'AWS API' })
   ).toBeDisabled()
 })
+
+const HIDE_UPSTREAM_BALANCE_ERRORS = 'Hide upstream insufficient balance errors'
+
+test('a new channel passes upstream balance errors through until the switch is turned on, which shows the message and status with their defaults', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(screen.getByRole('option', { name: /^DeepSeek / }))
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const toggle = screen.getByRole('switch', {
+    name: HIDE_UPSTREAM_BALANCE_ERRORS,
+  })
+  expect(toggle).not.toBeChecked()
+  expect(toggle).toHaveAccessibleDescription(/log details/)
+  expect(
+    screen.queryByRole('textbox', { name: 'Error returned to users' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('spinbutton', { name: 'Status Code' })
+  ).not.toBeInTheDocument()
+
+  await user.click(toggle)
+
+  expect(
+    screen.getByRole('textbox', { name: 'Error returned to users' })
+  ).toHaveAttribute('placeholder', '上游tokens数量不足')
+  expect(
+    screen.getByRole('spinbutton', { name: 'Status Code' })
+  ).toHaveAttribute('placeholder', '403')
+})
+
+test.each([1, 14, 24, CHANNEL_TYPE_NOVELAI])(
+  'an existing channel of type %i saved before the setting shows upstream balance errors passed through, unmarked',
+  async (type) => {
+    editingChannel = { ...editingChannel, type, settings: '{}' }
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+    expect(requestTab).not.toHaveAccessibleName(/Configured/)
+    await user.click(requestTab)
+    expect(
+      screen.getByRole('switch', { name: HIDE_UPSTREAM_BALANCE_ERRORS })
+    ).not.toBeChecked()
+    expect(
+      screen.queryByRole('textbox', { name: 'Error returned to users' })
+    ).not.toBeInTheDocument()
+  }
+)
+
+test('saving a channel without touching the switch writes no upstream balance error setting', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings: '{"future_option":{"level":2}}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).not.toHaveProperty('upstream_quota_error_mask_enabled')
+  expect(settings).not.toHaveProperty('upstream_quota_error_message')
+  expect(settings).not.toHaveProperty('upstream_quota_error_status_code')
+  expect(settings).toMatchObject({ future_option: { level: 2 } })
+})
+
+test('turning the switch on marks Request & Response and saves it with a trimmed Chinese message, a custom status and the other settings intact', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings: '{"future_option":{"level":2}}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  await user.click(requestTab)
+  await user.click(
+    screen.getByRole('switch', { name: HIDE_UPSTREAM_BALANCE_ERRORS })
+  )
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.type(
+    screen.getByRole('textbox', { name: 'Error returned to users' }),
+    '  余额维护中，请稍后再试  '
+  )
+  await user.type(
+    screen.getByRole('spinbutton', { name: 'Status Code' }),
+    '429'
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  expect(JSON.parse(payload.settings)).toMatchObject({
+    upstream_quota_error_mask_enabled: true,
+    upstream_quota_error_message: '余额维护中，请稍后再试',
+    upstream_quota_error_status_code: 429,
+    future_option: { level: 2 },
+  })
+})
+
+test('a channel saved with the switch on shows its message and status, and turning it off hides them and saves them without the switch', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings:
+      '{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"余额维护中","upstream_quota_error_status_code":429,"novelai_hd_disabled":true}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(requestTab)
+  const toggle = screen.getByRole('switch', {
+    name: HIDE_UPSTREAM_BALANCE_ERRORS,
+  })
+  expect(toggle).toBeChecked()
+  expect(
+    screen.getByRole('textbox', { name: 'Error returned to users' })
+  ).toHaveValue('余额维护中')
+  expect(screen.getByRole('spinbutton', { name: 'Status Code' })).toHaveValue(
+    429
+  )
+
+  await user.click(toggle)
+
+  expect(toggle).not.toBeChecked()
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  expect(
+    screen.queryByRole('textbox', { name: 'Error returned to users' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).not.toHaveProperty('upstream_quota_error_mask_enabled')
+  expect(settings).toMatchObject({
+    upstream_quota_error_message: '余额维护中',
+    upstream_quota_error_status_code: 429,
+  })
+})
+
+test.each([
+  [
+    'a message over 500 characters',
+    '额'.repeat(501),
+    '',
+    'Error returned to users',
+    'The error returned to users must be at most 500 characters',
+  ],
+  [
+    'a status below 400',
+    '',
+    '399',
+    'Status Code',
+    'The status code must be a whole number from 400 to 599',
+  ],
+  [
+    'a status above 599',
+    '',
+    '600',
+    'Status Code',
+    'The status code must be a whole number from 400 to 599',
+  ],
+  [
+    'a fractional status',
+    '',
+    '403.5',
+    'Status Code',
+    'The status code must be a whole number from 400 to 599',
+  ],
+])(
+  'a channel with %s is not saved and shows the allowed range',
+  async (_case, message, status, field, error) => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+    await user.click(
+      screen.getByRole('switch', { name: HIDE_UPSTREAM_BALANCE_ERRORS })
+    )
+    if (message) {
+      fireEvent.change(
+        screen.getByRole('textbox', { name: 'Error returned to users' }),
+        { target: { value: message } }
+      )
+    }
+    if (status) {
+      await user.type(
+        screen.getByRole('spinbutton', { name: 'Status Code' }),
+        status
+      )
+    }
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    expect(await screen.findByText(error)).toBeVisible()
+    expect(
+      screen.getByRole(field === 'Status Code' ? 'spinbutton' : 'textbox', {
+        name: field,
+      })
+    ).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  }
+)
+
+// The server counts characters (code points) after trimming.
+test.each([
+  ['500 Chinese characters', '额'.repeat(500), '额'.repeat(500)],
+  ['500 emoji of two UTF-16 units each', '😀'.repeat(500), '😀'.repeat(500)],
+  [
+    '500 characters between spaces',
+    `  ${'额'.repeat(500)}  `,
+    '额'.repeat(500),
+  ],
+])('a message of %s is saved', async (_case, typed, saved) => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  await user.click(
+    screen.getByRole('switch', { name: HIDE_UPSTREAM_BALANCE_ERRORS })
+  )
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Error returned to users' }),
+    { target: { value: typed } }
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  expect(JSON.parse(payload.settings)).toMatchObject({
+    upstream_quota_error_message: saved,
+  })
+})
+
+test('turning the switch off puts a message or status the server would refuse back to its saved value, so the channel still saves', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings:
+      '{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"余额维护中","upstream_quota_error_status_code":429}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Error returned to users' }),
+    { target: { value: '额'.repeat(501) } }
+  )
+  const status = screen.getByRole('spinbutton', { name: 'Status Code' })
+  await user.clear(status)
+  await user.type(status, '600')
+
+  await user.click(
+    screen.getByRole('switch', { name: HIDE_UPSTREAM_BALANCE_ERRORS })
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).not.toHaveProperty('upstream_quota_error_mask_enabled')
+  expect(settings).toMatchObject({
+    upstream_quota_error_message: '余额维护中',
+    upstream_quota_error_status_code: 429,
+  })
+})
+
+test('a channel saved with status 0 shows the default status and saves without one', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings:
+      '{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_status_code":0}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const status = screen.getByRole('spinbutton', { name: 'Status Code' })
+  expect(status).toHaveValue(null)
+  expect(status).toHaveAttribute('placeholder', '403')
+
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).toMatchObject({ upstream_quota_error_mask_enabled: true })
+  expect(settings).not.toHaveProperty('upstream_quota_error_status_code')
+})
+
+test('the upstream balance error switch is locked without sensitive channel write permission', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings: '{"upstream_quota_error_mask_enabled":true}',
+  }
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: { read: true, write: true } },
+        },
+      },
+    },
+  })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const toggle = screen.getByRole('switch', {
+    name: HIDE_UPSTREAM_BALANCE_ERRORS,
+  })
+  expect(toggle).toHaveAttribute('aria-disabled', 'true')
+  await user.click(toggle)
+  expect(toggle).toBeChecked()
+  expect(
+    screen.getByRole('textbox', { name: 'Error returned to users' })
+  ).toBeDisabled()
+  expect(screen.getByRole('spinbutton', { name: 'Status Code' })).toBeDisabled()
+})

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
@@ -158,6 +159,78 @@ type ChannelOtherSettings struct {
 	// NovelAI channel on NovelAI's host, the generating one aside; nil means
 	// NovelAIQueueLimitDefault, 0 no waiting.
 	NovelAIQueueLimit *int `json:"novelai_queue_limit,omitempty"`
+	// UpstreamQuotaErrorMaskEnabled replaces the error an upstream answers
+	// when its own account is out of balance or quota with the channel's
+	// message and status before it reaches the user. Off (unset) passes the
+	// upstream error through as it is. Zero values of the three fields all
+	// mean the default, so they need no pointers.
+	UpstreamQuotaErrorMaskEnabled bool `json:"upstream_quota_error_mask_enabled,omitempty"`
+	// UpstreamQuotaErrorMessage is that message; blank means
+	// UpstreamQuotaErrorMessageDefault.
+	UpstreamQuotaErrorMessage string `json:"upstream_quota_error_message,omitempty"`
+	// UpstreamQuotaErrorStatusCode is that status; 0 means
+	// UpstreamQuotaErrorStatusCodeDefault.
+	UpstreamQuotaErrorStatusCode int `json:"upstream_quota_error_status_code,omitempty"`
+}
+
+const (
+	// UpstreamQuotaErrorMessageDefault is the message an upstream balance
+	// error is replaced with when the channel sets none. It is the operator's
+	// own response text, so it is not translated.
+	UpstreamQuotaErrorMessageDefault = "上游tokens数量不足"
+	// UpstreamQuotaErrorMessageMaxRunes bounds the channel's message.
+	UpstreamQuotaErrorMessageMaxRunes = 500
+	// UpstreamQuotaErrorStatusCodeDefault is the status an upstream balance
+	// error is replaced with when the channel sets none.
+	UpstreamQuotaErrorStatusCodeDefault = 403
+	// UpstreamQuotaErrorStatusCodeMin and UpstreamQuotaErrorStatusCodeMax
+	// bound the channel's status to client and server errors.
+	UpstreamQuotaErrorStatusCodeMin = 400
+	UpstreamQuotaErrorStatusCodeMax = 599
+)
+
+// EffectiveUpstreamQuotaErrorMessage is the message that replaces an upstream
+// balance error: the channel's own, trimmed and at most
+// UpstreamQuotaErrorMessageMaxRunes long, or the default when blank.
+func (s *ChannelOtherSettings) EffectiveUpstreamQuotaErrorMessage() string {
+	if s == nil {
+		return UpstreamQuotaErrorMessageDefault
+	}
+	message := strings.TrimSpace(s.UpstreamQuotaErrorMessage)
+	if message == "" {
+		return UpstreamQuotaErrorMessageDefault
+	}
+	if runes := []rune(message); len(runes) > UpstreamQuotaErrorMessageMaxRunes {
+		return string(runes[:UpstreamQuotaErrorMessageMaxRunes])
+	}
+	return message
+}
+
+// EffectiveUpstreamQuotaErrorStatusCode is the status that replaces an
+// upstream balance error: the channel's own, or the default when unset or
+// outside UpstreamQuotaErrorStatusCodeMin to UpstreamQuotaErrorStatusCodeMax.
+func (s *ChannelOtherSettings) EffectiveUpstreamQuotaErrorStatusCode() int {
+	if s == nil || s.UpstreamQuotaErrorStatusCode < UpstreamQuotaErrorStatusCodeMin || s.UpstreamQuotaErrorStatusCode > UpstreamQuotaErrorStatusCodeMax {
+		return UpstreamQuotaErrorStatusCodeDefault
+	}
+	return s.UpstreamQuotaErrorStatusCode
+}
+
+// ValidateUpstreamQuotaError rejects a message longer than
+// UpstreamQuotaErrorMessageMaxRunes once trimmed, and a status other than 0
+// (the default) or UpstreamQuotaErrorStatusCodeMin to
+// UpstreamQuotaErrorStatusCodeMax.
+func (s *ChannelOtherSettings) ValidateUpstreamQuotaError() error {
+	if s == nil {
+		return nil
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(s.UpstreamQuotaErrorMessage)) > UpstreamQuotaErrorMessageMaxRunes {
+		return fmt.Errorf("upstream_quota_error_message must be at most %d characters", UpstreamQuotaErrorMessageMaxRunes)
+	}
+	if code := s.UpstreamQuotaErrorStatusCode; code != 0 && (code < UpstreamQuotaErrorStatusCodeMin || code > UpstreamQuotaErrorStatusCodeMax) {
+		return fmt.Errorf("upstream_quota_error_status_code must be between %d and %d", UpstreamQuotaErrorStatusCodeMin, UpstreamQuotaErrorStatusCodeMax)
+	}
+	return nil
 }
 
 const (

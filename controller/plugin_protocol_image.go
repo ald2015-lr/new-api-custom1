@@ -254,7 +254,9 @@ func respondTaskPluginImageError(c *gin.Context, taskErr *dto.TaskError) {
 		}
 	}
 	errorType := "new_api_error"
-	if status < http.StatusInternalServerError {
+	// The channel's own message for an upstream balance error keeps new-api's
+	// type under any status the channel chose.
+	if status < http.StatusInternalServerError && code != string(types.ErrorCodeServiceQuotaExhausted) {
 		errorType = "invalid_request_error"
 	}
 	c.JSON(status, gin.H{"error": gin.H{

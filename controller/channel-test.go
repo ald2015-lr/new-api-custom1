@@ -989,7 +989,10 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	}
 
 	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, nil)
+		// The channel test is the administrator's own request: its error log
+		// keeps the upstream's answer even on a channel that hides upstream
+		// balance errors from users.
+		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, nil, nil)
 		summary.Disabled++
 	}
 

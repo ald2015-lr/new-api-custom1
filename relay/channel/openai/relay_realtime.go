@@ -187,6 +187,21 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					localUsage.OutputTokenDetails.AudioTokens += audioToken
 				}
 
+				// A new-api upstream upgrades before it bills, so its own balance
+				// failure arrives as an error event. On a channel that hides
+				// those, the client gets the channel's message in its place;
+				// usage above was counted from the upstream's event.
+				if realtimeEvent.Type == dto.RealtimeEventTypeError && realtimeEvent.Error != nil {
+					if masked := service.MaskUpstreamQuotaError(c, types.WithOpenAIError(*realtimeEvent.Error, 0)); masked != nil {
+						logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
+						masked.SetMessage(common.MessageWithRequestId(masked.Error(), c.GetString(common.RequestIdKey)))
+						if message, err = common.Marshal(&dto.RealtimeEvent{Type: dto.RealtimeEventTypeError, EventId: helper.GetLocalRealtimeID(c), Error: common.GetPointer(masked.ToOpenAIError())}); err != nil {
+							errChan <- fmt.Errorf("error marshalling message: %v", err)
+							return
+						}
+					}
+				}
+
 				err = helper.WssString(c, clientConn, string(message))
 				if err != nil {
 					errChan <- fmt.Errorf("error writing to client: %v", err)

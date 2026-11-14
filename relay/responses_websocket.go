@@ -17,6 +17,7 @@ import (
 	appconstant "github.com/QuantumNous/new-api/constant"
 	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	appmodel "github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
@@ -286,6 +287,15 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if info != nil && billingPrepared {
 			apiErr = RefundFailedRequestBilling(c, info, apiErr)
 		}
+		// The upstream's balance error on a channel that hides those, such as
+		// a new-api upstream rejecting response.create for its own balance,
+		// reaches the client as the channel's message and status only. The
+		// refund and the health record above saw the upstream's error.
+		if masked := service.MaskUpstreamQuotaError(c, apiErr); masked != nil {
+			logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
+			masked.SetMessage(common.MessageWithRequestId(masked.Error(), c.GetString(common.RequestIdKey)))
+			apiErr = masked
+		}
 	}()
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
@@ -354,7 +364,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
 				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
 				if !clientGone {
-					service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
+					service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, service.MaskUpstreamQuotaError(c, apiErr), info)
 				}
 				if decision.Action == "retry" {
 					continue

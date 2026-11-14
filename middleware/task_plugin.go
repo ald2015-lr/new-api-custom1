@@ -1587,6 +1587,11 @@ func RespondTaskPluginError(c *gin.Context, taskErr *dto.TaskError) bool {
 		return false
 	}
 	sanitized := sanitizedTaskPluginError(taskErr.StatusCode, taskErr.Message)
+	if taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted) {
+		// The channel's own message for an upstream balance error, under any
+		// status the channel chose.
+		sanitized.Code, sanitized.Message = taskErr.Code, taskErr.Message
+	}
 	requestID := c.GetString(common.RequestIdKey)
 	hasRenderer, err := pinned.Plugin.Engine.HasCallablePath(c.Request.Context(), "native", "error")
 	requestValue, exists := c.Get(pluginruntime.ContextKeyRouteRequest)

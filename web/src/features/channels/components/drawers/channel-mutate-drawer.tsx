@@ -155,6 +155,8 @@ import {
   MODEL_FETCHABLE_TYPES,
   NOVELAI_QUEUE_LIMIT_DEFAULT,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
+  UPSTREAM_QUOTA_ERROR_MESSAGE_DEFAULT,
+  UPSTREAM_QUOTA_ERROR_STATUS_CODE_DEFAULT,
 } from '../../constants'
 import { useChannelKeyDisclosure } from '../../hooks/use-channel-key-disclosure'
 import {
@@ -185,6 +187,8 @@ import {
   hasModelConfigChanged,
   findMissingModelsInMapping,
   validateModelMappingJson,
+  isValidUpstreamQuotaErrorMessage,
+  isValidUpstreamQuotaErrorStatusCode,
 } from '../../lib'
 import {
   getChannelConfigurationSection,
@@ -321,6 +325,9 @@ const SENSITIVE_FORM_FIELDS = [
   'novelai_hd_disabled',
   'novelai_upscale_enabled',
   'novelai_queue_limit',
+  'upstream_quota_error_mask_enabled',
+  'upstream_quota_error_message',
+  'upstream_quota_error_status_code',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -609,6 +616,27 @@ export function ChannelMutateDrawer({
   const vertexKeyType = formValues.vertex_key_type
   const upstreamModelUpdateCheckEnabled =
     formValues.upstream_model_update_check_enabled
+  const upstreamQuotaErrorMaskEnabled =
+    formValues.upstream_quota_error_mask_enabled === true
+  // The message and status inputs hide with the switch off. A value there
+  // that the server would refuse goes back to its saved value, instead of
+  // blocking the save with an error nobody can see.
+  const resetRefusedUpstreamQuotaErrorFields = () => {
+    if (
+      !isValidUpstreamQuotaErrorMessage(
+        form.getValues('upstream_quota_error_message')
+      )
+    ) {
+      form.resetField('upstream_quota_error_message')
+    }
+    if (
+      !isValidUpstreamQuotaErrorStatusCode(
+        form.getValues('upstream_quota_error_status_code')
+      )
+    ) {
+      form.resetField('upstream_quota_error_status_code')
+    }
+  }
   const currentSettings = formValues.settings
   const currentAdvancedCustom = formValues.advanced_custom
   const currentHeaderOverride = formValues.header_override
@@ -2831,6 +2859,96 @@ export function ChannelMutateDrawer({
         disabled={sensitiveLocked}
         className='space-y-4 disabled:opacity-60'
       >
+        <FormField
+          control={form.control}
+          name='upstream_quota_error_mask_enabled'
+          render={({ field }) => (
+            <FormItem className='flex items-center justify-between gap-4 border-t pt-4'>
+              <div className='space-y-0.5'>
+                <FormLabel>
+                  {t('Hide upstream insufficient balance errors')}
+                </FormLabel>
+                <FormDescription>
+                  {t(
+                    "When the upstream account runs out of balance or quota, users get the error below instead of the upstream's original error (which includes the balance and the upstream request ID). Administrators still see the upstream's original error in the log details. Retries and automatic disabling still go by the upstream's original error."
+                  )}
+                </FormDescription>
+              </div>
+              <FormControl>
+                <Switch
+                  disabled={sensitiveLocked}
+                  checked={field.value === true}
+                  onCheckedChange={(checked) => {
+                    field.onChange(checked)
+                    if (!checked) resetRefusedUpstreamQuotaErrorFields()
+                  }}
+                />
+              </FormControl>
+            </FormItem>
+          )}
+        />
+        {upstreamQuotaErrorMaskEnabled && (
+          <div className='grid gap-4 sm:grid-cols-[1fr_8rem]'>
+            <FormField
+              control={form.control}
+              name='upstream_quota_error_message'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Error returned to users')}</FormLabel>
+                  <FormControl>
+                    {/* No maxLength: the browser would cut the text short
+                        before the form shows its message for the field. */}
+                    <Input
+                      placeholder={UPSTREAM_QUOTA_ERROR_MESSAGE_DEFAULT}
+                      disabled={sensitiveLocked}
+                      {...field}
+                      value={field.value ?? ''}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Any language, up to 500 characters. Leave empty for the default.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='upstream_quota_error_status_code'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Status Code')}</FormLabel>
+                  <FormControl>
+                    {/* No min, max or step: the browser's own check would stop
+                        the submit before the form shows its message for the
+                        field. */}
+                    <Input
+                      type='number'
+                      inputMode='numeric'
+                      placeholder={String(
+                        UPSTREAM_QUOTA_ERROR_STATUS_CODE_DEFAULT
+                      )}
+                      disabled={sensitiveLocked}
+                      name={field.name}
+                      ref={field.ref}
+                      onBlur={field.onBlur}
+                      value={field.value ?? ''}
+                      onChange={(e) =>
+                        field.onChange(
+                          e.target.value === '' ? null : Number(e.target.value)
+                        )
+                      }
+                    />
+                  </FormControl>
+                  <FormDescription>{t('400 to 599')}</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+        )}
         <FormField
           control={form.control}
           name='param_override'

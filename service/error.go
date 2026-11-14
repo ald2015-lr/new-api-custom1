@@ -121,6 +121,7 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 			if showBodyWhenFail {
 				newApiErr.Err = buildErrWithBody(newApiErr.Error())
 			}
+			keepUpstreamErrorFields(newApiErr, responseBody)
 			return
 		}
 	}
@@ -134,6 +135,7 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	if showBodyWhenFail {
 		newApiErr.Err = buildErrWithBody(newApiErr.Error())
 	}
+	keepUpstreamErrorFields(newApiErr, responseBody)
 	return
 }
 

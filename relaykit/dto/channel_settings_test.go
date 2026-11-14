@@ -3,6 +3,7 @@ package dto
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -769,4 +770,57 @@ func TestChannelOtherSettingsNovelAIQueueLimit(t *testing.T) {
 	}
 	assert.NoError(t, (*ChannelOtherSettings)(nil).ValidateNovelAIQueueLimit())
 	assert.Equal(t, 10, (*ChannelOtherSettings)(nil).EffectiveNovelAIQueueLimit())
+}
+
+// A channel that hides upstream balance errors answers with its own message
+// and status: blank or unset are the defaults, a stored value outside the
+// allowed range still acts within it, and saving rejects a message over 500
+// characters once trimmed (Chinese counts per character) or a status outside
+// 400 to 599.
+func TestChannelOtherSettingsUpstreamQuotaError(t *testing.T) {
+	long := strings.Repeat("额", UpstreamQuotaErrorMessageMaxRunes)
+	for _, tc := range []struct {
+		name             string
+		settings         ChannelOtherSettings
+		wantErr          string
+		effectiveMessage string
+		effectiveStatus  int
+	}{
+		{name: "unset", effectiveMessage: "上游tokens数量不足", effectiveStatus: 403},
+		{name: "blank message", settings: ChannelOtherSettings{UpstreamQuotaErrorMessage: " \t\n"}, effectiveMessage: "上游tokens数量不足", effectiveStatus: 403},
+		{name: "custom Chinese message is trimmed", settings: ChannelOtherSettings{UpstreamQuotaErrorMessage: "  服务繁忙，请稍后再试  "}, effectiveMessage: "服务繁忙，请稍后再试", effectiveStatus: 403},
+		{name: "500 characters", settings: ChannelOtherSettings{UpstreamQuotaErrorMessage: " " + long + " "}, effectiveMessage: long, effectiveStatus: 403},
+		{name: "501 characters", settings: ChannelOtherSettings{UpstreamQuotaErrorMessage: long + "x"}, wantErr: "upstream_quota_error_message must be at most 500 characters", effectiveMessage: long, effectiveStatus: 403},
+		{name: "lowest status", settings: ChannelOtherSettings{UpstreamQuotaErrorStatusCode: 400}, effectiveMessage: "上游tokens数量不足", effectiveStatus: 400},
+		{name: "custom status", settings: ChannelOtherSettings{UpstreamQuotaErrorStatusCode: 429}, effectiveMessage: "上游tokens数量不足", effectiveStatus: 429},
+		{name: "highest status", settings: ChannelOtherSettings{UpstreamQuotaErrorStatusCode: 599}, effectiveMessage: "上游tokens数量不足", effectiveStatus: 599},
+		{name: "status below range", settings: ChannelOtherSettings{UpstreamQuotaErrorStatusCode: 399}, wantErr: "upstream_quota_error_status_code must be between 400 and 599", effectiveMessage: "上游tokens数量不足", effectiveStatus: 403},
+		{name: "status above range", settings: ChannelOtherSettings{UpstreamQuotaErrorStatusCode: 600}, wantErr: "upstream_quota_error_status_code must be between 400 and 599", effectiveMessage: "上游tokens数量不足", effectiveStatus: 403},
+		{name: "negative status", settings: ChannelOtherSettings{UpstreamQuotaErrorStatusCode: -403}, wantErr: "upstream_quota_error_status_code must be between 400 and 599", effectiveMessage: "上游tokens数量不足", effectiveStatus: 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantErr == "" {
+				assert.NoError(t, tc.settings.ValidateUpstreamQuotaError())
+			} else {
+				assert.EqualError(t, tc.settings.ValidateUpstreamQuotaError(), tc.wantErr)
+			}
+			assert.Equal(t, tc.effectiveMessage, tc.settings.EffectiveUpstreamQuotaErrorMessage())
+			assert.Equal(t, tc.effectiveStatus, tc.settings.EffectiveUpstreamQuotaErrorStatusCode())
+		})
+	}
+	var unset *ChannelOtherSettings
+	assert.NoError(t, unset.ValidateUpstreamQuotaError())
+	assert.Equal(t, "上游tokens数量不足", unset.EffectiveUpstreamQuotaErrorMessage())
+	assert.Equal(t, 403, unset.EffectiveUpstreamQuotaErrorStatusCode())
+
+	// The switch is off unless saved on, and only saved values are written.
+	var decoded ChannelOtherSettings
+	require.NoError(t, json.Unmarshal([]byte(`{"novelai_hd_disabled":true}`), &decoded))
+	assert.False(t, decoded.UpstreamQuotaErrorMaskEnabled)
+	encoded, err := json.Marshal(ChannelOtherSettings{})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{}`, string(encoded))
+	encoded, err = json.Marshal(ChannelOtherSettings{UpstreamQuotaErrorMaskEnabled: true, UpstreamQuotaErrorMessage: "余额维护中", UpstreamQuotaErrorStatusCode: 429})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"余额维护中","upstream_quota_error_status_code":429}`, string(encoded))
 }

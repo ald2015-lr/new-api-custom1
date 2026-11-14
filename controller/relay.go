@@ -115,6 +115,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if relayFormat == relayconstant.RelayFormatNovelAI {
 				errors.As(newAPIError, &novelAIUpstream)
 			}
+			// The upstream's balance error on a channel that hides those goes
+			// out as the channel's message and status in every response shape
+			// below, the NovelAI one included: nothing of the upstream's
+			// answer reaches the client. Billing, retries and the channel's
+			// health above all used the upstream's error.
+			if masked := service.MaskUpstreamQuotaError(c, newAPIError); masked != nil {
+				logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
+				newAPIError, novelAIUpstream = masked, nil
+			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			upstreamURLs := common.UpstreamAddresses(c)
 			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() {
@@ -299,7 +308,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// A client that left cancelled the upstream request itself; the
 		// channel is not logged, disabled or blamed for that.
 		if !service.ClientGone(c) {
-			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, service.MaskUpstreamQuotaError(c, newAPIError), relayInfo)
 		}
 
 		if decision.Action != "retry" {
@@ -409,8 +418,8 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	return channel, nil
 }
 
-func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
-	service.ProcessChannelError(c, channelError, err, relayInfo)
+func processChannelError(c *gin.Context, channelError types.ChannelError, err, userErr *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+	service.ProcessChannelError(c, channelError, err, userErr, relayInfo)
 }
 
 func RelayMidjourney(c *gin.Context) {
@@ -682,6 +691,7 @@ func executeTaskSubmissionWith(
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
 				taskAPIError,
+				service.MaskUpstreamQuotaTaskError(c, taskErr),
 				relayInfo)
 		}
 
@@ -700,6 +710,12 @@ func executeTaskSubmissionWith(
 
 	if taskErr != nil {
 		diagnostics.failed(stage, "task_error", taskErr, false)
+		// The upstream's balance error on a channel that hides those reaches
+		// every task presenter as the channel's message and status only.
+		if masked := service.MaskUpstreamQuotaTaskError(c, taskErr); masked != nil {
+			logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
+			taskErr = &taskdto.TaskError{Code: string(masked.GetErrorCode()), Message: masked.Error(), StatusCode: masked.StatusCode, Error: masked}
+		}
 		return nil, taskErr
 	}
 	if result == nil {
@@ -918,7 +934,13 @@ func respondTaskSubmissionError(c *gin.Context, taskErr *taskdto.TaskError) {
 
 // respondTaskError 统一输出 Task 错误响应（含 429 限流提示改写）
 func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
-	if taskErr.StatusCode == http.StatusTooManyRequests {
+	switch {
+	case taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted):
+		// The channel's own message for an upstream balance error stays as
+		// the channel set it, under any status it chose, with the request id
+		// as new-api's relay errors carry it.
+		taskErr.Message = common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey))
+	case taskErr.StatusCode == http.StatusTooManyRequests:
 		taskErr.Message = i18n.T(c, i18n.MsgRelayGroupUpstreamSaturated)
 	}
 	c.JSON(taskErr.StatusCode, taskErr)

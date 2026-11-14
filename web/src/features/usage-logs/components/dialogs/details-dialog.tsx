@@ -895,6 +895,33 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
+        {/* The upstream's balance error the channel hid from the user (admin only) */}
+        {props.isAdmin && adminInfo?.upstream_error && (
+          <DetailSection
+            icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
+            label={t('Upstream original error')}
+            variant='danger'
+          >
+            <p className='mb-1 text-xs wrap-break-word'>
+              {adminInfo.upstream_error}
+            </p>
+            {adminInfo.upstream_error_code && (
+              <DetailRow
+                label={t('Code')}
+                value={adminInfo.upstream_error_code}
+                mono
+              />
+            )}
+            {adminInfo.upstream_request_id && (
+              <DetailRow
+                label={t('Upstream Request ID')}
+                value={adminInfo.upstream_request_id}
+                mono
+              />
+            )}
+          </DetailSection>
+        )}
+
         {/* Violation fee info */}
         {isViolation && other && (
           <DetailSection

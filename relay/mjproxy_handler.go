@@ -19,6 +19,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -230,12 +231,19 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	baseURL := c.GetString("base_url")
 	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
 	service.RequestPolicy(c).BeginAttempt(&model.Channel{Id: c.GetInt("channel_id")}, info.UsingGroup)
-	mjResp, _, err := service.DoMidjourneyHttpRequest(c, time.Second*60, fullRequestURL)
+	mjResp, responseBody, err := service.DoMidjourneyHttpRequest(c, time.Second*60, fullRequestURL)
 	accepted := service.RecordMidjourneyPolicyResponse(c, mjResp, err)
 	if err != nil {
 		return &mjResp.Response
 	}
 	midjResponse := &mjResp.Response
+	// The upstream's balance error on a channel that hides those reaches the
+	// client and the user's task list as the channel's message and status
+	// only; billing below uses the upstream's answer.
+	var masked *types.NewAPIError
+	if midjResponse.Code != 1 {
+		masked = service.MaskUpstreamQuotaMidjourneyError(c, mjResp.StatusCode, responseBody)
+	}
 	midjourneyTask := &model.Midjourney{
 		UserId:      info.UserId,
 		Code:        midjResponse.Code,
@@ -253,6 +261,10 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		Progress:    "0%",
 		FailReason:  "",
 		ChannelId:   c.GetInt("channel_id"),
+	}
+	if masked != nil {
+		logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", midjourneyTask.ChannelId))
+		midjourneyTask.Description = masked.Error()
 	}
 	billingPrepared, billingErr := service.PrepareMidjourneyTaskBilling(
 		info,
@@ -297,7 +309,12 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 		model.UpdateUserUsedQuotaAndRequestCount(info.UserId, midjourneyTask.Quota)
 		model.UpdateChannelUsedQuotaForRequest(billingChannelId, midjourneyTask.Quota)
 	}
-	c.Writer.WriteHeader(mjResp.StatusCode)
+	statusCode := mjResp.StatusCode
+	if masked != nil {
+		statusCode = masked.StatusCode
+		midjResponse = &dto.MidjourneyResponse{Code: constant.MjRequestError, Description: common.MessageWithRequestId(masked.Error(), c.GetString(common.RequestIdKey))}
+	}
+	c.Writer.WriteHeader(statusCode)
 	respBody, err := common.Marshal(midjResponse)
 	if err != nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "unmarshal_response_body_failed")
@@ -505,6 +522,9 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			}
 			c.Set("base_url", channel.GetBaseURL())
 			c.Set("channel_id", originTask.ChannelId)
+			// The task's channel answers, so its settings decide whether its
+			// upstream's balance errors are hidden.
+			common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
 			c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", channel.Key))
 			logger.LogDebug(c, "Midjourney action uses origin channel: id=%s, base_url=%s", strconv.Itoa(originTask.ChannelId), channel.GetBaseURL())
 		}
@@ -602,10 +622,23 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			}
 		}
 	}
+	statusCode := midjResponseWithStatus.StatusCode
 	if midjResponse.Code != 1 && midjResponse.Code != 21 && midjResponse.Code != 22 {
 		//非1-提交成功,21-任务已存在和22-排队中，则记录错误原因
 		midjourneyTask.FailReason = midjResponse.Description
 		consumeQuota = false
+		// The upstream's balance error on a channel that hides those reaches
+		// the client and the user's task list as the channel's message and
+		// status only; the policy record and billing use the upstream's answer.
+		if masked := service.MaskUpstreamQuotaMidjourneyError(c, statusCode, responseBody); masked != nil {
+			logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", midjourneyTask.ChannelId))
+			midjourneyTask.Description, midjourneyTask.FailReason = masked.Error(), masked.Error()
+			statusCode = masked.StatusCode
+			responseBody, err = common.Marshal(&dto.MidjourneyResponse{Code: constant.MjRequestError, Description: common.MessageWithRequestId(masked.Error(), c.GetString(common.RequestIdKey))})
+			if err != nil {
+				return service.MidjourneyErrorWrapper(constant.MjRequestError, "marshal_response_body_failed")
+			}
+		}
 	}
 
 	if midjResponse.Code == 21 { //21-任务已存在（处理中或者有结果了）
@@ -694,7 +727,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	//for k, v := range resp.Header {
 	//	c.Writer.Header().Set(k, v[0])
 	//}
-	c.Writer.WriteHeader(midjResponseWithStatus.StatusCode)
+	c.Writer.WriteHeader(statusCode)
 
 	_, err = io.Copy(c.Writer, bodyReader)
 	if err != nil {

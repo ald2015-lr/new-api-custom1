@@ -54,7 +54,14 @@ const CONFIGURATION_BLOCKS = {
   },
   overrideRules: {
     section: 'request',
-    fields: ['status_code_mapping', 'param_override', 'header_override'],
+    fields: [
+      'status_code_mapping',
+      'upstream_quota_error_mask_enabled',
+      'upstream_quota_error_message',
+      'upstream_quota_error_status_code',
+      'param_override',
+      'header_override',
+    ],
   },
   requestProcessing: {
     section: 'request',
@@ -154,6 +161,7 @@ export function getChannelConfigurationState(
     ),
     overrideRules:
       hasConfiguredJson(values.status_code_mapping) ||
+      values.upstream_quota_error_mask_enabled === true ||
       hasConfiguredJson(values.param_override) ||
       hasConfiguredJson(values.header_override),
     requestProcessing: Boolean(
