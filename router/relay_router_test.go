@@ -36,6 +36,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/novelai"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -43,6 +44,7 @@ import (
 	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2561,8 +2563,10 @@ const upstreamQuotaRequestID = "20261104012629802206256826"
 // quota, nothing changes.
 func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
 	setupRelayRouterTestDB(t)
-	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}, &model.Midjourney{}))
 	require.NoError(t, i18n.Init())
+	// Midjourney requests use the shared client directly.
+	service.InitHttpClient()
 	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
 	autoDisable, errorLog, retryTimes := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
 	disableCodes, disableKeywords := operation_setting.AutomaticDisableStatusCodesToString(), operation_setting.AutomaticDisableKeywordsToString()
@@ -2658,6 +2662,36 @@ func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
 	}))
 	t.Cleanup(held.Close)
 	create("uqe-keepalive", "uqe-keepalive", &answering{Server: held}, on, 0, 0)
+	// new-api upgrades a Realtime connection before it bills the request, so
+	// its pre-consume failure arrives as the first event, with its request id
+	// in the event id.
+	realtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer ws.Close()
+		var event map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(upstreamQuotaBody, &event))
+		event["type"], event["event_id"] = "error", "evt_"+upstreamQuotaRequestID
+		assert.NoError(t, ws.WriteJSON(event))
+	}))
+	t.Cleanup(realtime.Close)
+	create("uqe-realtime", "uqe-realtime", &answering{Server: realtime}, on, 0, 0)
+	// new-api's Midjourney answer when the account a channel uses is short.
+	mjBroke := answer(http.StatusBadRequest, `{"description":"quota_not_enough ","type":"upstream_error","code":4}`, "")
+	midjourney := func(name, modelName string, upstream *answering, settings string) model.Channel {
+		channel := create(name, modelName, upstream, settings, 0, 0)
+		require.NoError(t, model.DB.Model(&channel).Update("type", constant.ChannelTypeMidjourneyPlus).Error)
+		return channel
+	}
+	midjourney("uqe-mj-imagine", "mj_imagine", broke, on)
+	midjourney("uqe-mj-swap", "swap_face", mjBroke, on)
+	// An action goes to the channel of the task it acts on, which hides
+	// balance errors, though channel selection picks one that does not.
+	midjourney("uqe-mj-picked", "mj_upscale", broke, "")
+	origin := midjourney("uqe-mj-origin", "uqe-mj-origin", mjBroke, on)
+	require.NoError(t, model.DB.Create(&model.Midjourney{UserId: user.Id, Action: "IMAGINE", MjId: "uqe-origin-task", Prompt: "a cat", Status: "SUCCESS", Progress: "100%", ChannelId: origin.Id}).Error)
 	priceJSON, err := common.Marshal(prices)
 	require.NoError(t, err)
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(priceJSON)))
@@ -2754,6 +2788,9 @@ func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
 			var errorLog model.Log
 			require.NoError(t, model.LOG_DB.Where("type = ? AND request_id = ?", model.LogTypeError, ours).First(&errorLog).Error)
 			assert.Equal(t, fmt.Sprintf("status_code=%d, %s", tc.status, tc.message), errorLog.Content)
+			other, err := common.StrToMap(errorLog.Other)
+			require.NoError(t, err)
+			assert.Equal(t, float64(tc.status), other["status_code"], "the user's log shows the status the user got")
 		})
 	}
 
@@ -2819,6 +2856,51 @@ func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
 		assert.Contains(t, string(rest), `data: {"error":{"message":"上游tokens数量不足 (request id: `+ours+`)","type":"new_api_error","param":"","code":"service_quota_exhausted"}}`)
 		assertHidden(t, string(rest))
 	})
+
+	t.Run("a Realtime client gets the channel's message in place of the upstream's error event", func(t *testing.T) {
+		server := httptest.NewServer(engine)
+		t.Cleanup(server.Close)
+		client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/realtime?model=uqe-realtime", http.Header{"Authorization": []string{"Bearer uqetestkey"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Close() })
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+
+		_, message, err := client.ReadMessage()
+
+		require.NoError(t, err)
+		var event struct {
+			Type    string      `json:"type"`
+			EventID string      `json:"event_id"`
+			Error   openAIError `json:"error"`
+		}
+		require.NoError(t, common.Unmarshal(message, &event), string(message))
+		ours := strings.TrimPrefix(event.EventID, "evt_")
+		require.NotEqual(t, upstreamQuotaRequestID, ours, string(message))
+		assert.Equal(t, "error", event.Type)
+		assert.Equal(t, openAIError{Message: "上游tokens数量不足 (request id: " + ours + ")", Type: "new_api_error", Code: "service_quota_exhausted"}, event.Error)
+		assertHidden(t, string(message))
+	})
+
+	for _, tc := range []struct{ name, path, body string }{
+		{"a Midjourney submission gets the channel's message, also in the user's task list", "/mj/submit/imagine", `{"prompt":"a cat"}`},
+		{"a face swap gets the channel's message", "/mj/insight-face/swap", `{"sourceBase64":"data:image/png;base64,AAAA","targetBase64":"data:image/png;base64,AAAA"}`},
+		{"an action follows the setting of the channel of its task", "/mj/submit/change", `{"taskId":"uqe-origin-task","action":"UPSCALE","index":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := send("uqetestkey", tc.path, tc.body)
+
+			require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+			ours := recorder.Header().Get(common.RequestIdKey)
+			assert.JSONEq(t, `{"code":4,"description":"上游tokens数量不足 (request id: `+ours+`)","properties":null,"result":""}`, recorder.Body.String())
+			var task model.Midjourney
+			require.NoError(t, model.DB.Where("user_id = ?", user.Id).Order("id desc").First(&task).Error)
+			assert.Equal(t, "上游tokens数量不足", task.Description)
+			for _, shown := range []string{recorder.Body.String(), task.Description, task.FailReason} {
+				assertHidden(t, shown)
+				assert.NotContains(t, shown, "quota_not_enough")
+			}
+		})
+	}
 
 	t.Run("a retry serves the request on the next channel and the failed attempt's log is hidden too", func(t *testing.T) {
 		common.RetryTimes = 1

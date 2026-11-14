@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -404,6 +405,38 @@ func TestIsUpstreamQuotaExhaustedError(t *testing.T) {
 	}
 }
 
+// Upstream answers are told apart as RelayErrorHandler reads them off the
+// wire, with what its error leaves out: Google's status of a rate limit and a
+// code outside the "error" object, as DashScope's native endpoints send it.
+// The client still gets the upstream's text as before.
+func TestIsUpstreamQuotaExhaustedErrorReadsTheUpstreamBody(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantText string
+		status               int
+		want                 bool
+	}{
+		{name: "new-api pre-consume", status: http.StatusForbidden, body: `{"error":{"message":"预扣费额度失败, 用户剩余额度: ＄0.120000 (request id: X)","type":"new_api_error","code":"pre_consume_token_quota_failed"}}`, wantText: "预扣费额度失败, 用户剩余额度: ＄0.120000 (request id: X)", want: true},
+		// An upstream that runs this switch itself answers with its message.
+		{name: "upstream hiding its own upstream's balance error", status: http.StatusForbidden, body: `{"error":{"message":"上游tokens数量不足 (request id: X)","type":"new_api_error","code":"service_quota_exhausted"}}`, wantText: "上游tokens数量不足 (request id: X)", want: true},
+		{name: "upstream hiding it behind a custom message", status: http.StatusTooManyRequests, body: `{"error":{"message":"服务繁忙 (request id: X)","type":"new_api_error","code":"service_quota_exhausted"}}`, wantText: "服务繁忙 (request id: X)", want: true},
+		{name: "OpenAI insufficient_quota", status: http.StatusTooManyRequests, body: `{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}`, wantText: "You exceeded your current quota, please check your plan and billing details.", want: true},
+		{name: "Gemini free tier rate limit without its links", status: http.StatusTooManyRequests, body: `{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED"}}`, wantText: "You exceeded your current quota, please check your plan and billing details.", want: false},
+		{name: "DashScope native arrearage", status: http.StatusBadRequest, body: `{"code":"Arrearage","message":"Access denied, please make sure your account is in good standing.","request_id":"b8f1"}`, wantText: "Access denied, please make sure your account is in good standing.", want: true},
+		{name: "DashScope compatible-mode arrearage", status: http.StatusBadRequest, body: `{"error":{"code":"Arrearage","message":"Access denied, please make sure your account is in good standing.","type":"Arrearage"},"request_id":"b8f1"}`, wantText: "Access denied, please make sure your account is in good standing.", want: true},
+		{name: "DashScope native unrelated failure", status: http.StatusBadRequest, body: `{"code":"InvalidParameter","message":"Input is too long.","request_id":"b8f1"}`, wantText: "Input is too long.", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: http.Header{}}
+
+			err := RelayErrorHandler(context.Background(), response, false)
+
+			assert.Equal(t, tc.want, IsUpstreamQuotaExhaustedError(err))
+			assert.Equal(t, tc.wantText, err.Error())
+			assert.Equal(t, tc.status, err.StatusCode)
+		})
+	}
+}
+
 // A task submission's upstream answer reaches the host as a fail_to_fetch_task
 // error with the vendor's body as its message; its code, type, status and
 // message count wherever the body puts them. Local rejections and the user's
@@ -423,6 +456,9 @@ func TestIsUpstreamQuotaExhaustedTaskError(t *testing.T) {
 		{"Volcengine overdue code", upstream(http.StatusForbidden, `{"error":{"code":"AccountOverdueError","message":"The request failed because your account has an overdue balance."}}`), true},
 		{"numeric code with arrears", upstream(http.StatusBadRequest, `{"code":1102,"message":"账户欠费"}`), true},
 		{"402", upstream(http.StatusPaymentRequired, `payment required`), true},
+		{"Midjourney proxy description", upstream(http.StatusBadRequest, `{"code":4,"description":"\u8d26\u6237\u4f59\u989d\u4e0d\u8db3","result":""}`), true},
+		// An upstream that runs this switch itself, in a presenter's shape.
+		{"upstream hiding its own upstream's balance error", upstream(http.StatusForbidden, `{"code":5001,"message":"上游tokens数量不足 (request id: X)"}`), true},
 		{"Gemini rate limit", upstream(http.StatusTooManyRequests, `{"error":{"code":429,"message":"You exceeded your current quota","status":"RESOURCE_EXHAUSTED"}}`), false},
 		{"unrelated failure", upstream(http.StatusBadRequest, `{"code":"invalid_prompt","message":"prompt rejected"}`), false},
 		{"local rejection", &dto.TaskError{Code: "plugin_request_invalid", Message: "余额不足", StatusCode: http.StatusPaymentRequired, LocalError: true}, false},

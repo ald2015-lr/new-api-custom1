@@ -17,6 +17,7 @@ import (
 	appconstant "github.com/QuantumNous/new-api/constant"
 	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	appmodel "github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
@@ -285,6 +286,15 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		// so neither policy record belongs here.
 		if info != nil && billingPrepared {
 			apiErr = RefundFailedRequestBilling(c, info, apiErr)
+		}
+		// The upstream's balance error on a channel that hides those, such as
+		// a new-api upstream rejecting response.create for its own balance,
+		// reaches the client as the channel's message and status only. The
+		// refund and the health record above saw the upstream's error.
+		if masked := service.MaskUpstreamQuotaError(c, apiErr); masked != nil {
+			logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
+			masked.SetMessage(common.MessageWithRequestId(masked.Error(), c.GetString(common.RequestIdKey)))
+			apiErr = masked
 		}
 	}()
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())

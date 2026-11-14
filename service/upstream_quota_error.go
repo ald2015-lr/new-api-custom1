@@ -28,6 +28,7 @@ var upstreamQuotaErrorCodes = []string{
 	"arrearage",                      // Alibaba Cloud Model Studio (DashScope)
 	"exceeded_current_quota_error",   // Moonshot
 	"accountoverdueerror",            // Volcengine (AccountOverdueError)
+	"service_quota_exhausted",        // new-api hiding its own upstream's balance error (upstream_quota_error_mask_enabled)
 }
 
 // upstreamQuotaErrorPhrases are fixed parts, lower case, of the messages
@@ -60,6 +61,8 @@ var upstreamQuotaErrorPhrases = []string{
 	"额度不足",                               // generic
 	"額度不足",                               // generic, Traditional Chinese
 	"额度已用尽",                              // generic
+	"quota_not_enough",                   // new-api and one-api Midjourney relay (relay/mjproxy_handler.go)
+	"上游tokens数量不足",                       // new-api hiding its own upstream's balance error (relaykit/dto UpstreamQuotaErrorMessageDefault)
 }
 
 // upstreamRateLimitPhrases, lower case, mark a rate limit, which is never a
@@ -95,7 +98,50 @@ func IsUpstreamQuotaExhaustedError(err *types.NewAPIError) bool {
 	case types.ClaudeError:
 		codes = append(codes, relayError.Type)
 	}
+	var kept *upstreamErrorFields
+	if errors.As(err.Err, &kept) {
+		codes = append(codes, kept.codes...)
+	}
 	return isQuotaExhaustedAnswer(err.StatusCode, []string{err.Error()}, codes)
+}
+
+// upstreamErrorFields wraps the error of an upstream's answer with the codes
+// of its body that the relay error has no place for. Its text stays the
+// error's, so nothing the client or a log gets changes.
+type upstreamErrorFields struct {
+	error
+	codes []string
+}
+
+func (e *upstreamErrorFields) Unwrap() error {
+	return e.error
+}
+
+// keepUpstreamErrorFields keeps on err, for IsUpstreamQuotaExhaustedError, the
+// fields of the upstream's error body that err leaves out: Google's status,
+// RESOURCE_EXHAUSTED for a rate limit, and a code outside the "error" object,
+// as DashScope's native endpoints send Arrearage.
+func keepUpstreamErrorFields(err *types.NewAPIError, body []byte) {
+	var fields struct {
+		Code  any             `json:"code"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err == nil || common.Unmarshal(body, &fields) != nil {
+		return
+	}
+	var codes []string
+	if fields.Code != nil {
+		codes = append(codes, fmt.Sprint(fields.Code))
+	}
+	var googleError struct {
+		Status string `json:"status"`
+	}
+	if common.GetJsonType(fields.Error) == "object" && common.Unmarshal(fields.Error, &googleError) == nil && googleError.Status != "" {
+		codes = append(codes, googleError.Status)
+	}
+	if len(codes) > 0 {
+		err.Err = &upstreamErrorFields{error: err.Err, codes: codes}
+	}
 }
 
 // IsUpstreamQuotaExhaustedTaskError is IsUpstreamQuotaExhaustedError for a
@@ -115,11 +161,12 @@ func IsUpstreamQuotaExhaustedTaskError(taskErr *taskdto.TaskError) bool {
 	// The vendor's error fields, at the top level or under "error", so that a
 	// code still counts when the body escapes its text.
 	type vendorError struct {
-		Code    any    `json:"code"`
-		Type    string `json:"type"`
-		Status  string `json:"status"`
-		Message string `json:"message"`
-		Msg     string `json:"msg"`
+		Code        any    `json:"code"`
+		Type        string `json:"type"`
+		Status      string `json:"status"`
+		Message     string `json:"message"`
+		Msg         string `json:"msg"`
+		Description string `json:"description"` // Midjourney proxies
 	}
 	var body struct {
 		vendorError
@@ -136,7 +183,7 @@ func IsUpstreamQuotaExhaustedTaskError(taskErr *taskdto.TaskError) bool {
 				codes = append(codes, fmt.Sprint(vendor.Code))
 			}
 			codes = append(codes, vendor.Type, vendor.Status)
-			messages = append(messages, vendor.Message, vendor.Msg)
+			messages = append(messages, vendor.Message, vendor.Msg, vendor.Description)
 		}
 	}
 	return isQuotaExhaustedAnswer(taskErr.StatusCode, messages, codes)
@@ -194,6 +241,12 @@ func MaskUpstreamQuotaTaskError(c *gin.Context, taskErr *taskdto.TaskError) *typ
 		return nil
 	}
 	return channelUpstreamQuotaError(c)
+}
+
+// MaskUpstreamQuotaMidjourneyError is MaskUpstreamQuotaError for a Midjourney
+// submission that the upstream refused with statusCode and body.
+func MaskUpstreamQuotaMidjourneyError(c *gin.Context, statusCode int, body []byte) *types.NewAPIError {
+	return MaskUpstreamQuotaTaskError(c, &taskdto.TaskError{StatusCode: statusCode, Message: string(body)})
 }
 
 // channelUpstreamQuotaError is the error the channel selected for c answers in

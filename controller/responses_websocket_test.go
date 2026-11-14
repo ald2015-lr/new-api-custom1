@@ -1085,11 +1085,18 @@ func TestResponsesWebSocketCancelErrorDoesNotFinishActiveRequest(t *testing.T) {
 func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing.T) {
 	for _, tc := range []struct {
 		name, upstream, wantType, wantMessage string
+		wantCode                              any
 		status                                int
+		// hideBalanceErrors turns upstream_quota_error_mask_enabled on.
+		hideBalanceErrors bool
 	}{
-		{name: "structured error", upstream: `{"type":"error","response_id":"rejected","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Invalid input"},
+		{name: "structured error", upstream: `{"type":"error","response_id":"rejected","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantCode: "invalid_input", wantMessage: "Invalid input"},
 		// A frame without an error object is still reported as a request error.
-		{name: "bare error", upstream: `{"type":"error","status":500,"message":"upstream rejected"}`, status: http.StatusInternalServerError, wantType: "invalid_request_error", wantMessage: "upstream rejected"},
+		{name: "bare error", upstream: `{"type":"error","status":500,"message":"upstream rejected"}`, status: http.StatusInternalServerError, wantType: "invalid_request_error", wantCode: "", wantMessage: "upstream rejected"},
+		// A new-api upstream out of balance rejects the request with its
+		// pre-consume failure. A channel that hides those answers its own
+		// message, and the reservation is still refunded.
+		{name: "upstream balance error on a channel that hides those", upstream: `{"type":"error","status":403,"error":{"type":"new_api_error","code":"pre_consume_token_quota_failed","message":"预扣费额度失败, 用户剩余额度: ＄0.120000, 需要预扣费额度: ＄0.280000 (request id: 20261104012629802206256826)"}}`, hideBalanceErrors: true, status: http.StatusForbidden, wantType: "new_api_error", wantCode: "service_quota_exhausted", wantMessage: "上游tokens数量不足 (request id: responses-ws-billing-ws-0)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			preConsumed := make(chan int, 1)
@@ -1110,6 +1117,10 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 				_, _, _ = ws.ReadMessage()
 			})
 			tokenID <- fixture.token.Id
+			if tc.hideBalanceErrors {
+				fixture.channel.SetOtherSettings(dto.ChannelOtherSettings{AllowServiceTier: true, UpstreamQuotaErrorMaskEnabled: true})
+				require.NoError(t, model.DB.Model(fixture.channel).Update("settings", fixture.channel.OtherSettings).Error)
+			}
 			// Refund is asynchronous. Observe committed token writes instead of waiting
 			// a fixed delay or returning while its worker still uses the test database.
 			updates := make(chan struct{}, 4)
@@ -1127,6 +1138,7 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 			assert.Equal(t, float64(tc.status), rejection["status"])
 			rejectionError, _ := rejection["error"].(map[string]any)
 			assert.Equal(t, tc.wantType, rejectionError["type"])
+			assert.Equal(t, tc.wantCode, rejectionError["code"])
 			assert.Equal(t, tc.wantMessage, rejectionError["message"])
 			assert.Equal(t, 2000, <-preConsumed, "the rejected request reserved quota before contacting upstream")
 			deadline := time.NewTimer(3 * time.Second)
