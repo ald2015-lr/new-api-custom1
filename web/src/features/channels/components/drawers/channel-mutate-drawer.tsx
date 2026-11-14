@@ -187,6 +187,8 @@ import {
   hasModelConfigChanged,
   findMissingModelsInMapping,
   validateModelMappingJson,
+  isValidUpstreamQuotaErrorMessage,
+  isValidUpstreamQuotaErrorStatusCode,
 } from '../../lib'
 import {
   getChannelConfigurationSection,
@@ -616,6 +618,25 @@ export function ChannelMutateDrawer({
     formValues.upstream_model_update_check_enabled
   const upstreamQuotaErrorMaskEnabled =
     formValues.upstream_quota_error_mask_enabled === true
+  // The message and status inputs hide with the switch off. A value there
+  // that the server would refuse goes back to its saved value, instead of
+  // blocking the save with an error nobody can see.
+  const resetRefusedUpstreamQuotaErrorFields = () => {
+    if (
+      !isValidUpstreamQuotaErrorMessage(
+        form.getValues('upstream_quota_error_message')
+      )
+    ) {
+      form.resetField('upstream_quota_error_message')
+    }
+    if (
+      !isValidUpstreamQuotaErrorStatusCode(
+        form.getValues('upstream_quota_error_status_code')
+      )
+    ) {
+      form.resetField('upstream_quota_error_status_code')
+    }
+  }
   const currentSettings = formValues.settings
   const currentAdvancedCustom = formValues.advanced_custom
   const currentHeaderOverride = formValues.header_override
@@ -2857,7 +2878,10 @@ export function ChannelMutateDrawer({
                 <Switch
                   disabled={sensitiveLocked}
                   checked={field.value === true}
-                  onCheckedChange={field.onChange}
+                  onCheckedChange={(checked) => {
+                    field.onChange(checked)
+                    if (!checked) resetRefusedUpstreamQuotaErrorFields()
+                  }}
                 />
               </FormControl>
             </FormItem>

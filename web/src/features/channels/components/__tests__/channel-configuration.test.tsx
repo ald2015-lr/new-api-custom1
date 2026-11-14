@@ -3606,7 +3606,16 @@ test.each([
   }
 )
 
-test('a message of exactly 500 Chinese characters is saved', async () => {
+// The server counts characters (code points) after trimming.
+test.each([
+  ['500 Chinese characters', '额'.repeat(500), '额'.repeat(500)],
+  ['500 emoji of two UTF-16 units each', '😀'.repeat(500), '😀'.repeat(500)],
+  [
+    '500 characters between spaces',
+    `  ${'额'.repeat(500)}  `,
+    '额'.repeat(500),
+  ],
+])('a message of %s is saved', async (_case, typed, saved) => {
   const put = vi
     .spyOn(api, 'put')
     .mockResolvedValue({ data: { success: true } })
@@ -3619,14 +3628,76 @@ test('a message of exactly 500 Chinese characters is saved', async () => {
   )
   fireEvent.change(
     screen.getByRole('textbox', { name: 'Error returned to users' }),
-    { target: { value: '额'.repeat(500) } }
+    { target: { value: typed } }
   )
   await user.click(screen.getByRole('button', { name: 'Update Channel' }))
   await waitFor(() => expect(put).toHaveBeenCalled())
   const payload = put.mock.calls[0]?.[1] as { settings: string }
   expect(JSON.parse(payload.settings)).toMatchObject({
-    upstream_quota_error_message: '额'.repeat(500),
+    upstream_quota_error_message: saved,
   })
+})
+
+test('turning the switch off puts a message or status the server would refuse back to its saved value, so the channel still saves', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings:
+      '{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"余额维护中","upstream_quota_error_status_code":429}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Error returned to users' }),
+    { target: { value: '额'.repeat(501) } }
+  )
+  const status = screen.getByRole('spinbutton', { name: 'Status Code' })
+  await user.clear(status)
+  await user.type(status, '600')
+
+  await user.click(
+    screen.getByRole('switch', { name: HIDE_UPSTREAM_BALANCE_ERRORS })
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).not.toHaveProperty('upstream_quota_error_mask_enabled')
+  expect(settings).toMatchObject({
+    upstream_quota_error_message: '余额维护中',
+    upstream_quota_error_status_code: 429,
+  })
+})
+
+test('a channel saved with status 0 shows the default status and saves without one', async () => {
+  editingChannel = {
+    ...editingChannel,
+    settings:
+      '{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_status_code":0}',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const status = screen.getByRole('spinbutton', { name: 'Status Code' })
+  expect(status).toHaveValue(null)
+  expect(status).toHaveAttribute('placeholder', '403')
+
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { settings: string }
+  const settings = JSON.parse(payload.settings)
+  expect(settings).toMatchObject({ upstream_quota_error_mask_enabled: true })
+  expect(settings).not.toHaveProperty('upstream_quota_error_status_code')
 })
 
 test('the upstream balance error switch is locked without sensitive channel write permission', async () => {

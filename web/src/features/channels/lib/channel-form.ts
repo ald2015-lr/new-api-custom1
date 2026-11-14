@@ -457,23 +457,17 @@ export const channelFormSchema = z
       )
     }
 
-    // Characters, not UTF-16 units, as the server counts them.
-    if (
-      [...(data.upstream_quota_error_message?.trim() ?? '')].length >
-      UPSTREAM_QUOTA_ERROR_MESSAGE_MAX
-    ) {
+    if (!isValidUpstreamQuotaErrorMessage(data.upstream_quota_error_message)) {
       addRequiredIssue(
         ctx,
         'upstream_quota_error_message',
         ERROR_MESSAGES.INVALID_UPSTREAM_QUOTA_ERROR_MESSAGE
       )
     }
-    const quotaErrorStatus = data.upstream_quota_error_status_code
     if (
-      quotaErrorStatus != null &&
-      (!Number.isInteger(quotaErrorStatus) ||
-        quotaErrorStatus < UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN ||
-        quotaErrorStatus > UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX)
+      !isValidUpstreamQuotaErrorStatusCode(
+        data.upstream_quota_error_status_code
+      )
     ) {
       addRequiredIssue(
         ctx,
@@ -482,6 +476,32 @@ export const channelFormSchema = z
       )
     }
   })
+
+/**
+ * Whether the server accepts this message for an upstream balance error:
+ * at most UPSTREAM_QUOTA_ERROR_MESSAGE_MAX characters once trimmed, counted
+ * as code points like the server, not as UTF-16 units.
+ */
+export function isValidUpstreamQuotaErrorMessage(
+  message: string | undefined
+): boolean {
+  return [...(message?.trim() ?? '')].length <= UPSTREAM_QUOTA_ERROR_MESSAGE_MAX
+}
+
+/**
+ * Whether the server accepts this status for an upstream balance error:
+ * unset (the default) or a whole number in the allowed range.
+ */
+export function isValidUpstreamQuotaErrorStatusCode(
+  status: number | null | undefined
+): boolean {
+  return (
+    status == null ||
+    (Number.isInteger(status) &&
+      status >= UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN &&
+      status <= UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX)
+  )
+}
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
 
