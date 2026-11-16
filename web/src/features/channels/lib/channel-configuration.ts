@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import type { FieldErrors, FieldPath } from 'react-hook-form'
 
 import {
+  CHANNEL_TYPE_GEMINI,
   CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
@@ -75,6 +76,11 @@ const CONFIGURATION_BLOCKS = {
       'novelai_hd_disabled',
       'novelai_upscale_enabled',
       'novelai_queue_limit',
+      'gemini_free_key_enabled',
+      'gemini_free_key_reveal_tier_errors',
+      'gemini_free_key_token_counter',
+      'gemini_free_key_max_attempts',
+      'gemini_free_key_model_limits',
       'system_prompt',
       'system_prompt_override',
     ],
@@ -178,6 +184,7 @@ export function getChannelConfigurationState(
           values.novelai_upscale_enabled ||
           (values.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT) !==
             NOVELAI_QUEUE_LIMIT_DEFAULT)) ||
+      (values.type === CHANNEL_TYPE_GEMINI && values.gemini_free_key_enabled) ||
       values.system_prompt?.trim() ||
       values.system_prompt_override
     ),

@@ -35,6 +35,7 @@ import type {
   CopyChannelParams,
   CopyChannelResponse,
   FetchModelsResponse,
+  GeminiFreeKeyUsage,
   GetChannelResponse,
   GetChannelsParams,
   GetChannelsResponse,
@@ -428,6 +429,29 @@ export async function resetCodexUsage(
     channelActionConfig({ disableDuplicate: true })
   )
   return res.data
+}
+
+// ============================================================================
+// Gemini Free Key Usage
+// ============================================================================
+
+/**
+ * Per key and model usage of a Gemini channel's free key mode (admin only;
+ * keys are shown by their last 4 characters)
+ */
+export async function getGeminiFreeKeyUsage(
+  channelId: number,
+  signal?: AbortSignal
+): Promise<GeminiFreeKeyUsage> {
+  const response = await api.get<{
+    success: boolean
+    message?: string
+    data: GeminiFreeKeyUsage
+  }>(`/api/channel/${channelId}/gemini_free_key_usage`, {
+    signal,
+    disableDuplicate: true,
+  })
+  return requireServerSuccess(response.data).data
 }
 
 // ============================================================================

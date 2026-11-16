@@ -119,6 +119,13 @@ export interface ChannelOtherSettings {
   upstream_quota_error_mask_enabled?: boolean
   upstream_quota_error_message?: string
   upstream_quota_error_status_code?: number
+  // Free key mode of a Gemini (AI Studio) channel; off when unset. An unset
+  // token counter, attempt count or model list means the server's default.
+  gemini_free_key_enabled?: boolean
+  gemini_free_key_reveal_tier_errors?: boolean
+  gemini_free_key_token_counter?: '' | 'count_tokens' | 'local'
+  gemini_free_key_max_attempts?: number
+  gemini_free_key_model_limits?: GeminiFreeKeyModelLimit[]
   disable_task_polling_sleep?: boolean
   upstream_model_update_check_enabled?: boolean
   upstream_model_update_auto_sync_enabled?: boolean
@@ -126,6 +133,19 @@ export interface ChannelOtherSettings {
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
   advanced_custom?: AdvancedCustomConfig
+}
+
+/**
+ * Free-tier limits of one model on a Gemini channel in free key mode, per
+ * key: -1 is unlimited and 0 means the free tier does not offer the model.
+ * The aliases share the model's limits and counts.
+ */
+export interface GeminiFreeKeyModelLimit {
+  model: string
+  aliases?: string[]
+  rpm: number
+  tpm: number
+  rpd: number
 }
 
 export interface AdvancedCustomConfig {
@@ -285,6 +305,59 @@ export interface UpdateChannelQuotaLimitParams {
   daily_reset: boolean
   /** Empty uses the default exhausted message. */
   message: string
+}
+
+// ============================================================================
+// Gemini Free Key Usage Types
+// ============================================================================
+
+/**
+ * Why a key, or one model of a key, is paused: minute (a per-minute limit),
+ * day (the daily quota), not_free (the free tier does not offer the model),
+ * key_error (Google refused the key) or unknown (a 429 without details).
+ * Empty when it is not paused.
+ */
+export type GeminiFreeKeyCooldownReason =
+  | ''
+  | 'minute'
+  | 'day'
+  | 'not_free'
+  | 'key_error'
+  | 'unknown'
+
+/** Usage of one model (its limits' row) on one key; a limit of -1 is unlimited. */
+export interface GeminiFreeKeyModelUsage {
+  model: string
+  rpm_used: number
+  rpm_limit: number
+  tpm_used: number
+  tpm_limit: number
+  rpd_used: number
+  rpd_limit: number
+  /** Unix seconds; 0 when the model is not paused on this key. */
+  cooldown_until: number
+  cooldown_reason: GeminiFreeKeyCooldownReason
+}
+
+export interface GeminiFreeKeyUsageKey {
+  index: number
+  /** The key's last 4 characters, never the whole key. */
+  key_hint: string
+  enabled: boolean
+  /** Unix seconds; 0 when the whole key is not paused. */
+  cooldown_until: number
+  cooldown_reason: GeminiFreeKeyCooldownReason
+  models: GeminiFreeKeyModelUsage[]
+}
+
+/** GET /api/channel/:id/gemini_free_key_usage */
+export interface GeminiFreeKeyUsage {
+  enabled: boolean
+  /** The time zone of the daily reset, America/Los_Angeles. */
+  timezone: string
+  /** Unix seconds of the next daily reset. */
+  next_reset_at: number
+  keys: GeminiFreeKeyUsageKey[]
 }
 
 // ============================================================================
