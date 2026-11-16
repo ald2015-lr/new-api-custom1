@@ -3160,7 +3160,7 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		return channel
 	}
 	freeChannel := create("gfk-free", free, freeKeys, "gemini-2.5-flash,gemini-embedding-001,gemini-3.6-flash,gemini-2.5-pro", `{"gemini_free_key_enabled":true}`, 10)
-	create("gfk-paid", paid, []string{"AIzaSyRouterPaid-abcdefghijklmnopqrstuv"}, "gemini-2.5-flash,gemini-embedding-001,gemini-2.5-pro", "", 0)
+	paidChannel := create("gfk-paid", paid, []string{"AIzaSyRouterPaid-abcdefghijklmnopqrstuv"}, "gemini-2.5-flash,gemini-embedding-001,gemini-2.5-pro", "", 0)
 	create("gfk-genuine", genuine, []string{"AIzaSyRouterGenuine-abcdefghijklmnopqr"}, "gemini-genuine", "", 0)
 	revealing := create("gfk-reveal", free, freeKeys, "gemini-reveal", `{"gemini_free_key_enabled":true,"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_model_limits":[{"model":"gemini-reveal","rpm":-1,"tpm":-1,"rpd":-1}]}`, 0)
 	create("gfk-reveal-genuine", revealGenuine, []string{"AIzaSyRouterRevealGenuine-abcdefghijkl"}, "gemini-reveal-genuine", "", 0)
@@ -3272,6 +3272,10 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		assert.Contains(t, adminInfo["upstream_error"], "250001")
 		assert.Equal(t, "gemini_free_key_busy", adminInfo["upstream_error_code"])
 		assert.Equal(t, "too_large", adminInfo["gemini_free_key"].(map[string]any)["rejected"])
+		var consumed model.Log
+		require.NoError(t, model.LOG_DB.Where("type = ? AND request_id = ?", model.LogTypeConsume, recorder.Header().Get(common.RequestIdKey)).First(&consumed).Error)
+		assert.Equal(t, paidChannel.Id, consumed.ChannelId)
+		assert.NotContains(t, adminInfoOf(t, consumed), "gemini_free_key", "the paid channel's log has nothing of the free one")
 		assertNothingTold(t, userView(t))
 		free.respond(googleAnswers(100, http.StatusOK, generation))
 	})

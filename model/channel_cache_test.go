@@ -115,7 +115,7 @@ func TestSelectionSkipsGeminiFreeKeyChannelsWithoutRoom(t *testing.T) {
 
 			const on = `{"gemini_free_key_enabled":true}`
 			create := func(id int, key string, priority int64, settings, mapping string, info ChannelInfo) {
-				channel := Channel{Id: id, Type: constant.ChannelTypeGemini, Key: key, Status: common.ChannelStatusEnabled, Name: "gfk", Models: "gemini-2.5-flash,pro-alias,gemini-only", Group: "default", Priority: &priority, OtherSettings: settings, ChannelInfo: info}
+				channel := Channel{Id: id, Type: constant.ChannelTypeGemini, Key: key, Status: common.ChannelStatusEnabled, Name: "gfk", Models: "gemini-2.5-flash,pro-alias,gemini-2.5-flash-latest", Group: "default", Priority: &priority, OtherSettings: settings, ChannelInfo: info}
 				if mapping != "" {
 					channel.ModelMapping = &mapping
 				}
@@ -153,7 +153,9 @@ func TestSelectionSkipsGeminiFreeKeyChannelsWithoutRoom(t *testing.T) {
 			// Key 2 is disabled, so its room does not count.
 			pauseForTheDay("gfk-a1")
 			assert.Equal(t, 950002, selected("gemini-2.5-flash"))
-			assert.Equal(t, 950001, selected("gemini-only"), "the only channel serving the model stays")
+			// gemini-2.5-flash-latest counts as gemini-2.5-flash, and no other
+			// channel serves it.
+			assert.Equal(t, 950001, selected("gemini-2.5-flash-latest"), "the only channel serving the model stays")
 
 			// With the mode off nothing is skipped.
 			require.NoError(t, DB.Model(&Channel{}).Where("id = ?", 950001).Update("settings", `{"gemini_free_key_enabled":false}`).Error)

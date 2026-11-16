@@ -836,6 +836,7 @@ func TestChannelOtherSettingsGeminiFreeKey(t *testing.T) {
 	assert.Equal(t, "count_tokens", unset.EffectiveGeminiFreeKeyTokenCounter())
 	assert.Equal(t, 3, unset.EffectiveGeminiFreeKeyMaxAttempts())
 	assert.Equal(t, DefaultGeminiFreeKeyModelLimits(), unset.EffectiveGeminiFreeKeyModelLimits())
+	assert.Equal(t, DefaultGeminiFreeKeyModelLimits(), (&ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{}}).EffectiveGeminiFreeKeyModelLimits(), "an empty list is not stored")
 
 	defaults := DefaultGeminiFreeKeyModelLimits()
 	require.NoError(t, (&ChannelOtherSettings{GeminiFreeKeyModelLimits: defaults}).ValidateGeminiFreeKey(), "the defaults are valid")
