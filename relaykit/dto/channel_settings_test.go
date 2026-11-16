@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -823,4 +824,93 @@ func TestChannelOtherSettingsUpstreamQuotaError(t *testing.T) {
 	encoded, err = json.Marshal(ChannelOtherSettings{UpstreamQuotaErrorMaskEnabled: true, UpstreamQuotaErrorMessage: "余额维护中", UpstreamQuotaErrorStatusCode: 429})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"upstream_quota_error_mask_enabled":true,"upstream_quota_error_message":"余额维护中","upstream_quota_error_status_code":429}`, string(encoded))
+}
+
+// A Gemini channel's free key mode is off unless saved on and writes only
+// what it saves; its settings default to countTokens, 3 attempts and the
+// built-in limits per model, and saving rejects values outside their range,
+// naming the field.
+func TestChannelOtherSettingsGeminiFreeKey(t *testing.T) {
+	var unset *ChannelOtherSettings
+	assert.NoError(t, unset.ValidateGeminiFreeKey())
+	assert.Equal(t, "count_tokens", unset.EffectiveGeminiFreeKeyTokenCounter())
+	assert.Equal(t, 3, unset.EffectiveGeminiFreeKeyMaxAttempts())
+	assert.Equal(t, DefaultGeminiFreeKeyModelLimits(), unset.EffectiveGeminiFreeKeyModelLimits())
+
+	defaults := DefaultGeminiFreeKeyModelLimits()
+	require.NoError(t, (&ChannelOtherSettings{GeminiFreeKeyModelLimits: defaults}).ValidateGeminiFreeKey(), "the defaults are valid")
+	assert.Equal(t, GeminiFreeKeyModelLimit{Model: "gemini-3.6-flash", Aliases: []string{"gemini-3.5-flash"}, RPM: 5, TPM: 250000, RPD: 20}, defaults[1])
+	assert.Equal(t, GeminiFreeKeyModelLimit{Model: "gemma-4-26b-a4b-it", Aliases: []string{"gemma-4-26b"}, RPM: 30, TPM: 16000, RPD: 14400}, defaults[9])
+	assert.Equal(t, GeminiFreeKeyModelLimit{Model: "gemini-2.5-pro", RPM: 0, TPM: 0, RPD: 0}, defaults[28])
+	defaults[0].RPM = 99
+	assert.Equal(t, 5, DefaultGeminiFreeKeyModelLimits()[0].RPM, "each call returns a new table")
+
+	row := func(model string, aliases ...string) GeminiFreeKeyModelLimit {
+		return GeminiFreeKeyModelLimit{Model: model, Aliases: aliases, RPM: 1, TPM: 1, RPD: 1}
+	}
+	tooManyRows := make([]GeminiFreeKeyModelLimit, 301)
+	for i := range tooManyRows {
+		tooManyRows[i] = row(fmt.Sprintf("m-%d", i))
+	}
+	tooManyAliases := make([]string, 21)
+	for i := range tooManyAliases {
+		tooManyAliases[i] = fmt.Sprintf("a-%d", i)
+	}
+	for _, tc := range []struct {
+		name     string
+		settings ChannelOtherSettings
+		wantErr  string
+	}{
+		{name: "empty"},
+		{name: "local counter", settings: ChannelOtherSettings{GeminiFreeKeyTokenCounter: "local"}},
+		{name: "countTokens counter", settings: ChannelOtherSettings{GeminiFreeKeyTokenCounter: "count_tokens"}},
+		{name: "unknown counter", settings: ChannelOtherSettings{GeminiFreeKeyTokenCounter: "tiktoken"}, wantErr: "gemini_free_key_token_counter must be count_tokens or local"},
+		{name: "1 attempt", settings: ChannelOtherSettings{GeminiFreeKeyMaxAttempts: 1}},
+		{name: "10 attempts", settings: ChannelOtherSettings{GeminiFreeKeyMaxAttempts: 10}},
+		{name: "11 attempts", settings: ChannelOtherSettings{GeminiFreeKeyMaxAttempts: 11}, wantErr: "gemini_free_key_max_attempts must be between 1 and 10"},
+		{name: "negative attempts", settings: ChannelOtherSettings{GeminiFreeKeyMaxAttempts: -1}, wantErr: "gemini_free_key_max_attempts must be between 1 and 10"},
+		{name: "300 rows", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: tooManyRows[:300]}},
+		{name: "301 rows", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: tooManyRows}, wantErr: "gemini_free_key_model_limits must have at most 300 models"},
+		{name: "empty model", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a"), row("")}}, wantErr: "gemini_free_key_model_limits[1].model must not be empty"},
+		{name: "untrimmed model", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row(" a")}}, wantErr: "gemini_free_key_model_limits[0].model must not start or end with spaces"},
+		{name: "long model", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row(strings.Repeat("模", 129))}}, wantErr: "gemini_free_key_model_limits[0].model must be at most 128 characters"},
+		{name: "128 characters", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row(strings.Repeat("模", 128))}}},
+		{name: "20 aliases", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a", tooManyAliases[:20]...)}}},
+		{name: "21 aliases", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a", tooManyAliases...)}}, wantErr: "gemini_free_key_model_limits[0].aliases must have at most 20 names"},
+		{name: "empty alias", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a", "b", "")}}, wantErr: "gemini_free_key_model_limits[0].aliases[1] must not be empty"},
+		{name: "duplicate model ignoring case", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("Gemini-X"), row("gemini-x")}}, wantErr: `gemini_free_key_model_limits[1].model "gemini-x" is listed more than once in gemini_free_key_model_limits`},
+		{name: "alias of another row", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a"), row("b", "A")}}, wantErr: `gemini_free_key_model_limits[1].aliases[0] "A" is listed more than once in gemini_free_key_model_limits`},
+		{name: "unlimited and zero", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{{Model: "a", RPM: -1, TPM: 0, RPD: 1_000_000_000}}}},
+		{name: "rpm below -1", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{{Model: "a", RPM: -2}}}, wantErr: "gemini_free_key_model_limits[0].rpm must be between -1 and 1000000000"},
+		{name: "tpm above the maximum", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{{Model: "a", TPM: 1_000_000_001}}}, wantErr: "gemini_free_key_model_limits[0].tpm must be between -1 and 1000000000"},
+		{name: "rpd below -1", settings: ChannelOtherSettings{GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a"), {Model: "b", RPD: -5}}}, wantErr: "gemini_free_key_model_limits[1].rpd must be between -1 and 1000000000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantErr == "" {
+				assert.NoError(t, tc.settings.ValidateGeminiFreeKey())
+			} else {
+				assert.EqualError(t, tc.settings.ValidateGeminiFreeKey(), tc.wantErr)
+			}
+		})
+	}
+
+	custom := ChannelOtherSettings{GeminiFreeKeyTokenCounter: "local", GeminiFreeKeyMaxAttempts: 7, GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{row("a")}}
+	assert.Equal(t, "local", custom.EffectiveGeminiFreeKeyTokenCounter())
+	assert.Equal(t, 7, custom.EffectiveGeminiFreeKeyMaxAttempts())
+	assert.Equal(t, []GeminiFreeKeyModelLimit{row("a")}, custom.EffectiveGeminiFreeKeyModelLimits())
+	assert.Equal(t, 10, (&ChannelOtherSettings{GeminiFreeKeyMaxAttempts: 50}).EffectiveGeminiFreeKeyMaxAttempts())
+
+	// Only saved values are written, and a 0 limit is a value.
+	encoded, err := json.Marshal(ChannelOtherSettings{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "gemini_free_key")
+	encoded, err = json.Marshal(ChannelOtherSettings{
+		GeminiFreeKeyEnabled:     true,
+		GeminiFreeKeyModelLimits: []GeminiFreeKeyModelLimit{{Model: "gemini-2.5-pro", RPM: 0, TPM: 0, RPD: 0}, {Model: "gemini-x", Aliases: []string{"x"}, RPM: -1, TPM: 5, RPD: 1}},
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"gemini_free_key_enabled":true,"gemini_free_key_model_limits":[{"model":"gemini-2.5-pro","rpm":0,"tpm":0,"rpd":0},{"model":"gemini-x","aliases":["x"],"rpm":-1,"tpm":5,"rpd":1}]}`, string(encoded))
+	var decoded ChannelOtherSettings
+	require.NoError(t, json.Unmarshal([]byte(`{"gemini_free_key_enabled":true,"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_token_counter":"local","gemini_free_key_max_attempts":5}`), &decoded))
+	assert.Equal(t, ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true, GeminiFreeKeyTokenCounter: "local", GeminiFreeKeyMaxAttempts: 5}, decoded)
 }

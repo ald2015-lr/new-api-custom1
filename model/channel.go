@@ -1086,6 +1086,9 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelOtherSettings.ValidateUpstreamQuotaError(); err != nil {
 		return err
 	}
+	if err := channelOtherSettings.ValidateGeminiFreeKey(); err != nil {
+		return err
+	}
 	if preset := common.GetAdvancedCustomPreset(channel.Type); preset != nil {
 		channelOtherSettings.AdvancedCustom = preset
 	}

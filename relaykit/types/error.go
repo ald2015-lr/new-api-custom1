@@ -47,6 +47,13 @@ const (
 	// never reached NovelAI. It may be retried on another channel, and it is
 	// never a reason to disable a channel or a key.
 	ErrorCodeNovelAIKeyBusy ErrorCode = "novelai_key_busy"
+	// ErrorCodeGeminiFreeKeyBusy is the relay's own limit on a Gemini channel
+	// in free key mode: the model is not on the free tier, no key has room
+	// for the request, or the request is larger than a key may send in a
+	// minute; it also marks Google's free tier answers once every key the
+	// request could try was refused. It may be retried on another channel,
+	// and it is never a reason to disable a channel or a key.
+	ErrorCodeGeminiFreeKeyBusy ErrorCode = "gemini_free_key_busy"
 
 	// new api error
 	ErrorCodeCountTokenFailed   ErrorCode = "count_token_failed"
@@ -403,6 +410,15 @@ func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 func ErrOptionWithNoRecordErrorLog() NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.recordErrorLog = kitutil.GetPointer(false)
+	}
+}
+
+// ErrOptionWithErrorCode replaces the code the relay acts on (retries,
+// automatic disabling, logs). What an upstream's error tells the client comes
+// from its RelayError and stays as it was.
+func ErrOptionWithErrorCode(errorCode ErrorCode) NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		e.errorCode = errorCode
 	}
 }
 

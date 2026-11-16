@@ -104,6 +104,37 @@ func TestChannelValidateSettingsBoundsTheUpstreamQuotaError(t *testing.T) {
 	}
 }
 
+// Saving a channel rejects free key settings outside their range, naming the
+// field; the defaults and a channel that saves none are accepted.
+func TestChannelValidateSettingsBoundsTheGeminiFreeKeySettings(t *testing.T) {
+	for settings, wantErr := range map[string]string{
+		`{}`:                               "",
+		`{"gemini_free_key_enabled":true}`: "",
+		`{"gemini_free_key_token_counter":"local"}`:                                         "",
+		`{"gemini_free_key_token_counter":"x"}`:                                             "gemini_free_key_token_counter must be count_tokens or local",
+		`{"gemini_free_key_max_attempts":10}`:                                               "",
+		`{"gemini_free_key_max_attempts":11}`:                                               "gemini_free_key_max_attempts must be between 1 and 10",
+		`{"gemini_free_key_model_limits":[{"model":"gemini-x","rpm":5,"tpm":0,"rpd":-1}]}`:  "",
+		`{"gemini_free_key_model_limits":[{"model":"gemini-x","rpm":-2,"tpm":0,"rpd":-1}]}`: "gemini_free_key_model_limits[0].rpm must be between -1 and 1000000000",
+		`{"gemini_free_key_model_limits":[{"model":"gemini-x","rpm":1,"tpm":1,"rpd":1},{"model":"GEMINI-X","rpm":1,"tpm":1,"rpd":1}]}`: "is listed more than once",
+		`{"gemini_free_key_model_limits":[{"model":"gemini-x","rpm":1.5,"tpm":1,"rpd":1}]}`:                                            "rpm",
+	} {
+		t.Run(settings[:min(len(settings), 80)], func(t *testing.T) {
+			channel := &Channel{Type: constant.ChannelTypeGemini, OtherSettings: settings}
+			err := channel.ValidateSettings()
+			if wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), wantErr)
+		})
+	}
+	defaults, err := common.Marshal(dto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyModelLimits: dto.DefaultGeminiFreeKeyModelLimits()})
+	require.NoError(t, err)
+	assert.NoError(t, (&Channel{Type: constant.ChannelTypeGemini, OtherSettings: string(defaults)}).ValidateSettings())
+}
+
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",
