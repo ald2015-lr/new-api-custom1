@@ -20,6 +20,7 @@ import { z } from 'zod'
 
 import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
+  CHANNEL_TYPE_GEMINI,
   CHANNEL_TYPE_NEW_API,
   CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
@@ -29,6 +30,11 @@ import {
   CHANNEL_STATUS,
   ERROR_MESSAGES,
   FIELD_PASSTHROUGH_TYPES,
+  GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS,
+  GEMINI_FREE_KEY_MAX_ATTEMPTS_DEFAULT,
+  GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT,
+  GEMINI_FREE_KEY_TOKEN_COUNTERS,
+  type GeminiFreeKeyTokenCounter,
   MODEL_FETCHABLE_TYPES,
   NOVELAI_QUEUE_LIMIT_DEFAULT,
   NOVELAI_QUEUE_LIMIT_MAX,
@@ -47,6 +53,14 @@ import {
   validateAdvancedCustomConfig,
 } from './advanced-custom'
 import { readTaskExtendPluginKeys } from './channel-plugin-extensions'
+import {
+  isDefaultGeminiFreeKeyModelLimits,
+  isValidGeminiFreeKeyMaxAttempts,
+  readGeminiFreeKeyModelLimitRows,
+  toGeminiFreeKeyModelLimitRows,
+  toGeminiFreeKeyModelLimits,
+  validateGeminiFreeKeyModelLimitRows,
+} from './gemini-free-key'
 import { supportsResponsesWebSocket } from './responses-websocket'
 
 // ============================================================================
@@ -310,6 +324,27 @@ export const channelFormSchema = z
     upstream_quota_error_mask_enabled: z.boolean().optional(),
     upstream_quota_error_message: z.string().optional(),
     upstream_quota_error_status_code: z.number().nullable().optional(),
+    // Gemini (AI Studio) free key mode (stored in settings JSON). The switch
+    // that hides free-tier errors shows the reveal setting inverted. A
+    // cleared attempt count or limit is null; the attempt count saves as the
+    // default, an empty limit is refused.
+    gemini_free_key_enabled: z.boolean().optional(),
+    gemini_free_key_reveal_tier_errors: z.boolean().optional(),
+    gemini_free_key_token_counter: z
+      .enum(GEMINI_FREE_KEY_TOKEN_COUNTERS)
+      .optional(),
+    gemini_free_key_max_attempts: z.number().nullable().optional(),
+    gemini_free_key_model_limits: z
+      .array(
+        z.object({
+          model: z.string(),
+          aliases: z.string(),
+          rpm: z.number().nullable(),
+          tpm: z.number().nullable(),
+          rpd: z.number().nullable(),
+        })
+      )
+      .optional(),
     disable_task_polling_sleep: z.boolean().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
@@ -475,6 +510,29 @@ export const channelFormSchema = z
         ERROR_MESSAGES.INVALID_UPSTREAM_QUOTA_ERROR_STATUS_CODE
       )
     }
+
+    if (data.type === CHANNEL_TYPE_GEMINI) {
+      if (!isValidGeminiFreeKeyMaxAttempts(data.gemini_free_key_max_attempts)) {
+        addRequiredIssue(
+          ctx,
+          'gemini_free_key_max_attempts',
+          ERROR_MESSAGES.INVALID_GEMINI_FREE_KEY_MAX_ATTEMPTS
+        )
+      }
+      const limitIssues = data.gemini_free_key_model_limits
+        ? validateGeminiFreeKeyModelLimitRows(data.gemini_free_key_model_limits)
+        : []
+      for (const issue of limitIssues) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path:
+            issue.field === undefined
+              ? ['gemini_free_key_model_limits']
+              : ['gemini_free_key_model_limits', issue.index ?? 0, issue.field],
+          message: issue.message,
+        })
+      }
+    }
   })
 
 /**
@@ -572,6 +630,13 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   upstream_quota_error_mask_enabled: false,
   upstream_quota_error_message: '',
   upstream_quota_error_status_code: null,
+  gemini_free_key_enabled: false,
+  gemini_free_key_reveal_tier_errors: false,
+  gemini_free_key_token_counter: GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT,
+  gemini_free_key_max_attempts: null,
+  gemini_free_key_model_limits: toGeminiFreeKeyModelLimitRows(
+    GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS
+  ),
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
@@ -656,6 +721,12 @@ export function transformChannelToFormDefaults(
   let upstreamQuotaErrorMaskEnabled = false
   let upstreamQuotaErrorMessage = ''
   let upstreamQuotaErrorStatusCode: number | null = null
+  let geminiFreeKeyEnabled = false
+  let geminiFreeKeyRevealTierErrors = false
+  let geminiFreeKeyTokenCounter: GeminiFreeKeyTokenCounter =
+    GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT
+  let geminiFreeKeyMaxAttempts: number | null = null
+  let geminiFreeKeyModelLimits = readGeminiFreeKeyModelLimitRows(undefined)
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
@@ -708,6 +779,22 @@ export function transformChannelToFormDefaults(
       ) {
         upstreamQuotaErrorStatusCode = parsed.upstream_quota_error_status_code
       }
+      geminiFreeKeyEnabled = parsed.gemini_free_key_enabled === true
+      geminiFreeKeyRevealTierErrors =
+        parsed.gemini_free_key_reveal_tier_errors === true
+      if (parsed.gemini_free_key_token_counter === 'local') {
+        geminiFreeKeyTokenCounter = 'local'
+      }
+      // 0 or absent is the default, shown as the placeholder.
+      if (
+        Number.isInteger(parsed.gemini_free_key_max_attempts) &&
+        parsed.gemini_free_key_max_attempts !== 0
+      ) {
+        geminiFreeKeyMaxAttempts = parsed.gemini_free_key_max_attempts
+      }
+      geminiFreeKeyModelLimits = readGeminiFreeKeyModelLimitRows(
+        parsed.gemini_free_key_model_limits
+      )
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
@@ -777,6 +864,11 @@ export function transformChannelToFormDefaults(
     upstream_quota_error_mask_enabled: upstreamQuotaErrorMaskEnabled,
     upstream_quota_error_message: upstreamQuotaErrorMessage,
     upstream_quota_error_status_code: upstreamQuotaErrorStatusCode,
+    gemini_free_key_enabled: geminiFreeKeyEnabled,
+    gemini_free_key_reveal_tier_errors: geminiFreeKeyRevealTierErrors,
+    gemini_free_key_token_counter: geminiFreeKeyTokenCounter,
+    gemini_free_key_max_attempts: geminiFreeKeyMaxAttempts,
+    gemini_free_key_model_limits: geminiFreeKeyModelLimits,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
@@ -978,6 +1070,50 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
       formData.upstream_quota_error_status_code
   } else {
     delete settingsObj.upstream_quota_error_status_code
+  }
+
+  // Only a Gemini (AI Studio) channel has the free key mode. Only what
+  // differs from the defaults is written, so an untouched channel saves no
+  // key; the other free key settings are kept while the mode is off.
+  if (formData.type === CHANNEL_TYPE_GEMINI) {
+    if (formData.gemini_free_key_enabled === true) {
+      settingsObj.gemini_free_key_enabled = true
+    } else {
+      delete settingsObj.gemini_free_key_enabled
+    }
+    if (formData.gemini_free_key_reveal_tier_errors === true) {
+      settingsObj.gemini_free_key_reveal_tier_errors = true
+    } else {
+      delete settingsObj.gemini_free_key_reveal_tier_errors
+    }
+    if (formData.gemini_free_key_token_counter === 'local') {
+      settingsObj.gemini_free_key_token_counter = 'local'
+    } else {
+      delete settingsObj.gemini_free_key_token_counter
+    }
+    const attempts = formData.gemini_free_key_max_attempts
+    if (attempts != null && attempts !== GEMINI_FREE_KEY_MAX_ATTEMPTS_DEFAULT) {
+      settingsObj.gemini_free_key_max_attempts = attempts
+    } else {
+      delete settingsObj.gemini_free_key_max_attempts
+    }
+    const modelLimits = toGeminiFreeKeyModelLimits(
+      formData.gemini_free_key_model_limits ?? []
+    )
+    if (
+      modelLimits.length > 0 &&
+      !isDefaultGeminiFreeKeyModelLimits(modelLimits)
+    ) {
+      settingsObj.gemini_free_key_model_limits = modelLimits
+    } else {
+      delete settingsObj.gemini_free_key_model_limits
+    }
+  } else {
+    delete settingsObj.gemini_free_key_enabled
+    delete settingsObj.gemini_free_key_reveal_tier_errors
+    delete settingsObj.gemini_free_key_token_counter
+    delete settingsObj.gemini_free_key_max_attempts
+    delete settingsObj.gemini_free_key_model_limits
   }
 
   settingsObj.disable_task_polling_sleep =

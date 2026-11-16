@@ -140,6 +140,7 @@ import {
   ADD_MODE_OPTIONS,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
+  CHANNEL_TYPE_GEMINI,
   CHANNEL_TYPE_NEW_API,
   CHANNEL_TYPE_NOVELAI,
   CHANNEL_TYPE_OLLAMA,
@@ -228,6 +229,7 @@ import {
   type PassthroughKind,
 } from '../dialogs/passthrough-warning-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
+import { GeminiFreeKeySettings } from '../gemini-free-key-settings'
 import {
   ModelMappingBatchDialog,
   type ModelMappingBatchResult,
@@ -328,6 +330,11 @@ const SENSITIVE_FORM_FIELDS = [
   'upstream_quota_error_mask_enabled',
   'upstream_quota_error_message',
   'upstream_quota_error_status_code',
+  'gemini_free_key_enabled',
+  'gemini_free_key_reveal_tier_errors',
+  'gemini_free_key_token_counter',
+  'gemini_free_key_max_attempts',
+  'gemini_free_key_model_limits',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -5034,6 +5041,14 @@ export function ChannelMutateDrawer({
                 {systemPromptFields}
                 {systemPromptOverrideFields}
               </fieldset>
+              {currentType === CHANNEL_TYPE_GEMINI && (
+                <GeminiFreeKeySettings
+                  form={form}
+                  channelId={channelId}
+                  channelName={currentRow?.name ?? ''}
+                  locked={sensitiveLocked}
+                />
+              )}
             </div>
             {fieldPassthroughFields}
           </>
