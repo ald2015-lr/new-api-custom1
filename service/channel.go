@@ -64,8 +64,10 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
-	// The relay's own queue limit, not the channel's answer.
-	if err.GetErrorCode() == types.ErrorCodeNovelAIKeyBusy {
+	// The relay's own limits of a channel's keys, not the channel's answer,
+	// and Google's free tier rate limits once every key a request tried
+	// answered one: a free key that reached a limit is never disabled.
+	if code := err.GetErrorCode(); code == types.ErrorCodeNovelAIKeyBusy || code == types.ErrorCodeGeminiFreeKeyBusy {
 		return false
 	}
 	if types.IsChannelError(err) {

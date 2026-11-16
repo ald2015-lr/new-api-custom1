@@ -123,6 +123,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if masked := service.MaskUpstreamQuotaError(c, newAPIError); masked != nil {
 				logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
 				newAPIError, novelAIUpstream = masked, nil
+			} else if disguised := service.DisguiseGeminiFreeKeyError(c, newAPIError); disguised != nil {
+				// A Gemini channel in free key mode answers its own key
+				// limits and Google's free tier errors as Google's plain
+				// rate limit.
+				logger.LogInfo(c, common.LogText("free key error of channel #%d answered as a plain rate limit", c.GetInt("channel_id")))
+				newAPIError, novelAIUpstream = disguised, nil
 			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			upstreamURLs := common.UpstreamAddresses(c)
@@ -308,7 +314,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// A client that left cancelled the upstream request itself; the
 		// channel is not logged, disabled or blamed for that.
 		if !service.ClientGone(c) {
-			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, service.MaskUpstreamQuotaError(c, newAPIError), relayInfo)
+			userErr := cmp.Or(service.MaskUpstreamQuotaError(c, newAPIError), service.DisguiseGeminiFreeKeyError(c, newAPIError))
+			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, userErr, relayInfo)
 		}
 
 		if decision.Action != "retry" {

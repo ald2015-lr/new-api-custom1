@@ -77,6 +77,11 @@ const (
 	// It is not returned to end users, but can be persisted into consume/error logs for debugging.
 	ContextKeyAdminRejectReason ContextKey = "admin_reject_reason"
 
+	// ContextKeyGeminiFreeKeyAudit stores the *geminifreekey.Audit of the
+	// request's last attempt on a Gemini channel in free key mode, for the
+	// administrators' part of its logs.
+	ContextKeyGeminiFreeKeyAudit ContextKey = "gemini_free_key_audit"
+
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage             ContextKey = "language"
 	ContextKeyIsStream             ContextKey = "is_stream"

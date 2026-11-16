@@ -95,6 +95,15 @@ const (
 	MsgNovelAIStreamFailed           = "novelai.stream_failed"
 	MsgNovelAIStreamIncomplete       = "novelai.stream_incomplete"
 	MsgNovelAIChatPromptMissing      = "novelai.chat_prompt_missing"
+
+	// Gemini channels in free key mode. Users never see these: a channel in
+	// that mode answers them as Google's plain rate limit and keeps them for
+	// administrators.
+	MsgGeminiFreeKeyNotFree    = "gemini_free_key.not_free"
+	MsgGeminiFreeKeyNoKey      = "gemini_free_key.no_key"
+	MsgGeminiFreeKeyTooLarge   = "gemini_free_key.too_large"
+	MsgGeminiFreeKeyNoCapacity = "gemini_free_key.no_capacity"
+	MsgGeminiFreeKeyTierError  = "gemini_free_key.tier_error"
 )
 
 // Emails and the name of the token created at registration, in the

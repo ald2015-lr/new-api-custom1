@@ -181,6 +181,7 @@ func GetRandomSatisfiedChannel(
 		}
 		return nil, nil
 	}
+	channels = dropGeminiFreeKeyExhaustedChannels(channels, model)
 
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {

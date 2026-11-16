@@ -82,6 +82,13 @@ novelai.stream_failed: "NovelAI 中止了生成：{{.Error}}"
 novelai.stream_incomplete: "NovelAI 的串流在 {{.Total}} 張圖片中只回傳了 {{.Count}} 張後結束"
 novelai.chat_prompt_missing: "對話中沒有可作為圖片提示詞的使用者訊息"
 
+# Gemini 免費KEY模式（僅管理員可見；使用者看到的是一般的限流錯誤）
+gemini_free_key.not_free: "免費KEY模式：模型 {{.Model}} 不在免費層（{{.Bucket}} 的限制），請求未傳送到 Google"
+gemini_free_key.no_key: "免費KEY模式：該渠道今天沒有可用於 {{.Bucket}} 的 KEY（{{.Keys}}），請求未傳送到 Google"
+gemini_free_key.too_large: "免費KEY模式：請求有 {{.Tokens}} 個輸入 tokens（由 {{.Source}} 計算），共 {{.Requests}} 個請求，超過單一 KEY 對 {{.Bucket}} 的上限（RPM {{.RPM}}，TPM {{.TPM}}，RPD {{.RPD}}），請求未傳送到 Google"
+gemini_free_key.no_capacity: "免費KEY模式：該渠道目前沒有 KEY 能容納 {{.Bucket}} 的 {{.Tokens}} 個輸入 tokens（{{.Keys}}）"
+gemini_free_key.tier_error: "免費KEY模式：Google 回傳了 {{.Status}} 免費層錯誤：{{.Error}}"
+
 # 分組充值門檻訊息
 group_access.topup_required: "分組 {{.Group}} 需要累計充值滿 {{.Required}} 才能使用（目前累計 {{.Current}}）"
 group_access.whitelist_only: "分組 {{.Group}} 僅限指定使用者使用"

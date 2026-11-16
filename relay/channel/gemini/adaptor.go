@@ -254,6 +254,13 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	if freeKeyMode(info) {
+		resp, err := a.doFreeKeyRequest(c, info, requestBody)
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
+	}
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
 

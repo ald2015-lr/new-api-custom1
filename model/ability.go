@@ -130,6 +130,7 @@ func GetChannel(
 	if quotaExhausted != nil {
 		return nil, quotaExhausted
 	}
+	abilities = dropGeminiFreeKeyExhaustedAbilities(abilities, model)
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)

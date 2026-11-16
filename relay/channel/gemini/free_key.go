@@ -1,0 +1,492 @@
+package gemini
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	appconstant "github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/geminifreekey"
+	"github.com/QuantumNous/new-api/relay/channel"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
+
+	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/gin-gonic/gin"
+)
+
+// A Gemini (AI Studio) channel in free key mode sends each request to a key
+// with room for it under the free tier's limits of the model
+// (geminifreekey): requests per minute, input tokens per minute (counted
+// with Google's countTokens or locally) and requests per Pacific day, all
+// per key. A request Google answers with 429 moves to another key of the
+// channel, up to the channel's attempts; one no key can take is answered
+// with a 429 another channel may take (ErrorCodeGeminiFreeKeyBusy, never a
+// reason to disable a key).
+
+const (
+	// countTokensTimeout bounds a countTokens call.
+	countTokensTimeout = 10 * time.Second
+	// countTokensAnswerMax bounds the countTokens answer read.
+	countTokensAnswerMax = 1 << 20
+	// tierErrorTextMax bounds the upstream text an administrator sees in a
+	// free tier error answered as a rate limit.
+	tierErrorTextMax = 1000
+)
+
+// freeKeyMode tells whether info's channel is a Gemini channel in free key
+// mode. The adaptors that embed Adaptor (Vertex and others) are never in it.
+func freeKeyMode(info *relaycommon.RelayInfo) bool {
+	return info != nil && info.ChannelMeta != nil && info.ChannelType == appconstant.ChannelTypeGemini && info.ChannelOtherSettings.GeminiFreeKeyEnabled
+}
+
+// freeKeyAnswer is an answer Google gave a key of the request, kept until
+// the next key is tried or the request ends on it.
+type freeKeyAnswer struct {
+	key     geminifreekey.Key
+	verdict geminifreekey.Verdict
+	resp    *http.Response
+	body    []byte
+}
+
+// freeKeyRequest is a request on a channel in free key mode.
+type freeKeyRequest struct {
+	c       *gin.Context
+	info    *relaycommon.RelayInfo
+	limiter *geminifreekey.Limiter
+	pool    geminifreekey.Pool
+	audit   *geminifreekey.Audit
+	// tried are the keys the request used, countTokens calls that rejected
+	// a key included; at most attempts.
+	tried    []geminifreekey.KeyID
+	attempts int
+	// last is Google's last answer to a key that refused the request.
+	last *freeKeyAnswer
+}
+
+// doFreeKeyRequest is DoRequest on a channel in free key mode.
+func (a *Adaptor) doFreeKeyRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	settings := info.ChannelOtherSettings
+	rows := settings.EffectiveGeminiFreeKeyModelLimits()
+	r := &freeKeyRequest{
+		c:        c,
+		info:     info,
+		limiter:  geminifreekey.Default(),
+		attempts: settings.EffectiveGeminiFreeKeyMaxAttempts(),
+	}
+	r.pool = geminifreekey.Pool{ChannelID: info.ChannelId, Bucket: geminifreekey.ResolveBucket(rows, info.UpstreamModelName), Rows: rows}
+	r.pool.Keys, r.pool.Random = freeKeyPoolKeys(info)
+	r.audit = &geminifreekey.Audit{ChannelID: info.ChannelId, RetryIndex: info.RetryIndex, Bucket: r.pool.Bucket.ID, KeyIndex: -1}
+	common.SetContextKey(c, appconstant.ContextKeyGeminiFreeKeyAudit, r.audit)
+	bucket, limits := r.pool.Bucket.ID, r.pool.Bucket.Limits
+
+	if r.pool.Bucket.NotOnFreeTier() {
+		return nil, r.reject("not_free", i18n.T(c, i18n.MsgGeminiFreeKeyNotFree, map[string]any{"Model": info.UpstreamModelName, "Bucket": bucket}))
+	}
+	if report := r.limiter.Inspect(r.pool, 0, 0, nil); report.Usable() == 0 {
+		return nil, r.reject("no_key", i18n.T(c, i18n.MsgGeminiFreeKeyNoKey, map[string]any{"Bucket": bucket, "Keys": report.String()}))
+	}
+
+	body, err := newFreeKeyBody(requestBody)
+	if err != nil {
+		return nil, err
+	}
+	tokens, units, err := r.countTokens(body)
+	if err != nil {
+		return nil, err
+	}
+	if r.last != nil && r.nextKey() == nil {
+		// countTokens rejected every key the request could use.
+		return r.end()
+	}
+	if limits.TPM > 0 && tokens > limits.TPM || limits.RPM > 0 && units > limits.RPM || limits.RPD > 0 && units > limits.RPD {
+		return nil, r.reject("too_large", i18n.T(c, i18n.MsgGeminiFreeKeyTooLarge, map[string]any{
+			"Tokens": tokens, "Source": r.audit.TokenSource, "Requests": units, "Bucket": bucket,
+			"RPM": limits.RPM, "TPM": limits.TPM, "RPD": limits.RPD,
+		}))
+	}
+
+	for len(r.tried) < r.attempts {
+		ticket, report := r.limiter.Reserve(r.pool, tokens, units, r.tried)
+		if ticket == nil {
+			if r.last == nil {
+				return nil, r.reject("no_capacity", i18n.T(c, i18n.MsgGeminiFreeKeyNoCapacity, map[string]any{"Bucket": bucket, "Tokens": tokens, "Keys": report.String()}))
+			}
+			break
+		}
+		r.useKey(ticket.Key)
+		reader, err := body.next()
+		if err != nil {
+			ticket.Rollback()
+			return nil, err
+		}
+		resp, err := channel.DoApiRequest(a, c, info, reader)
+		if err != nil {
+			// The request never got an answer from Google.
+			ticket.Rollback()
+			r.audit.Attempts = append(r.audit.Attempts, geminifreekey.AuditAttempt{KeyIndex: ticket.Key.Index, Reason: "transport_error"})
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusOK {
+			ticket.Finish(resp.StatusCode, nil)
+			r.audit.Attempts = append(r.audit.Attempts, geminifreekey.AuditAttempt{KeyIndex: ticket.Key.Index, Status: resp.StatusCode, Reason: string(geminifreekey.OutcomeAccepted)})
+			return resp, nil
+		}
+		// Whoever handles the answer next reads the same bytes.
+		data, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		answer := &freeKeyAnswer{key: ticket.Key, resp: resp, body: data, verdict: ticket.Finish(resp.StatusCode, data)}
+		attempt := geminifreekey.AuditAttempt{KeyIndex: ticket.Key.Index, Status: resp.StatusCode, Reason: string(answer.verdict.Reason)}
+		if attempt.Reason == "" {
+			attempt.Reason = string(answer.verdict.Outcome)
+		}
+		r.audit.Attempts = append(r.audit.Attempts, attempt)
+		switch answer.verdict.Outcome {
+		case geminifreekey.OutcomeRateLimited, geminifreekey.OutcomeKeyRejected:
+			r.last = answer
+			continue
+		}
+		if !settings.GeminiFreeKeyRevealTierErrors && geminifreekey.RevealsFreeTier(string(data)) {
+			// Google's message, else its body, for administrators.
+			text := string(data)
+			if googleError, ok := geminifreekey.ParseGoogleError(data); ok && googleError.Message != "" {
+				text = googleError.Message
+			}
+			if runes := []rune(text); len(runes) > tierErrorTextMax {
+				text = string(runes[:tierErrorTextMax])
+			}
+			return nil, r.reject("tier_error", i18n.T(c, i18n.MsgGeminiFreeKeyTierError, map[string]any{"Status": resp.StatusCode, "Error": text}))
+		}
+		return resp, nil
+	}
+	return r.end()
+}
+
+// end answers the request with Google's last refusal once no other key may
+// take it: a rejected key's answer as Google sent it, so that the automatic
+// disable rules act on that key, and a 429 as the error the relay makes of
+// it (the same JSON for the client) under ErrorCodeGeminiFreeKeyBusy.
+func (r *freeKeyRequest) end() (*http.Response, error) {
+	last := r.last
+	if last.verdict.Outcome == geminifreekey.OutcomeKeyRejected {
+		return last.resp, nil
+	}
+	r.audit.Rejected = "rate_limited"
+	apiErr := service.RelayErrorHandler(r.c.Request.Context(), last.resp, false)
+	service.ResetStatusCode(apiErr, r.c.GetString("status_code_mapping"))
+	types.ErrOptionWithErrorCode(types.ErrorCodeGeminiFreeKeyBusy)(apiErr)
+	return nil, apiErr
+}
+
+// reject answers the request without Google with a 429 another channel may
+// take; message is for administrators only (see DisguiseGeminiFreeKeyError).
+func (r *freeKeyRequest) reject(reason, message string) error {
+	r.audit.Rejected = reason
+	return types.NewErrorWithStatusCode(errors.New(message), types.ErrorCodeGeminiFreeKeyBusy, http.StatusTooManyRequests)
+}
+
+// useKey makes key the attempt's key: the upstream call, the automatic
+// disable of a failing key and the logs' key index use it. Google's
+// rejection of the key before it, which the request leaves behind, disables
+// that key as the relay would have.
+func (r *freeKeyRequest) useKey(key geminifreekey.Key) {
+	r.disableRejectedKey()
+	r.tried = append(r.tried, geminifreekey.IDOf(key.Secret))
+	r.info.ApiKey, r.info.ChannelMultiKeyIndex = key.Secret, key.Index
+	if r.info.ChannelIsMultiKey {
+		common.SetContextKey(r.c, appconstant.ContextKeyChannelKey, key.Secret)
+		common.SetContextKey(r.c, appconstant.ContextKeyChannelMultiKeyIndex, key.Index)
+	}
+	r.audit.KeyIndex = key.Index
+}
+
+// nextKey is the key the request would try next, or nil when it may try no
+// other.
+func (r *freeKeyRequest) nextKey() *geminifreekey.Key {
+	if len(r.tried) >= r.attempts {
+		return nil
+	}
+	key, ok := r.limiter.Pick(r.pool, r.tried)
+	if !ok {
+		return nil
+	}
+	return &key
+}
+
+// disableRejectedKey disables the key Google rejected on the request's last
+// answer, as ProcessChannelError does for the answer a request ends on
+// (respecting the channel's automatic disable), once the request moves on to
+// another key.
+func (r *freeKeyRequest) disableRejectedKey() {
+	last := r.last
+	r.last = nil
+	if last == nil || last.verdict.Outcome != geminifreekey.OutcomeKeyRejected {
+		return
+	}
+	apiErr := service.RelayErrorHandler(r.c.Request.Context(), &http.Response{StatusCode: last.resp.StatusCode, Header: last.resp.Header, Body: io.NopCloser(bytes.NewReader(last.body))}, false)
+	service.ResetStatusCode(apiErr, r.c.GetString("status_code_mapping"))
+	autoBan := common.GetContextKeyBool(r.c, appconstant.ContextKeyChannelAutoBan)
+	if !autoBan || !service.ShouldDisableChannel(apiErr) {
+		return
+	}
+	channelError := *types.NewChannelError(r.info.ChannelId, r.info.ChannelType, common.GetContextKeyString(r.c, appconstant.ContextKeyChannelName), r.info.ChannelIsMultiKey, last.key.Secret, autoBan)
+	reason := apiErr.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(r.c)...)
+	logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key", r.info.ChannelId, last.key.Index))
+	gopool.Go(func() {
+		service.DisableChannel(channelError, reason)
+	})
+}
+
+// countTokens counts the request's input tokens once, with Google's
+// countTokens on the key the request would use when the channel says so and
+// the body is a generate or embed request, else (or when countTokens fails)
+// with the local estimate; units is how many requests the body makes (the
+// items of a batch embedding). A countTokens answer that rejects the key
+// pauses it and moves to another key, as an attempt.
+func (r *freeKeyRequest) countTokens(body *freeKeyBody) (tokens int, units int, err error) {
+	data, err := body.bytes()
+	if err != nil {
+		return 0, 0, err
+	}
+	payload, units := countTokensPayload(data, r.info.UpstreamModelName)
+	if payload != nil && r.info.ChannelOtherSettings.EffectiveGeminiFreeKeyTokenCounter() == dto.GeminiFreeKeyTokenCounterCountTokens && !r.info.ChannelSetting.PassThroughBodyEnabled {
+		for key := r.nextKey(); key != nil; key = r.nextKey() {
+			r.disableRejectedKey()
+			total, answer := r.callCountTokens(*key, payload)
+			if total >= 0 {
+				r.audit.Tokens, r.audit.TokenSource = total, dto.GeminiFreeKeyTokenCounterCountTokens
+				return total, units, nil
+			}
+			if answer == nil || !geminifreekey.IsKeyRejection(answer.resp.StatusCode, answer.body) {
+				break
+			}
+			answer.verdict = r.limiter.Observe(r.pool, *key, answer.resp.StatusCode, answer.body)
+			r.tried = append(r.tried, geminifreekey.IDOf(key.Secret))
+			r.audit.Attempts = append(r.audit.Attempts, geminifreekey.AuditAttempt{KeyIndex: key.Index, Status: answer.resp.StatusCode, Reason: "count_tokens_" + string(answer.verdict.Reason)})
+			r.last = answer
+		}
+	}
+	tokens = freeKeyLocalTokens(r.c, r.info)
+	r.audit.Tokens, r.audit.TokenSource = tokens, dto.GeminiFreeKeyTokenCounterLocal
+	return tokens, units, nil
+}
+
+// callCountTokens asks Google to count payload on key. It returns the count,
+// or -1 with Google's answer when it gave one that is not a count.
+func (r *freeKeyRequest) callCountTokens(key geminifreekey.Key, payload []byte) (int, *freeKeyAnswer) {
+	info := r.info
+	version := model_setting.GetGeminiVersionSetting(info.UpstreamModelName)
+	url := fmt.Sprintf("%s/%s/models/%s:countTokens", info.ChannelBaseUrl, version, info.UpstreamModelName)
+	ctx, cancel := context.WithTimeout(r.c.Request.Context(), countTokensTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return -1, nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", key.Secret)
+	// The channel's header overrides apply as on the request itself, an
+	// {api_key} placeholder meaning this key.
+	sentKey := info.ApiKey
+	info.ApiKey = key.Secret
+	err = channel.ApplyHeaderOverride(info, r.c, req)
+	info.ApiKey = sentKey
+	if err != nil {
+		return -1, nil
+	}
+	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
+	if err != nil {
+		return -1, nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d: countTokens failed, using the local estimate: %s", info.ChannelId, err.Error()))
+		return -1, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, countTokensAnswerMax))
+	_ = resp.Body.Close()
+	if err != nil {
+		return -1, nil
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(data))
+	if resp.StatusCode == http.StatusOK {
+		var counted struct {
+			TotalTokens *int `json:"totalTokens"`
+		}
+		if common.Unmarshal(data, &counted) == nil && counted.TotalTokens != nil && *counted.TotalTokens >= 0 {
+			return *counted.TotalTokens, nil
+		}
+	}
+	logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d: countTokens answered %d, using the local estimate", info.ChannelId, resp.StatusCode))
+	return -1, &freeKeyAnswer{key: key, resp: resp, body: data}
+}
+
+// countTokensPayload is the countTokens body for an outbound request body:
+// {"generateContentRequest": body with its model} for a generate request,
+// {"contents": [...]} with each request's content for an embed or batch
+// embed request, nil for anything else (an Imagen prediction, a body that is
+// not JSON). units is how many requests the body makes: its embed requests,
+// else 1.
+func countTokensPayload(data []byte, model string) (payload []byte, units int) {
+	units = 1
+	var fields map[string]json.RawMessage
+	if common.Unmarshal(data, &fields) != nil {
+		return nil, units
+	}
+	var requests []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if raw, ok := fields["requests"]; ok && common.GetJsonType(raw) == "array" && common.Unmarshal(raw, &requests) == nil && len(requests) > 0 {
+		units = len(requests)
+	}
+	if contents, ok := fields["contents"]; ok && common.GetJsonType(contents) == "array" {
+		name, err := common.Marshal("models/" + model)
+		if err != nil {
+			return nil, units
+		}
+		fields["model"] = name
+		inner, err := common.Marshal(fields)
+		if err != nil {
+			return nil, units
+		}
+		payload, err = common.Marshal(map[string]json.RawMessage{"generateContentRequest": inner})
+		if err != nil {
+			return nil, units
+		}
+		return payload, units
+	}
+	var contents []json.RawMessage
+	if content, ok := fields["content"]; ok && common.GetJsonType(content) == "object" {
+		contents = append(contents, content)
+	}
+	for _, request := range requests {
+		if common.GetJsonType(request.Content) == "object" {
+			contents = append(contents, request.Content)
+		}
+	}
+	if len(contents) == 0 {
+		return nil, units
+	}
+	payload, err := common.Marshal(map[string][]json.RawMessage{"contents": contents})
+	if err != nil {
+		return nil, units
+	}
+	return payload, units
+}
+
+// freeKeyLocalTokens is the local estimate of the request's input tokens:
+// the one billing made, else a count of the request, else 0.
+func freeKeyLocalTokens(c *gin.Context, info *relaycommon.RelayInfo) int {
+	if tokens := info.GetEstimatePromptTokens(); tokens > 0 {
+		return tokens
+	}
+	if info.Request == nil {
+		return 0
+	}
+	tokens, err := service.CountRequestToken(c, info.Request.GetTokenCountMeta(), info)
+	if err != nil {
+		return 0
+	}
+	return max(tokens, 0)
+}
+
+// freeKeyPoolKeys are the enabled keys of info's channel and whether it picks
+// them at random. A single-key channel's key is index 0.
+func freeKeyPoolKeys(info *relaycommon.RelayInfo) ([]geminifreekey.Key, bool) {
+	if !info.ChannelIsMultiKey {
+		return []geminifreekey.Key{{Index: 0, Secret: info.ApiKey}}, false
+	}
+	keys := []geminifreekey.Key{{Index: info.ChannelMultiKeyIndex, Secret: info.ApiKey}}
+	cached, err := model.CacheGetChannel(info.ChannelId)
+	if err != nil || !cached.ChannelInfo.IsMultiKey {
+		return keys, false
+	}
+	all, enabled := cached.EnabledMultiKeys()
+	if len(enabled) == 0 {
+		return keys, false
+	}
+	keys = make([]geminifreekey.Key, 0, len(enabled))
+	for _, index := range enabled {
+		keys = append(keys, geminifreekey.Key{Index: index, Secret: all[index]})
+	}
+	return keys, cached.ChannelInfo.MultiKeyMode == appconstant.MultiKeyModeRandom
+}
+
+// freeKeyBody sends the request body again on each attempt: a replayable
+// body through a fresh reader of the same bytes, any other body (the channel
+// test's buffer) read once.
+type freeKeyBody struct {
+	replayable common.ReplayableBody
+	data       []byte
+	sent       bool
+}
+
+func newFreeKeyBody(body io.Reader) (*freeKeyBody, error) {
+	if replayable, ok := body.(common.ReplayableBody); ok {
+		return &freeKeyBody{replayable: replayable}, nil
+	}
+	if body == nil {
+		return &freeKeyBody{}, nil
+	}
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	return &freeKeyBody{data: data}, nil
+}
+
+// bytes is the whole body, read without moving the reader the first attempt
+// sends.
+func (b *freeKeyBody) bytes() ([]byte, error) {
+	if b.replayable == nil {
+		return b.data, nil
+	}
+	reader, err := b.replayable.NewReader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
+// next is the body for the next attempt: the original replayable body the
+// first time, then a fresh reader that keeps its length and GetBody.
+func (b *freeKeyBody) next() (io.Reader, error) {
+	if b.replayable == nil {
+		return bytes.NewReader(b.data), nil
+	}
+	if !b.sent {
+		b.sent = true
+		return b.replayable, nil
+	}
+	reader, err := b.replayable.NewReader()
+	if err != nil {
+		return nil, err
+	}
+	return &replayedBody{ReadCloser: reader, source: b.replayable}, nil
+}
+
+// replayedBody is a fresh reader of a replayable body that is itself
+// replayable, so that the request it is sent with gets the body's length and
+// GetBody (channel.ApplyUpstreamBodyMetadata).
+type replayedBody struct {
+	io.ReadCloser
+	source common.ReplayableBody
+}
+
+func (b *replayedBody) Size() int64 { return b.source.Size() }
+
+func (b *replayedBody) NewReader() (io.ReadCloser, error) { return b.source.NewReader() }
