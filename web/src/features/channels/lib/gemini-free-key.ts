@@ -49,9 +49,11 @@ export type GeminiFreeKeyModelLimitField = keyof GeminiFreeKeyModelLimitRow
 
 const LIMIT_FIELDS = ['rpm', 'tpm', 'rpd'] as const
 
+// Aliases are separated by commas, full-width ones from a Chinese input
+// method included: no model name contains either.
 export function splitGeminiFreeKeyAliases(text: string): string[] {
   return text
-    .split(',')
+    .split(/[,，]/)
     .map((alias) => alias.trim())
     .filter(Boolean)
 }

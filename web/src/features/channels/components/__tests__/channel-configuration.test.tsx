@@ -16,6 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createRouter,
@@ -47,9 +50,23 @@ import {
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_SGLANG,
   CHANNEL_TYPE_VLLM,
+  GEMINI_FREE_KEY_ALIASES_MAX,
+  GEMINI_FREE_KEY_COOLDOWN_REASON_LABELS,
   GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS,
+  GEMINI_FREE_KEY_LIMIT_MAX,
+  GEMINI_FREE_KEY_LIMIT_MIN,
+  GEMINI_FREE_KEY_MAX_ATTEMPTS_DEFAULT,
+  GEMINI_FREE_KEY_MAX_ATTEMPTS_MAX,
+  GEMINI_FREE_KEY_MODEL_LIMITS_MAX_ROWS,
+  GEMINI_FREE_KEY_MODEL_NAME_MAX,
+  GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT,
+  GEMINI_FREE_KEY_TOKEN_COUNTERS,
 } from '../../constants'
-import { channelSchema, type Channel } from '../../types'
+import {
+  channelSchema,
+  type Channel,
+  type GeminiFreeKeyUsage,
+} from '../../types'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelsProvider } from '../channels-provider'
 import { ChannelMutateDrawer } from '../drawers/channel-mutate-drawer'
@@ -4041,7 +4058,7 @@ test('editing one limit of the default table saves the whole table with that cha
   })
 })
 
-test('an added model saves with trimmed names and its comma-separated aliases', async () => {
+test('an added model saves with trimmed names and its comma-separated aliases, full-width commas included', async () => {
   const { user } = await openGeminiRequestTab(
     geminiChannel({
       gemini_free_key_enabled: true,
@@ -4055,7 +4072,7 @@ test('an added model saves with trimmed names and its comma-separated aliases', 
   )
   await user.type(
     screen.getByRole('textbox', { name: 'Aliases #3' }),
-    'my-alias , , other-alias'
+    'my-alias , ，other-alias，third-alias'
   )
   await user.type(screen.getByRole('spinbutton', { name: 'RPM #3' }), '-1')
   await user.type(screen.getByRole('spinbutton', { name: 'TPM #3' }), '1000')
@@ -4065,7 +4082,7 @@ test('an added model saves with trimmed names and its comma-separated aliases', 
     ...SAVED_MODEL_LIMITS,
     {
       model: 'my-model',
-      aliases: ['my-alias', 'other-alias'],
+      aliases: ['my-alias', 'other-alias', 'third-alias'],
       rpm: -1,
       tpm: 1000,
       rpd: 2,
@@ -4371,7 +4388,101 @@ const FREE_KEY_USAGE = {
       ],
     },
   ],
+} satisfies GeminiFreeKeyUsage
+
+// The server owns the free key defaults, bounds and usage report; the form
+// and the usage dialog mirror them. These read the server's source so that
+// the two cannot drift apart.
+function serverSource(path: string): string {
+  return readFileSync(
+    resolve(import.meta.dirname, '../../../../../..', path),
+    'utf8'
+  )
 }
+
+test('the free key defaults and bounds of the form are the server’s', () => {
+  const source = serverSource('relaykit/dto/gemini_free_key.go')
+  const constants: Record<string, number | string> = Object.fromEntries(
+    [
+      ...source.matchAll(
+        /^\s*(GeminiFreeKey\w+)\s*=\s*(-?[\d_]+|"[^"]*")\s*$/gm
+      ),
+    ].map(([, name, value]) => [
+      name,
+      value.startsWith('"')
+        ? JSON.parse(value)
+        : Number(value.replaceAll('_', '')),
+    ])
+  )
+  expect(constants).toMatchObject({
+    GeminiFreeKeyUnlimited: GEMINI_FREE_KEY_LIMIT_MIN,
+    GeminiFreeKeyLimitMax: GEMINI_FREE_KEY_LIMIT_MAX,
+    GeminiFreeKeyMaxAttemptsDefault: GEMINI_FREE_KEY_MAX_ATTEMPTS_DEFAULT,
+    GeminiFreeKeyMaxAttemptsMax: GEMINI_FREE_KEY_MAX_ATTEMPTS_MAX,
+    GeminiFreeKeyModelLimitsMax: GEMINI_FREE_KEY_MODEL_LIMITS_MAX_ROWS,
+    GeminiFreeKeyAliasesMax: GEMINI_FREE_KEY_ALIASES_MAX,
+    GeminiFreeKeyModelNameMax: GEMINI_FREE_KEY_MODEL_NAME_MAX,
+    GeminiFreeKeyTokenCounterCountTokens: GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT,
+  })
+  expect([
+    constants.GeminiFreeKeyTokenCounterCountTokens,
+    constants.GeminiFreeKeyTokenCounterLocal,
+  ]).toEqual([...GEMINI_FREE_KEY_TOKEN_COUNTERS])
+
+  // The rows name -1 and 0 by local constants.
+  const [, first = '', second = '', firstValue = '', secondValue = ''] =
+    source.match(
+      /const (\w+), (\w+) = (GeminiFreeKey\w+), (GeminiFreeKey\w+)/
+    ) ?? []
+  const named: Record<string, number | string | undefined> = {
+    [first]: constants[firstValue],
+    [second]: constants[secondValue],
+  }
+  const rows = [
+    ...source.matchAll(/geminiFreeTierLimits\(("[^"]*"[^)]*)\)/g),
+  ].map(([, args]) => {
+    const [model = '', rpm = '', tpm = '', rpd = '', ...aliases] = args
+      .split(',')
+      .map((arg) => arg.trim())
+    const limit = (arg: string) => named[arg] ?? Number(arg)
+    return {
+      model: JSON.parse(model),
+      aliases: aliases.map((alias) => JSON.parse(alias)),
+      rpm: limit(rpm),
+      tpm: limit(tpm),
+      rpd: limit(rpd),
+    }
+  })
+  expect(named).toEqual({ unlimited: -1, notFree: 0 })
+  expect(rows).toEqual(GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS)
+})
+
+test('the free key usage the dialog reads has the server’s fields and pause reasons', () => {
+  const controller = serverSource('controller/gemini_free_key_usage.go')
+  const tagsOf = (type: string) =>
+    [
+      ...(
+        controller.match(
+          new RegExp(`type ${type} struct \\{([\\s\\S]*?)\\n\\}`)
+        )?.[1] ?? ''
+      ).matchAll(/json:"([^",]+)/g),
+    ]
+      .map(([, tag]) => tag)
+      .sort()
+  const keysOf = (value: object) => Object.keys(value).sort()
+  const [key] = FREE_KEY_USAGE.keys
+  expect(tagsOf('geminiFreeKeyUsageResponse')).toEqual(keysOf(FREE_KEY_USAGE))
+  expect(tagsOf('geminiFreeKeyKeyUsage')).toEqual(keysOf(key))
+  expect(tagsOf('geminiFreeKeyModelUsage')).toEqual(keysOf(key.models[0]))
+
+  const limiter = serverSource('pkg/geminifreekey/limiter.go')
+  const reasons = [...limiter.matchAll(/^\s*Reason\w+ Reason = "(\w+)"/gm)].map(
+    ([, reason]) => reason
+  )
+  expect(reasons.sort()).toEqual(
+    Object.keys(GEMINI_FREE_KEY_COOLDOWN_REASON_LABELS).sort()
+  )
+})
 
 async function openFreeKeyUsage(response: unknown) {
   const get = vi.mocked(api.get)
