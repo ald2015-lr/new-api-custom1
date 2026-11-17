@@ -126,6 +126,9 @@ export interface ChannelOtherSettings {
   gemini_free_key_token_counter?: '' | 'count_tokens' | 'local'
   gemini_free_key_max_attempts?: number
   gemini_free_key_model_limits?: GeminiFreeKeyModelLimit[]
+  // Thinking suffixes on the model names of a Gemini (AI Studio) channel;
+  // off when unset.
+  gemini_thinking_suffix_enabled?: boolean
   disable_task_polling_sleep?: boolean
   upstream_model_update_check_enabled?: boolean
   upstream_model_update_auto_sync_enabled?: boolean

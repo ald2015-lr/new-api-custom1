@@ -4716,3 +4716,154 @@ test('the free key usage dialog reports a failed request with the server message
   ).toBeVisible()
   expect(within(dialog).getByText('channel not found')).toBeVisible()
 })
+
+const THINKING_SUFFIXES = 'Thinking suffixes'
+
+test('a Gemini channel shows the thinking suffix switch right above free key mode, with the suffix rules listed under it', async () => {
+  await openGeminiRequestTab(geminiChannel({}))
+  const processing = screen.getByRole('group', { name: 'Request processing' })
+  const toggle = within(processing).getByRole('switch', {
+    name: THINKING_SUFFIXES,
+  })
+  const switches = within(processing).getAllByRole('switch')
+  const freeKey = within(processing).getByRole('switch', {
+    name: FREE_KEY_MODE,
+  })
+  expect(switches[switches.indexOf(freeKey) - 1]).toBe(toggle)
+  expect(toggle).toHaveAccessibleDescription(/thinking setting/)
+  const rules = within(within(processing).getByRole('list')).getAllByRole(
+    'listitem'
+  )
+  expect(rules).toHaveLength(5)
+  expect(rules[2]).toHaveTextContent('gemini-3.8-flash-128-nothinking')
+})
+
+test.each([1, 41])(
+  'a channel of type %i saved with thinking suffixes on offers no switch and stays unmarked',
+  async (type) => {
+    editingChannel = {
+      ...editingChannel,
+      type,
+      settings: '{"gemini_thinking_suffix_enabled":true}',
+    }
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+    expect(requestTab).not.toHaveAccessibleName(/Configured/)
+    await user.click(requestTab)
+    expect(
+      screen.queryByRole('switch', { name: THINKING_SUFFIXES })
+    ).not.toBeInTheDocument()
+  }
+)
+
+test('a new Gemini channel starts with thinking suffixes off', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(screen.getByRole('option', { name: /^Gemini / }))
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  expect(
+    screen.getByRole('switch', { name: THINKING_SUFFIXES })
+  ).not.toBeChecked()
+})
+
+test('a Gemini channel saved before thinking suffixes shows the switch off and saves no thinking suffix setting', async () => {
+  const { user } = await openGeminiRequestTab(
+    geminiChannel({ future_option: { level: 2 } })
+  )
+  expect(
+    screen.getByRole('switch', { name: THINKING_SUFFIXES })
+  ).not.toBeChecked()
+  const settings = await saveAndReadSettings(user)
+  expect(settings).not.toHaveProperty('gemini_thinking_suffix_enabled')
+  expect(settings).toMatchObject({ future_option: { level: 2 } })
+})
+
+test('turning thinking suffixes on marks Request processing as configured, and turning them off clears the mark', async () => {
+  const { user, requestTab } = await openGeminiRequestTab(geminiChannel({}))
+  const processing = screen.getByRole('group', { name: 'Request processing' })
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  const toggle = screen.getByRole('switch', { name: THINKING_SUFFIXES })
+
+  await user.click(toggle)
+  expect(
+    within(processing).getByRole('img', { name: 'Configured' })
+  ).toBeVisible()
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+
+  await user.click(toggle)
+  expect(
+    within(processing).queryByRole('img', { name: 'Configured' })
+  ).not.toBeInTheDocument()
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+})
+
+test('turning thinking suffixes on saves the switch and keeps the other settings, free key mode included', async () => {
+  const { user } = await openGeminiRequestTab(
+    geminiChannel({
+      gemini_free_key_enabled: true,
+      future_option: { level: 2 },
+    })
+  )
+  await user.click(screen.getByRole('switch', { name: THINKING_SUFFIXES }))
+  const settings = await saveAndReadSettings(user)
+  expect(settings).toMatchObject({
+    gemini_thinking_suffix_enabled: true,
+    gemini_free_key_enabled: true,
+    future_option: { level: 2 },
+  })
+})
+
+test('a Gemini channel saved with thinking suffixes on shows the switch on and marked, and turning it off saves the settings without it', async () => {
+  const { user, requestTab } = await openGeminiRequestTab(
+    geminiChannel({
+      gemini_thinking_suffix_enabled: true,
+      future_option: { level: 2 },
+    })
+  )
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  const toggle = screen.getByRole('switch', { name: THINKING_SUFFIXES })
+  expect(toggle).toBeChecked()
+  await user.click(toggle)
+  const settings = await saveAndReadSettings(user)
+  expect(settings).not.toHaveProperty('gemini_thinking_suffix_enabled')
+  expect(settings).toMatchObject({ future_option: { level: 2 } })
+})
+
+test('changing a Gemini channel with thinking suffixes on to OpenAI saves its settings without them', async () => {
+  const { user } = await openGeminiRequestTab(
+    geminiChannel({
+      gemini_thinking_suffix_enabled: true,
+      future_option: { level: 2 },
+    })
+  )
+  await user.click(screen.getByRole('button', { name: 'Change provider' }))
+  await user.click(screen.getByRole('option', { name: 'OpenAI Built-in #1' }))
+  const settings = await saveAndReadSettings(user)
+  expect(settings).not.toHaveProperty('gemini_thinking_suffix_enabled')
+  expect(settings).toMatchObject({ future_option: { level: 2 } })
+})
+
+test('the thinking suffix switch is locked without sensitive channel write permission', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: { read: true, write: true } },
+        },
+      },
+    },
+  })
+  const { user } = await openGeminiRequestTab(
+    geminiChannel({ gemini_thinking_suffix_enabled: true })
+  )
+  const toggle = screen.getByRole('switch', { name: THINKING_SUFFIXES })
+  expect(toggle).toHaveAttribute('aria-disabled', 'true')
+  await user.click(toggle)
+  expect(toggle).toBeChecked()
+})
