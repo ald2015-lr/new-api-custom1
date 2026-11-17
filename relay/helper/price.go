@@ -318,6 +318,11 @@ func resolveBillingModelName(origin string) string {
 	if deepSeekBase, _, _, ok := reasoning.ParseDeepSeekV4ThinkingSuffix(base); ok && !model_setting.ShouldPreserveThinkingSuffix(base) {
 		candidates = append(candidates, deepSeekBase)
 	}
+	// Gemini channel thinking suffixes (-128, -high, -nothinking …) bill at
+	// the base model's price unless the suffixed name has its own.
+	if geminiBase, _, ok := reasoning.ParseGeminiChannelThinkingSuffix(base); ok && !model_setting.ShouldPreserveThinkingSuffix(base) {
+		candidates = append(candidates, geminiBase)
+	}
 	candidates = append(candidates, base)
 
 	seen := make(map[string]struct{}, len(candidates))

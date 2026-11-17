@@ -56,11 +56,19 @@ func geminiCapabilitiesFor(model string) geminiCapabilities {
 		return geminiCapabilities{kind: geminiThinkingBudget, supportsDisable: true, minBudget: 512, maxBudget: 24576}
 	case strings.HasPrefix(model, "gemini-2.5-"):
 		return geminiCapabilities{kind: geminiThinkingBudget, supportsDisable: true, maxBudget: 24576}
-	case strings.HasPrefix(model, "gemini-3"), strings.HasPrefix(model, "gemini-4-argon"):
+	case strings.HasPrefix(model, "gemini-3"), strings.HasPrefix(model, "gemini-4-"):
 		return geminiCapabilities{kind: geminiThinkingLevel}
 	default:
 		return geminiCapabilities{}
 	}
+}
+
+// GeminiThinkingConfigurable reports whether model takes a thinking budget or
+// a thinking level, so that a host can tell a thinking suffix from a real
+// model-name segment and only synthesize thinking defaults where they apply.
+func GeminiThinkingConfigurable(model string) bool {
+	kind := geminiCapabilitiesFor(model).kind
+	return kind == geminiThinkingBudget || kind == geminiThinkingLevel
 }
 
 // RenderGemini maps a portable intent onto the target model's thinkingConfig.
@@ -217,7 +225,12 @@ func geminiDefaultEffort(model string) Effort {
 	switch {
 	case strings.HasPrefix(model, "gemini-4-argon-cyber-permissive"):
 		return EffortHigh
-	case strings.HasPrefix(model, "gemini-4-argon"):
+	case strings.HasPrefix(model, "gemini-4-argon"), strings.HasPrefix(model, "gemini-4-carbon"):
+		return EffortMedium
+	case strings.HasPrefix(model, "gemini-4-hydrogen"):
+		return EffortHigh
+	case strings.HasPrefix(model, "gemini-3.7-flash") && !strings.HasPrefix(model, "gemini-3.7-flash-lite"),
+		strings.HasPrefix(model, "gemini-3.8-flash") && !strings.HasPrefix(model, "gemini-3.8-flash-lite"):
 		return EffortMedium
 	case model == "gemini-flash-latest",
 		strings.HasPrefix(model, "gemini-3.5-flash") && !strings.HasPrefix(model, "gemini-3.5-flash-lite"),
@@ -512,8 +525,19 @@ func geminiLevelForEffort(model string, effort Effort) (string, error) {
 			return string(EffortLow), nil
 		}
 		return string(EffortHigh), nil
+	case strings.HasPrefix(model, "gemini-4-hydrogen"):
+		// Hydrogen takes low, medium, high and xhigh; minimal is refused.
+		switch effort {
+		case EffortMinimal:
+			return string(EffortLow), nil
+		case EffortXHigh, EffortMax:
+			return string(EffortXHigh), nil
+		}
 	case strings.HasPrefix(model, "gemini-3.1-pro"), model == "gemini-pro-latest",
-		strings.HasPrefix(model, "gemini-4-argon"):
+		strings.HasPrefix(model, "gemini-4-"),
+		strings.HasPrefix(model, "gemini-3.7-flash") && !strings.HasPrefix(model, "gemini-3.7-flash-lite"),
+		strings.HasPrefix(model, "gemini-3.8-flash") && !strings.HasPrefix(model, "gemini-3.8-flash-lite"):
+		// These take low, medium and high; minimal is refused with a 400.
 		if effort == EffortMinimal {
 			return string(EffortLow), nil
 		}

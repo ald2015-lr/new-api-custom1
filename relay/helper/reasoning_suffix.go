@@ -3,6 +3,7 @@ package helper
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -56,6 +57,12 @@ func ApplyReasoningModelSuffix(c *gin.Context, info *relaycommon.RelayInfo, outb
 	selected := originParsed
 	if upstream != origin {
 		selected, diagnostics = overlayMappedModelModifiers(selected, upstreamParsed, diagnostics)
+	}
+	if !selected.hasThinking && opts.Gemini.ChannelThinkingSuffixEnabled {
+		if intent, ok := geminiChannelDefaultThinking(selected.base, info.Request); ok {
+			selected.intent = intent
+			selected.hasThinking = true
+		}
 	}
 
 	if selected.hasThinking {
@@ -209,6 +216,11 @@ func parseHostModelSuffix(name string, opts *convmeta.Options) (string, reasonin
 	if name == "" {
 		return name, reasoning.Intent{}, false, nil
 	}
+	if opts.Gemini.ChannelThinkingSuffixEnabled {
+		if base, intent, found := reasoning.ParseGeminiChannelThinkingSuffix(name); found {
+			return base, intent, true, nil
+		}
+	}
 	return hostreasoning.ParseLegacyModelSuffix(
 		name,
 		opts.Claude.ThinkingAdapterEnabled,
@@ -229,4 +241,33 @@ func explicitIntentFromRequest(req dto.Request) (reasoning.Intent, []types.Conve
 	default:
 		return reasoning.Intent{}, nil, nil
 	}
+}
+
+// geminiChannelDefaultThinking is the thinking a Gemini channel with thinking
+// suffixes on gives a gemini-* name that has none: high, with thoughts
+// returned. A request that sets its own thinking strength keeps it, and a
+// request's own includeThoughts is kept too. Models whose thinking is not
+// configurable (or unknown) get nothing.
+func geminiChannelDefaultThinking(base string, req dto.Request) (reasoning.Intent, bool) {
+	bare := base
+	if slash := strings.LastIndex(bare, "/"); slash >= 0 {
+		bare = bare[slash+1:]
+	}
+	if !strings.HasPrefix(bare, "gemini-") || !reasoning.GeminiThinkingConfigurable(bare) {
+		return reasoning.Intent{}, false
+	}
+	explicit, _, err := explicitIntentFromRequest(req)
+	if err != nil || explicit.HasStrength() {
+		return reasoning.Intent{}, false
+	}
+	includeThoughts := true
+	if explicit.IncludeThoughts != nil {
+		includeThoughts = *explicit.IncludeThoughts
+	}
+	return reasoning.Intent{
+		Mode:            reasoning.ModeEnabled,
+		Effort:          reasoning.EffortHigh,
+		IncludeThoughts: &includeThoughts,
+		Source:          reasoning.SourceSuffix,
+	}, true
 }

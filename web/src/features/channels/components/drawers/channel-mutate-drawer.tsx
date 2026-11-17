@@ -335,6 +335,7 @@ const SENSITIVE_FORM_FIELDS = [
   'gemini_free_key_token_counter',
   'gemini_free_key_max_attempts',
   'gemini_free_key_model_limits',
+  'gemini_thinking_suffix_enabled',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -2162,6 +2163,63 @@ export function ChannelMutateDrawer({
         )}
       />
     </>
+  )
+
+  // The rules sit in a list under the switch row, which keeps the switch
+  // beside its label instead of beside the long text.
+  const geminiThinkingSuffixFields = currentType === CHANNEL_TYPE_GEMINI && (
+    <FormField
+      control={form.control}
+      name='gemini_thinking_suffix_enabled'
+      render={({ field }) => (
+        <FormItem className='gap-3 px-4 py-3'>
+          <div className='flex items-center justify-between gap-4'>
+            <div className='space-y-0.5'>
+              <FormLabel>{t('Thinking suffixes')}</FormLabel>
+              <FormDescription>
+                {t(
+                  'When on, Gemini model names on this channel can end in a thinking suffix. Before the request goes to Google, the suffix is removed and replaced with the matching thinking setting.'
+                )}
+              </FormDescription>
+            </div>
+            <FormControl>
+              <Switch
+                disabled={sensitiveLocked}
+                checked={field.value === true}
+                onCheckedChange={field.onChange}
+              />
+            </FormControl>
+          </div>
+          <ul className='text-muted-foreground list-disc space-y-1 pl-5 text-sm'>
+            <li>
+              {t(
+                'A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.'
+              )}
+            </li>
+            <li>
+              {t(
+                '-minimal / -low / -medium / -high / -xhigh / -max are thinking levels. A level the model does not support is replaced with the nearest one it does.'
+              )}
+            </li>
+            <li>
+              {t(
+                'Adding -nothinking at the end keeps thinking as usual but does not return the thinking content, for example gemini-3.8-flash-128-nothinking.'
+              )}
+            </li>
+            <li>
+              {t(
+                'Model names without a suffix think at high and return the thinking content by default (a thinking effort set in the request takes precedence).'
+              )}
+            </li>
+            <li>
+              {t(
+                'A suffixed model name with no price of its own is billed as the model without the suffix.'
+              )}
+            </li>
+          </ul>
+        </FormItem>
+      )}
+    />
   )
 
   const notesFields = (
@@ -5040,6 +5098,7 @@ export function ChannelMutateDrawer({
                 {passthroughFields}
                 {systemPromptFields}
                 {systemPromptOverrideFields}
+                {geminiThinkingSuffixFields}
               </fieldset>
               {currentType === CHANNEL_TYPE_GEMINI && (
                 <GeminiFreeKeySettings

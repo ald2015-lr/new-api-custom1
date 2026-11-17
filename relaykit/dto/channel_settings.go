@@ -171,6 +171,11 @@ type ChannelOtherSettings struct {
 	// UpstreamQuotaErrorStatusCode is that status; 0 means
 	// UpstreamQuotaErrorStatusCodeDefault.
 	UpstreamQuotaErrorStatusCode int `json:"upstream_quota_error_status_code,omitempty"`
+	// GeminiThinkingSuffixEnabled lets a Gemini channel read thinking suffixes
+	// on model names (-128, -low … -max, -nothinking; see
+	// reasoning.ParseGeminiChannelThinkingSuffix) and think at high with
+	// thoughts returned when a name has none. Off by default.
+	GeminiThinkingSuffixEnabled bool `json:"gemini_thinking_suffix_enabled,omitempty"`
 	// GeminiFreeKeyEnabled turns on free key mode on a Gemini (AI Studio)
 	// channel: each key's requests are limited per model to the free tier's
 	// requests per minute, input tokens per minute and requests per Pacific

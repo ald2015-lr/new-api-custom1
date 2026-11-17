@@ -345,6 +345,10 @@ export const channelFormSchema = z
         })
       )
       .optional(),
+    // Gemini (AI Studio): model names may end in thinking suffixes, turned
+    // into thinking settings before the request goes upstream (stored in
+    // settings JSON); off when unset.
+    gemini_thinking_suffix_enabled: z.boolean().optional(),
     disable_task_polling_sleep: z.boolean().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
@@ -637,6 +641,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   gemini_free_key_model_limits: toGeminiFreeKeyModelLimitRows(
     GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS
   ),
+  gemini_thinking_suffix_enabled: false,
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
@@ -727,6 +732,7 @@ export function transformChannelToFormDefaults(
     GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT
   let geminiFreeKeyMaxAttempts: number | null = null
   let geminiFreeKeyModelLimits = readGeminiFreeKeyModelLimitRows(undefined)
+  let geminiThinkingSuffixEnabled = false
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
@@ -795,6 +801,8 @@ export function transformChannelToFormDefaults(
       geminiFreeKeyModelLimits = readGeminiFreeKeyModelLimitRows(
         parsed.gemini_free_key_model_limits
       )
+      geminiThinkingSuffixEnabled =
+        parsed.gemini_thinking_suffix_enabled === true
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
@@ -869,6 +877,7 @@ export function transformChannelToFormDefaults(
     gemini_free_key_token_counter: geminiFreeKeyTokenCounter,
     gemini_free_key_max_attempts: geminiFreeKeyMaxAttempts,
     gemini_free_key_model_limits: geminiFreeKeyModelLimits,
+    gemini_thinking_suffix_enabled: geminiThinkingSuffixEnabled,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
@@ -1114,6 +1123,17 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     delete settingsObj.gemini_free_key_token_counter
     delete settingsObj.gemini_free_key_max_attempts
     delete settingsObj.gemini_free_key_model_limits
+  }
+
+  // Only a Gemini (AI Studio) channel reads thinking suffixes; the key is
+  // written only while the switch is on.
+  if (
+    formData.type === CHANNEL_TYPE_GEMINI &&
+    formData.gemini_thinking_suffix_enabled === true
+  ) {
+    settingsObj.gemini_thinking_suffix_enabled = true
+  } else {
+    delete settingsObj.gemini_thinking_suffix_enabled
   }
 
   settingsObj.disable_task_polling_sleep =

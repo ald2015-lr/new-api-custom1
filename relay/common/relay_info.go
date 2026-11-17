@@ -1024,6 +1024,8 @@ func (info *RelayInfo) ConvOptions() *convmeta.Options {
 	if info != nil {
 		if info.ChannelMeta != nil {
 			options.ToolLossPolicy = types.ConversionLossPolicy(info.ChannelOtherSettings.ToolLossPolicy)
+			options.Gemini.ChannelThinkingSuffixEnabled = channelType == constant.ChannelTypeGemini &&
+				info.ChannelOtherSettings.GeminiThinkingSuffixEnabled
 		}
 		info.convOptions = options
 	}

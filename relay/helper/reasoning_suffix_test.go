@@ -607,3 +607,104 @@ func TestApplyReasoningModelSuffixPreservesGpt51CodexMax(t *testing.T) {
 	assert.Nil(t, info.ReasoningConversion)
 	assert.Equal(t, "gpt-5.1-codex-max", hostreasoning.BaseModelName("gpt-5.1-codex-max"))
 }
+
+func geminiSuffixChannelInfo(model string, enabled bool, request dto.Request) *relaycommon.RelayInfo {
+	return &relaycommon.RelayInfo{
+		OriginModelName: model,
+		Request:         request,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:          constant.ChannelTypeGemini,
+			UpstreamModelName:    model,
+			ChannelOtherSettings: dto.ChannelOtherSettings{GeminiThinkingSuffixEnabled: enabled},
+		},
+	}
+}
+
+func TestApplyReasoningModelSuffixGeminiChannelThinkingSuffix(t *testing.T) {
+	settings := model_setting.GetGeminiSettings()
+	original := settings.ThinkingAdapterEnabled
+	t.Cleanup(func() { settings.ThinkingAdapterEnabled = original })
+
+	for _, globalAdapter := range []bool{false, true} {
+		settings.ThinkingAdapterEnabled = globalAdapter
+		t.Run("budget without thoughts", func(t *testing.T) {
+			outbound := &dto.GeneralOpenAIRequest{Model: "gemini-3.8-flash-128-nothinking"}
+			info := geminiSuffixChannelInfo(outbound.Model, true, &dto.GeneralOpenAIRequest{Model: outbound.Model})
+			mustApplyReasoningModelSuffix(t, info, outbound)
+			assert.Equal(t, "gemini-3.8-flash", info.UpstreamModelName)
+			assert.Equal(t, "gemini-3.8-flash", outbound.Model)
+			require.NotNil(t, info.ReasoningConversion)
+			assert.Equal(t, "enabled", info.ReasoningConversion.Mode, "nothinking still thinks on this channel")
+			require.NotNil(t, info.ReasoningConversion.BudgetTokens)
+			assert.Equal(t, 128, *info.ReasoningConversion.BudgetTokens)
+			require.NotNil(t, info.ReasoningConversion.IncludeThoughts)
+			assert.False(t, *info.ReasoningConversion.IncludeThoughts)
+		})
+		t.Run("level with thoughts", func(t *testing.T) {
+			info := geminiSuffixChannelInfo("gemini-4-hydrogen-xhigh", true, &dto.GeneralOpenAIRequest{Model: "gemini-4-hydrogen-xhigh"})
+			mustApplyReasoningModelSuffix(t, info)
+			assert.Equal(t, "gemini-4-hydrogen", info.UpstreamModelName)
+			require.NotNil(t, info.ReasoningConversion)
+			assert.Equal(t, "xhigh", info.ReasoningConversion.Effort)
+			require.NotNil(t, info.ReasoningConversion.IncludeThoughts)
+			assert.True(t, *info.ReasoningConversion.IncludeThoughts)
+		})
+	}
+	settings.ThinkingAdapterEnabled = false
+
+	t.Run("a bare name thinks at high with thoughts", func(t *testing.T) {
+		info := geminiSuffixChannelInfo("gemini-3.8-flash", true, &dto.GeneralOpenAIRequest{Model: "gemini-3.8-flash"})
+		mustApplyReasoningModelSuffix(t, info)
+		assert.Equal(t, "gemini-3.8-flash", info.UpstreamModelName)
+		require.NotNil(t, info.ReasoningConversion)
+		assert.Equal(t, "enabled", info.ReasoningConversion.Mode)
+		assert.Equal(t, "high", info.ReasoningConversion.Effort)
+		require.NotNil(t, info.ReasoningConversion.IncludeThoughts)
+		assert.True(t, *info.ReasoningConversion.IncludeThoughts)
+	})
+
+	t.Run("a bare name keeps the strength the request asked for", func(t *testing.T) {
+		request := &dto.GeneralOpenAIRequest{Model: "gemini-3.8-flash", ReasoningEffort: "low"}
+		info := geminiSuffixChannelInfo("gemini-3.8-flash", true, request)
+		mustApplyReasoningModelSuffix(t, info)
+		assert.Nil(t, info.ReasoningConversion)
+		assert.Equal(t, "low", request.ReasoningEffort)
+	})
+
+	t.Run("a bare native request keeps its own thinking config", func(t *testing.T) {
+		level := &dto.GeminiThinkingConfig{ThinkingLevel: "medium"}
+		request := &dto.GeminiChatRequest{GenerationConfig: dto.GeminiChatGenerationConfig{ThinkingConfig: level}}
+		info := geminiSuffixChannelInfo("gemini-3.8-flash", true, request)
+		mustApplyReasoningModelSuffix(t, info)
+		assert.Nil(t, info.ReasoningConversion)
+	})
+
+	t.Run("a bare name of a model without configurable thinking is left alone", func(t *testing.T) {
+		info := geminiSuffixChannelInfo("gemini-2.5-flash-image", true, &dto.GeneralOpenAIRequest{Model: "gemini-2.5-flash-image"})
+		mustApplyReasoningModelSuffix(t, info)
+		assert.Nil(t, info.ReasoningConversion)
+	})
+
+	t.Run("switch off leaves the name verbatim", func(t *testing.T) {
+		for _, model := range []string{"gemini-3.8-flash-128", "gemini-3.8-flash"} {
+			info := geminiSuffixChannelInfo(model, false, &dto.GeneralOpenAIRequest{Model: model})
+			mustApplyReasoningModelSuffix(t, info)
+			assert.Equal(t, model, info.UpstreamModelName)
+			assert.Nil(t, info.ReasoningConversion)
+		}
+	})
+
+	t.Run("another channel type ignores the setting", func(t *testing.T) {
+		info := geminiSuffixChannelInfo("gemini-3.8-flash-128", true, &dto.GeneralOpenAIRequest{Model: "gemini-3.8-flash-128"})
+		info.ChannelType = constant.ChannelTypeOpenAI
+		mustApplyReasoningModelSuffix(t, info)
+		assert.Equal(t, "gemini-3.8-flash-128", info.UpstreamModelName)
+		assert.Nil(t, info.ReasoningConversion)
+	})
+
+	t.Run("a versioned id stays intact", func(t *testing.T) {
+		info := geminiSuffixChannelInfo("gemini-2.0-flash-001", true, &dto.GeneralOpenAIRequest{Model: "gemini-2.0-flash-001"})
+		mustApplyReasoningModelSuffix(t, info)
+		assert.Equal(t, "gemini-2.0-flash-001", info.UpstreamModelName)
+	})
+}
