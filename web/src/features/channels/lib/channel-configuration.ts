@@ -81,6 +81,7 @@ const CONFIGURATION_BLOCKS = {
       'gemini_free_key_token_counter',
       'gemini_free_key_max_attempts',
       'gemini_free_key_model_limits',
+      'gemini_thinking_suffix_enabled',
       'system_prompt',
       'system_prompt_override',
     ],
@@ -184,7 +185,9 @@ export function getChannelConfigurationState(
           values.novelai_upscale_enabled ||
           (values.novelai_queue_limit ?? NOVELAI_QUEUE_LIMIT_DEFAULT) !==
             NOVELAI_QUEUE_LIMIT_DEFAULT)) ||
-      (values.type === CHANNEL_TYPE_GEMINI && values.gemini_free_key_enabled) ||
+      (values.type === CHANNEL_TYPE_GEMINI &&
+        (values.gemini_free_key_enabled ||
+          values.gemini_thinking_suffix_enabled)) ||
       values.system_prompt?.trim() ||
       values.system_prompt_override
     ),
