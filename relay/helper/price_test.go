@@ -802,3 +802,47 @@ func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
 func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }
 
 func (s *priceTestReservation) ReserveBeforeSubmit(quota int) error { return s.Reserve(quota) }
+
+func TestModelPriceHelperGeminiChannelThinkingSuffixBillsAtTheBaseModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	savedRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
+	})
+	oldSelfUse := operation_setting.SelfUseModeEnabled
+	operation_setting.SelfUseModeEnabled = false
+	t.Cleanup(func() { operation_setting.SelfUseModeEnabled = oldSelfUse })
+
+	ratios := ratio_setting.GetModelRatioCopy()
+	ratios["gemini-3.8-flash"] = 0.15
+	ratios["gemini-3.8-flash-max"] = 0.6
+	delete(ratios, "gemini-3.8-flash-128-nothinking")
+	delete(ratios, "gemini-2.0-flash-001")
+	delete(ratios, "gemini-2.0-flash")
+	ratioJSON, err := common.Marshal(ratios)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratioJSON)))
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx.Set("group", "default")
+	price := func(model string) (string, float64, error) {
+		info := &relaycommon.RelayInfo{OriginModelName: model, UserGroup: "default", UsingGroup: "default"}
+		priceData, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{})
+		return info.GetBillingModelName(), priceData.ModelRatio, err
+	}
+
+	name, ratio, err := price("gemini-3.8-flash-128-nothinking")
+	require.NoError(t, err, "a suffixed name without its own price bills at the base model")
+	assert.Equal(t, "gemini-3.8-flash", name)
+	assert.Equal(t, 0.15, ratio)
+
+	name, ratio, err = price("gemini-3.8-flash-max")
+	require.NoError(t, err, "a suffixed name with its own price keeps it")
+	assert.Equal(t, "gemini-3.8-flash-max", name)
+	assert.Equal(t, 0.6, ratio)
+
+	_, _, err = price("gemini-2.0-flash-001")
+	assert.Error(t, err, "a versioned id is not a suffix of an unpriced base")
+}

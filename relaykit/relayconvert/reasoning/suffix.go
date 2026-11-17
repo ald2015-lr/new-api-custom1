@@ -291,3 +291,99 @@ func ParseDeepSeekV4ThinkingSuffix(modelName string) (baseModel string, thinking
 		return modelName, "", "", false
 	}
 }
+
+// ParseGeminiChannelThinkingSuffix parses the thinking-suffix grammar a Gemini
+// channel can turn on: <gemini-base>[-<budget>|-<effort>][-nothinking].
+//   - -<budget> (for example -128) is a thinking budget in tokens. Models that
+//     only take a thinking level get the level that budget maps to (128 is
+//     low).
+//   - -minimal, -low, -medium, -high, -xhigh and -max are thinking levels;
+//     the target model's nearest supported level is used.
+//   - A trailing -nothinking keeps thinking on but asks for no thought parts
+//     (includeThoughts false). Alone it means the default level, high.
+//   - The legacy -thinking-<budget> and -thinking aliases read as -<budget>
+//     and as the default level.
+//
+// Every recognised name thinks with its thoughts returned unless it ends in
+// -nothinking. A budget tail is only recognised after a base whose thinking
+// is configurable and whose own last segment is not numeric, and never with
+// a leading zero, so versioned and dated ids such as gemini-2.0-flash-001 or
+// gemini-2.5-flash-preview-09-2025 stay intact.
+func ParseGeminiChannelThinkingSuffix(modelName string) (string, Intent, bool) {
+	prefix, bare := splitModelNamespace(modelName)
+	if !strings.HasPrefix(bare, "gemini-") {
+		return modelName, Intent{}, false
+	}
+	base, hideThoughts := strings.CutSuffix(bare, "-nothinking")
+	intent := Intent{Mode: ModeEnabled, Source: SourceSuffix}
+	found := hideThoughts
+	if marker := strings.LastIndex(base, "-thinking-"); marker >= 0 && isASCIIDigits(base[marker+len("-thinking-"):]) {
+		// The legacy -thinking-<budget> alias reads the same as -<budget>.
+		budget, err := strconv.Atoi(base[marker+len("-thinking-"):])
+		if err != nil {
+			return modelName, Intent{}, false
+		}
+		base = base[:marker]
+		intent.BudgetTokens = &budget
+		intent.BudgetSource = SourceSuffix
+		found = true
+	} else if trimmed, ok := strings.CutSuffix(base, "-thinking"); ok {
+		// The legacy -thinking alias reads as the default level.
+		base = trimmed
+		found = true
+	} else if trimmed, rawEffort, ok := TrimEffortSuffixWithSuffixes(base, EffortSuffixes); ok && legacyGeminiModelPattern.MatchString(trimmed) {
+		if effort, err := ParseEffort(rawEffort); err == nil {
+			base = trimmed
+			intent.Effort = effort
+			found = true
+		}
+	} else if trimmed, budget, ok := cutGeminiBudgetSuffix(base); ok {
+		base = trimmed
+		intent.BudgetTokens = &budget
+		intent.BudgetSource = SourceSuffix
+		found = true
+	}
+	if !found || !legacyGeminiModelPattern.MatchString(base) || strings.HasSuffix(base, "-thinking") {
+		return modelName, Intent{}, false
+	}
+	if intent.Effort == "" && intent.BudgetTokens == nil {
+		intent.Effort = EffortHigh
+	}
+	includeThoughts := !hideThoughts
+	intent.IncludeThoughts = &includeThoughts
+	return prefix + base, intent, true
+}
+
+// cutGeminiBudgetSuffix splits a trailing -<budget> off name. See
+// ParseGeminiChannelThinkingSuffix for the rules that keep real ids intact.
+func cutGeminiBudgetSuffix(name string) (string, int, bool) {
+	dash := strings.LastIndexByte(name, '-')
+	if dash <= 0 {
+		return name, 0, false
+	}
+	digits := name[dash+1:]
+	if digits == "" || len(digits) > 7 || digits[0] == '0' || !isASCIIDigits(digits) {
+		return name, 0, false
+	}
+	base := name[:dash]
+	if isASCIIDigits(base[strings.LastIndexByte(base, '-')+1:]) || !GeminiThinkingConfigurable(base) {
+		return name, 0, false
+	}
+	budget, err := strconv.Atoi(digits)
+	if err != nil {
+		return name, 0, false
+	}
+	return base, budget, true
+}
+
+func isASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}

@@ -77,6 +77,12 @@ type GeminiOptions struct {
 	// ThinkingAdapterBudgetTokensPercentage sizes thinkingBudget as a fraction
 	// of maxOutputTokens when the adapter fires.
 	ThinkingAdapterBudgetTokensPercentage float64
+	// ChannelThinkingSuffixEnabled is the selected Gemini channel's thinking
+	// suffix switch. While on, gemini-* names are read with
+	// reasoning.ParseGeminiChannelThinkingSuffix before the legacy aliases,
+	// and a name without a suffix thinks at high with its thoughts returned
+	// unless the request sets its own thinking strength.
+	ChannelThinkingSuffixEnabled bool
 	// FunctionCallThoughtSignatureEnabled attaches thoughtSignature bypass
 	// values to function-call parts.
 	FunctionCallThoughtSignatureEnabled bool

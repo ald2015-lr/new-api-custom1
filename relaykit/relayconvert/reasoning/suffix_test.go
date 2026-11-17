@@ -1,6 +1,7 @@
 package reasoning
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -189,4 +190,124 @@ func TestParseThinkingModifier(t *testing.T) {
 
 func intPtr(v int) *int {
 	return &v
+}
+
+func TestParseGeminiChannelThinkingSuffix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		model    string
+		wantBase string
+		// wantBudget and wantEffort describe the strength; nil budget and
+		// empty effort mean the name is not a thinking suffix.
+		wantBudget      *int
+		wantEffort      Effort
+		wantThoughts    bool
+		wantUnrecognise bool
+	}{
+		{name: "budget", model: "gemini-3.8-flash-128", wantBase: "gemini-3.8-flash", wantBudget: intPtr(128), wantThoughts: true},
+		{name: "budget without thoughts", model: "gemini-3.8-flash-128-nothinking", wantBase: "gemini-3.8-flash", wantBudget: intPtr(128)},
+		{name: "nothinking alone keeps the default level", model: "gemini-3.6-flash-nothinking", wantBase: "gemini-3.6-flash", wantEffort: EffortHigh},
+		{name: "level", model: "gemini-3.8-flash-low", wantBase: "gemini-3.8-flash", wantEffort: EffortLow, wantThoughts: true},
+		{name: "xhigh is not read as high", model: "gemini-4-hydrogen-xhigh", wantBase: "gemini-4-hydrogen", wantEffort: EffortXHigh, wantThoughts: true},
+		{name: "max", model: "gemini-3.6-flash-max", wantBase: "gemini-3.6-flash", wantEffort: EffortMax, wantThoughts: true},
+		{name: "minimal", model: "gemini-3.1-flash-lite-minimal", wantBase: "gemini-3.1-flash-lite", wantEffort: EffortMinimal, wantThoughts: true},
+		{name: "medium without thoughts", model: "gemini-3.8-flash-medium-nothinking", wantBase: "gemini-3.8-flash", wantEffort: EffortMedium},
+		{name: "budget on gemini 2.5", model: "gemini-2.5-flash-1024", wantBase: "gemini-2.5-flash", wantBudget: intPtr(1024), wantThoughts: true},
+		{name: "namespace kept", model: "models/gemini-2.5-pro-128", wantBase: "models/gemini-2.5-pro", wantBudget: intPtr(128), wantThoughts: true},
+		{name: "legacy budget alias", model: "gemini-2.5-flash-thinking-512", wantBase: "gemini-2.5-flash", wantBudget: intPtr(512), wantThoughts: true},
+		{name: "legacy thinking alias", model: "gemini-3.8-flash-thinking", wantBase: "gemini-3.8-flash", wantEffort: EffortHigh, wantThoughts: true},
+		{name: "bare name has no suffix", model: "gemini-3.8-flash", wantUnrecognise: true},
+		{name: "versioned id", model: "gemini-2.0-flash-001", wantUnrecognise: true},
+		{name: "embedding id", model: "gemini-embedding-001", wantUnrecognise: true},
+		{name: "dated preview id", model: "gemini-2.5-flash-preview-09-2025", wantUnrecognise: true},
+		{name: "dated native audio id", model: "gemini-2.5-flash-native-audio-preview-12-2025", wantUnrecognise: true},
+		{name: "number after an unknown model", model: "gemini-exp-1206", wantUnrecognise: true},
+		{name: "leading zero", model: "gemini-3.8-flash-0128", wantUnrecognise: true},
+		{name: "not a gemini name", model: "gemma-4-31b-it-high", wantUnrecognise: true},
+		{name: "openai name", model: "gpt-5-high", wantUnrecognise: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base, intent, found := ParseGeminiChannelThinkingSuffix(tt.model)
+			if tt.wantUnrecognise {
+				assert.False(t, found)
+				assert.Equal(t, tt.model, base)
+				assert.True(t, intent.IsEmpty())
+				return
+			}
+			require.True(t, found)
+			assert.Equal(t, tt.wantBase, base)
+			assert.Equal(t, ModeEnabled, intent.Mode)
+			assert.Equal(t, SourceSuffix, intent.Source)
+			assert.Equal(t, tt.wantEffort, intent.Effort)
+			if tt.wantBudget == nil {
+				assert.Nil(t, intent.BudgetTokens)
+			} else {
+				require.NotNil(t, intent.BudgetTokens)
+				assert.Equal(t, *tt.wantBudget, *intent.BudgetTokens)
+			}
+			require.NotNil(t, intent.IncludeThoughts)
+			assert.Equal(t, tt.wantThoughts, *intent.IncludeThoughts)
+		})
+	}
+}
+
+func TestGeminiChannelThinkingSuffixRendersPerModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		model      string
+		wantLevel  string
+		wantBudget *int
+	}{
+		// A budget is a budget where the model takes one…
+		{model: "gemini-2.5-flash-128", wantBudget: intPtr(128)},
+		{model: "gemini-2.5-pro-128", wantBudget: intPtr(128)},
+		{model: "gemini-2.5-flash-lite-128", wantBudget: intPtr(512)},
+		// …and a level where it only takes levels; 128 is low.
+		{model: "gemini-3.8-flash-128-nothinking", wantLevel: "low"},
+		{model: "gemini-4-hydrogen-128", wantLevel: "low"},
+		{model: "gemini-3.6-flash-24576", wantLevel: "high"},
+		{model: "gemini-3.8-flash-nothinking", wantLevel: "high"},
+		{model: "gemini-3.8-flash-minimal", wantLevel: "low"},
+		{model: "gemini-3.6-flash-minimal", wantLevel: "minimal"},
+		{model: "gemini-4-hydrogen-max", wantLevel: "xhigh"},
+		{model: "gemini-4-hydrogen-xhigh", wantLevel: "xhigh"},
+		{model: "gemini-4-carbon-xhigh", wantLevel: "high"},
+		{model: "gemini-3.8-flash-max", wantLevel: "high"},
+		{model: "gemini-2.5-pro-max", wantBudget: intPtr(32768)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			t.Parallel()
+			base, intent, found := ParseGeminiChannelThinkingSuffix(tt.model)
+			require.True(t, found)
+			rendered, err := RenderGemini(base, intent, nil, 0)
+			require.NoError(t, err)
+			require.NotNil(t, rendered.Config)
+			assert.Equal(t, tt.wantLevel, rendered.Config.ThinkingLevel)
+			if tt.wantBudget == nil {
+				assert.Nil(t, rendered.Config.ThinkingBudget)
+			} else {
+				require.NotNil(t, rendered.Config.ThinkingBudget)
+				assert.Equal(t, *tt.wantBudget, *rendered.Config.ThinkingBudget)
+			}
+			require.NotNil(t, rendered.Config.IncludeThoughts)
+			assert.Equal(t, !strings.HasSuffix(tt.model, "-nothinking"), *rendered.Config.IncludeThoughts)
+		})
+	}
+}
+
+func TestGeminiThinkingConfigurable(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon"} {
+		assert.True(t, GeminiThinkingConfigurable(model), model)
+	}
+	for _, model := range []string{"gemini-2.5-flash-image", "gemini-3.8-flash-tts", "gemini-embedding-001", "gemini-exp", "gemma-4-31b-it", "gemini-2.0-flash"} {
+		assert.False(t, GeminiThinkingConfigurable(model), model)
+	}
 }
