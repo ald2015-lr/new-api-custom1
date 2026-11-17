@@ -77,6 +77,18 @@ const (
 	// It is not returned to end users, but can be persisted into consume/error logs for debugging.
 	ContextKeyAdminRejectReason ContextKey = "admin_reject_reason"
 
+	// ContextKeyGeminiFreeKeyAudit stores the *geminifreekey.Audit of the
+	// request's last attempt on a Gemini channel in free key mode, for the
+	// administrators' part of its logs.
+	ContextKeyGeminiFreeKeyAudit ContextKey = "gemini_free_key_audit"
+
+	// ContextKeyGeminiFreeKeyRateLimits stores, by channel id, Google's last
+	// 429 that ended an attempt of the request on a Gemini channel in free
+	// key mode (map[int]*types.NewAPIError), which a later attempt the
+	// channel refuses on its own shows on a channel that reveals free tier
+	// errors.
+	ContextKeyGeminiFreeKeyRateLimits ContextKey = "gemini_free_key_rate_limits"
+
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage             ContextKey = "language"
 	ContextKeyIsStream             ContextKey = "is_stream"

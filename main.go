@@ -105,6 +105,9 @@ func main() {
 
 		go model.SyncChannelCache(common.SyncFrequency)
 	}
+	// Selection from the database reads Gemini channels in free key mode only
+	// while the free key limiter is active; a stored one activates it now.
+	model.InitGeminiFreeKeyLimiter()
 	wsmanager.StartSubscriber(context.Background())
 
 	// Warm pricing after channel cache initialization so Advanced Custom

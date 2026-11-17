@@ -27,10 +27,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/geminifreekey"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay/channel/novelai"
@@ -2985,5 +2987,663 @@ func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
 
 		require.Equal(t, http.StatusTooManyRequests, recorder.Code, recorder.Body.String())
 		assert.Equal(t, geminiQuotaMessage, errorOf(recorder).Message)
+	})
+}
+
+// freeKeyUpstream plays Google for the free key relay test: it counts the
+// calls of each kind per key and answers them as the test says.
+type freeKeyUpstream struct {
+	mu     sync.Mutex
+	calls  map[string]int // "<key> <action>"
+	answer func(key, action string) (int, string)
+}
+
+func (u *freeKeyUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.ReadAll(r.Body)
+	key := r.Header.Get("x-goog-api-key")
+	_, action, _ := strings.Cut(r.URL.Path, ":")
+	u.mu.Lock()
+	u.calls[key+" "+action]++
+	answer := u.answer
+	u.mu.Unlock()
+	status, body := answer(key, action)
+	contentType := "application/json; charset=UTF-8"
+	if strings.HasPrefix(body, "data: ") {
+		contentType = "text/event-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body)
+}
+
+func (u *freeKeyUpstream) respond(answer func(key, action string) (int, string)) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.answer = answer
+}
+
+// count is how many calls of action reached keys (any key when none).
+func (u *freeKeyUpstream) count(action string, keys ...string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for call, calls := range u.calls {
+		key, callAction, _ := strings.Cut(call, " ")
+		if callAction == action && (len(keys) == 0 || slices.Contains(keys, key)) {
+			n += calls
+		}
+	}
+	return n
+}
+
+// googleAnswers answers countTokens with tokens and every other call as the
+// model did.
+func googleAnswers(tokens int, status int, body string) func(key, action string) (int, string) {
+	return func(_, action string) (int, string) {
+		switch action {
+		case "countTokens":
+			return http.StatusOK, fmt.Sprintf(`{"totalTokens":%d}`, tokens)
+		case "batchEmbedContents":
+			if status == http.StatusOK {
+				return http.StatusOK, `{"embeddings":[{"values":[0.5]}]}`
+			}
+		case "streamGenerateContent":
+			if status == http.StatusOK {
+				return http.StatusOK, "data: " + body + "\n\n"
+			}
+		}
+		return status, body
+	}
+}
+
+type freeKeyClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *freeKeyClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *freeKeyClock) Add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// A Gemini channel in free key mode in front of a paid channel, with one
+// retry: OpenAI, Gemini, Claude and embedding requests go to a free key with
+// room; a request larger than the model's tokens per minute, one every key
+// refused with Google's free tier 429, and, once every key paused for the
+// day, every later one, go to the paid channel. Users see Google's plain rate
+// limit, exactly as Google's own passes through, in the response and their
+// error log, while administrators see what happened; no free key is ever
+// disabled for a rate limit.
+func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	autoDisable, errorLog, retryTimes := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
+	disableCodes, disableKeywords := operation_setting.AutomaticDisableStatusCodesToString(), operation_setting.AutomaticDisableKeywordsToString()
+	streamingTimeout := constant.StreamingTimeout
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	constant.StreamingTimeout = 30
+	clock := &freeKeyClock{now: time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)}
+	previousLimiter := geminifreekey.SetDefault(geminifreekey.New(clock.Now))
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		geminifreekey.SetDefault(previousLimiter)
+		constant.StreamingTimeout = streamingTimeout
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = autoDisable, errorLog, retryTimes
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(disableCodes))
+		operation_setting.AutomaticDisableKeywordsFromString(disableKeywords)
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = true, true, 1
+	// Google's free tier 429 says "You exceeded your current quota", one of
+	// the default keywords, and 429 is a disable status here as well.
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401,429"))
+	operation_setting.AutomaticDisableKeywordsFromString("You exceeded your current quota\nPermission denied")
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"gemini-2.5-flash":0.01,"gemini-embedding-001":0.01,"gemini-3.6-flash":0.01,"gemini-2.5-pro":0.01,"gemini-genuine":0.01,"gemini-reveal":0.01,"gemini-reveal-genuine":0.01,"gemini-off":0.01,"gemini-tiers":0.01}`))
+
+	const generation = `{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}}`
+	const freeTierTPM = `{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000, model: gemini-3.6-flash, description: Generate content input tokens per minute limit exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits.\nPlease retry in 49.477199395s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Learn more about Gemini API quotas","url":"https://aistudio.google.com/docs/rate-limits"}]},{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"description":"Generate content input tokens per minute limit exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits.","quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_input_token_count","quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaDimensions":{"location":"global","model":"gemini-3.6-flash"},"quotaValue":"250000"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"49s"}]}}`
+	// freeTierRPD is Google's per-day 429 answered at now, whose delay runs
+	// to the next midnight in Los Angeles, a little short as Google rounds it.
+	freeTierRPD := func(now time.Time) string {
+		delay := geminifreekey.NextReset(now).Sub(now) - 718*time.Millisecond
+		return fmt.Sprintf(`{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in %s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"location":"global","model":"gemini-2.5-flash"},"quotaValue":"20"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"%ds"}]}}`, delay, int(delay.Seconds()))
+	}
+	const plainRateLimit = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`
+
+	free := &freeKeyUpstream{calls: map[string]int{}}
+	free.respond(googleAnswers(100, http.StatusOK, generation))
+	paid := &freeKeyUpstream{calls: map[string]int{}}
+	paid.respond(googleAnswers(100, http.StatusOK, generation))
+	genuine := &freeKeyUpstream{calls: map[string]int{}}
+	genuine.respond(googleAnswers(100, http.StatusTooManyRequests, plainRateLimit))
+	revealGenuine := &freeKeyUpstream{calls: map[string]int{}}
+	revealGenuine.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+	servers := map[*freeKeyUpstream]*httptest.Server{}
+	for _, upstream := range []*freeKeyUpstream{free, paid, genuine, revealGenuine} {
+		servers[upstream] = httptest.NewServer(upstream)
+		t.Cleanup(servers[upstream].Close)
+	}
+
+	user := model.User{Id: 6600000 + int(relayRouterTestUsers.Add(1)), Username: "gfk-user", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "gfktestkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	freeKeys := []string{"AIzaSyRouterFree0-abcdefghijklmnopqrstu", "AIzaSyRouterFree1-abcdefghijklmnopqrstu", "AIzaSyRouterFree2-abcdefghijklmnopqrstu"}
+	// Free channels may disable keys automatically; the others may not, so
+	// that they keep answering.
+	create := func(name string, upstream *freeKeyUpstream, keys []string, models, settings string, priority int64) model.Channel {
+		baseURL := servers[upstream].URL
+		autoBan := 0
+		if upstream == free {
+			autoBan = 1
+		}
+		channel := model.Channel{Name: name, Key: strings.Join(keys, "\n"), Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeGemini, Group: "default", Models: models, BaseURL: &baseURL, OtherSettings: settings, Priority: &priority, AutoBan: &autoBan}
+		if len(keys) > 1 {
+			channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: len(keys), MultiKeyMode: constant.MultiKeyModePolling}
+		}
+		require.NoError(t, model.DB.Create(&channel).Error)
+		for _, name := range channel.GetModels() {
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true, Priority: &priority}).Error)
+		}
+		return channel
+	}
+	freeChannel := create("gfk-free", free, freeKeys, "gemini-2.5-flash,gemini-embedding-001,gemini-3.6-flash,gemini-2.5-pro", `{"gemini_free_key_enabled":true}`, 10)
+	paidChannel := create("gfk-paid", paid, []string{"AIzaSyRouterPaid-abcdefghijklmnopqrstuv"}, "gemini-2.5-flash,gemini-embedding-001,gemini-2.5-pro", "", 0)
+	create("gfk-genuine", genuine, []string{"AIzaSyRouterGenuine-abcdefghijklmnopqr"}, "gemini-genuine", "", 0)
+	revealing := create("gfk-reveal", free, freeKeys, "gemini-reveal", `{"gemini_free_key_enabled":true,"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_model_limits":[{"model":"gemini-reveal","rpm":-1,"tpm":-1,"rpd":-1}]}`, 0)
+	create("gfk-reveal-genuine", revealGenuine, []string{"AIzaSyRouterRevealGenuine-abcdefghijkl"}, "gemini-reveal-genuine", "", 0)
+	// A multi-key channel with the mode saved off behaves as before it existed.
+	offKeys := []string{"AIzaSyRouterOff0-abcdefghijklmnopqrstuv", "AIzaSyRouterOff1-abcdefghijklmnopqrstuv"}
+	off := create("gfk-off", revealGenuine, offKeys, "gemini-off", `{"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_max_attempts":3}`, 0)
+	require.NoError(t, model.DB.Model(&off).Update("auto_ban", 1).Error)
+	// Three priority tiers: free keys, then a paid channel, then one that
+	// always answers Google's rate limit.
+	create("gfk-tiers-free", free, []string{"AIzaSyRouterTiers0-abcdefghijklmnopqrst", "AIzaSyRouterTiers1-abcdefghijklmnopqrst"}, "gemini-tiers", `{"gemini_free_key_enabled":true}`, 10)
+	create("gfk-tiers-paid", paid, []string{"AIzaSyRouterTiersPaid-abcdefghijklmnop"}, "gemini-tiers", "", 5)
+	create("gfk-tiers-last", genuine, []string{"AIzaSyRouterTiersLast-abcdefghijklmnop"}, "gemini-tiers", "", 0)
+
+	engine := gin.New()
+	engine.Use(middleware.RequestId())
+	SetRelayRouter(engine)
+	send := func(path, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer gfktestkey")
+		engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+	requests := map[string]func(modelName string) *httptest.ResponseRecorder{
+		"OpenAI chat": func(modelName string) *httptest.ResponseRecorder {
+			return send("/v1/chat/completions", `{"model":"`+modelName+`","messages":[{"role":"user","content":"hi"}]}`)
+		},
+		"Gemini generateContent": func(modelName string) *httptest.ResponseRecorder {
+			return send("/v1beta/models/"+modelName+":generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		},
+		"Gemini streamGenerateContent": func(modelName string) *httptest.ResponseRecorder {
+			return send("/v1beta/models/"+modelName+":streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		},
+		"Claude messages": func(modelName string) *httptest.ResponseRecorder {
+			return send("/v1/messages", `{"model":"`+modelName+`","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+		},
+	}
+	routes := slices.Sorted(maps.Keys(requests))
+	userView := func(t *testing.T) string {
+		t.Helper()
+		logs, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 1000)
+		require.NoError(t, err)
+		view, err := common.Marshal(logs)
+		require.NoError(t, err)
+		return string(view)
+	}
+	errorLogsOf := func(t *testing.T, requestID string) []model.Log {
+		t.Helper()
+		var logs []model.Log
+		require.NoError(t, model.LOG_DB.Where("type = ? AND request_id = ?", model.LogTypeError, requestID).Order("id").Find(&logs).Error)
+		return logs
+	}
+	adminInfoOf := func(t *testing.T, log model.Log) map[string]any {
+		t.Helper()
+		other, err := common.StrToMap(log.Other)
+		require.NoError(t, err)
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok)
+		return adminInfo
+	}
+	// assertNothingTold checks that text tells nothing of the free tier or
+	// the channel's keys.
+	assertNothingTold := func(t *testing.T, text string) {
+		t.Helper()
+		for _, told := range append([]string{"free_tier", "FreeTier", "Free Tier", "free tier", "billing details", "generativelanguage", "quotaId", "250000", "aistudio", "ai.dev", "ai.google.dev", "retry in", "49s", "Free key mode", "免费", "免費", "gemini_free_key", "key_index", "…"}, freeKeys...) {
+			assert.NotContains(t, text, told)
+		}
+	}
+	keysUntouched := func(t *testing.T) {
+		t.Helper()
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		channel, err := model.GetChannelById(freeChannel.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "no free key is disabled")
+	}
+
+	t.Run("every format is served by a free key", func(t *testing.T) {
+		for _, route := range routes {
+			clock.Add(time.Minute)
+			recorder := requests[route]("gemini-2.5-flash")
+			require.Equal(t, http.StatusOK, recorder.Code, route+": "+recorder.Body.String())
+		}
+		recorder := send("/v1/embeddings", `{"model":"gemini-embedding-001","input":"hi"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, len(routes)+1, free.count("countTokens"))
+		assert.Equal(t, len(routes), free.count("generateContent")+free.count("streamGenerateContent"))
+		assert.Equal(t, 1, free.count("batchEmbedContents"))
+		assert.Zero(t, paid.count("generateContent")+paid.count("streamGenerateContent")+paid.count("batchEmbedContents"))
+
+		var consumed model.Log
+		require.NoError(t, model.LOG_DB.Where("type = ? AND channel_id = ?", model.LogTypeConsume, freeChannel.Id).Order("id desc").First(&consumed).Error)
+		audit, ok := adminInfoOf(t, consumed)["gemini_free_key"].(map[string]any)
+		require.True(t, ok, "administrators see the key and the counted tokens")
+		assert.Equal(t, "gemini-embedding-001", audit["bucket"])
+		assert.Equal(t, float64(100), audit["tokens"])
+		assert.Equal(t, "count_tokens", audit["token_source"])
+		assertNothingTold(t, userView(t))
+	})
+
+	t.Run("a request over the model's tokens per minute goes to the next channel", func(t *testing.T) {
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(250001, http.StatusOK, generation))
+		generated := free.count("generateContent")
+		recorder := requests["OpenAI chat"]("gemini-2.5-flash")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, generated, free.count("generateContent"), "no free key got it")
+		assert.Equal(t, 1, paid.count("generateContent"))
+		logs := errorLogsOf(t, recorder.Header().Get(common.RequestIdKey))
+		require.Len(t, logs, 1)
+		assert.Equal(t, "status_code=429, Resource has been exhausted (e.g. check quota).", logs[0].Content)
+		adminInfo := adminInfoOf(t, logs[0])
+		assert.Contains(t, adminInfo["upstream_error"], "250001")
+		assert.Equal(t, "gemini_free_key_busy", adminInfo["upstream_error_code"])
+		assert.Equal(t, "too_large", adminInfo["gemini_free_key"].(map[string]any)["rejected"])
+		var consumed model.Log
+		require.NoError(t, model.LOG_DB.Where("type = ? AND request_id = ?", model.LogTypeConsume, recorder.Header().Get(common.RequestIdKey)).First(&consumed).Error)
+		assert.Equal(t, paidChannel.Id, consumed.ChannelId)
+		assert.NotContains(t, adminInfoOf(t, consumed), "gemini_free_key", "the paid channel's log has nothing of the free one")
+		assertNothingTold(t, userView(t))
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	t.Run("a request every key refused goes to the next channel and disables nothing", func(t *testing.T) {
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		before := free.count("generateContent", freeKeys...)
+		recorder := requests["Gemini generateContent"]("gemini-2.5-flash")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, before+3, free.count("generateContent", freeKeys...), "each key once")
+		assert.Equal(t, 2, paid.count("generateContent"))
+		logs := errorLogsOf(t, recorder.Header().Get(common.RequestIdKey))
+		require.Len(t, logs, 1)
+		assert.Equal(t, "status_code=429, Resource has been exhausted (e.g. check quota).", logs[0].Content)
+		adminInfo := adminInfoOf(t, logs[0])
+		assert.Contains(t, adminInfo["upstream_error"], "generate_content_free_tier_input_token_count")
+		attempts := adminInfo["gemini_free_key"].(map[string]any)["attempts"].([]any)
+		assert.Len(t, attempts, 3)
+		keysUntouched(t)
+		assertNothingTold(t, userView(t))
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	// The free channel the request exhausted keeps its priority tier, so the
+	// retry goes to the next tier, not the one after it.
+	t.Run("a request its free channel refused retries on the next priority tier", func(t *testing.T) {
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		paidBefore := paid.count("generateContent")
+		recorder := requests["OpenAI chat"]("gemini-tiers")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, paidBefore+1, paid.count("generateContent"))
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	t.Run("a model the free tier does not serve goes to the next channel untouched", func(t *testing.T) {
+		before := free.count("countTokens") + free.count("generateContent")
+		recorder := requests["OpenAI chat"]("gemini-2.5-pro")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, before, free.count("countTokens")+free.count("generateContent"))
+		assert.Empty(t, errorLogsOf(t, recorder.Header().Get(common.RequestIdKey)), "selection skipped the free channel")
+	})
+
+	// Selection from the database (memory cache off) in a fresh process, which
+	// nothing relayed in free key mode yet: the startup check of the stored
+	// channels activates the mode, so the very first request for a model the
+	// free tier does not serve goes straight to the paid channel.
+	t.Run("selection from the database skips the free channel from a fresh process's first request", func(t *testing.T) {
+		memoryCache := common.MemoryCacheEnabled
+		common.MemoryCacheEnabled = false
+		fresh := geminifreekey.New(clock.Now)
+		previous := geminifreekey.SetDefault(fresh)
+		t.Cleanup(func() {
+			geminifreekey.SetDefault(previous)
+			common.MemoryCacheEnabled = memoryCache
+		})
+		model.InitGeminiFreeKeyLimiter()
+		asked, paidBefore := free.count("countTokens")+free.count("generateContent"), paid.count("generateContent")
+		for i := range 2 {
+			recorder := requests["OpenAI chat"]("gemini-2.5-pro")
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			assert.Empty(t, errorLogsOf(t, recorder.Header().Get(common.RequestIdKey)), "request %d: selection skipped the free channel", i+1)
+			assert.Equal(t, paidBefore+i+1, paid.count("generateContent"))
+		}
+		assert.Equal(t, asked, free.count("countTokens")+free.count("generateContent"), "nothing reached Google on the free channel")
+	})
+
+	// The user gets exactly what a channel without the mode passes on from
+	// Google's own plain rate limit, in every format and in their log.
+	t.Run("an exhausted free channel answers as Google's plain rate limit", func(t *testing.T) {
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		for _, route := range routes {
+			t.Run(route, func(t *testing.T) {
+				clock.Add(time.Minute)
+				disguised := requests[route]("gemini-3.6-flash")
+				real := requests[route]("gemini-genuine")
+				require.Equal(t, http.StatusTooManyRequests, real.Code)
+				assert.Contains(t, real.Body.String(), "Resource has been exhausted (e.g. check quota).")
+				require.Equal(t, real.Code, disguised.Code)
+				assert.Equal(t, real.Header().Get("Content-Type"), disguised.Header().Get("Content-Type"))
+				ours, theirs := disguised.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
+				assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(disguised.Body.String(), ours, "<id>"))
+				assertNothingTold(t, disguised.Body.String())
+				disguisedLogs, realLogs := errorLogsOf(t, ours), errorLogsOf(t, theirs)
+				require.Len(t, disguisedLogs, 2, "the request and its retry")
+				require.Len(t, realLogs, 2)
+				for i := range realLogs {
+					assert.Equal(t, realLogs[i].Content, disguisedLogs[i].Content)
+					disguisedOther, err := common.StrToMap(disguisedLogs[i].Other)
+					require.NoError(t, err)
+					realOther, err := common.StrToMap(realLogs[i].Other)
+					require.NoError(t, err)
+					for _, field := range []string{"error_type", "error_code", "status_code"} {
+						assert.Equal(t, realOther[field], disguisedOther[field], field)
+					}
+				}
+			})
+		}
+		keysUntouched(t)
+		assertNothingTold(t, userView(t))
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	// Without a retry the request ends on Google's 429.
+	t.Run("a channel that reveals free tier errors passes Google's on as without the mode", func(t *testing.T) {
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 1 })
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		for _, route := range routes {
+			t.Run(route, func(t *testing.T) {
+				clock.Add(time.Minute)
+				revealed := requests[route]("gemini-reveal")
+				real := requests[route]("gemini-reveal-genuine")
+				require.Equal(t, http.StatusTooManyRequests, real.Code)
+				assert.Contains(t, real.Body.String(), "generate_content_free_tier_input_token_count")
+				require.Equal(t, real.Code, revealed.Code)
+				ours, theirs := revealed.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
+				assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(revealed.Body.String(), ours, "<id>"))
+				// The user's log reads as without the mode too.
+				revealedLogs, realLogs := errorLogsOf(t, ours), errorLogsOf(t, theirs)
+				require.Len(t, revealedLogs, 1)
+				require.Len(t, realLogs, 1)
+				assert.Equal(t, realLogs[0].Content, revealedLogs[0].Content)
+				revealedOther, err := common.StrToMap(revealedLogs[0].Other)
+				require.NoError(t, err)
+				realOther, err := common.StrToMap(realLogs[0].Other)
+				require.NoError(t, err)
+				for _, field := range []string{"error_type", "error_code", "status_code"} {
+					assert.Equal(t, realOther[field], revealedOther[field], field)
+				}
+				assert.Equal(t, "gemini_free_key_busy", adminInfoOf(t, revealedLogs[0])["upstream_error_code"], "the administrators see why the key stays enabled")
+			})
+		}
+		channel, err := model.GetChannelById(revealing.Id, true)
+		require.NoError(t, err)
+		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "no free key is disabled")
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	// The retry lands on the same channel, the only one for the model, and
+	// finds every key Google refused paused: the user still gets Google's
+	// 429 twice, as from a channel without the mode whose key answers it
+	// twice, while administrators see the channel's own rejection.
+	t.Run("a channel that reveals free tier errors passes Google's on after a retry on it", func(t *testing.T) {
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		for _, route := range routes {
+			t.Run(route, func(t *testing.T) {
+				clock.Add(time.Minute)
+				_, action, _ := strings.Cut(route, " ")
+				if route == "OpenAI chat" || route == "Claude messages" {
+					action = "generateContent"
+				}
+				asked := free.count(action, freeKeys...)
+				revealed := requests[route]("gemini-reveal")
+				real := requests[route]("gemini-reveal-genuine")
+				require.Equal(t, http.StatusTooManyRequests, real.Code)
+				assert.Contains(t, real.Body.String(), "generate_content_free_tier_input_token_count")
+				assert.Equal(t, asked+len(freeKeys), free.count(action, freeKeys...), "each key once, none on the retry")
+				require.Equal(t, real.Code, revealed.Code)
+				assert.Equal(t, real.Header().Get("Content-Type"), revealed.Header().Get("Content-Type"))
+				ours, theirs := revealed.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
+				assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(revealed.Body.String(), ours, "<id>"))
+				revealedLogs, realLogs := errorLogsOf(t, ours), errorLogsOf(t, theirs)
+				require.Len(t, revealedLogs, 2, "the request and its retry")
+				require.Len(t, realLogs, 2)
+				for i := range realLogs {
+					assert.Equal(t, realLogs[i].Content, revealedLogs[i].Content)
+					revealedOther, err := common.StrToMap(revealedLogs[i].Other)
+					require.NoError(t, err)
+					realOther, err := common.StrToMap(realLogs[i].Other)
+					require.NoError(t, err)
+					for _, field := range []string{"error_type", "error_code", "status_code"} {
+						assert.Equal(t, realOther[field], revealedOther[field], field)
+					}
+				}
+				retry := adminInfoOf(t, revealedLogs[1])
+				assert.Equal(t, "gemini_free_key_busy", retry["upstream_error_code"])
+				assert.Contains(t, retry["upstream_error"], "Free key mode", "administrators see the channel's own rejection")
+				assert.Equal(t, "no_key", retry["gemini_free_key"].(map[string]any)["rejected"])
+			})
+		}
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		channel, err := model.GetChannelById(revealing.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "no free key is disabled")
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	// A stream the channel refuses without asking Google gets the headers of
+	// a stream Google refused.
+	t.Run("a stream refused without Google reads like Google's own rate limit", func(t *testing.T) {
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 1 })
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(250001, http.StatusOK, generation))
+		refused := requests["Gemini streamGenerateContent"]("gemini-3.6-flash")
+		real := requests["Gemini streamGenerateContent"]("gemini-genuine")
+		require.Equal(t, http.StatusTooManyRequests, real.Code)
+		require.Equal(t, real.Code, refused.Code)
+		headers := func(recorder *httptest.ResponseRecorder) http.Header {
+			header := recorder.Header().Clone()
+			header.Del(common.RequestIdKey)
+			return header
+		}
+		assert.Equal(t, headers(real), headers(refused))
+		assert.Equal(t, "no-cache", refused.Header().Get("Cache-Control"))
+		ours, theirs := refused.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
+		assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(refused.Body.String(), ours, "<id>"))
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	t.Run("with the mode off Google's free tier 429 is relayed and disables the key as before", func(t *testing.T) {
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 1 })
+		countsBefore := revealGenuine.count("countTokens")
+		recorder := requests["OpenAI chat"]("gemini-off")
+		require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "generate_content_free_tier_input_token_count")
+		assert.Equal(t, countsBefore, revealGenuine.count("countTokens"), "no token count")
+		assert.Equal(t, 1, revealGenuine.count("generateContent", offKeys...), "one key, once")
+		assert.Eventually(t, func() bool {
+			channel, err := model.GetChannelById(off.Id, true)
+			return err == nil && len(channel.ChannelInfo.MultiKeyStatusList) == 1
+		}, 5*time.Second, 10*time.Millisecond)
+		logs := errorLogsOf(t, recorder.Header().Get(common.RequestIdKey))
+		require.Len(t, logs, 1)
+		assert.Contains(t, logs[0].Content, "generate_content_free_tier_input_token_count")
+	})
+
+	t.Run("once every key paused for the day the free channel is skipped", func(t *testing.T) {
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierRPD(clock.Now())))
+		recorder := requests["OpenAI chat"]("gemini-2.5-flash")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 1 })
+		before, paidBefore := free.count("countTokens")+free.count("generateContent"), paid.count("generateContent")
+		recorder = requests["OpenAI chat"]("gemini-2.5-flash")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, before, free.count("countTokens")+free.count("generateContent"))
+		assert.Equal(t, paidBefore+1, paid.count("generateContent"))
+		assert.Empty(t, errorLogsOf(t, recorder.Header().Get(common.RequestIdKey)))
+		keysUntouched(t)
+
+		// The usage panel shows each key's day used up, the key itself never.
+		usageEngine := gin.New()
+		usageEngine.GET("/usage/:id", controller.GetGeminiFreeKeyUsage)
+		usageRecorder := httptest.NewRecorder()
+		usageEngine.ServeHTTP(usageRecorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/usage/%d", freeChannel.Id), nil))
+		require.Equal(t, http.StatusOK, usageRecorder.Code)
+		for _, key := range freeKeys {
+			assert.NotContains(t, usageRecorder.Body.String(), key)
+		}
+		var usage struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Enabled     bool   `json:"enabled"`
+				Timezone    string `json:"timezone"`
+				NextResetAt int64  `json:"next_reset_at"`
+				Keys        []struct {
+					Index   int    `json:"index"`
+					KeyHint string `json:"key_hint"`
+					Enabled bool   `json:"enabled"`
+					Models  []struct {
+						Model          string `json:"model"`
+						RPDUsed        int    `json:"rpd_used"`
+						RPDLimit       int    `json:"rpd_limit"`
+						CooldownUntil  int64  `json:"cooldown_until"`
+						CooldownReason string `json:"cooldown_reason"`
+					} `json:"models"`
+				} `json:"keys"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(usageRecorder.Body.Bytes(), &usage))
+		require.True(t, usage.Success)
+		assert.True(t, usage.Data.Enabled)
+		assert.Equal(t, "America/Los_Angeles", usage.Data.Timezone)
+		assert.Equal(t, time.Date(2026, 11, 17, 0, 0, 0, 0, time.FixedZone("PST", -8*60*60)).Unix(), usage.Data.NextResetAt)
+		require.Len(t, usage.Data.Keys, 3)
+		for i, key := range usage.Data.Keys {
+			assert.Equal(t, i, key.Index)
+			assert.Equal(t, "…"+freeKeys[i][len(freeKeys[i])-4:], key.KeyHint)
+			assert.True(t, key.Enabled)
+			var flash bool
+			for _, used := range key.Models {
+				if used.Model == "gemini-2.5-flash" {
+					flash = true
+					assert.Equal(t, 20, used.RPDUsed)
+					assert.Equal(t, 20, used.RPDLimit)
+					assert.Equal(t, "day", used.CooldownReason)
+					assert.Equal(t, usage.Data.NextResetAt, used.CooldownUntil)
+				}
+			}
+			assert.True(t, flash)
+		}
+
+		// At midnight in Los Angeles the free channel serves again.
+		clock.Add(24 * time.Hour)
+		before = free.count("generateContent")
+		recorder = requests["OpenAI chat"]("gemini-2.5-flash")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, before+1, free.count("generateContent"))
+	})
+
+	// The usage panel says whether the mode is saved on, which keys are
+	// enabled (a single key with its channel) and lists the buckets the
+	// channel's models count in after its model mapping.
+	t.Run("the usage panel shows the mode, the enabled keys and the mapped models", func(t *testing.T) {
+		usageEngine := gin.New()
+		usageEngine.GET("/usage/:id", controller.GetGeminiFreeKeyUsage)
+		type keyUsage struct {
+			Index   int  `json:"index"`
+			Enabled bool `json:"enabled"`
+			Models  []struct {
+				Model string `json:"model"`
+			} `json:"models"`
+		}
+		usageOf := func(t *testing.T, channel model.Channel) (bool, []keyUsage) {
+			t.Helper()
+			require.NoError(t, model.DB.Create(&channel).Error)
+			recorder := httptest.NewRecorder()
+			usageEngine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/usage/%d", channel.Id), nil))
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var usage struct {
+				Success bool `json:"success"`
+				Data    struct {
+					Enabled bool       `json:"enabled"`
+					Keys    []keyUsage `json:"keys"`
+				} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &usage))
+			require.True(t, usage.Success)
+			return usage.Data.Enabled, usage.Data.Keys
+		}
+		modelsOf := func(key keyUsage) []string {
+			var names []string
+			for _, used := range key.Models {
+				names = append(names, used.Model)
+			}
+			return names
+		}
+		mapping := `{"gfk-usage-alias":"gemini-2.5-flash"}`
+		enabled, keys := usageOf(t, model.Channel{Name: "gfk-usage-off", Type: constant.ChannelTypeGemini, Status: common.ChannelStatusEnabled, Group: "default",
+			Key: "AIzaSyUsageOff0-abcdefghij\nAIzaSyUsageOff1-abcdefghij\nAIzaSyUsageOff2-abcdefghij", Models: "gfk-usage-alias", ModelMapping: &mapping, OtherSettings: `{"gemini_free_key_enabled":false}`,
+			ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling, MultiKeyStatusList: map[int]int{1: common.ChannelStatusManuallyDisabled}}})
+		assert.False(t, enabled, "the mode is not saved on")
+		require.Len(t, keys, 3)
+		assert.Equal(t, []bool{true, false, true}, []bool{keys[0].Enabled, keys[1].Enabled, keys[2].Enabled})
+		assert.Equal(t, []string{"gemini-2.5-flash"}, modelsOf(keys[0]), "the model counts in the bucket it is mapped to")
+
+		enabled, keys = usageOf(t, model.Channel{Name: "gfk-usage-single", Type: constant.ChannelTypeGemini, Status: common.ChannelStatusManuallyDisabled, Group: "default",
+			Key: "AIzaSyUsageSingle-abcdefghij", Models: "gemini-2.5-flash", OtherSettings: `{"gemini_free_key_enabled":true}`})
+		assert.True(t, enabled)
+		require.Len(t, keys, 1)
+		assert.False(t, keys[0].Enabled, "a single key is off with its channel")
 	})
 }

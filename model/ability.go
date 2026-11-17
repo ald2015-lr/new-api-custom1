@@ -105,11 +105,13 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
+// GetChannel is GetRandomSatisfiedChannel read from the database.
 func GetChannel(
 	group string,
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
+	tried ...int,
 ) (*Channel, error) {
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
@@ -130,6 +132,7 @@ func GetChannel(
 	if quotaExhausted != nil {
 		return nil, quotaExhausted
 	}
+	abilities, freeKeyExhausted := dropGeminiFreeKeyExhaustedAbilities(abilities, model, tried)
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
@@ -151,6 +154,11 @@ func GetChannel(
 		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
 			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
 		})
+		// A free key channel the request tried and exhausted keeps its tier
+		// but is chosen only when nothing else in the tier is left.
+		if withRoom := lo.Filter(abilities, func(ability Ability, _ int) bool { return !freeKeyExhausted[ability.ChannelId] }); len(withRoom) > 0 {
+			abilities = withRoom
+		}
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {

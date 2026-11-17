@@ -171,6 +171,25 @@ type ChannelOtherSettings struct {
 	// UpstreamQuotaErrorStatusCode is that status; 0 means
 	// UpstreamQuotaErrorStatusCodeDefault.
 	UpstreamQuotaErrorStatusCode int `json:"upstream_quota_error_status_code,omitempty"`
+	// GeminiFreeKeyEnabled turns on free key mode on a Gemini (AI Studio)
+	// channel: each key's requests are limited per model to the free tier's
+	// requests per minute, input tokens per minute and requests per Pacific
+	// day, and a request goes to a key with room for it. Off (unset) relays
+	// as before.
+	GeminiFreeKeyEnabled bool `json:"gemini_free_key_enabled,omitempty"`
+	// GeminiFreeKeyRevealTierErrors passes Google's free tier errors to the
+	// user as Google sent them; off (unset) answers them as a plain rate limit.
+	GeminiFreeKeyRevealTierErrors bool `json:"gemini_free_key_reveal_tier_errors,omitempty"`
+	// GeminiFreeKeyTokenCounter is how a request's input tokens are counted:
+	// GeminiFreeKeyTokenCounterCountTokens (blank, the default) or
+	// GeminiFreeKeyTokenCounterLocal.
+	GeminiFreeKeyTokenCounter string `json:"gemini_free_key_token_counter,omitempty"`
+	// GeminiFreeKeyMaxAttempts is how many keys one request may try on the
+	// channel; 0 means GeminiFreeKeyMaxAttemptsDefault.
+	GeminiFreeKeyMaxAttempts int `json:"gemini_free_key_max_attempts,omitempty"`
+	// GeminiFreeKeyModelLimits are the free tier's limits per model; nil
+	// (or empty, which is not stored) means DefaultGeminiFreeKeyModelLimits.
+	GeminiFreeKeyModelLimits []GeminiFreeKeyModelLimit `json:"gemini_free_key_model_limits,omitempty"`
 }
 
 const (

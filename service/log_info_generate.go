@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/geminifreekey"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -88,6 +89,12 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	}
 	if common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
 		other.SetAdmin("local_count_tokens", true)
+	}
+	// What the attempt did on a Gemini channel in free key mode, when this is
+	// that attempt.
+	if audit, ok := common.GetContextKeyType[*geminifreekey.Audit](ctx, constant.ContextKeyGeminiFreeKeyAudit); ok && audit != nil &&
+		relayInfo != nil && relayInfo.ChannelMeta != nil && audit.ChannelID == relayInfo.ChannelId && audit.RetryIndex == relayInfo.RetryIndex {
+		other.SetAdmin("gemini_free_key", audit)
 	}
 
 	AppendChannelAffinityAdminInfo(ctx, other)

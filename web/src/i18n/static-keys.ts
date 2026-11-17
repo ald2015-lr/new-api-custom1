@@ -956,4 +956,18 @@ export const STATIC_I18N_KEYS = [
   'Paid check-in reward',
   'Invitation bonus',
   'Invite reward',
+  // Gemini free key mode: pause reasons and channel form validation messages.
+  'Per-minute limit',
+  'Daily quota used up',
+  'Not on the free tier',
+  'Invalid key',
+  'Upstream rate limit',
+  'Keys to try per request must be a whole number from 1 to 10',
+  'Enter a model name',
+  'Model names and aliases must be at most 128 characters',
+  'A model can have at most 20 aliases',
+  'This name is already used by another model or alias',
+  'Enter a whole number from -1 to 1000000000',
+  'Keep at least one model, or restore the defaults',
+  'At most 300 models',
 ] as const

@@ -16,6 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type {
+  GeminiFreeKeyCooldownReason,
+  GeminiFreeKeyModelLimit,
+} from './types'
 
 export const CHANNEL_PRIORITY_GUIDE_KEYS = {
   card: 'channels:priority-drag-guide:card:v1',
@@ -27,6 +31,8 @@ export const CHANNEL_PRIORITY_GUIDE_KEYS = {
 // ============================================================================
 
 export const CHANNEL_TYPE_OLLAMA = 4
+
+export const CHANNEL_TYPE_GEMINI = 24
 
 export const CHANNEL_TYPE_SUB2API = 59
 
@@ -56,6 +62,147 @@ export const UPSTREAM_QUOTA_ERROR_MESSAGE_MAX = 500
 export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_DEFAULT = 403
 export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN = 400
 export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX = 599
+
+// Free key mode of a Gemini (AI Studio) channel (settings.gemini_free_key_*).
+// The server applies the same defaults and bounds; the channel form saves
+// only what differs from the defaults.
+export const GEMINI_FREE_KEY_TOKEN_COUNTERS = ['count_tokens', 'local'] as const
+export type GeminiFreeKeyTokenCounter =
+  (typeof GEMINI_FREE_KEY_TOKEN_COUNTERS)[number]
+export const GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT: GeminiFreeKeyTokenCounter =
+  'count_tokens'
+// Different keys one request may try inside the channel.
+export const GEMINI_FREE_KEY_MAX_ATTEMPTS_DEFAULT = 3
+export const GEMINI_FREE_KEY_MAX_ATTEMPTS_MIN = 1
+export const GEMINI_FREE_KEY_MAX_ATTEMPTS_MAX = 10
+// Bounds of the model limits table: rows, characters of a model name or
+// alias, aliases per row, and each RPM / TPM / RPD value (-1 is unlimited).
+export const GEMINI_FREE_KEY_MODEL_LIMITS_MAX_ROWS = 300
+export const GEMINI_FREE_KEY_MODEL_NAME_MAX = 128
+export const GEMINI_FREE_KEY_ALIASES_MAX = 20
+export const GEMINI_FREE_KEY_LIMIT_MIN = -1
+export const GEMINI_FREE_KEY_LIMIT_MAX = 1_000_000_000
+
+// Model, aliases, RPM, TPM (input tokens per minute), RPD of each key on the
+// AI Studio free tier. -1 is unlimited; 0 means the free tier does not offer
+// the model, so its requests go to other channels at once.
+type GeminiFreeKeyDefaultRow = [
+  model: string,
+  aliases: string[],
+  rpm: number,
+  tpm: number,
+  rpd: number,
+]
+
+const GEMINI_FREE_KEY_DEFAULT_ROWS: GeminiFreeKeyDefaultRow[] = [
+  ['gemini-3.8-flash', ['gemini-3.7-flash'], 5, 250_000, 20],
+  ['gemini-3.6-flash', ['gemini-3.5-flash'], 5, 250_000, 20],
+  ['gemini-3-flash-preview', ['gemini-3-flash'], 5, 250_000, 20],
+  ['gemini-2.5-flash', [], 5, 250_000, 20],
+  ['gemini-2.5-flash-lite', [], 10, 250_000, 20],
+  [
+    'gemini-3.1-flash-lite',
+    ['gemini-3.1-flash-lite-preview'],
+    15,
+    250_000,
+    500,
+  ],
+  ['gemini-3.5-flash-lite', [], 15, 250_000, 500],
+  ['gemini-4-hydrogen', [], 5, 250_000, 20],
+  ['gemini-robotics-er-2-preview', [], 5, 250_000, 20],
+  ['gemma-4-26b-a4b-it', ['gemma-4-26b'], 30, 16_000, 14_400],
+  ['gemma-4-31b-it', ['gemma-4-31b'], 30, 16_000, 14_400],
+  ['gemini-2.5-flash-preview-tts', [], 3, 10_000, 10],
+  ['gemini-3.1-flash-tts-preview', [], 3, 10_000, 10],
+  ['gemini-3.8-flash-tts', [], 3, 10_000, 10],
+  ['gemini-3.8-flash-lite-tts', [], 3, 10_000, 10],
+  ['gemini-3.5-transcribe', [], 3, 10_000, 25],
+  ['gemini-embedding-001', [], 100, 30_000, 1000],
+  ['gemini-embedding-2', ['gemini-embedding-2-preview'], 100, 30_000, 1000],
+  ['gemini-decision-1', [], 200, 50_000, 10_000],
+  [
+    'antigravity-preview-09-2026',
+    ['antigravity-preview-05-2026'],
+    60,
+    100_000,
+    100,
+  ],
+  // Live models: listed so their names do not fall into a Flash row.
+  [
+    'gemini-2.5-flash-native-audio-preview-09-2025',
+    [
+      'gemini-2.5-flash-native-audio-preview-12-2025',
+      'gemini-2.5-flash-native-audio-latest',
+    ],
+    -1,
+    1_000_000,
+    -1,
+  ],
+  ['gemini-3.1-flash-live-preview', [], -1, 65_000, -1],
+  ['gemini-3.5-live-translate-preview', [], -1, 20_000, -1],
+  ['gemini-3.5-transcribe-live', [], -1, 20_000, -1],
+  ['gemini-3.8-live', [], -1, 65_000, -1],
+  ['gemini-3.8-live-extended-thinking', [], -1, 65_000, -1],
+  // Not on the free tier.
+  ['gemini-2.0-flash', ['gemini-2.0-flash-001'], 0, 0, 0],
+  ['gemini-2.0-flash-lite', ['gemini-2.0-flash-lite-001'], 0, 0, 0],
+  ['gemini-2.5-pro', [], 0, 0, 0],
+  ['gemini-2.5-pro-preview-tts', [], 0, 0, 0],
+  [
+    'gemini-2.5-flash-image',
+    ['gemini-2.5-flash-image-preview', 'gemini-2.5-flash-preview-image'],
+    0,
+    0,
+    0,
+  ],
+  [
+    'gemini-3-pro-image',
+    ['gemini-3-pro-image-preview', 'nano-banana-pro-preview'],
+    0,
+    0,
+    0,
+  ],
+  [
+    'gemini-3.1-pro-preview',
+    ['gemini-3.1-pro-preview-customtools', 'gemini-3.1-pro'],
+    0,
+    0,
+    0,
+  ],
+  ['gemini-3.1-flash-image', ['gemini-3.1-flash-image-preview'], 0, 0, 0],
+  ['gemini-3.1-flash-lite-image', [], 0, 0, 0],
+  ['gemini-4-argon', [], 0, 0, 0],
+  ['gemini-4-carbon', [], 0, 0, 0],
+  ['gemini-nano-banana-2.1', [], 0, 0, 0],
+  ['gemini-omni-1.1-flash', ['gemini-omni-flash-preview'], 0, 0, 0],
+  ['gemini-omni-1.2-flash', [], 0, 0, 0],
+  ['gemini-2.5-computer-use-preview-10-2025', [], 0, 0, 0],
+  ['lyria-3-clip-preview', [], 0, 0, 0],
+  ['lyria-3-pro-preview', [], 0, 0, 0],
+  ['deep-research-pro-preview-12-2025', [], 0, 0, 0],
+]
+
+// The built-in model limits the server applies while a channel saves none.
+export const GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS: readonly GeminiFreeKeyModelLimit[] =
+  GEMINI_FREE_KEY_DEFAULT_ROWS.map(([model, aliases, rpm, tpm, rpd]) => ({
+    model,
+    aliases,
+    rpm,
+    tpm,
+    rpd,
+  }))
+
+// Labels (i18n keys) of why a key, or one model of a key, is paused.
+export const GEMINI_FREE_KEY_COOLDOWN_REASON_LABELS: Record<
+  Exclude<GeminiFreeKeyCooldownReason, ''>,
+  string
+> = {
+  minute: 'Per-minute limit',
+  day: 'Daily quota used up',
+  not_free: 'Not on the free tier',
+  key_error: 'Invalid key',
+  unknown: 'Upstream rate limit',
+}
 
 export const CHANNEL_TYPES = {
   0: 'Unknown',
@@ -395,6 +542,18 @@ export const ERROR_MESSAGES = {
     'The error returned to users must be at most 500 characters',
   INVALID_UPSTREAM_QUOTA_ERROR_STATUS_CODE:
     'The status code must be a whole number from 400 to 599',
+  INVALID_GEMINI_FREE_KEY_MAX_ATTEMPTS:
+    'Keys to try per request must be a whole number from 1 to 10',
+  GEMINI_FREE_KEY_MODEL_REQUIRED: 'Enter a model name',
+  GEMINI_FREE_KEY_NAME_TOO_LONG:
+    'Model names and aliases must be at most 128 characters',
+  GEMINI_FREE_KEY_TOO_MANY_ALIASES: 'A model can have at most 20 aliases',
+  GEMINI_FREE_KEY_DUPLICATE_NAME:
+    'This name is already used by another model or alias',
+  INVALID_GEMINI_FREE_KEY_LIMIT: 'Enter a whole number from -1 to 1000000000',
+  GEMINI_FREE_KEY_MODEL_LIMITS_EMPTY:
+    'Keep at least one model, or restore the defaults',
+  GEMINI_FREE_KEY_MODEL_LIMITS_TOO_MANY: 'At most 300 models',
   CREATE_FAILED: 'Failed to create channel',
   UPDATE_FAILED: 'Failed to update channel',
   DELETE_FAILED: 'Failed to delete channel',
