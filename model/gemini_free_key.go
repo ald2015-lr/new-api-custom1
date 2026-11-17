@@ -9,6 +9,48 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 )
 
+// geminiFreeKeySettings are the other settings of channel when it is a Gemini
+// channel in free key mode; ok is false for any other channel.
+func geminiFreeKeySettings(channel *Channel) (settings dto.ChannelOtherSettings, ok bool) {
+	if channel == nil || channel.Type != constant.ChannelTypeGemini || channel.OtherSettings == "" {
+		return settings, false
+	}
+	if common.UnmarshalJsonStr(channel.OtherSettings, &settings) != nil {
+		return settings, false
+	}
+	return settings, settings.GeminiFreeKeyEnabled
+}
+
+// noteGeminiFreeKeyChannel marks the free key limiter active when channel, as
+// just saved, is a Gemini channel in free key mode, so that selection from the
+// database passes it over (dropGeminiFreeKeyExhaustedAbilities) from the next
+// request on rather than from the first one relayed in the mode.
+func noteGeminiFreeKeyChannel(channel *Channel) {
+	if _, ok := geminiFreeKeySettings(channel); ok {
+		geminifreekey.Default().MarkActive()
+	}
+}
+
+// InitGeminiFreeKeyLimiter marks the free key limiter active at startup when
+// a stored Gemini channel, enabled or not, is in free key mode, so that a
+// fresh process selecting from the database passes such a channel over from
+// its first request. A deployment without one keeps the limiter inactive, and
+// its selections read no channel for the mode. On a database error the
+// limiter stays as it was: the first request relayed in the mode activates it.
+func InitGeminiFreeKeyLimiter() {
+	var channels []*Channel
+	if err := DB.Select("id", "type", "settings").Where("type = ?", constant.ChannelTypeGemini).Find(&channels).Error; err != nil {
+		common.SysError(common.LogText("failed to read Gemini free key channels: %s", err.Error()))
+		return
+	}
+	for _, channel := range channels {
+		if _, ok := geminiFreeKeySettings(channel); ok {
+			geminifreekey.Default().MarkActive()
+			return
+		}
+	}
+}
+
 // geminiFreeKeyCannotServe tells whether channel is a Gemini channel in free
 // key mode that cannot serve modelName at all now: the model (after the
 // channel's model mapping) is not on the free tier, or every enabled key is
@@ -18,11 +60,8 @@ import (
 // status only when the channel's polling lock is free: UpdateChannelStatus
 // takes that lock before channelSyncLock.
 func geminiFreeKeyCannotServe(channel *Channel, modelName string, holdsCacheLock bool) bool {
-	if channel == nil || channel.Type != constant.ChannelTypeGemini || channel.OtherSettings == "" {
-		return false
-	}
-	var settings dto.ChannelOtherSettings
-	if common.UnmarshalJsonStr(channel.OtherSettings, &settings) != nil || !settings.GeminiFreeKeyEnabled {
+	settings, ok := geminiFreeKeySettings(channel)
+	if !ok {
 		return false
 	}
 	upstreamModel := modelName
@@ -90,8 +129,10 @@ func dropGeminiFreeKeyExhaustedChannels(ids []int, modelName string, tried []int
 
 // dropGeminiFreeKeyExhaustedAbilities is dropGeminiFreeKeyExhaustedChannels
 // for the abilities of database selection. It reads the Gemini channels among
-// them only once this process has relayed in free key mode, so that it costs
-// nothing where the mode is not used.
+// them only while the free key limiter is active: a Gemini channel in free key
+// mode was stored at startup (InitGeminiFreeKeyLimiter) or saved since, or
+// this process relayed in the mode. So it costs nothing where the mode is not
+// used.
 func dropGeminiFreeKeyExhaustedAbilities(abilities []Ability, modelName string, tried []int) ([]Ability, map[int]bool) {
 	if len(abilities) == 0 || !geminifreekey.Default().Active() {
 		return abilities, nil

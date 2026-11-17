@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/geminifreekey"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -257,4 +260,103 @@ func TestAddChannelPanicRollsBackWithoutSuccess(t *testing.T) {
 	require.NoError(t, database.Model(&model.Ability{}).Count(&abilities).Error)
 	assert.Zero(t, channels)
 	assert.Zero(t, abilities)
+}
+
+// Adding a Gemini channel in free key mode (single, batch or multi to single),
+// copying one or editing a channel to turn the mode on activates the free key
+// limiter, so that selection from the database passes such a channel over
+// from the next request on; so does the startup check of a stored one. Other
+// channels leave it inactive.
+func TestGeminiFreeKeyChannelSavesActivateTheLimiter(t *testing.T) {
+	rootID := setupChannelCreateTest(t)
+	const on = `{"gemini_free_key_enabled":true}`
+	freshLimiter := func(t *testing.T) *geminifreekey.Limiter {
+		t.Helper()
+		limiter := geminifreekey.New(nil)
+		previous := geminifreekey.SetDefault(limiter)
+		t.Cleanup(func() { geminifreekey.SetDefault(previous) })
+		return limiter
+	}
+	removeNamed := func(t *testing.T, name string) {
+		t.Helper()
+		t.Cleanup(func() {
+			var ids []int
+			require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", name).Pluck("id", &ids).Error)
+			_, err := model.BatchDeleteChannels(ids)
+			require.NoError(t, err)
+		})
+	}
+	stored := func(t *testing.T, name, settings string) *model.Channel {
+		t.Helper()
+		removeNamed(t, name)
+		channel := &model.Channel{Name: name, Type: constant.ChannelTypeGemini, Key: "gfk-stored-key", Status: common.ChannelStatusEnabled, Models: "gemini-2.5-flash", Group: "default", OtherSettings: settings}
+		require.NoError(t, model.DB.Create(channel).Error)
+		return channel
+	}
+	send := func(t *testing.T, handler gin.HandlerFunc, method string, params gin.Params, body string) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Set("id", rootID)
+		context.Set("role", common.RoleRootUser)
+		context.Params = params
+		context.Request = httptest.NewRequest(method, "/api/channel/", strings.NewReader(body))
+		context.Request.Header.Set("Content-Type", "application/json")
+		handler(context)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.Contains(t, recorder.Body.String(), `"success":true`)
+	}
+
+	for _, mode := range []string{"single", "batch", "multi_to_single"} {
+		t.Run("add "+mode, func(t *testing.T) {
+			name := "gfk-save-" + mode
+			removeNamed(t, name)
+			limiter := freshLimiter(t)
+			add := func(channelType int, settings string) {
+				t.Helper()
+				request, err := common.Marshal(AddChannelRequest{Mode: mode, Channel: &model.Channel{Name: name, Type: channelType, Key: "gfk-save-key-1\ngfk-save-key-2", Models: "gemini-2.5-flash", Group: "default", OtherSettings: settings}})
+				require.NoError(t, err)
+				send(t, AddChannel, http.MethodPost, nil, string(request))
+			}
+			add(constant.ChannelTypeGemini, "")
+			add(constant.ChannelTypeGemini, `{"gemini_free_key_enabled":false}`)
+			add(constant.ChannelTypeOpenAI, on)
+			assert.False(t, limiter.Active(), "no channel in free key mode")
+			add(constant.ChannelTypeGemini, on)
+			assert.True(t, limiter.Active())
+		})
+	}
+
+	t.Run("copy", func(t *testing.T) {
+		origin := stored(t, "gfk-save-copy", on)
+		removeNamed(t, origin.Name+"_copy")
+		limiter := freshLimiter(t)
+		send(t, CopyChannel, http.MethodPost, gin.Params{{Key: "id", Value: fmt.Sprintf("%d", origin.Id)}}, "")
+		assert.True(t, limiter.Active())
+	})
+
+	t.Run("edit", func(t *testing.T) {
+		channel := stored(t, "gfk-save-edit", "")
+		limiter := freshLimiter(t)
+		edit := func(settings string) {
+			t.Helper()
+			body, err := common.Marshal(map[string]any{"id": channel.Id, "type": channel.Type, "name": channel.Name, "models": channel.Models, "group": channel.Group, "settings": settings})
+			require.NoError(t, err)
+			send(t, UpdateChannel, http.MethodPut, nil, string(body))
+		}
+		edit(`{"gemini_free_key_reveal_tier_errors":true}`)
+		assert.False(t, limiter.Active(), "the mode is still off")
+		edit(on)
+		assert.True(t, limiter.Active())
+	})
+
+	t.Run("startup", func(t *testing.T) {
+		stored(t, "gfk-save-startup-off", `{"gemini_free_key_enabled":false}`)
+		limiter := freshLimiter(t)
+		model.InitGeminiFreeKeyLimiter()
+		assert.False(t, limiter.Active(), "no stored channel in free key mode")
+		stored(t, "gfk-save-startup-on", on)
+		model.InitGeminiFreeKeyLimiter()
+		assert.True(t, limiter.Active())
+	})
 }

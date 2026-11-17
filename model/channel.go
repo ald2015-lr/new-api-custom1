@@ -503,7 +503,13 @@ func BatchInsertChannels(channels []Channel) error {
 			}
 		}
 	}
-	return tx.Commit().Error
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+	for i := range channels {
+		noteGeminiFreeKeyChannel(&channels[i])
+	}
+	return nil
 }
 
 func BatchDeleteChannels(ids []int) (int64, error) {
@@ -579,6 +585,7 @@ func (channel *Channel) Insert() error {
 	if err != nil {
 		return err
 	}
+	noteGeminiFreeKeyChannel(channel)
 	err = channel.AddAbilities(nil)
 	return err
 }
@@ -628,6 +635,7 @@ func (channel *Channel) Update() error {
 		return err
 	}
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
+	noteGeminiFreeKeyChannel(channel)
 	err = channel.UpdateAbilities(nil)
 	return err
 }

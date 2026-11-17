@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -243,4 +244,162 @@ func TestSelectionKeepsTheTiersOfAGeminiFreeKeyRequest(t *testing.T) {
 			assert.Equal(t, 960006, picked("gemini-3.6-flash", 0))
 		})
 	}
+}
+
+// useDatabaseSelection selects from the database (memory cache off), as after
+// a restart without the memory cache, with a fresh free key limiter that no
+// request has used yet.
+func useDatabaseSelection(t *testing.T) *geminifreekey.Limiter {
+	t.Helper()
+	truncateTables(t)
+	originalMemoryCache := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	limiter := geminifreekey.New(nil)
+	previous := geminifreekey.SetDefault(limiter)
+	t.Cleanup(func() {
+		geminifreekey.SetDefault(previous)
+		DB.Exec("DELETE FROM channels")
+		DB.Exec("DELETE FROM abilities")
+		common.MemoryCacheEnabled = true
+		InitChannelCache()
+		common.MemoryCacheEnabled = originalMemoryCache
+	})
+	return limiter
+}
+
+// A Gemini channel saved in free key mode (added, added in a batch or copied,
+// edited to turn the mode on, or edited in another field) marks the free key
+// limiter active, so that selection from the database passes it over for a
+// model the free tier does not serve from the very first request, before
+// anything was relayed in the mode.
+func TestDatabaseSelectionSkipsASavedGeminiFreeKeyChannelFromTheFirstRequest(t *testing.T) {
+	const on = `{"gemini_free_key_enabled":true}`
+	for name, save := range map[string]func(t *testing.T, free *Channel){
+		"insert": func(t *testing.T, free *Channel) {
+			require.NoError(t, free.Insert())
+		},
+		"batch insert": func(t *testing.T, free *Channel) {
+			require.NoError(t, BatchInsertChannels([]Channel{*free}))
+		},
+		"update turning the mode on": func(t *testing.T, free *Channel) {
+			free.OtherSettings = ""
+			require.NoError(t, free.Insert())
+			require.False(t, geminifreekey.Default().Active())
+			free.OtherSettings = on
+			require.NoError(t, free.Update())
+		},
+		"update of another field": func(t *testing.T, free *Channel) {
+			require.NoError(t, DB.Create(free).Error)
+			require.NoError(t, free.AddAbilities(nil))
+			require.False(t, geminifreekey.Default().Active())
+			require.NoError(t, (&Channel{Id: free.Id, Name: "gfk-renamed"}).Update())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			limiter := useDatabaseSelection(t)
+			paidPriority, freePriority := int64(0), int64(10)
+			paid := Channel{Id: 970002, Type: constant.ChannelTypeGemini, Key: "sk-paid", Status: common.ChannelStatusEnabled, Name: "paid", Models: "gemini-2.5-pro", Group: "default", Priority: &paidPriority}
+			require.NoError(t, paid.Insert())
+			free := &Channel{Id: 970001, Type: constant.ChannelTypeGemini, Key: "gfk-first-key", Status: common.ChannelStatusEnabled, Name: "gfk", Models: "gemini-2.5-pro", Group: "default", Priority: &freePriority, OtherSettings: on}
+			save(t, free)
+
+			assert.True(t, limiter.Active())
+			channel, err := GetRandomSatisfiedChannel("default", "gemini-2.5-pro", 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, channel)
+			assert.Equal(t, paid.Id, channel.Id, "the free tier does not serve gemini-2.5-pro")
+		})
+	}
+}
+
+// At startup a stored Gemini channel in free key mode, also a disabled one or
+// one stored without the model (an older version, a restore), marks the free
+// key limiter active, so that a fresh process selecting from the database
+// passes it over from its first request. A database error leaves the limiter
+// inactive.
+func TestInitGeminiFreeKeyLimiterActivatesTheModeOfAStoredChannel(t *testing.T) {
+	limiter := useDatabaseSelection(t)
+	paidPriority, freePriority := int64(0), int64(10)
+	for _, channel := range []*Channel{
+		{Id: 971001, Type: constant.ChannelTypeGemini, Key: "gfk-start-key", Status: common.ChannelStatusEnabled, Name: "gfk", Models: "gemini-2.5-pro", Group: "default", Priority: &freePriority, OtherSettings: `{"gemini_free_key_enabled":true}`},
+		{Id: 971002, Type: constant.ChannelTypeGemini, Key: "sk-paid", Status: common.ChannelStatusEnabled, Name: "paid", Models: "gemini-2.5-pro", Group: "default", Priority: &paidPriority},
+	} {
+		require.NoError(t, DB.Create(channel).Error)
+		require.NoError(t, channel.AddAbilities(nil))
+	}
+	require.False(t, limiter.Active())
+
+	broken, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	originalDB := DB
+	DB = broken
+	require.NotPanics(t, InitGeminiFreeKeyLimiter)
+	DB = originalDB
+	if sqlDB, err := broken.DB(); err == nil {
+		_ = sqlDB.Close()
+	}
+	assert.False(t, limiter.Active(), "a failed read activates nothing")
+
+	InitGeminiFreeKeyLimiter()
+	assert.True(t, limiter.Active())
+	channel, err := GetRandomSatisfiedChannel("default", "gemini-2.5-pro", 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, channel)
+	assert.Equal(t, 971002, channel.Id, "the free tier does not serve gemini-2.5-pro")
+
+	// A disabled channel in the mode counts too: enabling it again does not
+	// save it through the model.
+	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", 971001).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	fresh := geminifreekey.New(nil)
+	geminifreekey.SetDefault(fresh)
+	InitGeminiFreeKeyLimiter()
+	assert.True(t, fresh.Active())
+}
+
+// A deployment without a Gemini channel in free key mode keeps the free key
+// limiter inactive at startup and whenever it saves a channel, so that
+// selection from the database reads no channel for the mode: one query fewer
+// than once the mode is in use. The startup check is one query.
+func TestADeploymentWithoutGeminiFreeKeyChannelsKeepsTheLimiterInactive(t *testing.T) {
+	limiter := useDatabaseSelection(t)
+	priority := int64(0)
+	channel := func(id, channelType int, settings string) Channel {
+		return Channel{Id: id, Type: channelType, Key: fmt.Sprintf("sk-%d", id), Status: common.ChannelStatusEnabled, Name: "no-gfk", Models: "gemini-2.5-pro", Group: "default", Priority: &priority, OtherSettings: settings}
+	}
+	inserted := channel(972001, constant.ChannelTypeGemini, "")
+	require.NoError(t, inserted.Insert())
+	require.NoError(t, BatchInsertChannels([]Channel{
+		channel(972002, constant.ChannelTypeGemini, `{"gemini_free_key_enabled":false}`),
+		channel(972003, constant.ChannelTypeOpenAI, `{"gemini_free_key_enabled":true}`),
+		channel(972004, constant.ChannelTypeGemini, `{"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_max_attempts":3}`),
+	}))
+	inserted.OtherSettings = `{"gemini_free_key_enabled":false}`
+	require.NoError(t, inserted.Update())
+	stored := channel(972005, constant.ChannelTypeGemini, "not json")
+	require.NoError(t, DB.Create(&stored).Error)
+
+	channelQueries := 0
+	const counter = "test:count_channel_queries"
+	require.NoError(t, DB.Callback().Query().After("gorm:query").Register(counter, func(tx *gorm.DB) {
+		if tx.Statement.Table == "channels" {
+			channelQueries++
+		}
+	}))
+	t.Cleanup(func() { _ = DB.Callback().Query().Remove(counter) })
+	InitGeminiFreeKeyLimiter()
+	assert.Equal(t, 1, channelQueries, "the startup check")
+	assert.False(t, limiter.Active())
+
+	selectionQueries := func() int {
+		t.Helper()
+		channelQueries = 0
+		selected, err := GetRandomSatisfiedChannel("default", "gemini-2.5-pro", 0, nil)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		return channelQueries
+	}
+	inactive := selectionQueries()
+	assert.False(t, limiter.Active())
+	limiter.MarkActive()
+	assert.Equal(t, inactive+1, selectionQueries(), "only an active limiter reads the Gemini channels")
 }

@@ -3330,12 +3330,11 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		assert.Empty(t, errorLogsOf(t, recorder.Header().Get(common.RequestIdKey)), "selection skipped the free channel")
 	})
 
-	// Selection from the database (memory cache off) passes a free channel
-	// over once this process relayed in free key mode, which a request the
-	// channel refused on its own, sending nothing to Google, is too: the
-	// next request for a model the free tier does not serve goes straight
-	// to the paid channel.
-	t.Run("selection from the database skips the free channel after its own rejection", func(t *testing.T) {
+	// Selection from the database (memory cache off) in a fresh process, which
+	// nothing relayed in free key mode yet: the startup check of the stored
+	// channels activates the mode, so the very first request for a model the
+	// free tier does not serve goes straight to the paid channel.
+	t.Run("selection from the database skips the free channel from a fresh process's first request", func(t *testing.T) {
 		memoryCache := common.MemoryCacheEnabled
 		common.MemoryCacheEnabled = false
 		fresh := geminifreekey.New(clock.Now)
@@ -3344,17 +3343,14 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 			geminifreekey.SetDefault(previous)
 			common.MemoryCacheEnabled = memoryCache
 		})
+		model.InitGeminiFreeKeyLimiter()
 		asked, paidBefore := free.count("countTokens")+free.count("generateContent"), paid.count("generateContent")
-		first := requests["OpenAI chat"]("gemini-2.5-pro")
-		require.Equal(t, http.StatusOK, first.Code, first.Body.String())
-		logs := errorLogsOf(t, first.Header().Get(common.RequestIdKey))
-		require.Len(t, logs, 1, "nothing marked the limiter active yet, so the free channel got the first request")
-		assert.Equal(t, freeChannel.Id, logs[0].ChannelId)
-		assert.Equal(t, "not_free", adminInfoOf(t, logs[0])["gemini_free_key"].(map[string]any)["rejected"])
-		second := requests["OpenAI chat"]("gemini-2.5-pro")
-		require.Equal(t, http.StatusOK, second.Code, second.Body.String())
-		assert.Empty(t, errorLogsOf(t, second.Header().Get(common.RequestIdKey)), "selection skipped the free channel")
-		assert.Equal(t, paidBefore+2, paid.count("generateContent"))
+		for i := range 2 {
+			recorder := requests["OpenAI chat"]("gemini-2.5-pro")
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			assert.Empty(t, errorLogsOf(t, recorder.Header().Get(common.RequestIdKey)), "request %d: selection skipped the free channel", i+1)
+			assert.Equal(t, paidBefore+i+1, paid.count("generateContent"))
+		}
 		assert.Equal(t, asked, free.count("countTokens")+free.count("generateContent"), "nothing reached Google on the free channel")
 	})
 

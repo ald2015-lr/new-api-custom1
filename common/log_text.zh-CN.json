@@ -578,6 +578,7 @@
   "failed to query channels: %s": "查询渠道失败: %s",
   "failed to query log stat: %s": "查询日志统计失败: %s",
   "failed to query rpm/tpm stat: %s": "查询 rpm/tpm 统计失败: %s",
+  "failed to read Gemini free key channels: %s": "读取 Gemini 免费KEY渠道失败: %s",
   "failed to read TTS response body: %v": "读取 TTS 响应体失败: %v",
   "failed to read the cumulative recharge of user %d: %s": "读取用户 %d 的累计充值失败: %s",
   "failed to record log: %s": "记录日志失败: %s",

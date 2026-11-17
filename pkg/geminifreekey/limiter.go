@@ -159,7 +159,8 @@ type Limiter struct {
 	cursors map[cursorKey]*cursor
 	seq     uint64
 	pruned  time.Time
-	// active is set once a request in free key mode used the limiter.
+	// active is set once free key mode is in use: a request in the mode used
+	// the limiter, or a channel in the mode is stored (MarkActive).
 	active atomic.Bool
 }
 
@@ -655,14 +656,16 @@ func (l *Limiter) Usage(keys []Key, rows []dto.GeminiFreeKeyModelLimit, models [
 	return report
 }
 
-// Active tells whether a request in free key mode used the limiter, so that
-// callers can skip work where the mode is not used.
+// Active tells whether free key mode is in use in this process (a request in
+// the mode used the limiter, or MarkActive was called), so that callers can
+// skip work where the mode is not used.
 func (l *Limiter) Active() bool {
 	return l.active.Load()
 }
 
-// MarkActive records that a request in free key mode came to the limiter,
-// also one answered before it counted anything (a model off the free tier).
+// MarkActive records that free key mode is in use: a request in the mode came
+// to the limiter, also one answered before it counted anything (a model off
+// the free tier), or a channel in the mode is stored.
 func (l *Limiter) MarkActive() {
 	l.active.Store(true)
 }
