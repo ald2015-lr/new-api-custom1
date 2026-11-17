@@ -62,6 +62,7 @@ import {
   GEMINI_FREE_KEY_TOKEN_COUNTER_DEFAULT,
   GEMINI_FREE_KEY_TOKEN_COUNTERS,
 } from '../../constants'
+import { validateGeminiFreeKeyModelLimitRows } from '../../lib/gemini-free-key'
 import {
   channelSchema,
   type Channel,
@@ -4058,6 +4059,138 @@ test('editing one limit of the default table saves the whole table with that cha
   })
 })
 
+test.each([
+  [
+    'requests per minute',
+    'RPM #4',
+    '4',
+    3,
+    { model: 'gemini-2.5-flash', rpm: 4, tpm: 250000, rpd: 20 },
+  ],
+  [
+    'input tokens per minute',
+    'TPM #4',
+    '200000',
+    3,
+    { model: 'gemini-2.5-flash', rpm: 5, tpm: 200000, rpd: 20 },
+  ],
+  [
+    'aliases',
+    'Aliases #1',
+    'gemini-3.7-flash, gemini-flash-latest',
+    0,
+    {
+      model: 'gemini-3.8-flash',
+      aliases: ['gemini-3.7-flash', 'gemini-flash-latest'],
+      rpm: 5,
+      tpm: 250000,
+      rpd: 20,
+    },
+  ],
+])(
+  'editing the %s of a default row saves the whole table with that change',
+  async (_field, cell, value, index, row) => {
+    const { user } = await openGeminiRequestTab(
+      geminiChannel({ gemini_free_key_enabled: true })
+    )
+    const limits = screen.getByRole('group', { name: 'Model limits' })
+    fireEvent.change(within(limits).getByLabelText(cell), {
+      target: { value },
+    })
+    const settings = await saveAndReadSettings(user)
+    const saved = settings.gemini_free_key_model_limits as Array<
+      Record<string, unknown>
+    >
+    expect(saved).toHaveLength(44)
+    expect(saved[index]).toEqual(row)
+  }
+)
+
+test('the model limits table takes every value the server takes, up to its limits, and refuses one more', () => {
+  const row = (model: string, aliases = '') => ({
+    model,
+    aliases,
+    rpm: 1,
+    tpm: 1,
+    rpd: 1,
+  })
+  const aliases = (count: number) =>
+    Array.from({ length: count }, (_, i) => `alias-${i}`).join(',')
+  // Names count in characters, as the server counts them.
+  const longest = '𝔪'.repeat(GEMINI_FREE_KEY_MODEL_NAME_MAX)
+  expect(
+    validateGeminiFreeKeyModelLimitRows([
+      {
+        ...row(
+          longest,
+          `${aliases(GEMINI_FREE_KEY_ALIASES_MAX - 1)},a${longest.slice(2)}`
+        ),
+        rpm: GEMINI_FREE_KEY_LIMIT_MIN,
+        tpm: GEMINI_FREE_KEY_LIMIT_MAX,
+        rpd: 0,
+      },
+    ])
+  ).toEqual([])
+  const full = Array.from(
+    { length: GEMINI_FREE_KEY_MODEL_LIMITS_MAX_ROWS },
+    (_, i) => row(`model-${i}`)
+  )
+  expect(validateGeminiFreeKeyModelLimitRows(full)).toEqual([])
+
+  expect(
+    validateGeminiFreeKeyModelLimitRows([...full, row('one-more')])
+  ).toEqual([{ message: 'At most 300 models' }])
+  expect(validateGeminiFreeKeyModelLimitRows([row(`${longest}m`)])).toEqual([
+    {
+      index: 0,
+      field: 'model',
+      message: 'Model names and aliases must be at most 128 characters',
+    },
+  ])
+  expect(
+    validateGeminiFreeKeyModelLimitRows([
+      row('m', aliases(GEMINI_FREE_KEY_ALIASES_MAX + 1)),
+    ])
+  ).toEqual([
+    {
+      index: 0,
+      field: 'aliases',
+      message: 'A model can have at most 20 aliases',
+    },
+  ])
+  expect(
+    validateGeminiFreeKeyModelLimitRows([
+      {
+        ...row('m'),
+        rpm: GEMINI_FREE_KEY_LIMIT_MIN - 1,
+        tpm: GEMINI_FREE_KEY_LIMIT_MAX + 1,
+      },
+    ]).map((issue) => issue.field)
+  ).toEqual(['rpm', 'tpm'])
+})
+
+test('a full model limits table offers no more rows', async () => {
+  const full = Array.from(
+    { length: GEMINI_FREE_KEY_MODEL_LIMITS_MAX_ROWS },
+    (_, i) => ({ model: `model-${i}`, rpm: 1, tpm: 1, rpd: 1 })
+  )
+  await openGeminiRequestTab(
+    geminiChannel({
+      gemini_free_key_enabled: true,
+      gemini_free_key_model_limits: full.slice(0, -1),
+    })
+  )
+  expect(screen.getByRole('button', { name: 'Add model' })).toBeEnabled()
+  cleanup()
+  await openGeminiRequestTab(
+    geminiChannel({
+      gemini_free_key_enabled: true,
+      gemini_free_key_model_limits: full,
+    })
+  )
+  expect(screen.getByRole('button', { name: 'Add model' })).toBeDisabled()
+})
+
 test('an added model saves with trimmed names and its comma-separated aliases, full-width commas included', async () => {
   const { user } = await openGeminiRequestTab(
     geminiChannel({
@@ -4543,6 +4676,12 @@ test('the free key usage dialog shows each key and model in local time with why 
     // Unlimited requests, and a pause that has ended.
     expect(rows[4]).toHaveTextContent('3 / Unlimited')
     expect(rows[4]).toHaveTextContent('Available')
+
+    expect(
+      within(dialog).queryByText(
+        'Free key mode is not saved as on for this channel yet. Counting starts once it is saved.'
+      )
+    ).not.toBeInTheDocument()
 
     const second = within(dialog).getByRole('region', { name: 'Key #2' })
     expect(second).toHaveTextContent('…zZ9x')
