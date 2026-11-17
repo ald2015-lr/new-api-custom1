@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -118,6 +119,13 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 	filters := GetChannelConstraints(param.Ctx).Filters
 	affinityRetryOffset := param.Ctx.GetInt(ginKeyChannelAffinityRetryOffset)
+	// The channels this request already tried keep their priority tiers.
+	var tried []int
+	for _, used := range param.Ctx.GetStringSlice("use_channel") {
+		if id, err := strconv.Atoi(used); err == nil {
+			tried = append(tried, id)
+		}
+	}
 
 	if param.TokenGroup == "auto" {
 		autoGroups := GetRequestAutoGroups(param.Ctx, userGroup)
@@ -155,6 +163,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				param.ModelName,
 				priorityRetry,
 				filters,
+				tried...,
 			)
 			if channel == nil {
 				// Remember a quota-limit refusal so it is reported if no later group has a channel.
@@ -209,6 +218,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			param.ModelName,
 			max(param.GetRetry()-affinityRetryOffset, 0),
 			filters,
+			tried...,
 		)
 		if err != nil {
 			return nil, param.TokenGroup, err

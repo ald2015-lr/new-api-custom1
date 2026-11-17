@@ -2,7 +2,6 @@ package geminifreekey
 
 import (
 	"crypto/sha256"
-	"fmt"
 	"maps"
 	"math/rand/v2"
 	"slices"
@@ -241,31 +240,6 @@ type Report struct {
 // minute.
 func (r Report) Usable() int {
 	return r.Ready + r.RPMFull + r.TPMFull
-}
-
-// String describes the keys for administrators.
-func (r Report) String() string {
-	parts := []string{fmt.Sprintf("%d keys", r.Keys)}
-	for _, count := range []struct {
-		n     int
-		label string
-	}{
-		{r.Tried, "already tried"},
-		{r.KeyError, "rejected by Google"},
-		{r.PausedNotFree, "not on this key's free tier"},
-		{r.PausedDay, "paused for the rest of the day"},
-		{r.DayFull, "at the requests per day"},
-		{r.PausedMinute, "paused by Google for a minute limit"},
-		{r.PausedUnknown, "paused after a rate limit"},
-		{r.RPMFull, "at the requests per minute"},
-		{r.TPMFull, "at the input tokens per minute"},
-		{r.Ready, "with room"},
-	} {
-		if count.n > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", count.n, count.label))
-		}
-	}
-	return strings.Join(parts, ", ")
 }
 
 type keyState int
@@ -566,7 +540,9 @@ func (l *Limiter) Observe(pool Pool, key Key, status int, body []byte) Verdict {
 			if pause.Until.After(u.until) {
 				u.until, u.reason = pause.Until, pause.Reason
 			}
-			if pause.Reason == ReasonDay && bucket.Limits.RPD > 0 {
+			// A pause until midnight shows the day used up; a shorter one
+			// is about Google's previous day and leaves ours as it is.
+			if pause.Reason == ReasonDay && bucket.Limits.RPD > 0 && !pause.Until.Before(NextReset(now)) {
 				u.dayCount = max(u.dayCount, bucket.Limits.RPD)
 			}
 		}

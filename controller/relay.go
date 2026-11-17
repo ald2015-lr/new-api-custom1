@@ -125,9 +125,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				newAPIError, novelAIUpstream = masked, nil
 			} else if disguised := service.DisguiseGeminiFreeKeyError(c, newAPIError); disguised != nil {
 				// A Gemini channel in free key mode answers its own key
-				// limits and Google's free tier errors as Google's plain
-				// rate limit.
-				logger.LogInfo(c, common.LogText("free key error of channel #%d answered as a plain rate limit", c.GetInt("channel_id")))
+				// limits and Google's free tier errors as Google's rate
+				// limit.
+				logger.LogInfo(c, common.LogText("free key error of channel #%d answered as Google's rate limit", c.GetInt("channel_id")))
 				newAPIError, novelAIUpstream = disguised, nil
 			}
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
@@ -690,6 +690,18 @@ func executeTaskSubmissionWith(
 		}
 
 		taskAPIError := taskSubmissionAPIError(taskErr)
+		userErr := service.MaskUpstreamQuotaTaskError(c, taskErr)
+		if shown, spare := service.GeminiFreeKeyTaskError(c, taskErr); spare || shown != nil {
+			// A Gemini channel in free key mode: the user's log shows what
+			// the user gets, and Google's rate limit of a free key never
+			// disables it.
+			userErr = cmp.Or(userErr, taskSubmissionAPIError(cmp.Or(shown, taskErr)))
+			if spare {
+				spared := *taskAPIError
+				types.ErrOptionWithErrorCode(types.ErrorCodeGeminiFreeKeyBusy)(&spared)
+				taskAPIError = &spared
+			}
+		}
 		relayInfo.LastError = taskAPIError
 		decision := decideTaskRetry(c, taskErr, common.RetryTimes-retryParam.GetRetry())
 		service.RecordPolicyFailure(c, channel.Id, taskAPIError, decision)
@@ -698,7 +710,7 @@ func executeTaskSubmissionWith(
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
 				taskAPIError,
-				service.MaskUpstreamQuotaTaskError(c, taskErr),
+				userErr,
 				relayInfo)
 		}
 
@@ -722,6 +734,9 @@ func executeTaskSubmissionWith(
 		if masked := service.MaskUpstreamQuotaTaskError(c, taskErr); masked != nil {
 			logger.LogInfo(c, common.LogText("upstream balance error hidden behind the message of channel #%d", c.GetInt("channel_id")))
 			taskErr = &taskdto.TaskError{Code: string(masked.GetErrorCode()), Message: masked.Error(), StatusCode: masked.StatusCode, Error: masked}
+		} else if shown, _ := service.GeminiFreeKeyTaskError(c, taskErr); shown != nil {
+			logger.LogInfo(c, common.LogText("free key error of channel #%d answered as Google's rate limit", c.GetInt("channel_id")))
+			taskErr = shown
 		}
 		return nil, taskErr
 	}

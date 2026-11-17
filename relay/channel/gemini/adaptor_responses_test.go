@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -376,6 +378,13 @@ func requireFreeKeyBusy(t *testing.T, err error) *types.NewAPIError {
 
 const freeKeyTPM429 = `{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000, model: gemini-2.5-flash, description: Generate content input tokens per minute limit exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits.\nPlease retry in 49.477199395s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_input_token_count","quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaDimensions":{"location":"global","model":"gemini-2.5-flash"},"quotaValue":"250000"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"49s"}]}}`
 
+// freeKeyDay429 is Google's per-day 429 for gemini-2.5-flash without a retry
+// delay.
+const freeKeyDay429 = `{"error":{"code":429,"message":"x","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaValue":"20"}]}]}}`
+
+// freeKeyPlain429 is Google's rate limit without quota details.
+const freeKeyPlain429 = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`
+
 // On a Gemini channel in free key mode a request counts its input tokens
 // once with countTokens, goes to a key with room under the model's free tier
 // limits and moves to another key when Google answers 429 or rejects the
@@ -588,6 +597,67 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 		assert.Equal(t, unauthenticated, readFreeKeyResponse(t, resp))
 	})
 
+	t.Run("the key countTokens rejected last is the key the request ends on", func(t *testing.T) {
+		previousAutoDisable := common.AutomaticDisableChannelEnabled
+		common.AutomaticDisableChannelEnabled = true
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previousAutoDisable })
+		f := newFreeKeyFixture(t, keys[:2], nil)
+		const suspended = `{"error":{"code":403,"message":"Permission denied: Consumer 'api_key:AIzaSyFreeKey1' has been suspended.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"CONSUMER_SUSPENDED"}]}}`
+		// The distributor's key 0 is done for the day; key 1 was suspended.
+		pool := geminifreekey.Pool{Bucket: geminifreekey.ResolveBucket(dto.DefaultGeminiFreeKeyModelLimits(), "gemini-2.5-flash")}
+		f.limiter.Observe(pool, geminifreekey.Key{Secret: keys[0]}, http.StatusTooManyRequests, []byte(freeKeyDay429))
+		f.google.countAnswer = func(key string) (int, string) {
+			if key == keys[1] {
+				return http.StatusForbidden, suspended
+			}
+			return http.StatusOK, `{"totalTokens":7}`
+		}
+		c, info := f.request("gemini-2.5-flash", on)
+		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		_, generates := f.google.calls()
+		assert.Empty(t, generates)
+		assert.Equal(t, keys[1], info.ApiKey)
+		assert.Equal(t, 1, info.ChannelMultiKeyIndex)
+		assert.Equal(t, keys[1], common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+		assert.Equal(t, 1, common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex))
+		assert.Equal(t, 1, freeKeyAuditOf(t, c).KeyIndex)
+
+		// The relay acts on the answer as it does on any request's last one.
+		apiErr := service.RelayErrorHandler(c.Request.Context(), resp, false)
+		service.ProcessChannelError(c, *types.NewChannelError(f.channelID, constant.ChannelTypeGemini, "gemini-free", true, common.GetContextKeyString(c, constant.ContextKeyChannelKey), true), apiErr, nil, info)
+		assert.Eventually(t, func() bool {
+			channel, err := model.GetChannelById(f.channelID, true)
+			return err == nil && channel.ChannelInfo.MultiKeyStatusList[1] == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond, "the suspended key is disabled")
+		channel, err := model.GetChannelById(f.channelID, true)
+		require.NoError(t, err)
+		assert.NotContains(t, channel.ChannelInfo.MultiKeyStatusList, 0, "the healthy key stays enabled")
+	})
+
+	t.Run("a request Google received stays counted when its answer never comes", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys[:1], nil)
+		c, info := f.request("gemini-2.5-flash", dto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyTokenCounter: "local"})
+		ctx, cancel := context.WithCancel(c.Request.Context())
+		c.Request = c.Request.WithContext(ctx)
+		silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			// Google has the request; the client leaves before its answer.
+			cancel()
+			<-r.Context().Done()
+		}))
+		t.Cleanup(silent.Close)
+		info.ChannelBaseUrl = silent.URL
+		_, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.Error(t, err)
+		usage := f.limiter.Usage([]geminifreekey.Key{{Index: 0, Secret: keys[0]}}, dto.DefaultGeminiFreeKeyModelLimits(), []string{"gemini-2.5-flash"})
+		assert.Equal(t, 1, usage[0].Models[0].RPMUsed)
+		assert.Equal(t, 42, usage[0].Models[0].TPMUsed)
+		assert.Equal(t, 1, usage[0].Models[0].RPDUsed)
+		assert.Equal(t, []geminifreekey.AuditAttempt{{KeyIndex: 0, Reason: "no_answer"}}, freeKeyAuditOf(t, c).Attempts)
+	})
+
 	t.Run("a request that never reached Google is taken back", func(t *testing.T) {
 		f := newFreeKeyFixture(t, keys[:1], nil)
 		c, info := f.request("gemini-2.5-flash", dto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyTokenCounter: "local"})
@@ -598,6 +668,84 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 		assert.Zero(t, usage[0].Models[0].RPDUsed)
 		assert.Zero(t, usage[0].Models[0].RPMUsed)
 		assert.Equal(t, []geminifreekey.AuditAttempt{{KeyIndex: 0, Reason: "transport_error"}}, freeKeyAuditOf(t, c).Attempts)
+	})
+
+	t.Run("the channel test leaves a key Google rejected enabled", func(t *testing.T) {
+		previousAutoDisable := common.AutomaticDisableChannelEnabled
+		common.AutomaticDisableChannelEnabled = true
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previousAutoDisable })
+		f := newFreeKeyFixture(t, keys, nil)
+		const suspended = `{"error":{"code":403,"message":"Permission denied: Consumer 'api_key:AIzaSyFreeKey0' has been suspended.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"CONSUMER_SUSPENDED"}]}}`
+		f.google.generateAnswer = func(key string) (int, string) {
+			if key == keys[0] {
+				return http.StatusForbidden, suspended
+			}
+			return http.StatusOK, freeKeyGeneration
+		}
+		c, info := f.request("gemini-2.5-flash", on)
+		info.IsChannelTest = true
+		resp, err := (&Adaptor{}).DoRequest(c, info, bytes.NewBufferString(freeKeyChatBody))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.(*http.Response).StatusCode)
+		_, generates := f.google.calls()
+		assert.Equal(t, []string{keys[0], keys[1]}, []string{generates[0].key, generates[1].key})
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		channel, err := model.GetChannelById(f.channelID, true)
+		require.NoError(t, err)
+		assert.NotContains(t, channel.ChannelInfo.MultiKeyStatusList, 0, "a channel test disables no key it moved past")
+		pool := geminifreekey.Pool{Keys: []geminifreekey.Key{{Index: 0, Secret: keys[0]}}, Bucket: geminifreekey.ResolveBucket(dto.DefaultGeminiFreeKeyModelLimits(), "gemini-2.5-flash")}
+		assert.Equal(t, geminifreekey.Report{Keys: 1, KeyError: 1}, f.limiter.Inspect(pool, 0, 1, nil), "the key still sits out")
+	})
+
+	t.Run("a stream answered without Google has the headers of one sent to it", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys, nil)
+		f.google.countAnswer = func(string) (int, string) { return http.StatusOK, `{"totalTokens":250001}` }
+		f.google.generateAnswer = func(string) (int, string) { return http.StatusTooManyRequests, freeKeyPlain429 }
+		refused, refusedInfo := f.request("gemini-2.5-flash", on)
+		refusedInfo.IsStream = true
+		_, err := doFreeKeyRequest(t, refused, refusedInfo, freeKeyChatBody)
+		requireFreeKeyBusy(t, err)
+		sent, sentInfo := f.request("gemini-2.5-flash", dto.ChannelOtherSettings{})
+		sentInfo.IsStream = true
+		resp, err := doFreeKeyRequest(t, sent, sentInfo, freeKeyChatBody)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+		assert.Equal(t, "no-cache", refused.Writer.Header().Get("Cache-Control"))
+		assert.Equal(t, sent.Writer.Header(), refused.Writer.Header())
+	})
+
+	t.Run("a request of exactly the model's tokens per minute is sent", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys, nil)
+		f.google.countAnswer = func(string) (int, string) { return http.StatusOK, `{"totalTokens":250000}` }
+		c, info := f.request("gemini-2.5-flash", on)
+		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.NoError(t, err)
+		assert.Equal(t, freeKeyGeneration, readFreeKeyResponse(t, resp))
+	})
+
+	t.Run("Google's last 429 follows the channel's status code mapping when errors are revealed", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys, nil)
+		f.google.generateAnswer = func(string) (int, string) { return http.StatusTooManyRequests, freeKeyTPM429 }
+		c, info := f.request("gemini-2.5-flash", dto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true})
+		c.Set("status_code_mapping", `{"429":"503"}`)
+		_, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		var apiErr *types.NewAPIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, types.ErrorCodeGeminiFreeKeyBusy, apiErr.GetErrorCode())
+		assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+	})
+
+	t.Run("the key summary for administrators is in their language", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys[:2], nil)
+		pool := geminifreekey.Pool{Bucket: geminifreekey.ResolveBucket(dto.DefaultGeminiFreeKeyModelLimits(), "gemini-2.5-flash")}
+		for _, key := range keys[:2] {
+			f.limiter.Observe(pool, geminifreekey.Key{Secret: key}, http.StatusTooManyRequests, []byte(freeKeyDay429))
+		}
+		c, info := f.request("gemini-2.5-flash", on)
+		common.SetContextKey(c, constant.ContextKeyUserSetting, dto.UserSetting{Language: i18n.LangZhCN})
+		_, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		apiErr := requireFreeKeyBusy(t, err)
+		assert.Equal(t, "免费KEY模式：该渠道今天没有可用于 gemini-2.5-flash 的 KEY（共 2 个 KEY，2 个今天剩余时间暂停），请求未发送到 Google", apiErr.Error())
 	})
 
 	t.Run("any other answer is returned as sent", func(t *testing.T) {

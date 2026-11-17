@@ -104,6 +104,19 @@ const (
 	MsgGeminiFreeKeyTooLarge   = "gemini_free_key.too_large"
 	MsgGeminiFreeKeyNoCapacity = "gemini_free_key.no_capacity"
 	MsgGeminiFreeKeyTierError  = "gemini_free_key.tier_error"
+	// The parts of the key summary in those messages.
+	MsgGeminiFreeKeyKeys              = "gemini_free_key.keys"
+	MsgGeminiFreeKeyKeysTried         = "gemini_free_key.keys_tried"
+	MsgGeminiFreeKeyKeysRejected      = "gemini_free_key.keys_rejected"
+	MsgGeminiFreeKeyKeysNotFree       = "gemini_free_key.keys_not_free"
+	MsgGeminiFreeKeyKeysPausedDay     = "gemini_free_key.keys_paused_day"
+	MsgGeminiFreeKeyKeysDayFull       = "gemini_free_key.keys_day_full"
+	MsgGeminiFreeKeyKeysPausedMinute  = "gemini_free_key.keys_paused_minute"
+	MsgGeminiFreeKeyKeysPausedUnknown = "gemini_free_key.keys_paused_unknown"
+	MsgGeminiFreeKeyKeysRPMFull       = "gemini_free_key.keys_rpm_full"
+	MsgGeminiFreeKeyKeysTPMFull       = "gemini_free_key.keys_tpm_full"
+	MsgGeminiFreeKeyKeysReady         = "gemini_free_key.keys_ready"
+	MsgGeminiFreeKeyKeysSeparator     = "gemini_free_key.keys_separator"
 )
 
 // Emails and the name of the token created at registration, in the

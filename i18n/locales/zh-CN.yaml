@@ -88,6 +88,18 @@ gemini_free_key.no_key: "免费KEY模式：该渠道今天没有可用于 {{.Buc
 gemini_free_key.too_large: "免费KEY模式：请求有 {{.Tokens}} 个输入 tokens（由 {{.Source}} 计算），共 {{.Requests}} 个请求，超过单个 KEY 对 {{.Bucket}} 的上限（RPM {{.RPM}}，TPM {{.TPM}}，RPD {{.RPD}}），请求未发送到 Google"
 gemini_free_key.no_capacity: "免费KEY模式：该渠道当前没有 KEY 能容纳 {{.Bucket}} 的 {{.Tokens}} 个输入 tokens（{{.Keys}}）"
 gemini_free_key.tier_error: "免费KEY模式：Google 返回了 {{.Status}} 免费层报错：{{.Error}}"
+gemini_free_key.keys: "共 {{.Count}} 个 KEY"
+gemini_free_key.keys_tried: "{{.Count}} 个已尝试"
+gemini_free_key.keys_rejected: "{{.Count}} 个被 Google 拒绝"
+gemini_free_key.keys_not_free: "{{.Count}} 个的免费层不提供该模型"
+gemini_free_key.keys_paused_day: "{{.Count}} 个今天剩余时间暂停"
+gemini_free_key.keys_day_full: "{{.Count}} 个已达每日请求数上限"
+gemini_free_key.keys_paused_minute: "{{.Count}} 个因 Google 每分钟限制暂停"
+gemini_free_key.keys_paused_unknown: "{{.Count}} 个因限流暂停"
+gemini_free_key.keys_rpm_full: "{{.Count}} 个已达每分钟请求数上限"
+gemini_free_key.keys_tpm_full: "{{.Count}} 个已达每分钟输入 tokens 上限"
+gemini_free_key.keys_ready: "{{.Count}} 个有余量"
+gemini_free_key.keys_separator: "，"
 
 # 分组充值门槛消息
 group_access.topup_required: "分组 {{.Group}} 需要累计充值满 {{.Required}} 才能使用（当前累计 {{.Current}}）"

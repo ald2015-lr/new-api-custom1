@@ -21,6 +21,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -527,4 +528,122 @@ func TestKlingNativeRouteHidesTheUpstreamBalanceError(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(userView), "预扣费额度失败")
 	assert.NotContains(t, string(userView), "0.12")
+}
+
+// A Gemini channel in free key mode does not limit Veo's long-running
+// predictions, which go through the google task plugin; there Google's free
+// tier answers still reach the user exactly as a plain rate limit of Google
+// does through the task relay (unless the channel reveals them, when they
+// read as on any channel), the administrators keep the original, and
+// Google's rate limit never disables the free key.
+func TestGeminiFreeKeyChannelHidesFreeTierErrorsOfVeo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service.InitHttpClient()
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousMemoryCache, previousRedisEnabled := common.MemoryCacheEnabled, common.RedisEnabled
+	previousErrorLog, previousRetryTimes, previousAutoDisable := constant.ErrorLogEnabled, common.RetryTimes, common.AutomaticDisableChannelEnabled
+	// One database for every connection: the automatic disable writes from
+	// a goroutine of its own.
+	database, err := gorm.Open(sqlite.Open("file:gemini_free_key_veo?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
+	model.DB, model.LOG_DB = database, database
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	constant.ErrorLogEnabled, common.RetryTimes, common.AutomaticDisableChannelEnabled = true, 0, true
+	const veo = "veo-3.1-generate-preview"
+	previousModelRatios := ratio_setting.ModelRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"`+veo+`":1}`))
+	t.Cleanup(func() {
+		if sqlDB, err := database.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.MemoryCacheEnabled, common.RedisEnabled = previousMemoryCache, previousRedisEnabled
+		constant.ErrorLogEnabled, common.RetryTimes, common.AutomaticDisableChannelEnabled = previousErrorLog, previousRetryTimes, previousAutoDisable
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousModelRatios))
+	})
+	require.NoError(t, database.Create(&model.User{Id: 7, Username: "veo-user", Group: "default", Quota: 1_000_000}).Error)
+
+	const freeTier = `{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: veo-3.1-generate\nPlease retry in 55.905378193s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"model":"veo-3.1-generate","location":"global"}}]}]}}`
+	const plain = "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"
+	type answer struct {
+		status  int
+		body    string
+		log     model.Log
+		channel model.Channel
+	}
+	submit := func(t *testing.T, settings string, upstreamBody string) answer {
+		t.Helper()
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, upstreamBody)
+		}))
+		defer upstream.Close()
+		channel := model.Channel{Type: constant.ChannelTypeGemini, Name: "gemini-veo", Key: "AIzaSyVeoFreeKey-0123456789abcdefghij", BaseURL: &upstream.URL,
+			Status: common.ChannelStatusEnabled, Models: veo, Group: "default", OtherSettings: settings}
+		require.NoError(t, database.Create(&channel).Error)
+		generation := pluginruntime.DefaultRegistry.Generation()
+		require.NotNil(t, generation)
+		path := "/v1beta/models/" + veo + ":predictLongRunning"
+		binding, found := generation.LookupDeclaredRoute(http.MethodPost, "/v1beta/models/:model")
+		require.True(t, found)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"instances":[{"prompt":"a lighthouse"}]}`))
+		// The inner router names the path's wildcard by its position.
+		c.Params = gin.Params{{Key: "s2", Value: veo + ":predictLongRunning"}}
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set(pluginruntime.ContextKeyPinnedRoute, pluginruntime.PinnedRoute{Generation: generation, Plugin: binding.Plugin, Route: binding.Route})
+		common.SetContextKey(c, constant.ContextKeyUserId, 7)
+		common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+		common.SetContextKey(c, constant.ContextKeyUserQuota, 1_000_000)
+		middleware.PrepareTaskPluginRoute()(c)
+		require.False(t, c.IsAborted(), recorder.Body.String())
+		require.Nil(t, middleware.SetupContextForSelectedChannel(c, &channel, veo))
+		relayInfo := &relaycommon.RelayInfo{UserId: 7, UserGroup: "default", UsingGroup: "default", UserQuota: 1_000_000, TokenGroup: "default",
+			OriginModelName: veo, Billing: &nativeRouteBilling{userID: 7},
+			TaskRelayInfo: &relaycommon.TaskRelayInfo{Action: c.GetString("task_action"), PublicTaskID: "task_veo_" + settings, LockedChannel: &channel}}
+		outcome, taskErr := executeTaskSubmissionWith(c, relayInfo, relay.RelayTaskSubmit)
+		require.Nil(t, outcome)
+		require.NotNil(t, taskErr)
+		respondTaskSubmissionError(c, taskErr)
+		var errorLog model.Log
+		require.NoError(t, database.Where("type = ? AND channel_id = ?", model.LogTypeError, channel.Id).First(&errorLog).Error)
+		// The automatic disable runs on a goroutine of its own.
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		var stored model.Channel
+		require.NoError(t, database.First(&stored, channel.Id).Error)
+		return answer{status: recorder.Code, body: recorder.Body.String(), log: errorLog, channel: stored}
+	}
+	userView := func(t *testing.T, log model.Log) map[string]any {
+		t.Helper()
+		other, err := common.StrToMap(log.Other)
+		require.NoError(t, err)
+		delete(other, "admin_info")
+		return map[string]any{"content": log.Content, "other": other}
+	}
+
+	genuine := submit(t, "", plain)
+	require.Equal(t, http.StatusTooManyRequests, genuine.status)
+	hidden := submit(t, `{"gemini_free_key_enabled":true}`, freeTier)
+	assert.Equal(t, genuine.status, hidden.status)
+	assert.Equal(t, genuine.body, hidden.body, "the user gets Google's plain rate limit")
+	assert.Equal(t, userView(t, genuine.log), userView(t, hidden.log))
+	shown, err := common.Marshal(userView(t, hidden.log))
+	require.NoError(t, err)
+	for _, leak := range []string{"free", "Free", "billing", "limit: 0", "ai.dev", "gemini_free_key"} {
+		assert.NotContains(t, hidden.body+string(shown), leak)
+	}
+	assert.Contains(t, hidden.log.Other, "generate_content_free_tier_requests", "the administrators keep Google's answer")
+	assert.Equal(t, common.ChannelStatusEnabled, hidden.channel.Status, "Google's rate limit never disables the free key")
+
+	revealedOnMain := submit(t, "", freeTier)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, revealedOnMain.channel.Status, "without the mode the default keyword disables the key")
+	revealed := submit(t, `{"gemini_free_key_enabled":true,"gemini_free_key_reveal_tier_errors":true}`, freeTier)
+	assert.Equal(t, revealedOnMain.body, revealed.body)
+	assert.Equal(t, userView(t, revealedOnMain.log), userView(t, revealed.log))
+	assert.Equal(t, common.ChannelStatusEnabled, revealed.channel.Status)
 }

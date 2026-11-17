@@ -1,6 +1,8 @@
 package model
 
 import (
+	"slices"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/geminifreekey"
@@ -60,27 +62,39 @@ func geminiFreeKeyCannotServe(channel *Channel, modelName string, holdsCacheLock
 // dropGeminiFreeKeyExhaustedChannels removes from the cached channel ids those
 // that cannot serve modelName now (geminiFreeKeyCannotServe), unless that
 // would remove them all: the relay then answers with its rate limit, which
-// the retry moves past. The caller holds channelSyncLock.
-func dropGeminiFreeKeyExhaustedChannels(ids []int, modelName string) []int {
-	kept := make([]int, 0, len(ids))
+// the retry moves past. A channel the request already tried (tried) stays, so
+// that the priority tiers, which the retry index walks, stay as they were for
+// the request's first attempt; exhausted names it and every other channel
+// that cannot serve the model, which the tier's choice passes over while it
+// has another channel. The caller holds channelSyncLock.
+func dropGeminiFreeKeyExhaustedChannels(ids []int, modelName string, tried []int) (kept []int, exhausted map[int]bool) {
+	kept = make([]int, 0, len(ids))
 	for _, id := range ids {
 		if !geminiFreeKeyCannotServe(channelsIDM[id], modelName, true) {
 			kept = append(kept, id)
+			continue
+		}
+		if exhausted == nil {
+			exhausted = map[int]bool{}
+		}
+		exhausted[id] = true
+		if slices.Contains(tried, id) {
+			kept = append(kept, id)
 		}
 	}
-	if len(kept) == 0 || len(kept) == len(ids) {
-		return ids
+	if len(kept) == 0 {
+		return ids, exhausted
 	}
-	return kept
+	return kept, exhausted
 }
 
 // dropGeminiFreeKeyExhaustedAbilities is dropGeminiFreeKeyExhaustedChannels
 // for the abilities of database selection. It reads the Gemini channels among
 // them only once this process has relayed in free key mode, so that it costs
 // nothing where the mode is not used.
-func dropGeminiFreeKeyExhaustedAbilities(abilities []Ability, modelName string) []Ability {
+func dropGeminiFreeKeyExhaustedAbilities(abilities []Ability, modelName string, tried []int) ([]Ability, map[int]bool) {
 	if len(abilities) == 0 || !geminifreekey.Default().Active() {
-		return abilities
+		return abilities, nil
 	}
 	ids := make([]int, 0, len(abilities))
 	for _, ability := range abilities {
@@ -88,7 +102,7 @@ func dropGeminiFreeKeyExhaustedAbilities(abilities []Ability, modelName string) 
 	}
 	var channels []*Channel
 	if err := DB.Where("id IN ? AND type = ?", ids, constant.ChannelTypeGemini).Find(&channels).Error; err != nil || len(channels) == 0 {
-		return abilities
+		return abilities, nil
 	}
 	exhausted := map[int]bool{}
 	for _, channel := range channels {
@@ -97,16 +111,16 @@ func dropGeminiFreeKeyExhaustedAbilities(abilities []Ability, modelName string) 
 		}
 	}
 	if len(exhausted) == 0 {
-		return abilities
+		return abilities, nil
 	}
 	kept := make([]Ability, 0, len(abilities))
 	for _, ability := range abilities {
-		if !exhausted[ability.ChannelId] {
+		if !exhausted[ability.ChannelId] || slices.Contains(tried, ability.ChannelId) {
 			kept = append(kept, ability)
 		}
 	}
 	if len(kept) == 0 {
-		return abilities
+		return abilities, exhausted
 	}
-	return kept
+	return kept, exhausted
 }

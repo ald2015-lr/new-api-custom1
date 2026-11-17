@@ -167,3 +167,80 @@ func TestSelectionSkipsGeminiFreeKeyChannelsWithoutRoom(t *testing.T) {
 		})
 	}
 }
+
+// The free key skip keeps the priority tiers a request walks: a free channel
+// the request tried and exhausted keeps its tier, so that the retry goes on to
+// the next tier, but is not chosen again while its tier has another channel;
+// one exhausted before the request is passed over from its first attempt. A
+// single-key channel counts its one key, and a channel of another type is
+// never skipped, whatever its settings say. The memory cache and the database
+// agree.
+func TestSelectionKeepsTheTiersOfAGeminiFreeKeyRequest(t *testing.T) {
+	for _, memoryCache := range []bool{true, false} {
+		t.Run(map[bool]string{true: "memory cache", false: "database"}[memoryCache], func(t *testing.T) {
+			truncateTables(t)
+			originalMemoryCache := common.MemoryCacheEnabled
+			common.MemoryCacheEnabled = memoryCache
+			t.Cleanup(func() {
+				DB.Exec("DELETE FROM channels")
+				DB.Exec("DELETE FROM abilities")
+				common.MemoryCacheEnabled = true
+				InitChannelCache()
+				common.MemoryCacheEnabled = originalMemoryCache
+			})
+			limiter := geminifreekey.New(nil)
+			previous := geminifreekey.SetDefault(limiter)
+			t.Cleanup(func() { geminifreekey.SetDefault(previous) })
+
+			const on = `{"gemini_free_key_enabled":true}`
+			create := func(id, channelType int, key, models string, priority int64, weight uint, settings string) {
+				channel := Channel{Id: id, Type: channelType, Key: key, Status: common.ChannelStatusEnabled, Name: "gfk-tiers", Models: models, Group: "default", Priority: &priority, Weight: &weight, OtherSettings: settings}
+				require.NoError(t, channel.Insert())
+			}
+			create(960001, constant.ChannelTypeGemini, "gfk-tier-key", "gemini-2.5-flash", 10, 0, on)
+			create(960002, constant.ChannelTypeOpenAI, "sk-tier-5", "gemini-2.5-flash", 5, 0, "")
+			create(960003, constant.ChannelTypeOpenAI, "sk-tier-0", "gemini-2.5-flash", 0, 0, "")
+			create(960004, constant.ChannelTypeGemini, "gfk-same-tier-key", "gemini-3-flash-preview", 0, 100, on)
+			create(960005, constant.ChannelTypeOpenAI, "sk-same-tier", "gemini-3-flash-preview", 0, 1, "")
+			create(960006, constant.ChannelTypeOpenAI, "gfk-other-type-key", "gemini-3.6-flash", 10, 0, on)
+			create(960007, constant.ChannelTypeOpenAI, "sk-other-type", "gemini-3.6-flash", 0, 0, "")
+			if memoryCache {
+				InitChannelCache()
+			}
+			picked := func(modelName string, retry int, tried ...int) int {
+				t.Helper()
+				channel, err := GetRandomSatisfiedChannel("default", modelName, retry, nil, tried...)
+				require.NoError(t, err)
+				require.NotNil(t, channel)
+				return channel.Id
+			}
+			rows := dto.DefaultGeminiFreeKeyModelLimits()
+			pauseForTheDay := func(modelName, key string) {
+				pool := geminifreekey.Pool{Bucket: geminifreekey.ResolveBucket(rows, modelName), Rows: rows}
+				limiter.Observe(pool, geminifreekey.Key{Secret: key}, 429, []byte(`{"error":{"code":429,"message":"quota","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaValue":"20"}]}]}}`))
+			}
+
+			assert.Equal(t, 960001, picked("gemini-2.5-flash", 0))
+			assert.Equal(t, 960002, picked("gemini-2.5-flash", 1, 960001))
+			// The free channel's one key runs out on the request's first
+			// attempt: the retry still goes to the next tier.
+			pauseForTheDay("gemini-2.5-flash", "gfk-tier-key")
+			assert.Equal(t, 960002, picked("gemini-2.5-flash", 1, 960001))
+			assert.Equal(t, 960003, picked("gemini-2.5-flash", 2, 960001, 960002))
+			// A request that starts after it ran out passes over it.
+			assert.Equal(t, 960002, picked("gemini-2.5-flash", 0))
+			assert.Equal(t, 960003, picked("gemini-2.5-flash", 1, 960002))
+
+			// In one tier the free channel the request exhausted is not chosen
+			// again, however heavy it is.
+			pauseForTheDay("gemini-3-flash-preview", "gfk-same-tier-key")
+			for range 3 {
+				assert.Equal(t, 960005, picked("gemini-3-flash-preview", 1, 960004))
+			}
+
+			// Only a Gemini channel is in free key mode.
+			pauseForTheDay("gemini-3.6-flash", "gfk-other-type-key")
+			assert.Equal(t, 960006, picked("gemini-3.6-flash", 0))
+		})
+	}
+}

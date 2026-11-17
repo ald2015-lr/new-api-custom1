@@ -146,15 +146,20 @@ func syncChannelCacheOnce(sync func()) {
 	sync()
 }
 
+// GetRandomSatisfiedChannel picks a channel of the retry-th priority tier
+// for model. tried are the channels the request already tried: a Gemini
+// channel in free key mode among them keeps its tier once it cannot serve the
+// model any more (see dropGeminiFreeKeyExhaustedChannels).
 func GetRandomSatisfiedChannel(
 	group string,
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
+	tried ...int,
 ) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, filters)
+		return GetChannel(group, model, retry, filters, tried...)
 	}
 
 	channelSyncLock.RLock()
@@ -181,7 +186,7 @@ func GetRandomSatisfiedChannel(
 		}
 		return nil, nil
 	}
-	channels = dropGeminiFreeKeyExhaustedChannels(channels, model)
+	channels, freeKeyExhausted := dropGeminiFreeKeyExhaustedChannels(channels, model, tried)
 
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {
@@ -209,10 +214,25 @@ func GetRandomSatisfiedChannel(
 	}
 	targetPriority := int64(sortedUniquePriorities[retry])
 
+	// A free key channel the request tried and exhausted keeps its tier but
+	// is chosen only when nothing else in the tier is left.
+	candidates := channels
+	if len(freeKeyExhausted) > 0 {
+		var withRoom []int
+		for _, channelId := range channels {
+			if channel, ok := channelsIDM[channelId]; ok && channel.GetPriority() == targetPriority && !freeKeyExhausted[channelId] {
+				withRoom = append(withRoom, channelId)
+			}
+		}
+		if len(withRoom) > 0 {
+			candidates = withRoom
+		}
+	}
+
 	// get the priority for the given retry number
 	var sumWeight = 0
 	var targetChannels []*Channel
-	for _, channelId := range channels {
+	for _, channelId := range candidates {
 		if channel, ok := channelsIDM[channelId]; ok {
 			if channel.GetPriority() == targetPriority {
 				sumWeight += channel.GetWeight()

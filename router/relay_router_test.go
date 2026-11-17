@@ -3116,11 +3116,16 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401,429"))
 	operation_setting.AutomaticDisableKeywordsFromString("You exceeded your current quota\nPermission denied")
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
-	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"gemini-2.5-flash":0.01,"gemini-embedding-001":0.01,"gemini-3.6-flash":0.01,"gemini-2.5-pro":0.01,"gemini-genuine":0.01,"gemini-reveal":0.01,"gemini-reveal-genuine":0.01,"gemini-off":0.01}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"gemini-2.5-flash":0.01,"gemini-embedding-001":0.01,"gemini-3.6-flash":0.01,"gemini-2.5-pro":0.01,"gemini-genuine":0.01,"gemini-reveal":0.01,"gemini-reveal-genuine":0.01,"gemini-off":0.01,"gemini-tiers":0.01}`))
 
 	const generation = `{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4}}`
 	const freeTierTPM = `{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 250000, model: gemini-3.6-flash, description: Generate content input tokens per minute limit exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits.\nPlease retry in 49.477199395s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Learn more about Gemini API quotas","url":"https://aistudio.google.com/docs/rate-limits"}]},{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"description":"Generate content input tokens per minute limit exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits.","quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_input_token_count","quotaId":"GenerateContentInputTokensPerModelPerMinute-FreeTier","quotaDimensions":{"location":"global","model":"gemini-3.6-flash"},"quotaValue":"250000"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"49s"}]}}`
-	const freeTierRPD = `{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 14h7m39.282233548s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"location":"global","model":"gemini-2.5-flash"},"quotaValue":"20"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"50859s"}]}}`
+	// freeTierRPD is Google's per-day 429 answered at now, whose delay runs
+	// to the next midnight in Los Angeles, a little short as Google rounds it.
+	freeTierRPD := func(now time.Time) string {
+		delay := geminifreekey.NextReset(now).Sub(now) - 718*time.Millisecond
+		return fmt.Sprintf(`{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in %s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"location":"global","model":"gemini-2.5-flash"},"quotaValue":"20"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"%ds"}]}}`, delay, int(delay.Seconds()))
+	}
 	const plainRateLimit = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`
 
 	free := &freeKeyUpstream{calls: map[string]int{}}
@@ -3168,6 +3173,11 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 	offKeys := []string{"AIzaSyRouterOff0-abcdefghijklmnopqrstuv", "AIzaSyRouterOff1-abcdefghijklmnopqrstuv"}
 	off := create("gfk-off", revealGenuine, offKeys, "gemini-off", `{"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_max_attempts":3}`, 0)
 	require.NoError(t, model.DB.Model(&off).Update("auto_ban", 1).Error)
+	// Three priority tiers: free keys, then a paid channel, then one that
+	// always answers Google's rate limit.
+	create("gfk-tiers-free", free, []string{"AIzaSyRouterTiers0-abcdefghijklmnopqrst", "AIzaSyRouterTiers1-abcdefghijklmnopqrst"}, "gemini-tiers", `{"gemini_free_key_enabled":true}`, 10)
+	create("gfk-tiers-paid", paid, []string{"AIzaSyRouterTiersPaid-abcdefghijklmnop"}, "gemini-tiers", "", 5)
+	create("gfk-tiers-last", genuine, []string{"AIzaSyRouterTiersLast-abcdefghijklmnop"}, "gemini-tiers", "", 0)
 
 	engine := gin.New()
 	engine.Use(middleware.RequestId())
@@ -3300,6 +3310,18 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		free.respond(googleAnswers(100, http.StatusOK, generation))
 	})
 
+	// The free channel the request exhausted keeps its priority tier, so the
+	// retry goes to the next tier, not the one after it.
+	t.Run("a request its free channel refused retries on the next priority tier", func(t *testing.T) {
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		paidBefore := paid.count("generateContent")
+		recorder := requests["OpenAI chat"]("gemini-tiers")
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, paidBefore+1, paid.count("generateContent"))
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
 	t.Run("a model the free tier does not serve goes to the next channel untouched", func(t *testing.T) {
 		before := free.count("countTokens") + free.count("generateContent")
 		recorder := requests["OpenAI chat"]("gemini-2.5-pro")
@@ -3362,11 +3384,47 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 				require.Equal(t, real.Code, revealed.Code)
 				ours, theirs := revealed.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
 				assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(revealed.Body.String(), ours, "<id>"))
+				// The user's log reads as without the mode too.
+				revealedLogs, realLogs := errorLogsOf(t, ours), errorLogsOf(t, theirs)
+				require.Len(t, revealedLogs, 1)
+				require.Len(t, realLogs, 1)
+				assert.Equal(t, realLogs[0].Content, revealedLogs[0].Content)
+				revealedOther, err := common.StrToMap(revealedLogs[0].Other)
+				require.NoError(t, err)
+				realOther, err := common.StrToMap(realLogs[0].Other)
+				require.NoError(t, err)
+				for _, field := range []string{"error_type", "error_code", "status_code"} {
+					assert.Equal(t, realOther[field], revealedOther[field], field)
+				}
+				assert.Equal(t, "gemini_free_key_busy", adminInfoOf(t, revealedLogs[0])["upstream_error_code"], "the administrators see why the key stays enabled")
 			})
 		}
 		channel, err := model.GetChannelById(revealing.Id, true)
 		require.NoError(t, err)
 		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "no free key is disabled")
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	// A stream the channel refuses without asking Google gets the headers of
+	// a stream Google refused.
+	t.Run("a stream refused without Google reads like Google's own rate limit", func(t *testing.T) {
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 1 })
+		clock.Add(time.Minute)
+		free.respond(googleAnswers(250001, http.StatusOK, generation))
+		refused := requests["Gemini streamGenerateContent"]("gemini-3.6-flash")
+		real := requests["Gemini streamGenerateContent"]("gemini-genuine")
+		require.Equal(t, http.StatusTooManyRequests, real.Code)
+		require.Equal(t, real.Code, refused.Code)
+		headers := func(recorder *httptest.ResponseRecorder) http.Header {
+			header := recorder.Header().Clone()
+			header.Del(common.RequestIdKey)
+			return header
+		}
+		assert.Equal(t, headers(real), headers(refused))
+		assert.Equal(t, "no-cache", refused.Header().Get("Cache-Control"))
+		ours, theirs := refused.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
+		assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(refused.Body.String(), ours, "<id>"))
 		free.respond(googleAnswers(100, http.StatusOK, generation))
 	})
 
@@ -3390,7 +3448,7 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 
 	t.Run("once every key paused for the day the free channel is skipped", func(t *testing.T) {
 		clock.Add(time.Minute)
-		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierRPD))
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierRPD(clock.Now())))
 		recorder := requests["OpenAI chat"]("gemini-2.5-flash")
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		free.respond(googleAnswers(100, http.StatusOK, generation))
@@ -3462,5 +3520,58 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		recorder = requests["OpenAI chat"]("gemini-2.5-flash")
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.Equal(t, before+1, free.count("generateContent"))
+	})
+
+	// The usage panel says whether the mode is saved on, which keys are
+	// enabled (a single key with its channel) and lists the buckets the
+	// channel's models count in after its model mapping.
+	t.Run("the usage panel shows the mode, the enabled keys and the mapped models", func(t *testing.T) {
+		usageEngine := gin.New()
+		usageEngine.GET("/usage/:id", controller.GetGeminiFreeKeyUsage)
+		type keyUsage struct {
+			Index   int  `json:"index"`
+			Enabled bool `json:"enabled"`
+			Models  []struct {
+				Model string `json:"model"`
+			} `json:"models"`
+		}
+		usageOf := func(t *testing.T, channel model.Channel) (bool, []keyUsage) {
+			t.Helper()
+			require.NoError(t, model.DB.Create(&channel).Error)
+			recorder := httptest.NewRecorder()
+			usageEngine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/usage/%d", channel.Id), nil))
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var usage struct {
+				Success bool `json:"success"`
+				Data    struct {
+					Enabled bool       `json:"enabled"`
+					Keys    []keyUsage `json:"keys"`
+				} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &usage))
+			require.True(t, usage.Success)
+			return usage.Data.Enabled, usage.Data.Keys
+		}
+		modelsOf := func(key keyUsage) []string {
+			var names []string
+			for _, used := range key.Models {
+				names = append(names, used.Model)
+			}
+			return names
+		}
+		mapping := `{"gfk-usage-alias":"gemini-2.5-flash"}`
+		enabled, keys := usageOf(t, model.Channel{Name: "gfk-usage-off", Type: constant.ChannelTypeGemini, Status: common.ChannelStatusEnabled, Group: "default",
+			Key: "AIzaSyUsageOff0-abcdefghij\nAIzaSyUsageOff1-abcdefghij\nAIzaSyUsageOff2-abcdefghij", Models: "gfk-usage-alias", ModelMapping: &mapping, OtherSettings: `{"gemini_free_key_enabled":false}`,
+			ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling, MultiKeyStatusList: map[int]int{1: common.ChannelStatusManuallyDisabled}}})
+		assert.False(t, enabled, "the mode is not saved on")
+		require.Len(t, keys, 3)
+		assert.Equal(t, []bool{true, false, true}, []bool{keys[0].Enabled, keys[1].Enabled, keys[2].Enabled})
+		assert.Equal(t, []string{"gemini-2.5-flash"}, modelsOf(keys[0]), "the model counts in the bucket it is mapped to")
+
+		enabled, keys = usageOf(t, model.Channel{Name: "gfk-usage-single", Type: constant.ChannelTypeGemini, Status: common.ChannelStatusManuallyDisabled, Group: "default",
+			Key: "AIzaSyUsageSingle-abcdefghij", Models: "gemini-2.5-flash", OtherSettings: `{"gemini_free_key_enabled":true}`})
+		assert.True(t, enabled)
+		require.Len(t, keys, 1)
+		assert.False(t, keys[0].Enabled, "a single key is off with its channel")
 	})
 }

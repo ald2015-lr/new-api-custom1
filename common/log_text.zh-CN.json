@@ -648,7 +648,7 @@
   "failed to write to temp file: %s": "写入临时文件失败: %s",
   "final group ratio: %f": "最终分组倍率: %f",
   "final group: %s": "最终使用的分组: %s",
-  "free key error of channel #%d answered as a plain rate limit": "渠道 #%d 的免费KEY报错已按普通限流返回",
+  "free key error of channel #%d answered as Google's rate limit": "渠道 #%d 的免费KEY报错已按 Google 的限流报错返回",
   "getAndValidateTextRequest failed: %s": "getAndValidateTextRequest 失败: %s",
   "get_channel_null: %s": "查询渠道失败: %s",
   "granted %d pending invite rewards": "已发放 %d 份待发放的邀请奖励",

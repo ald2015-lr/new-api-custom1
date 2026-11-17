@@ -303,9 +303,11 @@ func TestLimiterUnlimitedAndZero(t *testing.T) {
 
 // Google's 429 pauses the key for the model: a per-minute quota for its
 // retry delay (within 1 s and 10 min), a per-day quota or a model the free
-// tier does not serve until the next Pacific midnight.
+// tier does not serve until the next Pacific midnight, unless Google's day
+// ends well before it.
 func TestRateLimitPause(t *testing.T) {
-	now := time.Date(2026, 11, 16, 9, 52, 20, 0, time.UTC)
+	// When Google answered the per-day sample: its 50859 s end at midnight.
+	now := time.Date(2026, 11, 16, 17, 52, 20, 0, time.UTC)
 	midnight := time.Date(2026, 11, 17, 0, 0, 0, 0, pst)
 	for _, tc := range []struct {
 		name   string
@@ -327,6 +329,11 @@ func TestRateLimitPause(t *testing.T) {
 		{"a delay over ten minutes", `{"error":{"code":429,"message":"x","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier","quotaValue":"5"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"3600s"}]}}`, ReasonMinute, now.Add(10 * time.Minute), nil},
 		{"violations without a quotaValue", `{"error":{"code":429,"message":"Resource has been exhausted.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaDimensions":{"model":"gemini-2.5-pro"}},{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier","quotaValue":"0"}]}]}}`, ReasonNotFree, midnight, []string{"gemini-2.5-pro"}},
 		{"limit 0 in the message alone", `{"error":{"code":429,"message":"* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-pro\nPlease retry in 55s.","status":"RESOURCE_EXHAUSTED"}}`, ReasonNotFree, midnight, nil},
+		{"per day, Google's delay a little short of midnight", dayQuotaAnswer("", "Please retry in 14h7m38s."), ReasonDay, midnight, nil},
+		{"per day, Google's day ending later than ours", dayQuotaAnswer("1s", "Please retry in 1.282233548s."), ReasonDay, now.Add(time.Second), nil},
+		{"per day, Google's delay from the message", dayQuotaAnswer("", "Please retry in 4m30s."), ReasonDay, now.Add(4*time.Minute + 30*time.Second), nil},
+		{"per day, a delay under a second", dayQuotaAnswer("", "Please retry in 120ms."), ReasonDay, now.Add(time.Second), nil},
+		{"per day without a delay", dayQuotaAnswer("", ""), ReasonDay, midnight, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pause := RateLimitPause([]byte(tc.body), now)
@@ -337,10 +344,25 @@ func TestRateLimitPause(t *testing.T) {
 	}
 }
 
+// dayQuotaAnswer is Google's per-day 429 for gemini-2.5-flash with the
+// RetryInfo delay retryInfo and the message's ending retryIn (each left out
+// when empty).
+func dayQuotaAnswer(retryInfo, retryIn string) string {
+	details := `{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaValue":"20"}]}`
+	if retryInfo != "" {
+		details += `,{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"` + retryInfo + `"}`
+	}
+	message := `You exceeded your current quota. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20`
+	if retryIn != "" {
+		message += `\n` + retryIn
+	}
+	return `{"error":{"code":429,"message":"` + message + `","status":"RESOURCE_EXHAUSTED","details":[` + details + `]}}`
+}
+
 // Observe pauses the key for the request's bucket and for the bucket of the
 // model Google names, and a daily pause shows the day as used up.
 func TestObservePausesTheKey(t *testing.T) {
-	start := time.Date(2026, 11, 16, 9, 52, 20, 0, time.UTC)
+	start := time.Date(2026, 11, 16, 17, 52, 20, 0, time.UTC)
 	limiter, clock := newTestLimiter(start)
 	rows := dto.DefaultGeminiFreeKeyModelLimits()
 	keys := testKeys(2)
@@ -371,6 +393,54 @@ func TestObservePausesTheKey(t *testing.T) {
 	// Midnight in Los Angeles is 16:00 in Beijing in winter.
 	clock.Set(time.Date(2026, 11, 17, 16, 0, 0, 0, time.FixedZone("CST", 8*60*60)))
 	assert.Equal(t, Report{Keys: 2, Ready: 2}, limiter.Inspect(flash, 0, 1, nil))
+}
+
+// A per-day 429 that Google answers just after Pacific midnight for its own
+// day, which has not ended yet (a late reset, or a request sent before
+// midnight), pauses the key only for Google's delay and leaves the new day's
+// count as it is.
+func TestDayPauseAfterMidnightFollowsGoogle(t *testing.T) {
+	rows := dto.DefaultGeminiFreeKeyModelLimits()
+	keys := testKeys(3)
+	pool := Pool{ChannelID: 1, Keys: keys, Bucket: ResolveBucket(rows, "gemini-2.5-flash"), Rows: rows}
+
+	t.Run("a late reset", func(t *testing.T) {
+		limiter, clock := newTestLimiter(time.Date(2026, 11, 17, 0, 0, 0, 500_000_000, pst))
+		for _, key := range keys {
+			verdict := limiter.Observe(pool, key, 429, []byte(dayQuotaAnswer("1s", "Please retry in 1.282233548s.")))
+			assert.Equal(t, ReasonDay, verdict.Reason)
+		}
+		assert.False(t, limiter.CanServe(pool))
+		clock.Add(time.Second)
+		assert.True(t, limiter.CanServe(pool), "Google said to retry in a second")
+		usage := limiter.Usage(keys[:1], rows, []string{"gemini-2.5-flash"})
+		assert.Zero(t, usage[0].Models[0].RPDUsed, "the new day is not used up")
+	})
+
+	t.Run("a request sent before midnight", func(t *testing.T) {
+		limiter, clock := newTestLimiter(time.Date(2026, 11, 16, 23, 59, 59, 900_000_000, pst))
+		ticket, _ := limiter.Reserve(pool, 10, 1, nil)
+		require.NotNil(t, ticket)
+		clock.Set(time.Date(2026, 11, 17, 0, 0, 0, 100_000_000, pst))
+		verdict := ticket.Finish(429, []byte(dayQuotaAnswer("1s", "Please retry in 900ms.")))
+		assert.True(t, time.Date(2026, 11, 17, 0, 0, 1, 100_000_000, pst).Equal(verdict.Until), verdict.Until.String())
+		clock.Add(time.Second)
+		ready, _ := limiter.Reserve(pool, 10, 1, nil)
+		assert.NotNil(t, ready)
+		usage := limiter.Usage(keys, rows, []string{"gemini-2.5-flash"})
+		assert.Equal(t, 1, usage[0].Models[0].RPDUsed+usage[1].Models[0].RPDUsed+usage[2].Models[0].RPDUsed, "only the new request counts today")
+	})
+
+	t.Run("Google's delay a little short of our midnight", func(t *testing.T) {
+		limiter, clock := newTestLimiter(time.Date(2026, 11, 16, 23, 59, 30, 0, pst))
+		verdict := limiter.Observe(pool, keys[0], 429, []byte(dayQuotaAnswer("29s", "Please retry in 29.5s.")))
+		midnight := time.Date(2026, 11, 17, 0, 0, 0, 0, pst)
+		assert.True(t, midnight.Equal(verdict.Until), verdict.Until.String())
+		usage := limiter.Usage(keys[:1], rows, []string{"gemini-2.5-flash"})
+		assert.Equal(t, 20, usage[0].Models[0].RPDUsed, "the day shows used up")
+		clock.Set(midnight)
+		assert.Equal(t, Report{Keys: 3, Ready: 3}, limiter.Inspect(pool, 0, 1, nil))
+	})
 }
 
 // A key Google rejects sits out every model for an hour; a 403 about the
@@ -424,6 +494,7 @@ func TestRevealsFreeTier(t *testing.T) {
 		"Quota exceeded for metric: x, limit: 0":                                                                            true,
 		"limit: 05 requests":                                                                                                false,
 		"Precondition check failed.":                                                                                        true,
+		"Permission denied: Consumer 'api_key:AIzaSyTestKey00' has been suspended.":                                         true,
 		"This model models/gemini-2.5-flash-lite is no longer available to new users.":                                      true,
 		"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.": false,
 	} {
@@ -439,7 +510,7 @@ func TestLimiterChoosesTheKey(t *testing.T) {
 	reserve := func(t *testing.T, limiter *Limiter, pool Pool, tried ...KeyID) int {
 		t.Helper()
 		ticket, report := limiter.Reserve(pool, 1, 1, tried)
-		require.NotNil(t, ticket, report.String())
+		require.NotNil(t, ticket, "%+v", report)
 		return ticket.Key.Index
 	}
 	t.Run("fewest requests this minute, then today, then in turn", func(t *testing.T) {

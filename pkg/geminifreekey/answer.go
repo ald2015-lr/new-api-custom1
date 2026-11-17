@@ -101,6 +101,10 @@ const (
 	minuteRetryMin     = time.Second
 	minuteRetryMax     = 10 * time.Minute
 	minuteRetryDefault = time.Minute
+	// dayResetSlack is how long before the next Pacific midnight Google's
+	// retry delay for a per-day quota may end and still mean that midnight:
+	// Google gives the delay in whole seconds, and clocks differ a little.
+	dayResetSlack = time.Minute
 )
 
 // Pause is how a key pauses for its bucket after Google's 429.
@@ -117,7 +121,9 @@ type Pause struct {
 //     quotaValue: the model is not on the key's free tier (ReasonNotFree),
 //     until the next Pacific midnight;
 //   - a violation of a per-day quota: ReasonDay, until the next Pacific
-//     midnight;
+//     midnight, or only for Google's retry delay when that ends well before
+//     it: Google's day has not ended yet although ours has (its reset came
+//     late, or the request was answered across midnight);
 //   - a violation of a per-minute quota: ReasonMinute, for Google's retry
 //     delay (RetryInfo, else the message's "retry in", else a minute) within
 //     a second and ten minutes;
@@ -147,6 +153,9 @@ func RateLimitPause(body []byte, now time.Time) Pause {
 		pause.Reason, pause.Until = ReasonNotFree, NextReset(now)
 	case perDay:
 		pause.Reason, pause.Until = ReasonDay, NextReset(now)
+		if delay, given := googleRetryDelay(googleError); given && now.Add(delay).Before(pause.Until.Add(-dayResetSlack)) {
+			pause.Until = now.Add(max(delay, minuteRetryMin))
+		}
 	case perMinute:
 		pause.Reason, pause.Until = ReasonMinute, now.Add(retryDelay(googleError))
 	default:
@@ -155,25 +164,29 @@ func RateLimitPause(body []byte, now time.Time) Pause {
 	return pause
 }
 
-// retryDelay is Google's retry delay: RetryInfo, else the message's "retry
-// in", else a minute, within a second and ten minutes.
-func retryDelay(e GoogleError) time.Duration {
-	delay := time.Duration(0)
+// googleRetryDelay is the retry delay Google gives: RetryInfo's, else the
+// message's "retry in", and whether it gives one above 0.
+func googleRetryDelay(e GoogleError) (time.Duration, bool) {
 	for _, detail := range e.Details {
 		if strings.HasSuffix(detail.Type, "google.rpc.RetryInfo") {
-			if parsed, err := time.ParseDuration(strings.TrimSpace(detail.RetryDelay)); err == nil {
-				delay = parsed
+			if parsed, err := time.ParseDuration(strings.TrimSpace(detail.RetryDelay)); err == nil && parsed > 0 {
+				return parsed, true
 			}
 		}
 	}
-	if delay <= 0 {
-		if match := retryInPattern.FindStringSubmatch(e.Message); match != nil {
-			if parsed, err := time.ParseDuration(match[1]); err == nil {
-				delay = parsed
-			}
+	if match := retryInPattern.FindStringSubmatch(e.Message); match != nil {
+		if parsed, err := time.ParseDuration(match[1]); err == nil && parsed > 0 {
+			return parsed, true
 		}
 	}
-	if delay <= 0 {
+	return 0, false
+}
+
+// retryDelay is Google's retry delay (googleRetryDelay), else a minute,
+// within a second and ten minutes.
+func retryDelay(e GoogleError) time.Duration {
+	delay, given := googleRetryDelay(e)
+	if !given {
 		return minuteRetryDefault
 	}
 	return min(max(delay, minuteRetryMin), minuteRetryMax)
