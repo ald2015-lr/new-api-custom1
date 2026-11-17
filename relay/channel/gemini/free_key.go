@@ -203,6 +203,13 @@ func (r *freeKeyRequest) end() (*http.Response, error) {
 	last := r.last
 	if last.verdict.Outcome == geminifreekey.OutcomeKeyRejected {
 		r.pointAt(last.key)
+		// The relay disables the key by its own rules; a key without a free
+		// tier, which those rules need not cover, is disabled here.
+		if !r.info.IsChannelTest && geminifreekey.IsFreeTierUnavailable(last.resp.StatusCode, last.body) {
+			if apiErr := r.answerError(last); !service.ShouldDisableChannel(apiErr) {
+				r.disableKey(last, apiErr, true)
+			}
+		}
 		return last.resp, nil
 	}
 	r.audit.Rejected = "rate_limited"
@@ -268,24 +275,46 @@ func (r *freeKeyRequest) nextKey() *geminifreekey.Key {
 // disableRejectedKey disables the key Google rejected on the request's last
 // answer, as ProcessChannelError does for the answer a request ends on
 // (respecting the channel's automatic disable), once the request moves on to
-// another key. A channel test disables nothing here: the test acts on the
-// answer it ends on, as it would without the mode, and the key sits out in
-// the limiter all the same.
+// another key. A key whose Google project has no free tier can never serve in
+// free key mode and is disabled whatever the relay's rules say. A channel test
+// disables nothing here: the test acts on the answer it ends on, as it would
+// without the mode, and the key sits out in the limiter all the same.
 func (r *freeKeyRequest) disableRejectedKey() {
 	last := r.last
 	r.last = nil
 	if last == nil || last.verdict.Outcome != geminifreekey.OutcomeKeyRejected || r.info.IsChannelTest {
 		return
 	}
-	apiErr := service.RelayErrorHandler(r.c.Request.Context(), &http.Response{StatusCode: last.resp.StatusCode, Header: last.resp.Header, Body: io.NopCloser(bytes.NewReader(last.body))}, false)
-	service.ResetStatusCode(apiErr, r.c.GetString("status_code_mapping"))
-	autoBan := common.GetContextKeyBool(r.c, appconstant.ContextKeyChannelAutoBan)
-	if !autoBan || !service.ShouldDisableChannel(apiErr) {
+	apiErr := r.answerError(last)
+	noFreeTier := geminifreekey.IsFreeTierUnavailable(last.resp.StatusCode, last.body)
+	if !noFreeTier && !service.ShouldDisableChannel(apiErr) {
 		return
 	}
-	channelError := *types.NewChannelError(r.info.ChannelId, r.info.ChannelType, common.GetContextKeyString(r.c, appconstant.ContextKeyChannelName), r.info.ChannelIsMultiKey, last.key.Secret, autoBan)
+	r.disableKey(last, apiErr, noFreeTier)
+}
+
+// answerError is the error the relay makes of answer.
+func (r *freeKeyRequest) answerError(answer *freeKeyAnswer) *types.NewAPIError {
+	apiErr := service.RelayErrorHandler(r.c.Request.Context(), &http.Response{StatusCode: answer.resp.StatusCode, Header: answer.resp.Header, Body: io.NopCloser(bytes.NewReader(answer.body))}, false)
+	service.ResetStatusCode(apiErr, r.c.GetString("status_code_mapping"))
+	return apiErr
+}
+
+// disableKey disables answer's key for apiErr, the error the relay made of
+// answer, when the channel disables failing keys automatically; noFreeTier
+// tells that its Google project has no free tier.
+func (r *freeKeyRequest) disableKey(answer *freeKeyAnswer, apiErr *types.NewAPIError, noFreeTier bool) {
+	autoBan := common.GetContextKeyBool(r.c, appconstant.ContextKeyChannelAutoBan)
+	if !autoBan {
+		return
+	}
+	channelError := *types.NewChannelError(r.info.ChannelId, r.info.ChannelType, common.GetContextKeyString(r.c, appconstant.ContextKeyChannelName), r.info.ChannelIsMultiKey, answer.key.Secret, autoBan)
 	reason := apiErr.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(r.c)...)
-	logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key", r.info.ChannelId, last.key.Index+1))
+	if noFreeTier {
+		logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d key #%d has no free tier on its Google project, disabling it", r.info.ChannelId, answer.key.Index+1))
+	} else {
+		logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key", r.info.ChannelId, answer.key.Index+1))
+	}
 	gopool.Go(func() {
 		service.DisableChannel(channelError, reason)
 	})

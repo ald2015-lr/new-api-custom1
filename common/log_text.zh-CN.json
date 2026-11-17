@@ -99,6 +99,7 @@
   "Fix null task_id task error: %v": "修复 task_id 为空的任务出错: %v",
   "Fix null task_id task success: %v": "修复 task_id 为空的任务成功: %v",
   "Gemini embedding request body: %s": "Gemini 嵌入请求体: %s",
+  "Gemini free key channel #%d key #%d has no free tier on its Google project, disabling it": "Gemini 免费KEY渠道 #%d 的 KEY #%d 所在的 Google 项目没有免费层，已禁用该 KEY",
   "Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key": "Gemini 免费KEY渠道 #%d 的 KEY #%d 被 Google 拒绝，已禁用该 KEY 并改用其他 KEY",
   "Gemini free key channel #%d: Google rejected key #%d on countTokens (status %d) and no other key may be tried, answering with that rejection": "Gemini 免费KEY渠道 #%d：KEY #%d 调用 countTokens 时被 Google 拒绝（状态码 %d），且没有其他可尝试的 KEY，按该拒绝返回",
   "Gemini free key channel #%d: Google rejected key #%d on countTokens (status %d), trying key #%d": "Gemini 免费KEY渠道 #%d：KEY #%d 调用 countTokens 时被 Google 拒绝（状态码 %d），改用 KEY #%d",

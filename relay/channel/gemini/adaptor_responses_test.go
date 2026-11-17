@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -420,6 +421,10 @@ const freeKeyDay429 = `{"error":{"code":429,"message":"x","status":"RESOURCE_EXH
 // freeKeyPlain429 is Google's rate limit without quota details.
 const freeKeyPlain429 = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`
 
+// freeKeyProjectUnavailable is Google's answer for a key whose project has no
+// free tier.
+const freeKeyProjectUnavailable = `{"error":{"code":403,"message":"The Gemini API free tier is not available for this project. To use the Gemini API, please set up billing to upgrade to the paid tier at https://aistudio.google.com/billing. For more information, see https://ai.google.dev/gemini-api/docs/troubleshooting#project-unavailable.","status":"PERMISSION_DENIED"}}`
+
 // On a Gemini channel in free key mode a request counts its input tokens
 // once with countTokens, goes to a key with room under the model's free tier
 // limits and moves to another key when Google answers 429 or rejects the
@@ -686,6 +691,134 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 		channel, err := model.GetChannelById(f.channelID, true)
 		require.NoError(t, err)
 		assert.NotContains(t, channel.ChannelInfo.MultiKeyStatusList, 0, "the healthy key stays enabled")
+	})
+
+	t.Run("a key whose project has no free tier is disabled whatever the global rules say", func(t *testing.T) {
+		previousAutoDisable := common.AutomaticDisableChannelEnabled
+		common.AutomaticDisableChannelEnabled = false
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previousAutoDisable })
+		f := newFreeKeyFixture(t, keys, nil)
+		f.google.generateAnswer = func(key string) (int, string) {
+			if key == keys[0] {
+				return http.StatusForbidden, freeKeyProjectUnavailable
+			}
+			return http.StatusOK, freeKeyGeneration
+		}
+		serverLog := captureFreeKeyServerLog(t)
+		c, info := f.request("gemini-2.5-flash", on)
+		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.NoError(t, err)
+		assert.Equal(t, freeKeyGeneration, readFreeKeyResponse(t, resp))
+		_, generates := f.google.calls()
+		assert.Equal(t, []string{keys[0], keys[1]}, []string{generates[0].key, generates[1].key})
+		assert.Equal(t, []geminifreekey.AuditAttempt{{KeyIndex: 0, Status: 403, Reason: "key_error"}, {KeyIndex: 1, Status: 200, Reason: "accepted"}}, freeKeyAuditOf(t, c).Attempts)
+		assert.Empty(t, freeKeyAuditOf(t, c).Rejected)
+		assert.Contains(t, serverLog.String(), fmt.Sprintf("Gemini free key channel #%d key #1 has no free tier on its Google project, disabling it", f.channelID))
+		assert.Eventually(t, func() bool {
+			channel, err := model.GetChannelById(f.channelID, true)
+			return err == nil && channel.ChannelInfo.MultiKeyStatusList[0] == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond)
+		channel, err := model.GetChannelById(f.channelID, true)
+		require.NoError(t, err)
+		assert.NotContains(t, channel.ChannelInfo.MultiKeyStatusList, 1, "the key that served stays enabled")
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+	})
+
+	t.Run("a channel without automatic disable keeps a key whose project has no free tier", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys, nil)
+		f.google.generateAnswer = func(key string) (int, string) {
+			if key == keys[0] {
+				return http.StatusForbidden, freeKeyProjectUnavailable
+			}
+			return http.StatusOK, freeKeyGeneration
+		}
+		serverLog := captureFreeKeyServerLog(t)
+		c, info := f.request("gemini-2.5-flash", on)
+		common.SetContextKey(c, constant.ContextKeyChannelAutoBan, false)
+		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.NoError(t, err)
+		assert.Equal(t, freeKeyGeneration, readFreeKeyResponse(t, resp))
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		assert.NotContains(t, serverLog.String(), "disabling it")
+		channel, err := model.GetChannelById(f.channelID, true)
+		require.NoError(t, err)
+		assert.NotContains(t, channel.ChannelInfo.MultiKeyStatusList, 0)
+		pool := geminifreekey.Pool{Keys: []geminifreekey.Key{{Index: 0, Secret: keys[0]}}, Bucket: geminifreekey.ResolveBucket(dto.DefaultGeminiFreeKeyModelLimits(), "gemini-2.5-flash")}
+		assert.Equal(t, geminifreekey.Report{Keys: 1, KeyError: 1}, f.limiter.Inspect(pool, 0, 1, nil), "the key sits out all the same")
+	})
+
+	t.Run("the last key whose project has no free tier is disabled and its answer returned", func(t *testing.T) {
+		previousAutoDisable := common.AutomaticDisableChannelEnabled
+		common.AutomaticDisableChannelEnabled = false
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previousAutoDisable })
+		f := newFreeKeyFixture(t, keys[:2], nil)
+		f.google.generateAnswer = func(key string) (int, string) {
+			if key == keys[1] {
+				return http.StatusForbidden, freeKeyProjectUnavailable
+			}
+			return http.StatusOK, freeKeyGeneration
+		}
+		// The distributor's key 0 is done for the day.
+		pool := geminifreekey.Pool{Bucket: geminifreekey.ResolveBucket(dto.DefaultGeminiFreeKeyModelLimits(), "gemini-2.5-flash")}
+		f.limiter.Observe(pool, geminifreekey.Key{Secret: keys[0]}, http.StatusTooManyRequests, []byte(freeKeyDay429))
+		c, info := f.request("gemini-2.5-flash", on)
+		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		assert.Equal(t, freeKeyProjectUnavailable, readFreeKeyResponse(t, resp))
+		assert.Equal(t, 1, info.ChannelMultiKeyIndex)
+		assert.Eventually(t, func() bool {
+			channel, err := model.GetChannelById(f.channelID, true)
+			return err == nil && channel.ChannelInfo.MultiKeyStatusList[1] == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond)
+		channel, err := model.GetChannelById(f.channelID, true)
+		require.NoError(t, err)
+		assert.NotContains(t, channel.ChannelInfo.MultiKeyStatusList, 0, "the key done for the day stays enabled")
+		// The user never learns that the key is a free one.
+		common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeGemini)
+		common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, on)
+		answer := &http.Response{StatusCode: resp.StatusCode, Header: resp.Header, Body: io.NopCloser(strings.NewReader(freeKeyProjectUnavailable))}
+		shown := service.DisguiseGeminiFreeKeyError(c, service.RelayErrorHandler(c.Request.Context(), answer, false))
+		require.NotNil(t, shown)
+		assert.Equal(t, http.StatusTooManyRequests, shown.StatusCode)
+		assert.NotContains(t, shown.Error(), "free tier")
+	})
+
+	t.Run("the last such key the relay's own rules disable is left to them", func(t *testing.T) {
+		previousAutoDisable, previousCodes := common.AutomaticDisableChannelEnabled, operation_setting.AutomaticDisableStatusCodeRanges
+		common.AutomaticDisableChannelEnabled = true
+		operation_setting.AutomaticDisableStatusCodeRanges = []operation_setting.StatusCodeRange{{Start: 403, End: 403}}
+		t.Cleanup(func() {
+			common.AutomaticDisableChannelEnabled, operation_setting.AutomaticDisableStatusCodeRanges = previousAutoDisable, previousCodes
+		})
+		f := newFreeKeyFixture(t, keys[:1], nil)
+		f.google.generateAnswer = func(string) (int, string) { return http.StatusForbidden, freeKeyProjectUnavailable }
+		serverLog := captureFreeKeyServerLog(t)
+		c, info := f.request("gemini-2.5-flash", on)
+		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		assert.NotContains(t, serverLog.String(), "disabling it", "the relay disables the key the request ends on once")
+	})
+
+	t.Run("the channel test leaves keys whose project has no free tier enabled", func(t *testing.T) {
+		f := newFreeKeyFixture(t, keys[:2], nil)
+		f.google.generateAnswer = func(string) (int, string) { return http.StatusForbidden, freeKeyProjectUnavailable }
+		serverLog := captureFreeKeyServerLog(t)
+		c, info := f.request("gemini-2.5-flash", on)
+		info.IsChannelTest = true
+		resp, err := (&Adaptor{}).DoRequest(c, info, bytes.NewBufferString(freeKeyChatBody))
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.(*http.Response).StatusCode)
+		_, generates := f.google.calls()
+		assert.Equal(t, []string{keys[0], keys[1]}, []string{generates[0].key, generates[1].key})
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		assert.NotContains(t, serverLog.String(), "disabling it")
+		channel, err := model.GetChannelById(f.channelID, true)
+		require.NoError(t, err)
+		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "neither the key moved past nor the key the test ends on")
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
 	})
 
 	t.Run("a request Google received stays counted when its answer never comes", func(t *testing.T) {

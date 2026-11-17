@@ -215,6 +215,28 @@ var keyRejectionPhrases = []string{
 	"has been suspended",
 	"denied access",
 	"permission denied on the service",
+	freeTierUnavailablePhrase,
+}
+
+// freeTierUnavailablePhrase, lower case, is Google's answer for a key whose
+// project has no free tier at all: "The Gemini API free tier is not
+// available for this project. To use the Gemini API, please set up billing
+// to upgrade to the paid tier …". Unlike a free tier closed to the caller's
+// country, it is about the key's project and lasts until billing is set up.
+const freeTierUnavailablePhrase = "free tier is not available for this project"
+
+// IsFreeTierUnavailable tells Google's 400 or 403 for a key whose project has
+// no free tier. Such a key can never serve in free key mode, so the relay
+// disables it rather than letting it sit out and come back.
+func IsFreeTierUnavailable(status int, body []byte) bool {
+	if status != 400 && status != 403 {
+		return false
+	}
+	message := string(body)
+	if googleError, ok := ParseGoogleError(body); ok && googleError.Message != "" {
+		message = googleError.Message
+	}
+	return strings.Contains(strings.ToLower(message), freeTierUnavailablePhrase)
 }
 
 // IsKeyRejection tells Google's answers that reject the key itself: any
