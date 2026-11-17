@@ -445,6 +445,10 @@ func TestDayPauseAfterMidnightFollowsGoogle(t *testing.T) {
 
 // A key Google rejects sits out every model for an hour; a 403 about the
 // request does not.
+// projectUnavailableSample is Google's answer for a key whose project has no
+// free tier.
+const projectUnavailableSample = `{"error":{"code":403,"message":"The Gemini API free tier is not available for this project. To use the Gemini API, please set up billing to upgrade to the paid tier at https://aistudio.google.com/billing. For more information, see https://ai.google.dev/gemini-api/docs/troubleshooting#project-unavailable.","status":"PERMISSION_DENIED"}}`
+
 func TestKeyRejection(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -457,6 +461,7 @@ func TestKeyRejection(t *testing.T) {
 		{"unauthenticated", 401, `{"error":{"code":401,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}`, true},
 		{"suspended", 403, `{"error":{"code":403,"message":"Permission denied: Consumer 'api_key:AIzaSyTest' has been suspended.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"CONSUMER_SUSPENDED","domain":"googleapis.com","metadata":{"consumer":"projects/123"}}]}}`, true},
 		{"project denied access", 403, `{"error":{"code":403,"message":"Your project has been denied access. Please contact support.","status":"PERMISSION_DENIED"}}`, true},
+		{"project without a free tier", 403, projectUnavailableSample, true},
 		{"a file the key may not read", 403, `{"error":{"code":403,"message":"You do not have permission to access the File abc or it may not exist.","status":"PERMISSION_DENIED"}}`, false},
 		{"bad request", 400, `{"error":{"code":400,"message":"* GenerateContentRequest.contents: contents is not specified\n","status":"INVALID_ARGUMENT"}}`, false},
 		{"rate limit", 429, ownerTPMSample, false},
@@ -464,6 +469,24 @@ func TestKeyRejection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.rejected, IsKeyRejection(tc.status, []byte(tc.body)))
+		})
+	}
+
+	for _, tc := range []struct {
+		name        string
+		status      int
+		body        string
+		unavailable bool
+	}{
+		{"project without a free tier", 403, projectUnavailableSample, true},
+		{"the same answer as a 400", 400, projectUnavailableSample, true},
+		{"a body that is not Google's JSON", 403, "The Gemini API free tier is not available for this project.", true},
+		{"a 429 naming it", 429, projectUnavailableSample, false},
+		{"free tier closed to the country", 400, `{"error":{"code":400,"message":"Gemini API free tier is not available in your country. Please enable billing on your project in Google AI Studio.","status":"FAILED_PRECONDITION"}}`, false},
+		{"suspended", 403, `{"error":{"code":403,"message":"Permission denied: Consumer 'api_key:AIzaSyTest' has been suspended.","status":"PERMISSION_DENIED"}}`, false},
+	} {
+		t.Run("free tier unavailable: "+tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.unavailable, IsFreeTierUnavailable(tc.status, []byte(tc.body)))
 		})
 	}
 
