@@ -661,6 +661,12 @@ func (l *Limiter) Active() bool {
 	return l.active.Load()
 }
 
+// MarkActive records that a request in free key mode came to the limiter,
+// also one answered before it counted anything (a model off the free tier).
+func (l *Limiter) MarkActive() {
+	l.active.Store(true)
+}
+
 // Now is the limiter's time.
 func (l *Limiter) Now() time.Time {
 	return l.now()

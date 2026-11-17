@@ -366,6 +366,41 @@ func freeKeyAuditOf(t *testing.T, c *gin.Context) *geminifreekey.Audit {
 	return audit
 }
 
+// freeKeyServerLog collects the server's log lines while a test runs.
+type freeKeyServerLog struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (l *freeKeyServerLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.text.Write(p)
+}
+
+func (l *freeKeyServerLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.text.String()
+}
+
+// captureFreeKeyServerLog collects the warnings and errors the server logs
+// until the test ends.
+func captureFreeKeyServerLog(t *testing.T) *freeKeyServerLog {
+	t.Helper()
+	log := &freeKeyServerLog{}
+	common.LogWriterMu.Lock()
+	previous := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = log
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultErrorWriter = previous
+		common.LogWriterMu.Unlock()
+	})
+	return log
+}
+
 func requireFreeKeyBusy(t *testing.T, err error) *types.NewAPIError {
 	t.Helper()
 	var apiErr *types.NewAPIError
@@ -500,6 +535,7 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 		assert.Empty(t, counts)
 		assert.Empty(t, generates)
 		assert.Equal(t, "not_free", freeKeyAuditOf(t, c).Rejected)
+		assert.True(t, f.limiter.Active(), "selection from the database skips the channel from now on")
 	})
 
 	t.Run("no key left for the model today is answered before counting", func(t *testing.T) {
@@ -524,12 +560,14 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 		f.google.countAnswer = func(string) (int, string) {
 			return http.StatusNotFound, `{"error":{"code":404,"message":"models/gemini-2.5-flash is not found for API version v1beta, or is not supported for countTokens.","status":"NOT_FOUND"}}`
 		}
+		serverLog := captureFreeKeyServerLog(t)
 		c, info := f.request("gemini-2.5-flash", on)
 		_, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
 		require.NoError(t, err)
 		audit := freeKeyAuditOf(t, c)
 		assert.Equal(t, 42, audit.Tokens)
 		assert.Equal(t, "local", audit.TokenSource)
+		assert.Contains(t, serverLog.String(), fmt.Sprintf("Gemini free key channel #%d: countTokens answered 404, using the local estimate", f.channelID))
 	})
 
 	t.Run("the local counter never calls countTokens", func(t *testing.T) {
@@ -563,10 +601,15 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 			}
 			return http.StatusOK, freeKeyGeneration
 		}
+		serverLog := captureFreeKeyServerLog(t)
 		c, info := f.request("gemini-2.5-flash", on)
 		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
 		require.NoError(t, err)
 		assert.Equal(t, freeKeyGeneration, readFreeKeyResponse(t, resp))
+		// The log numbers keys from 1, as the channel's key list does.
+		assert.Contains(t, serverLog.String(), fmt.Sprintf("Gemini free key channel #%d: Google rejected key #1 on countTokens (status 400), trying key #2", f.channelID))
+		assert.Contains(t, serverLog.String(), fmt.Sprintf("Gemini free key channel #%d key #2 was rejected by Google, disabling it and trying another key", f.channelID))
+		assert.NotContains(t, serverLog.String(), "local estimate", "countTokens counted on the next key")
 		counts, generates := f.google.calls()
 		assert.Equal(t, []string{keys[0], keys[1]}, []string{counts[0].key, counts[1].key})
 		assert.Equal(t, []string{keys[1], keys[2]}, []string{generates[0].key, generates[1].key})
@@ -612,12 +655,21 @@ func TestFreeKeyModeSendsEachRequestToAKeyWithRoom(t *testing.T) {
 			}
 			return http.StatusOK, `{"totalTokens":7}`
 		}
+		serverLog := captureFreeKeyServerLog(t)
+		common.SetLogLanguage("zh-CN")
+		t.Cleanup(func() {
+			// The automatic disable below logs from its own goroutine.
+			assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+			common.SetLogLanguage("")
+		})
 		c, info := f.request("gemini-2.5-flash", on)
 		resp, err := doFreeKeyRequest(t, c, info, freeKeyChatBody)
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 		_, generates := f.google.calls()
 		assert.Empty(t, generates)
+		assert.Contains(t, serverLog.String(), fmt.Sprintf("Gemini 免费KEY渠道 #%d：KEY #2 调用 countTokens 时被 Google 拒绝（状态码 403），且没有其他可尝试的 KEY，按该拒绝返回", f.channelID))
+		assert.NotContains(t, serverLog.String(), "本地估算")
 		assert.Equal(t, keys[1], info.ApiKey)
 		assert.Equal(t, 1, info.ChannelMultiKeyIndex)
 		assert.Equal(t, keys[1], common.GetContextKeyString(c, constant.ContextKeyChannelKey))

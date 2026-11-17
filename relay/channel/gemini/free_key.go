@@ -90,6 +90,10 @@ func (a *Adaptor) doFreeKeyRequest(c *gin.Context, info *relaycommon.RelayInfo, 
 		limiter:  geminifreekey.Default(),
 		attempts: settings.EffectiveGeminiFreeKeyMaxAttempts(),
 	}
+	// Selection from the database skips a channel that cannot serve the
+	// model only once the limiter is active, which a request the channel
+	// answers on its own makes it as well.
+	r.limiter.MarkActive()
 	r.pool = geminifreekey.Pool{ChannelID: info.ChannelId, Bucket: geminifreekey.ResolveBucket(rows, info.UpstreamModelName), Rows: rows}
 	r.pool.Keys, r.pool.Random = freeKeyPoolKeys(info)
 	r.audit = &geminifreekey.Audit{ChannelID: info.ChannelId, RetryIndex: info.RetryIndex, Bucket: r.pool.Bucket.ID, KeyIndex: -1}
@@ -193,6 +197,8 @@ func (a *Adaptor) doFreeKeyRequest(c *gin.Context, info *relaycommon.RelayInfo, 
 // pointing at that key (countTokens may have rejected it) so that the
 // automatic disable rules act on it, and a 429 as the error the relay makes
 // of it (the same JSON for the client) under ErrorCodeGeminiFreeKeyBusy.
+// The request keeps that 429 for its later attempts on the channel
+// (ContextKeyGeminiFreeKeyRateLimits).
 func (r *freeKeyRequest) end() (*http.Response, error) {
 	last := r.last
 	if last.verdict.Outcome == geminifreekey.OutcomeKeyRejected {
@@ -203,6 +209,12 @@ func (r *freeKeyRequest) end() (*http.Response, error) {
 	apiErr := service.RelayErrorHandler(r.c.Request.Context(), last.resp, false)
 	service.ResetStatusCode(apiErr, r.c.GetString("status_code_mapping"))
 	types.ErrOptionWithErrorCode(types.ErrorCodeGeminiFreeKeyBusy)(apiErr)
+	rateLimits, _ := common.GetContextKeyType[map[int]*types.NewAPIError](r.c, appconstant.ContextKeyGeminiFreeKeyRateLimits)
+	if rateLimits == nil {
+		rateLimits = map[int]*types.NewAPIError{}
+		common.SetContextKey(r.c, appconstant.ContextKeyGeminiFreeKeyRateLimits, rateLimits)
+	}
+	rateLimits[r.info.ChannelId] = apiErr
 	return nil, apiErr
 }
 
@@ -273,7 +285,7 @@ func (r *freeKeyRequest) disableRejectedKey() {
 	}
 	channelError := *types.NewChannelError(r.info.ChannelId, r.info.ChannelType, common.GetContextKeyString(r.c, appconstant.ContextKeyChannelName), r.info.ChannelIsMultiKey, last.key.Secret, autoBan)
 	reason := apiErr.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(r.c)...)
-	logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key", r.info.ChannelId, last.key.Index))
+	logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key", r.info.ChannelId, last.key.Index+1))
 	gopool.Go(func() {
 		service.DisableChannel(channelError, reason)
 	})
@@ -284,7 +296,8 @@ func (r *freeKeyRequest) disableRejectedKey() {
 // the body is a generate or embed request, else (or when countTokens fails)
 // with the local estimate; units is how many requests the body makes (the
 // items of a batch embedding). A countTokens answer that rejects the key
-// pauses it and moves to another key, as an attempt.
+// pauses it and moves to another key, as an attempt; once no other key may
+// be tried, the request ends on that answer (doFreeKeyRequest).
 func (r *freeKeyRequest) countTokens(body *freeKeyBody) (tokens int, units int, err error) {
 	data, err := body.bytes()
 	if err != nil {
@@ -292,20 +305,33 @@ func (r *freeKeyRequest) countTokens(body *freeKeyBody) (tokens int, units int, 
 	}
 	payload, units := countTokensPayload(data, r.info.UpstreamModelName)
 	if payload != nil && r.info.ChannelOtherSettings.EffectiveGeminiFreeKeyTokenCounter() == dto.GeminiFreeKeyTokenCounterCountTokens && !r.info.ChannelSetting.PassThroughBodyEnabled {
-		for key := r.nextKey(); key != nil; key = r.nextKey() {
+		key := r.nextKey()
+		for key != nil {
 			r.disableRejectedKey()
 			total, answer := r.callCountTokens(*key, payload)
 			if total >= 0 {
 				r.audit.Tokens, r.audit.TokenSource = total, dto.GeminiFreeKeyTokenCounterCountTokens
 				return total, units, nil
 			}
-			if answer == nil || !geminifreekey.IsKeyRejection(answer.resp.StatusCode, answer.body) {
+			if answer == nil {
 				break
 			}
-			answer.verdict = r.limiter.Observe(r.pool, *key, answer.resp.StatusCode, answer.body)
+			status := answer.resp.StatusCode
+			if !geminifreekey.IsKeyRejection(status, answer.body) {
+				logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d: countTokens answered %d, using the local estimate", r.info.ChannelId, status))
+				break
+			}
+			answer.verdict = r.limiter.Observe(r.pool, *key, status, answer.body)
 			r.tried = append(r.tried, geminifreekey.IDOf(key.Secret))
-			r.audit.Attempts = append(r.audit.Attempts, geminifreekey.AuditAttempt{KeyIndex: key.Index, Status: answer.resp.StatusCode, Reason: "count_tokens_" + string(answer.verdict.Reason)})
+			r.audit.Attempts = append(r.audit.Attempts, geminifreekey.AuditAttempt{KeyIndex: key.Index, Status: status, Reason: "count_tokens_" + string(answer.verdict.Reason)})
 			r.last = answer
+			// Key numbers count from 1, as the channel's key list shows them.
+			rejected := key.Index + 1
+			if key = r.nextKey(); key == nil {
+				logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d: Google rejected key #%d on countTokens (status %d) and no other key may be tried, answering with that rejection", r.info.ChannelId, rejected, status))
+				break
+			}
+			logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d: Google rejected key #%d on countTokens (status %d), trying key #%d", r.info.ChannelId, rejected, status, key.Index+1))
 		}
 	}
 	tokens = freeKeyLocalTokens(r.c, r.info)
@@ -314,7 +340,8 @@ func (r *freeKeyRequest) countTokens(body *freeKeyBody) (tokens int, units int, 
 }
 
 // callCountTokens asks Google to count payload on key. It returns the count,
-// or -1 with Google's answer when it gave one that is not a count.
+// or -1 with Google's answer when it gave one that is not a count, or -1
+// alone when it got no answer (the request then uses the local estimate).
 func (r *freeKeyRequest) callCountTokens(key geminifreekey.Key, payload []byte) (int, *freeKeyAnswer) {
 	info := r.info
 	version := model_setting.GetGeminiVersionSetting(info.UpstreamModelName)
@@ -359,7 +386,6 @@ func (r *freeKeyRequest) callCountTokens(key geminifreekey.Key, payload []byte) 
 			return *counted.TotalTokens, nil
 		}
 	}
-	logger.LogWarn(r.c, common.LogText("Gemini free key channel #%d: countTokens answered %d, using the local estimate", info.ChannelId, resp.StatusCode))
 	return -1, &freeKeyAnswer{key: key, resp: resp, body: data}
 }
 

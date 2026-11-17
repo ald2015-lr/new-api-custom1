@@ -46,8 +46,10 @@ func IsGeminiFreeTierError(err *types.NewAPIError) bool {
 // unless the channel reveals free tier errors, Google's free tier errors and
 // any other 429 of Google. A channel that reveals them shows Google's last
 // 429 as the relay made it, without ErrorCodeGeminiFreeKeyBusy, which only
-// keeps its key enabled. Otherwise, and on any other channel, it is nil.
-// Billing, retries, automatic disabling and the administrators' log keep err.
+// keeps its key enabled, and shows it as well in place of its own rejection
+// of a later attempt of the request (a retry that found the keys Google
+// refused paused). Otherwise, and on any other channel, it is nil. Billing,
+// retries, automatic disabling and the administrators' log keep err.
 func DisguiseGeminiFreeKeyError(c *gin.Context, err *types.NewAPIError) *types.NewAPIError {
 	if c == nil || err == nil || common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypeGemini {
 		return nil
@@ -59,6 +61,14 @@ func DisguiseGeminiFreeKeyError(c *gin.Context, err *types.NewAPIError) *types.N
 	local := err.GetErrorType() == types.ErrorTypeNewAPIError
 	busy := err.GetErrorCode() == types.ErrorCodeGeminiFreeKeyBusy
 	switch {
+	case busy && local && settings.GeminiFreeKeyRevealTierErrors:
+		rateLimits, _ := common.GetContextKeyType[map[int]*types.NewAPIError](c, constant.ContextKeyGeminiFreeKeyRateLimits)
+		if earlier := rateLimits[common.GetContextKeyInt(c, constant.ContextKeyChannelId)]; earlier != nil {
+			if shown := asGoogleSentIt(earlier); shown != nil {
+				return shown
+			}
+		}
+		// No answer of Google to show: its plain rate limit, below.
 	case busy && local:
 	case settings.GeminiFreeKeyRevealTierErrors:
 		if busy {

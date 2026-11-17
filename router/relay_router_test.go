@@ -3330,6 +3330,34 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		assert.Empty(t, errorLogsOf(t, recorder.Header().Get(common.RequestIdKey)), "selection skipped the free channel")
 	})
 
+	// Selection from the database (memory cache off) passes a free channel
+	// over once this process relayed in free key mode, which a request the
+	// channel refused on its own, sending nothing to Google, is too: the
+	// next request for a model the free tier does not serve goes straight
+	// to the paid channel.
+	t.Run("selection from the database skips the free channel after its own rejection", func(t *testing.T) {
+		memoryCache := common.MemoryCacheEnabled
+		common.MemoryCacheEnabled = false
+		fresh := geminifreekey.New(clock.Now)
+		previous := geminifreekey.SetDefault(fresh)
+		t.Cleanup(func() {
+			geminifreekey.SetDefault(previous)
+			common.MemoryCacheEnabled = memoryCache
+		})
+		asked, paidBefore := free.count("countTokens")+free.count("generateContent"), paid.count("generateContent")
+		first := requests["OpenAI chat"]("gemini-2.5-pro")
+		require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+		logs := errorLogsOf(t, first.Header().Get(common.RequestIdKey))
+		require.Len(t, logs, 1, "nothing marked the limiter active yet, so the free channel got the first request")
+		assert.Equal(t, freeChannel.Id, logs[0].ChannelId)
+		assert.Equal(t, "not_free", adminInfoOf(t, logs[0])["gemini_free_key"].(map[string]any)["rejected"])
+		second := requests["OpenAI chat"]("gemini-2.5-pro")
+		require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+		assert.Empty(t, errorLogsOf(t, second.Header().Get(common.RequestIdKey)), "selection skipped the free channel")
+		assert.Equal(t, paidBefore+2, paid.count("generateContent"))
+		assert.Equal(t, asked, free.count("countTokens")+free.count("generateContent"), "nothing reached Google on the free channel")
+	})
+
 	// The user gets exactly what a channel without the mode passes on from
 	// Google's own plain rate limit, in every format and in their log.
 	t.Run("an exhausted free channel answers as Google's plain rate limit", func(t *testing.T) {
@@ -3367,9 +3395,7 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		free.respond(googleAnswers(100, http.StatusOK, generation))
 	})
 
-	// Without a retry: a retry on the same channel would find every key
-	// paused, and the channel's own rejection always reads as a plain rate
-	// limit.
+	// Without a retry the request ends on Google's 429.
 	t.Run("a channel that reveals free tier errors passes Google's on as without the mode", func(t *testing.T) {
 		common.RetryTimes = 0
 		t.Cleanup(func() { common.RetryTimes = 1 })
@@ -3401,6 +3427,56 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		}
 		channel, err := model.GetChannelById(revealing.Id, true)
 		require.NoError(t, err)
+		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "no free key is disabled")
+		free.respond(googleAnswers(100, http.StatusOK, generation))
+	})
+
+	// The retry lands on the same channel, the only one for the model, and
+	// finds every key Google refused paused: the user still gets Google's
+	// 429 twice, as from a channel without the mode whose key answers it
+	// twice, while administrators see the channel's own rejection.
+	t.Run("a channel that reveals free tier errors passes Google's on after a retry on it", func(t *testing.T) {
+		free.respond(googleAnswers(100, http.StatusTooManyRequests, freeTierTPM))
+		for _, route := range routes {
+			t.Run(route, func(t *testing.T) {
+				clock.Add(time.Minute)
+				_, action, _ := strings.Cut(route, " ")
+				if route == "OpenAI chat" || route == "Claude messages" {
+					action = "generateContent"
+				}
+				asked := free.count(action, freeKeys...)
+				revealed := requests[route]("gemini-reveal")
+				real := requests[route]("gemini-reveal-genuine")
+				require.Equal(t, http.StatusTooManyRequests, real.Code)
+				assert.Contains(t, real.Body.String(), "generate_content_free_tier_input_token_count")
+				assert.Equal(t, asked+len(freeKeys), free.count(action, freeKeys...), "each key once, none on the retry")
+				require.Equal(t, real.Code, revealed.Code)
+				assert.Equal(t, real.Header().Get("Content-Type"), revealed.Header().Get("Content-Type"))
+				ours, theirs := revealed.Header().Get(common.RequestIdKey), real.Header().Get(common.RequestIdKey)
+				assert.Equal(t, strings.ReplaceAll(real.Body.String(), theirs, "<id>"), strings.ReplaceAll(revealed.Body.String(), ours, "<id>"))
+				revealedLogs, realLogs := errorLogsOf(t, ours), errorLogsOf(t, theirs)
+				require.Len(t, revealedLogs, 2, "the request and its retry")
+				require.Len(t, realLogs, 2)
+				for i := range realLogs {
+					assert.Equal(t, realLogs[i].Content, revealedLogs[i].Content)
+					revealedOther, err := common.StrToMap(revealedLogs[i].Other)
+					require.NoError(t, err)
+					realOther, err := common.StrToMap(realLogs[i].Other)
+					require.NoError(t, err)
+					for _, field := range []string{"error_type", "error_code", "status_code"} {
+						assert.Equal(t, realOther[field], revealedOther[field], field)
+					}
+				}
+				retry := adminInfoOf(t, revealedLogs[1])
+				assert.Equal(t, "gemini_free_key_busy", retry["upstream_error_code"])
+				assert.Contains(t, retry["upstream_error"], "Free key mode", "administrators see the channel's own rejection")
+				assert.Equal(t, "no_key", retry["gemini_free_key"].(map[string]any)["rejected"])
+			})
+		}
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		channel, err := model.GetChannelById(revealing.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
 		assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList, "no free key is disabled")
 		free.respond(googleAnswers(100, http.StatusOK, generation))
 	})

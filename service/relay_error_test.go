@@ -555,8 +555,9 @@ func TestShouldDisableChannelSparesGeminiFreeKeys(t *testing.T) {
 // included), in place of the channel's key limits always and, unless the
 // channel reveals them, of Google's free tier errors and any other 429 of
 // Google; a channel that reveals them shows Google's last 429 exactly as the
-// relay made it, without the code that keeps its key enabled. Nothing else
-// is replaced, and nothing is on any other channel.
+// relay made it, without the code that keeps its key enabled, also in place
+// of its own rejection of a request Google answered so on that channel
+// before. Nothing else is replaced, and nothing is on any other channel.
 func TestDisguiseGeminiFreeKeyError(t *testing.T) {
 	const plainGoogleRateLimit = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`
 	busy := func() *types.NewAPIError {
@@ -584,20 +585,31 @@ func TestDisguiseGeminiFreeKeyError(t *testing.T) {
 		disguised = "disguised"
 		asSent    = "as Google sent it"
 	)
+	// The request is on channel 7; earlierOn is the channel Google's 429
+	// ended an earlier attempt of it on, if any.
 	for _, tc := range []struct {
 		name        string
 		channelType int
 		settings    *kitdto.ChannelOtherSettings
 		mapping     string
+		earlierOn   int
 		want        map[string]string
 	}{
 		{name: "free key mode", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true},
+			want: map[string]string{"busy": disguised, "exhausted": disguised, "free tier 400": disguised, "paid 429": disguised, "overloaded": kept, "own quota": kept}},
+		{name: "free key mode after Google's 429 on the channel", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true}, earlierOn: 7,
 			want: map[string]string{"busy": disguised, "exhausted": disguised, "free tier 400": disguised, "paid 429": disguised, "overloaded": kept, "own quota": kept}},
 		{name: "free key mode with a status code mapping", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true}, mapping: `{"429":"503"}`,
 			want: map[string]string{"busy": disguised, "exhausted": disguised, "free tier 400": disguised, "paid 429": disguised, "overloaded": kept, "own quota": kept}},
 		{name: "free tier errors revealed", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true},
 			want: map[string]string{"busy": disguised, "exhausted": asSent, "free tier 400": kept, "paid 429": kept, "overloaded": kept, "own quota": kept}},
 		{name: "free tier errors revealed with a status code mapping", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true}, mapping: `{"429":"503"}`,
+			want: map[string]string{"busy": disguised, "exhausted": asSent, "free tier 400": kept, "paid 429": kept, "overloaded": kept, "own quota": kept}},
+		{name: "free tier errors revealed after Google's 429 on the channel", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true}, earlierOn: 7,
+			want: map[string]string{"busy": asSent, "exhausted": asSent, "free tier 400": kept, "paid 429": kept, "overloaded": kept, "own quota": kept}},
+		{name: "free tier errors revealed after Google's 429 on the channel with a status code mapping", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true}, mapping: `{"429":"503"}`, earlierOn: 7,
+			want: map[string]string{"busy": asSent, "exhausted": asSent, "free tier 400": kept, "paid 429": kept, "overloaded": kept, "own quota": kept}},
+		{name: "free tier errors revealed after Google's 429 on another channel", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true}, earlierOn: 8,
 			want: map[string]string{"busy": disguised, "exhausted": asSent, "free tier 400": kept, "paid 429": kept, "overloaded": kept, "own quota": kept}},
 		{name: "free key mode off", channelType: constant.ChannelTypeGemini, settings: &kitdto.ChannelOtherSettings{GeminiFreeKeyRevealTierErrors: true},
 			want: map[string]string{"busy": kept, "exhausted": kept, "free tier 400": kept, "paid 429": kept, "overloaded": kept, "own quota": kept}},
@@ -610,10 +622,15 @@ func TestDisguiseGeminiFreeKeyError(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 			common.SetContextKey(c, constant.ContextKeyChannelType, tc.channelType)
+			common.SetContextKey(c, constant.ContextKeyChannelId, 7)
 			if tc.settings != nil {
 				common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, *tc.settings)
 			}
 			c.Set("status_code_mapping", tc.mapping)
+			earlier := exhausted(tc.mapping)
+			if tc.earlierOn != 0 {
+				common.SetContextKey(c, constant.ContextKeyGeminiFreeKeyRateLimits, map[int]*types.NewAPIError{tc.earlierOn: earlier})
+			}
 			genuine := relayErrorOf(t, http.StatusTooManyRequests, plainGoogleRateLimit, tc.mapping)
 			for name, err := range map[string]*types.NewAPIError{"busy": busy(), "exhausted": exhausted(tc.mapping), "free tier 400": freeTier400(), "paid 429": paid429(), "overloaded": overloaded(), "own quota": ownQuota()} {
 				got := DisguiseGeminiFreeKeyError(c, err)
@@ -644,6 +661,7 @@ func TestDisguiseGeminiFreeKeyError(t *testing.T) {
 				}
 			}
 			assert.Nil(t, DisguiseGeminiFreeKeyError(c, nil))
+			assert.Equal(t, exhausted(tc.mapping), earlier, "the request's earlier answer is left as it was")
 		})
 	}
 	assert.Equal(t, http.StatusServiceUnavailable, relayErrorOf(t, http.StatusTooManyRequests, plainGoogleRateLimit, `{"429":"503"}`).StatusCode, "the mapping applies")

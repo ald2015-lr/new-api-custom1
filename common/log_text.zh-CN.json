@@ -100,6 +100,8 @@
   "Fix null task_id task success: %v": "修复 task_id 为空的任务成功: %v",
   "Gemini embedding request body: %s": "Gemini 嵌入请求体: %s",
   "Gemini free key channel #%d key #%d was rejected by Google, disabling it and trying another key": "Gemini 免费KEY渠道 #%d 的 KEY #%d 被 Google 拒绝，已禁用该 KEY 并改用其他 KEY",
+  "Gemini free key channel #%d: Google rejected key #%d on countTokens (status %d) and no other key may be tried, answering with that rejection": "Gemini 免费KEY渠道 #%d：KEY #%d 调用 countTokens 时被 Google 拒绝（状态码 %d），且没有其他可尝试的 KEY，按该拒绝返回",
+  "Gemini free key channel #%d: Google rejected key #%d on countTokens (status %d), trying key #%d": "Gemini 免费KEY渠道 #%d：KEY #%d 调用 countTokens 时被 Google 拒绝（状态码 %d），改用 KEY #%d",
   "Gemini free key channel #%d: countTokens answered %d, using the local estimate": "Gemini 免费KEY渠道 #%d：countTokens 返回 %d，改用本地估算",
   "Gemini free key channel #%d: countTokens failed, using the local estimate: %s": "Gemini 免费KEY渠道 #%d：countTokens 调用失败，改用本地估算：%s",
   "Gemini native embedding response body: %s": "Gemini 原生格式嵌入响应体: %s",

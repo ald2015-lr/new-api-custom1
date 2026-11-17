@@ -82,6 +82,13 @@ const (
 	// administrators' part of its logs.
 	ContextKeyGeminiFreeKeyAudit ContextKey = "gemini_free_key_audit"
 
+	// ContextKeyGeminiFreeKeyRateLimits stores, by channel id, Google's last
+	// 429 that ended an attempt of the request on a Gemini channel in free
+	// key mode (map[int]*types.NewAPIError), which a later attempt the
+	// channel refuses on its own shows on a channel that reveals free tier
+	// errors.
+	ContextKeyGeminiFreeKeyRateLimits ContextKey = "gemini_free_key_rate_limits"
+
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage             ContextKey = "language"
 	ContextKeyIsStream             ContextKey = "is_stream"
