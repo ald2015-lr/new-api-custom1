@@ -4436,9 +4436,15 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	}
 
 	t.Run("text over the budget is sent in part and audited as truncated", func(t *testing.T) {
-		// Pieces of 2000 and 1000 runes: only the second fits the budget.
-		recorder := chat("mod-budget", userMessage(distinct(unique("budget"), 3000)[:3000]))
+		// Pieces of 2000 and 1000 runes: the budget of 1000 checks the start
+		// of the first piece instead of skipping it.
+		text := distinct(unique("budget"), 3000)[:3000]
+		mark := upstream.mark()
+		recorder := chat("mod-budget", userMessage(text))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/moderations")
+		require.Len(t, calls, 1)
+		assert.Contains(t, calls[0].Body, `"input":["`+text[:1000]+`"]`)
 		audit := consumeAudit(t, recorder)
 		assert.Equal(t, true, audit["truncated"])
 		assert.Equal(t, float64(1000), audit["checked_chars"])

@@ -1302,11 +1302,12 @@ func TestRules(t *testing.T) {
 
 // ---- pieces and budget ----
 
-// distinctText is n runes of text that splits into distinct pieces.
+// distinctText is n runes of text that splits into distinct pieces. It holds
+// no whitespace, which normalisation would trim at its end.
 func distinctText(seed string, n int) string {
 	var b strings.Builder
 	for i := 0; utf8.RuneCountInString(b.String()) < n; i++ {
-		fmt.Fprintf(&b, "%s%07d ", seed, i)
+		fmt.Fprintf(&b, "%s%07d,", seed, i)
 	}
 	return string([]rune(b.String())[:n])
 }
@@ -1329,88 +1330,140 @@ func groupRunes(plan budgetPlan) map[int]int {
 
 func noVerdicts(string) bool { return false }
 
+func sentTexts(plan budgetPlan) []string {
+	var texts []string
+	for _, p := range plan.send {
+		texts = append(texts, p.text)
+	}
+	return texts
+}
+
 // The budget of uncached runes goes to system text up to half of it, then the
 // newest user message, then the rest of the system text, then older user
-// messages; cached pieces are free and over-budget text is only audited.
+// messages; cached pieces are free, a piece longer than what is left is sent
+// cut to it, and over-budget text is only audited.
 func TestBudgetOrder(t *testing.T) {
 	const endpoint = "https://api.openai.com/v1/moderations"
 	t.Run("system is capped at half the budget before the newest user message", func(t *testing.T) {
-		ex := segmentsOf(roleSystem, distinctText("s", 12000), roleUser, distinctText("old", 2000), roleUser, distinctText("new", 3000))
+		system := distinctText("s", 12000)
+		ex := segmentsOf(roleSystem, system, roleUser, distinctText("old", 2000), roleUser, distinctText("new", 3000))
 		candidates, truncated := candidatePieces(ex, endpoint, 10000)
 		assert.False(t, truncated)
-		plan := planBudget(candidates, noVerdicts, 10000)
-		// 4000 system runes (a third 2000-rune piece would pass half the
-		// budget), the 3000 of the newest message, then 2000 more system runes.
-		assert.Equal(t, map[int]int{groupSystem: 6000, groupNewestUser: 3000}, groupRunes(plan))
-		assert.Equal(t, 9000, plan.checked)
+		plan := planBudget(candidates, noVerdicts, 10000, endpoint)
+		// Two system pieces and half of a third reach half the budget, then
+		// the 3000 runes of the newest message; the rest completes the third
+		// system piece and checks the end of the fifth.
+		assert.Equal(t, map[int]int{groupSystem: 7000, groupNewestUser: 3000}, groupRunes(plan))
+		assert.Equal(t, 10000, plan.checked)
 		assert.True(t, plan.truncated, "the older user message and the rest of the system text are not sent")
 		var order []int
 		for _, p := range plan.send {
 			order = append(order, p.group)
 		}
-		assert.Equal(t, []int{groupSystem, groupSystem, groupNewestUser, groupNewestUser, groupSystem}, order)
+		assert.Equal(t, []int{groupSystem, groupSystem, groupSystem, groupNewestUser, groupNewestUser, groupSystem}, order)
+		pieces := splitRunes(system, pieceMaxRunes)
+		assert.Equal(t, pieces[1], plan.send[2].text, "the piece cut at half the budget is completed later")
+		assert.Equal(t, pieces[4][1000:], plan.send[5].text, "a piece from the end of its segment keeps its end")
 	})
 	t.Run("system padding cannot push the newest user message out", func(t *testing.T) {
 		ex := segmentsOf(roleSystem, distinctText("pad", 50000), roleUser, "MOD-FLAG-SEXUAL")
 		candidates, _ := candidatePieces(ex, endpoint, 10000)
-		plan := planBudget(candidates, noVerdicts, 10000)
-		require.Len(t, plan.send, 5)
-		assert.Equal(t, groupNewestUser, plan.send[2].group, "right after the first half of the budget")
-		assert.Equal(t, "MOD-FLAG-SEXUAL", plan.send[2].text)
-		assert.Equal(t, 8000, groupRunes(plan)[groupSystem])
+		plan := planBudget(candidates, noVerdicts, 10000, endpoint)
+		require.Len(t, plan.send, 6)
+		assert.Equal(t, groupNewestUser, plan.send[3].group, "right after the first half of the budget")
+		assert.Equal(t, "MOD-FLAG-SEXUAL", plan.send[3].text)
+		assert.Equal(t, 10000-len("MOD-FLAG-SEXUAL"), groupRunes(plan)[groupSystem])
+	})
+	t.Run("the default budget is used up in its order", func(t *testing.T) {
+		// The 9000-rune system prompt fills half the budget with whole pieces;
+		// the newest message gets the other half: its start, its end and the
+		// start of its middle piece.
+		system, user := distinctText("系统", 9000), distinctText("用户", 6000)
+		candidates, _ := candidatePieces(segmentsOf(roleSystem, system, roleUser, user), endpoint, 10000)
+		plan := planBudget(candidates, noVerdicts, 10000, endpoint)
+		s, u := splitRunes(system, pieceMaxRunes), splitRunes(user, pieceMaxRunes)
+		assert.Equal(t, []string{s[0], s[4], s[1], u[0], u[2], string([]rune(u[1])[:1000])}, sentTexts(plan))
+		assert.Equal(t, map[int]int{groupSystem: 5000, groupNewestUser: 5000}, groupRunes(plan))
+		assert.Equal(t, 10000, plan.checked)
+		assert.True(t, plan.truncated)
+
+		// A 9500-rune system prompt reaches half the budget inside its third
+		// piece; after the newest message the rest of the budget completes
+		// that piece and checks the end of the next one.
+		system, user = distinctText("系统", 9500), distinctText("用户", 3000)
+		candidates, _ = candidatePieces(segmentsOf(roleSystem, system, roleUser, user), endpoint, 10000)
+		plan = planBudget(candidates, noVerdicts, 10000, endpoint)
+		s, u = splitRunes(system, pieceMaxRunes), splitRunes(user, pieceMaxRunes)
+		assert.Equal(t, []string{s[0], s[4], s[1], u[0], u[1], string([]rune(s[3])[500:])}, sentTexts(plan))
+		assert.Equal(t, map[int]int{groupSystem: 7000, groupNewestUser: 3000}, groupRunes(plan))
+		assert.Equal(t, 10000, plan.checked)
+		assert.True(t, plan.truncated)
+		for _, p := range plan.send {
+			assert.Equal(t, utf8.RuneCountInString(p.text), p.runes)
+			assert.Equal(t, textKey(endpoint, p.text), p.key)
+		}
+	})
+	t.Run("text that fits is sent in the same pieces every time", func(t *testing.T) {
+		// Half the budget ends inside a system piece, but the budget is not
+		// the limit: the piece is sent whole, so its verdict is cached.
+		candidates, _ := candidatePieces(segmentsOf(roleSystem, distinctText("系统", 9500), roleUser, distinctText("用户", 500)), endpoint, 10000)
+		plan := planBudget(candidates, noVerdicts, 10000, endpoint)
+		assert.ElementsMatch(t, candidates, plan.send)
+		assert.Equal(t, 10000, plan.checked)
+		assert.False(t, plan.truncated)
 	})
 	t.Run("pieces alternate between the start and the end of a segment", func(t *testing.T) {
 		text := distinctText("p", 10000)
 		ex := segmentsOf(roleSystem, text)
 		candidates, _ := candidatePieces(ex, endpoint, 10000)
-		plan := planBudget(candidates, noVerdicts, 10000)
+		plan := planBudget(candidates, noVerdicts, 10000, endpoint)
 		pieces := splitRunes(text, pieceMaxRunes)
 		require.Len(t, pieces, 5)
-		var sent []string
-		for _, p := range plan.send {
-			sent = append(sent, p.text)
-		}
-		assert.Equal(t, []string{pieces[0], pieces[4], pieces[1], pieces[3], pieces[2]}, sent)
+		assert.Equal(t, []string{pieces[0], pieces[4], pieces[1], pieces[3], pieces[2]}, sentTexts(plan))
 		assert.Equal(t, []int{0, 3, 1, 2}, alternate(4))
 	})
-	t.Run("the newest user message keeps start and end when it is longer than the budget", func(t *testing.T) {
+	t.Run("the newest user message is checked from both ends up to the budget", func(t *testing.T) {
 		text := distinctText("u", 7000)
 		candidates, _ := candidatePieces(segmentsOf(roleUser, text), endpoint, 4000)
-		plan := planBudget(candidates, noVerdicts, 4000)
+		plan := planBudget(candidates, noVerdicts, 4000, endpoint)
 		pieces := splitRunes(text, pieceMaxRunes)
-		require.Len(t, plan.send, 2)
-		assert.Equal(t, pieces[0], plan.send[0].text)
-		assert.Equal(t, pieces[3], plan.send[1].text, "the short last piece fits after the first")
+		assert.Equal(t, []string{pieces[0], pieces[3], pieces[1][:1000]}, sentTexts(plan), "the start, the short last piece, then the start of the second piece")
+		assert.Equal(t, 4000, plan.checked)
 		assert.True(t, plan.truncated)
 	})
 	t.Run("whitespace-only pieces are dropped and duplicates count once", func(t *testing.T) {
 		seg := &segment{role: roleUser, norm: &normalized{text: strings.Repeat("a", 2000) + strings.Repeat(" ", 2000) + "b"}}
 		source := &pieceSource{segments: []*segment{seg}}
 		var taken []string
-		for text, ok := source.take(); ok; text, ok = source.take() {
+		for text, _, ok := source.take(); ok; text, _, ok = source.take() {
 			taken = append(taken, text)
 		}
 		assert.Equal(t, []string{strings.Repeat("a", 2000), "b"}, taken)
 		candidates, _ := candidatePieces(segmentsOf(roleUser, "same text", roleUser, "same text", roleSystem, "same text"), endpoint, 10000)
 		assert.Len(t, candidates, 1)
+		seg = &segment{role: roleUser, norm: &normalized{text: strings.Repeat(" ", 1000) + "b"}}
+		candidates, _ = candidatePieces(&extraction{segments: []*segment{seg}}, endpoint, 1000)
+		plan := planBudget(candidates, noVerdicts, 1000, endpoint)
+		assert.Empty(t, plan.send, "a cut that holds only whitespace is not sent")
+		assert.True(t, plan.truncated)
 	})
 	t.Run("cached pieces are free", func(t *testing.T) {
 		cachedText := distinctText("c", 2000)
 		candidates, _ := candidatePieces(segmentsOf(roleUser, cachedText, roleUser, distinctText("n", 1000)), endpoint, 1000)
-		plan := planBudget(candidates, func(key string) bool { return key == textKey(endpoint, cachedText) }, 1000)
+		plan := planBudget(candidates, func(key string) bool { return key == textKey(endpoint, cachedText) }, 1000, endpoint)
 		assert.Equal(t, 1, plan.cached)
 		assert.Equal(t, 1000, plan.checked)
 		assert.False(t, plan.truncated)
 	})
-	t.Run("budget reached exactly or exceeded by one rune", func(t *testing.T) {
-		candidates, _ := candidatePieces(segmentsOf(roleUser, distinctText("e", 1000)), endpoint, 1000)
-		plan := planBudget(candidates, noVerdicts, 1000)
-		assert.Equal(t, 1000, plan.checked)
-		assert.False(t, plan.truncated)
-		candidates, _ = candidatePieces(segmentsOf(roleUser, distinctText("e", 1001)), endpoint, 1000)
-		plan = planBudget(candidates, noVerdicts, 1000)
-		assert.Equal(t, 0, plan.checked)
-		assert.True(t, plan.truncated)
+	t.Run("a message longer than the budget is checked from its start up to the budget", func(t *testing.T) {
+		for _, n := range []int{1000, 1001, 1500} {
+			text := distinctText("e", n)
+			candidates, _ := candidatePieces(segmentsOf(roleUser, text), endpoint, 1000)
+			plan := planBudget(candidates, noVerdicts, 1000, endpoint)
+			assert.Equal(t, []string{text[:1000]}, sentTexts(plan), n)
+			assert.Equal(t, 1000, plan.checked, n)
+			assert.Equal(t, n > 1000, plan.truncated, n)
+		}
 	})
 	t.Run("at most 256 pieces are considered", func(t *testing.T) {
 		var roleTexts []string
@@ -1428,7 +1481,7 @@ func TestBudgetOrder(t *testing.T) {
 			roleTexts = append(roleTexts, roleUser, distinctText(fmt.Sprintf("m%03d-", i), 2000))
 		}
 		candidates, _ := candidatePieces(segmentsOf(roleTexts...), endpoint, 200000)
-		plan := planBudget(candidates, noVerdicts, 200000)
+		plan := planBudget(candidates, noVerdicts, 200000, endpoint)
 		assert.Equal(t, 200000, plan.checked)
 		calls := packCalls(plan.send, nil)
 		assert.Len(t, calls, 25)

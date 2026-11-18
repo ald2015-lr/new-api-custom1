@@ -27,10 +27,11 @@ const (
 // piece is at most pieceMaxRunes of normalised text: what one moderation
 // input carries and one verdict describes.
 type piece struct {
-	text  string
-	runes int
-	key   string
-	group int
+	text    string
+	runes   int
+	key     string
+	group   int
+	fromEnd bool // taken from the end of its segment, so a cut keeps its end
 }
 
 type imageCandidate struct {
@@ -49,18 +50,19 @@ type pieceSource struct {
 	next     int
 }
 
-func (s *pieceSource) take() (string, bool) {
+func (s *pieceSource) take() (text string, fromEnd, ok bool) {
 	for {
 		if s.next < len(s.order) {
 			p := s.pieces[s.order[s.next]]
+			fromEnd = s.next%2 == 1
 			s.next++
 			if strings.TrimSpace(p) == "" {
 				continue
 			}
-			return p, true
+			return p, fromEnd, true
 		}
 		if len(s.segments) == 0 {
-			return "", false
+			return "", false, false
 		}
 		s.pieces = splitRunes(s.segments[0].normalized().text, pieceMaxRunes)
 		s.order = alternate(len(s.pieces))
@@ -120,7 +122,7 @@ func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []
 	}
 	seen := make(map[string]bool)
 	full := false
-	add := func(text string, group int) {
+	add := func(text string, group int, fromEnd bool) {
 		key := textKey(endpoint, text)
 		if seen[key] {
 			return
@@ -130,16 +132,16 @@ func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []
 			return
 		}
 		seen[key] = true
-		candidates = append(candidates, &piece{text: text, runes: utf8.RuneCountInString(text), key: key, group: group})
+		candidates = append(candidates, &piece{text: text, runes: utf8.RuneCountInString(text), key: key, group: group, fromEnd: fromEnd})
 	}
 	drain := func(source *pieceSource, group int, limit int) {
 		used := 0
 		for !full && (limit < 0 || used < limit) {
-			text, ok := source.take()
+			text, fromEnd, ok := source.take()
 			if !ok {
 				return
 			}
-			add(text, group)
+			add(text, group, fromEnd)
 			used += utf8.RuneCountInString(text)
 		}
 	}
@@ -160,40 +162,69 @@ type budgetPlan struct {
 
 // planBudget fills the budget of uncached runes: system text up to half of
 // it (rounded down), then the newest user message, then the rest of the
-// system text, then the older user messages. Cached pieces are free; a piece
-// that does not fit is skipped, as a later, shorter one may still fit.
-func planBudget(candidates []*piece, known func(key string) bool, budget int) budgetPlan {
+// system text, then the older user messages. Cached pieces are free. When a
+// piece is longer than what is left, its start is sent, or its end for a
+// piece taken from the end of its segment, so no budget goes unused while
+// unchecked text remains. A system piece cut at half the budget is completed
+// first in the third step, so a piece goes out cut only when the whole budget
+// is spent: text that fits is sent in the same pieces every time and its
+// verdicts hit the cache.
+func planBudget(candidates []*piece, known func(key string) bool, budget int, endpoint string) budgetPlan {
 	var plan budgetPlan
-	taken := make([]bool, len(candidates))
-	systemCap, systemChecked := budget/2, 0
-	take := func(i int, p *piece) {
-		taken[i] = true
-		plan.send = append(plan.send, p)
-		plan.checked += p.runes
-	}
+	cached := make([]bool, len(candidates))
 	for i, p := range candidates {
 		if known(p.key) {
-			taken[i] = true
+			cached[i] = true
 			plan.cached++
 		}
 	}
-	for i, p := range candidates {
-		if p.group == groupSystem && !taken[i] && systemChecked+p.runes <= systemCap && plan.checked+p.runes <= budget {
-			systemChecked += p.runes
-			take(i, p)
+	granted := make([]int, len(candidates)) // runes of each piece the budget covers
+	var order []int                         // pieces in the order the budget first reached them
+	used := 0
+	grant := func(group, limit int) {
+		given := 0
+		for i, p := range candidates {
+			left := min(limit-given, budget-used)
+			if left <= 0 {
+				return
+			}
+			if p.group != group || cached[i] || granted[i] == p.runes {
+				continue
+			}
+			if granted[i] == 0 {
+				order = append(order, i)
+			}
+			n := min(p.runes-granted[i], left)
+			granted[i] += n
+			given += n
+			used += n
 		}
 	}
-	for _, group := range []int{groupNewestUser, groupSystem, groupOlderUser} {
-		for i, p := range candidates {
-			if p.group != group || taken[i] {
-				continue
-			}
-			if plan.checked+p.runes > budget {
-				plan.truncated = true
-				continue
-			}
-			take(i, p)
+	grant(groupSystem, budget/2)
+	grant(groupNewestUser, budget)
+	grant(groupSystem, budget)
+	grant(groupOlderUser, budget)
+
+	for i, p := range candidates {
+		if !cached[i] && granted[i] < p.runes {
+			plan.truncated = true
 		}
+	}
+	for _, i := range order {
+		p := candidates[i]
+		if n := granted[i]; n < p.runes {
+			runes := []rune(p.text)
+			text := string(runes[:n])
+			if p.fromEnd {
+				text = string(runes[len(runes)-n:])
+			}
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			p = &piece{text: text, runes: n, key: textKey(endpoint, text), group: p.group, fromEnd: p.fromEnd}
+		}
+		plan.send = append(plan.send, p)
+		plan.checked += p.runes
 	}
 	return plan
 }

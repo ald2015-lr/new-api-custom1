@@ -247,7 +247,7 @@ func moderate(c *gin.Context, info *relaycommon.RelayInfo, settings *dto.Channel
 		return moderationOutcome{flagged: true}
 	}
 
-	plan := planBudget(candidates, func(key string) bool { _, ok := state.verdicts[key]; return ok }, budget)
+	plan := planBudget(candidates, func(key string) bool { _, ok := state.verdicts[key]; return ok }, budget, endpoint)
 	audit.CheckedChars, audit.Pieces, audit.CachedPieces = plan.checked, len(plan.send), plan.cached
 	if plan.truncated {
 		audit.Truncated = true
