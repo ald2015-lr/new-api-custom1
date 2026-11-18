@@ -38,6 +38,7 @@ import {
   Code,
   Route,
   Settings,
+  ShieldCheck,
   SlidersHorizontal,
   Wand2,
 } from 'lucide-react'
@@ -204,6 +205,7 @@ import {
   supportsNewAPIUpstream,
 } from '../../lib/channel-plugin-extensions'
 import { getChannelTypeConfig } from '../../lib/channel-type-config'
+import { readModerationRuleServerError } from '../../lib/content-moderation-rules'
 import {
   collectInvalidStatusCodeEntries,
   collectNewDisallowedStatusCodeRedirects,
@@ -213,6 +215,7 @@ import {
   nextTaskPluginBaseUrl,
 } from '../../lib/task-plugin-base-url'
 import type { Channel } from '../../types'
+import { ChannelModerationSettings } from '../channel-moderation-settings'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
@@ -336,6 +339,15 @@ const SENSITIVE_FORM_FIELDS = [
   'gemini_free_key_max_attempts',
   'gemini_free_key_model_limits',
   'gemini_thinking_suffix_enabled',
+  'moderation_enabled',
+  'moderation_fail_open',
+  'moderation_categories',
+  'moderation_skip_images',
+  'moderation_max_chars',
+  'moderation_timeout_seconds',
+  'moderation_rule_presets',
+  'moderation_rules',
+  'send_safety_identifier',
   'disable_task_polling_sleep',
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
@@ -1771,8 +1783,25 @@ export function ChannelMutateDrawer({
 
       try {
         await channelMutation.mutateAsync(data)
-      } catch {
-        // The mutation reports the server error; keep the draft open for correction.
+      } catch (error) {
+        // The mutation reports the server error; keep the draft open for
+        // correction. A refused moderation rule is also marked on its row.
+        const ruleError = readModerationRuleServerError(error)
+        if (
+          ruleError &&
+          ruleError.index < (data.moderation_rules?.length ?? 0)
+        ) {
+          const field =
+            `moderation_rules.${ruleError.index}.${ruleError.field}` as const
+          form.setError(field, {
+            type: 'server',
+            message: t('The server rejected this rule: {{error}}', {
+              error: ruleError.error,
+            }),
+          })
+          setConfigurationSection('request')
+          setPendingErrorFocus(field)
+        }
       }
     },
     [
@@ -3266,7 +3295,12 @@ export function ChannelMutateDrawer({
                         {t('Allow safety_identifier passthrough')}
                       </FormLabel>
                       <FormDescription>
-                        {t('Pass through the safety_identifier field')}
+                        {currentType === 1 &&
+                        formValues.send_safety_identifier === true
+                          ? t(
+                              'Ignored while “Send a user safety identifier to OpenAI” is on'
+                            )
+                          : t('Pass through the safety_identifier field')}
                       </FormDescription>
                     </div>
                     <FormControl>
@@ -5109,6 +5143,30 @@ export function ChannelMutateDrawer({
                 />
               )}
             </div>
+            {currentType === 1 && (
+              <div
+                role='group'
+                aria-label={t('Content moderation')}
+                className={channelConfigurationBlockClassName(
+                  configuration.blocks.contentModeration,
+                  'space-y-4'
+                )}
+              >
+                <CardHeading
+                  status={configuration.blocks.contentModeration}
+                  title={t('Content moderation')}
+                  icon={<ShieldCheck className='size-4' />}
+                />
+                <ChannelModerationSettings
+                  key={channelId ?? 'new'}
+                  form={form}
+                  channelId={channelId}
+                  savedType={currentRow?.type}
+                  locked={sensitiveLocked}
+                  canTest={canOperateChannel}
+                />
+              </div>
+            )}
             {fieldPassthroughFields}
           </>
         }

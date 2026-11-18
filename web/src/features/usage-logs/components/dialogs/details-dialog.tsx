@@ -94,6 +94,7 @@ import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
+import { ModerationDetailsSection } from './moderation-details-section'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
 // to its i18n label key for display in the audit details.
@@ -104,6 +105,7 @@ const CHANNEL_FIELD_LABELS: Record<string, string> = {
   type: 'Type',
   base_url: 'Base URL',
   key: 'Key',
+  content_moderation: 'Content moderation',
 }
 
 function timingTextColorClass(
@@ -895,6 +897,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
+        {/* What content moderation did on this attempt (admin only) */}
+        {props.isAdmin && adminInfo?.moderation && (
+          <ModerationDetailsSection audit={adminInfo.moderation} />
+        )}
+
         {/* The upstream's balance error the channel hid from the user (admin only) */}
         {props.isAdmin && adminInfo?.upstream_error && (
           <DetailSection
@@ -1453,5 +1460,5 @@ export function DetailsDialog(props: DetailsDialogProps) {
 }
 
 function isDisplayableType(type: number): boolean {
-  return [0, 2, 5, 6].includes(type)
+  return [0, 2, 5, 6, 100].includes(type)
 }

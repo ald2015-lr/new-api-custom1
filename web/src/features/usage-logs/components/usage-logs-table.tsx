@@ -63,6 +63,7 @@ const route = getRouteApi('/_authenticated/usage-logs/$section')
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
   [LOG_TYPE_ENUM.REFUND]: 'bg-blue-50/30 dark:bg-blue-950/15',
+  [LOG_TYPE_ENUM.MODERATION]: 'bg-amber-50/40 dark:bg-amber-950/20',
 }
 
 // Warning tint for logs where a quota conversion saturated (admin-only marker).

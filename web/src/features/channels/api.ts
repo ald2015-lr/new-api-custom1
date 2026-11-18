@@ -28,6 +28,7 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  ChannelModerationProbeResponse,
   ChannelOpsResponse,
   ChannelQuotaLimitResponse,
   ChannelQuotaLimitsResponse,
@@ -293,6 +294,22 @@ export async function testChannel(
   const res = await api.get(
     `/api/channel/test/${id}`,
     channelActionConfig({ params })
+  )
+  return res.data
+}
+
+/**
+ * Make one content moderation call with a harmless text, using the saved
+ * base URL, first enabled key, proxy and header overrides of an OpenAI
+ * channel. Changes nothing.
+ */
+export async function testChannelModeration(
+  id: number
+): Promise<ChannelModerationProbeResponse> {
+  const res = await api.post(
+    `/api/channel/${id}/moderation_test`,
+    undefined,
+    channelActionConfig()
   )
   return res.data
 }
