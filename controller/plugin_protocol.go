@@ -1245,9 +1245,10 @@ func respondPluginProtocolSubmissionError(c *gin.Context, taskErr *dto.TaskError
 	if taskErr != nil && taskErr.StatusCode >= 400 && taskErr.StatusCode <= 599 {
 		status = taskErr.StatusCode
 	}
-	if taskErr != nil && taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted) {
+	if taskErr != nil && (taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted) || types.IsContentModerationErrorCode(types.ErrorCode(taskErr.Code))) {
 		// The channel's own message for an upstream balance error, under any
-		// status the channel chose.
+		// status the channel chose, and content moderation's generic
+		// message.
 		respondPluginProtocolError(c, status, taskErr.Code, common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey)))
 		return
 	}
