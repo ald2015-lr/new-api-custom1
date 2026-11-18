@@ -354,14 +354,26 @@ func TestManageUserConvertsBetweenFullAndDeputyAdmin(t *testing.T) {
 	}
 	member := createTarget("becomes-deputy", common.RoleCommonUser)
 	identity, proof := manageUserProof(t, db, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"set_deputy"}`, member.Id))})
+	// Allow overrides left for the id (an earlier account with a reused id)
+	// grant root-only permissions that the admin baseline does not hold.
+	staleGrants := []authz.Permission{authz.ChannelSecretView, authz.AuditRead, authz.TaskPluginBind}
+	for _, stale := range staleGrants {
+		require.NoError(t, db.Create(&model.CasbinRule{Ptype: "p", V0: authz.UserSubject(member.Id), V1: stale.Resource, V2: stale.Action, V3: authz.EffectAllow}).Error)
+	}
+	require.NoError(t, authz.ReloadPolicy())
 
-	// A common user becomes a deputy admin: role and assignment in one commit.
+	// A common user becomes a deputy admin: role and assignment in one commit,
+	// starting from the deputy baseline like a promotion.
 	recorder := performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, member.Id), identity, proof)
 	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"role":10`)
 	assertConverted(member, common.RoleAdminUser, true, 2)
+	assert.Equal(t, []string{"g role:deputy"}, userCasbinRules(t, db, member.Id))
 	assert.False(t, authz.Can(member.Id, common.RoleAdminUser, authz.BillingRead))
 	assert.True(t, authz.Can(member.Id, common.RoleAdminUser, authz.ChannelRead))
+	for _, stale := range staleGrants {
+		assert.False(t, authz.Can(member.Id, common.RoleAdminUser, stale), stale)
+	}
 	var audit model.AuditLog
 	require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Order("id desc").First(&audit).Error)
 	params, err := common.Marshal(audit.Other.Op.Params)

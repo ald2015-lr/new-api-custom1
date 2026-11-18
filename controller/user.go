@@ -1378,16 +1378,24 @@ func ManageUser(c *gin.Context) {
 		// together, so no node ever sees the new role with stale rows. Promote
 		// and demote drop every override and the deputy assignment, so a
 		// promoted user starts from the full admin baseline even when a stale
-		// assignment is left for the id; set_deputy and set_admin switch the
-		// assignment.
+		// assignment is left for the id. set_deputy on a common user drops them
+		// the same way before assigning, so it starts from the deputy baseline;
+		// on a full admin it keeps the non-recharge overrides root granted.
+		// set_admin removes the assignment.
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
 			switch req.Action {
 			case "set_deputy":
-				if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
+				if user.Role == common.RoleAdminUser {
+					if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
+						return err
+					}
+					_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
 					return err
 				}
-				if user.Role == common.RoleAdminUser {
-					_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
+				if err := authz.ClearUserAuthorizationInTx(tx, user.Id); err != nil {
+					return err
+				}
+				if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
 					return err
 				}
 				user.Role = common.RoleAdminUser
