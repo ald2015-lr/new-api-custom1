@@ -220,19 +220,24 @@ func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
 
 // The client IP diagnostic answers with the address the server derives for
 // the caller under TRUSTED_PROXIES, says whether TRUSTED_PROXIES is set (to a
-// list or to none) instead of left to the built-in defaults, and is never
-// cached.
+// list or to none) instead of left to the built-in defaults and whether it
+// trusts every IPv4 or IPv6 address (then any client, the public peers here,
+// chooses its address with X-Forwarded-For), and is never cached.
 func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		name, trustedProxies, remoteAddr, ip string
-		configured                           bool
+		configured, catchAll                 bool
 	}{
-		{"defaults trust a private proxy", "", "172.20.0.2:4321", "203.0.113.10", false},
-		{"defaults ignore the header of a public peer", " ", "198.51.100.10:4321", "198.51.100.10", false},
-		{"explicit proxy list", "192.0.2.0/24", "192.0.2.10:4321", "203.0.113.10", true},
-		{"the outer proxy is not in the list", "192.0.2.0/24", "172.20.0.2:4321", "172.20.0.2", true},
-		{"no proxy trusted", "none", "172.20.0.2:4321", "172.20.0.2", true},
+		{"defaults trust a private proxy", "", "172.20.0.2:4321", "203.0.113.10", false, false},
+		{"defaults ignore the header of a public peer", " ", "198.51.100.10:4321", "198.51.100.10", false, false},
+		{"explicit proxy list", "192.0.2.0/24", "192.0.2.10:4321", "203.0.113.10", true, false},
+		{"the outer proxy is not in the list", "192.0.2.0/24", "172.20.0.2:4321", "172.20.0.2", true, false},
+		{"no proxy trusted", "none", "172.20.0.2:4321", "172.20.0.2", true, false},
+		{"every IPv4 address", "0.0.0.0/0", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv6 address next to a proxy", "192.0.2.10, ::/0", "[2001:db8::10]:4321", "203.0.113.10", true, true},
+		{"every IPv4 address written with another address", "10.1.2.3/0", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv4 address as IPv4-mapped IPv6", "::ffff:0:0/96", "198.51.100.10:4321", "203.0.113.10", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TRUSTED_PROXIES", tc.trustedProxies)
@@ -245,7 +250,7 @@ func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 			request.Header.Set("X-Forwarded-For", "203.0.113.10")
 			router.ServeHTTP(recorder, request)
 			require.Equal(t, http.StatusOK, recorder.Code)
-			assert.JSONEq(t, fmt.Sprintf(`{"success":true,"message":"","data":{"ip":%q,"trusted_proxies_configured":%t}}`, tc.ip, tc.configured), recorder.Body.String())
+			assert.JSONEq(t, fmt.Sprintf(`{"success":true,"message":"","data":{"ip":%q,"trusted_proxies_configured":%t,"trusted_proxies_catch_all":%t}}`, tc.ip, tc.configured, tc.catchAll), recorder.Body.String())
 			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
 		})
 	}

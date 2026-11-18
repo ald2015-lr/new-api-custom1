@@ -135,16 +135,26 @@ func GetOptions(c *gin.Context) {
 }
 
 // GetClientIP shows the root administrator the client IP the server derives
-// for their own request, and whether TRUSTED_PROXIES is set (to a list or to
-// none) rather than left to the built-in private-network defaults. An
-// administrator compares the IP with their real public address before turning
-// on the per-network registration limit: behind a proxy the server does not
-// trust, every visitor has the proxy's address.
+// for their own request, and how TRUSTED_PROXIES is set. An administrator
+// compares the IP with their real public address before turning on the
+// per-network registration limit: behind a proxy the server does not trust,
+// every visitor has the proxy's address.
+//
+// Fields of data:
+//   - ip: the client IP of this request.
+//   - trusted_proxies_configured: TRUSTED_PROXIES is set (to a list or to
+//     none) rather than left to the built-in private-network defaults.
+//   - trusted_proxies_catch_all: the list trusts every IPv4 or every IPv6
+//     address (0.0.0.0/0, ::/0 or the like). Then any client can choose the
+//     IP the server sees for it with X-Forwarded-For, and so get around the
+//     per-network limits, even though ip looks right; the list must name only
+//     the proxies' own addresses.
 func GetClientIP(c *gin.Context) {
-	_, usedDefaults, _ := common.ResolveTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	trustedProxies, usedDefaults, _ := common.ResolveTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
 	common.ApiSuccess(c, gin.H{
 		"ip":                         c.ClientIP(),
 		"trusted_proxies_configured": !usedDefaults,
+		"trusted_proxies_catch_all":  common.TrustedProxiesCatchAll(trustedProxies),
 	})
 }
 
