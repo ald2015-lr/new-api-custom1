@@ -454,7 +454,7 @@ export const ChannelModerationSettings = memo(
       <div className='space-y-4'>
         <fieldset
           disabled={props.locked}
-          className='space-y-4 disabled:opacity-60'
+          className='min-w-0 space-y-4 disabled:opacity-60'
         >
           <FormField
             control={form.control}
@@ -496,7 +496,7 @@ export const ChannelModerationSettings = memo(
         {enabled && (
           <fieldset
             disabled={props.locked}
-            className='space-y-4 disabled:opacity-60'
+            className='min-w-0 space-y-4 disabled:opacity-60'
           >
             <FormField
               control={form.control}
@@ -610,7 +610,7 @@ export const ChannelModerationSettings = memo(
         {showRules && (
           <fieldset
             disabled={props.locked}
-            className='space-y-4 disabled:opacity-60'
+            className='min-w-0 space-y-4 disabled:opacity-60'
           >
             <ChannelModerationRulesEditor
               control={form.control}
@@ -619,7 +619,10 @@ export const ChannelModerationSettings = memo(
           </fieldset>
         )}
         <Separator />
-        <fieldset disabled={props.locked} className='disabled:opacity-60'>
+        <fieldset
+          disabled={props.locked}
+          className='min-w-0 disabled:opacity-60'
+        >
           <FormField
             control={form.control}
             name='send_safety_identifier'

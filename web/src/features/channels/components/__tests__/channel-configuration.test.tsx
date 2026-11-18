@@ -4949,6 +4949,24 @@ test('an OpenAI channel shows the content moderation card with moderation off an
   ).not.toBeChecked()
 })
 
+test('with moderation on, every content moderation fieldset can shrink, so the custom rules table scrolls inside the card on a narrow screen', async () => {
+  await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_rules: [{ type: 'keyword', pattern: 'cot' }],
+    })
+  )
+  const card = screen.getByRole('group', { name: 'Content moderation' })
+  const rules = within(card).getByRole('group', { name: 'Custom rules' })
+  // A fieldset is at least as wide as its content by default, so without
+  // min-w-0 it grows to the rules table's width and the panel scrolls
+  // sideways instead of the table's own scroll box.
+  expect(rules.closest('fieldset')).toHaveClass('min-w-0')
+  const fieldsets = card.querySelectorAll('fieldset')
+  expect(fieldsets).toHaveLength(4)
+  for (const fieldset of fieldsets) expect(fieldset).toHaveClass('min-w-0')
+})
+
 test.each([3, 8, 57, 59, 60, 14])(
   'a channel of type %i, next to OpenAI, has no content moderation card',
   async (type) => {
