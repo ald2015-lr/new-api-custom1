@@ -3764,6 +3764,8 @@ func (u *moderationUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(http.StatusOK, jsonType, `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"forwarded","annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
 	case "/v1/images/generations", "/v1/images/edits":
 		reply(http.StatusOK, jsonType, `{"created":1,"data":[{"url":"https://img.example/out.png"}]}`)
+	case "/v1/videos":
+		reply(http.StatusOK, jsonType, `{"id":"video_mod_1","object":"video","status":"queued","model":"sora-2","created_at":1}`)
 	case "/v1/audio/speech":
 		reply(http.StatusOK, "audio/mpeg", "ID3")
 	case "/v1/embeddings":
@@ -3801,7 +3803,7 @@ func (u *moderationUpstream) since(mark int, path string) []moderationUpstreamRe
 // as before, and the gateway safety identifier is independent of it.
 func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	setupRelayRouterTestDB(t)
-	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}, &model.Task{}))
 	require.NoError(t, i18n.Init())
 	service.InitHttpClient()
 	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
@@ -3927,6 +3929,10 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			}
 		})
 	}
+	soraChannel := create("sora-2", "sk-ok-sora", on)
+	create("sora-2-pro", "sk-mod-500", on)
+	guarded("sora-2")
+	guarded("sora-2-pro")
 	chatToResponses := create("mod-c2r", "sk-ok-c2r", on)
 	globalSettings.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{
 		Enabled: true, ChannelIDs: []int{sidResponses.Id, chatToResponses.Id}, ModelPatterns: []string{"^mod-sid-resp$", "^mod-c2r$"},
@@ -3938,6 +3944,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	engine := gin.New()
 	engine.Use(middleware.RequestId())
 	SetRelayRouter(engine)
+	SetVideoRouter(engine)
 	SetTaskPluginProtocolRouter(engine)
 	send := func(path, contentType string, body io.Reader) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
@@ -4611,4 +4618,44 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a Sora task on a moderated OpenAI channel is checked before submission", func(t *testing.T) {
+		var tasks int64
+		countTasks := func() int64 {
+			require.NoError(t, model.DB.Model(&model.Task{}).Count(&tasks).Error)
+			return tasks
+		}
+		before, tasksBefore := quota(t), countTasks()
+		for _, tc := range []struct {
+			model, prompt, code string
+			status              int
+		}{
+			{"sora-2", unique("MOD-FLAG-SEXUAL video"), "content_moderation_flagged", http.StatusBadRequest},
+			{"sora-2-pro", unique("a quiet harbour at dawn"), "content_moderation_unavailable", http.StatusServiceUnavailable},
+		} {
+			mark := upstream.mark()
+			recorder := post("/v1/videos", `{"model":"`+tc.model+`","prompt":"`+tc.prompt+`","seconds":"4","size":"720x1280"}`)
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			var answer struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &answer))
+			assert.Equal(t, tc.code, answer.Code)
+			assert.True(t, strings.HasSuffix(answer.Message, " (request id: "+requestID(recorder)+")"), answer.Message)
+			assert.Empty(t, upstream.since(mark, "/v1/videos"))
+			_, other := rejectedRow(t, recorder)
+			assertNoRetry(t, other)
+		}
+		assert.Equal(t, tasksBefore, countTasks(), "no task row")
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
+
+		mark := upstream.mark()
+		recorder := post("/v1/videos", `{"model":"sora-2","prompt":"`+unique("a quiet harbour at dawn")+`","seconds":"4","size":"720x1280"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/videos")
+		require.Len(t, calls, 1)
+		assert.Equal(t, "Bearer "+soraChannel.Key, calls[0].Authorization)
+		assert.Equal(t, tasksBefore+1, countTasks())
+	})
 }

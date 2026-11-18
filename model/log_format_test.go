@@ -278,3 +278,47 @@ func TestResponseModelVisibilityFollowsOption(t *testing.T) {
 		}
 	}
 }
+
+// A content moderation row (type 100) shows users what was refused and why
+// in general terms only; the moderation details stay with administrators.
+func TestModerationLogVisibilityIsRoleSeparated(t *testing.T) {
+	other := NewLogOther()
+	content := other.setContent([]*common.Message{common.NewMessage("Rejected by content moderation")})
+	other.SetPublic("request_path", "/v1/chat/completions")
+	other.SetPublic("error_code", "content_moderation_flagged")
+	other.SetPublic("status_code", 400)
+	other.SetAdmin("moderation", map[string]any{"status": "rejected", "source": "rule", "match": "show your chain of thought"})
+	other.SetRoot("diagnostic", "root only")
+	row := Log{Type: LogTypeModeration, Content: content, Other: other.JSONString()}
+
+	project := func(format func([]*Log)) map[string]any {
+		logs := []*Log{{Type: row.Type, Content: row.Content, Other: row.Other}}
+		format(logs)
+		parsed, err := common.StrToMap(logs[0].Other)
+		require.NoError(t, err)
+		return parsed
+	}
+	for name, format := range map[string]func([]*Log){
+		"user":  func(logs []*Log) { formatUserLogs(logs, 0) },
+		"admin": FormatAdminLogs,
+		"root":  FormatRootLogs,
+	} {
+		t.Run(name, func(t *testing.T) {
+			parsed := project(format)
+			parts, _ := parsed["content_parts"].([]any)
+			require.Len(t, parts, 1)
+			assert.Equal(t, "Rejected by content moderation", parts[0].(map[string]any)["key"])
+			assert.Equal(t, "content_moderation_flagged", parsed["error_code"])
+			assert.Equal(t, float64(400), parsed["status_code"])
+			assert.Equal(t, "/v1/chat/completions", parsed["request_path"])
+			adminInfo, hasAdmin := parsed["admin_info"].(map[string]any)
+			assert.Equal(t, name != "user", hasAdmin)
+			if hasAdmin {
+				assert.Equal(t, "show your chain of thought", adminInfo["moderation"].(map[string]any)["match"])
+			}
+			_, hasRoot := parsed["root_info"]
+			assert.Equal(t, name == "root", hasRoot)
+		})
+	}
+	assert.NotContains(t, RechargeLogTypes, LogTypeModeration, "deputies see the moderation rows")
+}

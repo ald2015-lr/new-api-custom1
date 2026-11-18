@@ -2672,3 +2672,41 @@ func TestNativeRouteCredentialRewritesOnlyTheVendorsOwnForm(t *testing.T) {
 		})
 	}
 }
+
+// A content moderation rejection reaches a plugin route's client with its
+// code and generic message, rendered by the plugin or by the host.
+func TestRespondTaskPluginErrorKeepsTheContentModerationMessage(t *testing.T) {
+	for _, tc := range []struct{ name, renderer, want string }{
+		{"host fallback", "", `{"code":"content_moderation_flagged","message":"moderation text (request id: req-mod)","data":null}`},
+		{"plugin renderer", `export const native = {error: function(ctx, error) { return {code: error.code, message: error.message, requestId: error.requestId}; }};`,
+			`{"code":"content_moderation_flagged","message":"moderation text","requestId":"req-mod"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plugin := compileTaskRoutePlugin(t, `
+export const meta = {
+  apiVersion: 1, key: "route-moderation-test", name: "Moderation", version: "1.0.0",
+  author: {name: "Test"},
+  models: ["moderation-model"], fetchMode: "per_task",
+};
+export function buildSubmitRequest() { return {url: "https://example.com"}; }
+export function parseSubmitResponse() { return {taskId: "one"}; }
+export function buildQueryRequest() { return {url: "https://example.com"}; }
+export function parseTaskResult() { return {status: "SUCCESS"}; }
+`+tc.renderer)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/vendor/submit", strings.NewReader(`{}`))
+			c.Set(common.RequestIdKey, "req-mod")
+			c.Set(jsplugin.ContextKeyPinnedRoute, jsplugin.PinnedRoute{Plugin: plugin})
+			c.Set(jsplugin.ContextKeyRouteRequest, jsplugin.RouteRequestContext{
+				Path: "/vendor/submit", Method: http.MethodPost, Params: map[string]string{}, Query: map[string][]string{},
+			})
+
+			handled := RespondTaskPluginError(c, &dto.TaskError{Code: "content_moderation_flagged", Message: "moderation text", StatusCode: http.StatusBadRequest, LocalError: true})
+
+			assert.True(t, handled)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code)
+			assert.JSONEq(t, tc.want, recorder.Body.String())
+		})
+	}
+}

@@ -720,3 +720,35 @@ func TestTaskPresentersShowTheChannelMessageOfAHiddenBalanceError(t *testing.T) 
 		})
 	}
 }
+
+// A content moderation rejection keeps its code and generic message, with
+// the request id, in the task presenters, where other errors are replaced by
+// fixed texts per status.
+func TestTaskPresentersKeepTheContentModerationMessage(t *testing.T) {
+	for _, code := range []kittypes.ErrorCode{kittypes.ErrorCodeContentModerationFlagged, kittypes.ErrorCodeContentModerationUnavailable} {
+		status := http.StatusBadRequest
+		if code == kittypes.ErrorCodeContentModerationUnavailable {
+			status = http.StatusServiceUnavailable
+		}
+		for _, tc := range []struct {
+			name    string
+			present func(*gin.Context, *dto.TaskError)
+			want    string
+		}{
+			{"task JSON", respondTaskError, `{"code":"` + string(code) + `","message":"moderation text (request id: req-mod)","data":null}`},
+			{"Responses bridge", respondPluginProtocolSubmissionError, `{"error":{"message":"moderation text (request id: req-mod)","type":"new_api_error","code":"` + string(code) + `"}}`},
+		} {
+			t.Run(string(code)+" "+tc.name, func(t *testing.T) {
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{}`))
+				c.Set(common.RequestIdKey, "req-mod")
+
+				tc.present(c, &dto.TaskError{Code: string(code), Message: "moderation text", StatusCode: status, LocalError: true})
+
+				assert.Equal(t, status, recorder.Code)
+				assert.JSONEq(t, tc.want, recorder.Body.String())
+			})
+		}
+	}
+}
