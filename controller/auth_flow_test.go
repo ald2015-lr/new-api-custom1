@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1316,6 +1317,72 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 	assert.Equal(t, "10004@qq.com", existing.Email)
 	require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", "oidc-4").Count(&count).Error)
 	assert.EqualValues(t, 1, count)
+}
+
+// GitHub's user endpoint returns only the public profile email, and GitHub
+// accepts only a verified address as that: a sign-up stores it, and an
+// account without a public email signs up without one.
+func TestGitHubSignUpStoresThePublicProfileEmail(t *testing.T) {
+	db := setupOAuthSignUpTest(t)
+	userInfo := ""
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = emailHTTPTransport(func(request *http.Request) (*http.Response, error) {
+		assert.Equal(t, "https://api.github.com/user", request.URL.String())
+		assert.Equal(t, "Bearer github-token", request.Header.Get("Authorization"))
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(userInfo))}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	github := &oauth.GitHubProvider{}
+	token := &oauth.OAuthToken{AccessToken: "github-token"}
+
+	for _, tc := range []struct {
+		name, userInfo, email string
+		verified              bool
+	}{
+		{"public email", `{"id":7001,"login":"octo-public","name":"Octo","email":"10019@qq.com"}`, "10019@qq.com", true},
+		{"no public email", `{"id":7002,"login":"octo-private","name":"Octo","email":null}`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userInfo = tc.userInfo
+			identity, err := github.GetUserInfo(context.Background(), token)
+			require.NoError(t, err)
+			assert.Equal(t, tc.email, identity.Email)
+			assert.Equal(t, tc.verified, identity.EmailVerified)
+			created, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), github, identity, token, "")
+			require.NoError(t, err)
+			var stored model.User
+			require.NoError(t, db.First(&stored, created.Id).Error)
+			assert.Equal(t, tc.email, stored.Email)
+			assert.Equal(t, identity.ProviderUserID, stored.GitHubId)
+		})
+	}
+}
+
+// A WeChat sign-up through its route is audited as a registration, with the
+// wechat method, the client address and the user agent.
+func TestWeChatSignUpIsAuditedAsARegistration(t *testing.T) {
+	db := setupOAuthSignUpTest(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "wechat-code", r.URL.Query().Get("code"))
+		_, _ = w.Write([]byte(`{"success":true,"data":"audit-wechat"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	previousWeChat, previousAddress := common.WeChatAuthEnabled, common.WeChatServerAddress
+	common.WeChatAuthEnabled, common.WeChatServerAddress = true, upstream.URL
+	t.Cleanup(func() { common.WeChatAuthEnabled, common.WeChatServerAddress = previousWeChat, previousAddress })
+	router := gin.New()
+	router.GET("/api/oauth/wechat", WeChatAuth)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/oauth/wechat?code=wechat-code", nil)
+	request.RemoteAddr = "203.0.113.7:4321"
+	request.Header.Set("User-Agent", "register-test-agent")
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	var created model.User
+	require.NoError(t, db.Where("wechat_id = ?", "audit-wechat").First(&created).Error)
+	assertRegisterAudit(t, created, "wechat")
 }
 
 func TestOAuthSignUpCountsTowardTheRegistrationLimit(t *testing.T) {
