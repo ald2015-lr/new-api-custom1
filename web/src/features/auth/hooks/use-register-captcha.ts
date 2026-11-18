@@ -26,20 +26,20 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { AuthOperationError } from '@/lib/secure-verification'
 import {
   createServerError,
-  getServerErrorSources,
+  getServerErrorStatus,
 } from '@/lib/server-error-message'
 import { STATUS_QUERY_KEY } from '@/lib/status-query'
 
 import { getRegisterCaptcha } from '../api'
 import type { RegisterCaptcha, RegisterCaptchaParams } from '../types'
 
-const CAPTCHA_ERROR_CODES = new Set(['CAPTCHA_REQUIRED', 'CAPTCHA_INVALID'])
-
-/** The server turned a request down because of the registration captcha. */
-function isCaptchaRejection(outcome: unknown): boolean {
-  return getServerErrorSources(outcome).some(
-    (source) =>
-      typeof source.code === 'string' && CAPTCHA_ERROR_CODES.has(source.code)
+/** The server answered the request and turned it down. */
+function isServerRefusal(outcome: unknown): boolean {
+  if (getServerErrorStatus(outcome) !== undefined) return true
+  return (
+    typeof outcome === 'object' &&
+    outcome !== null &&
+    (outcome as { success?: unknown }).success === false
   )
 }
 
@@ -64,8 +64,17 @@ export function useRegisterCaptcha() {
   const latestRequest = useRef(0)
   // Wall-clock expiry, for a timer that fires late in a sleeping tab.
   const expiresAt = useRef(Number.POSITIVE_INFINITY)
+  // False once the page is gone: a reply that arrives later must not fetch
+  // an image nobody sees, which counts against the network's captcha budget.
+  const mounted = useRef(false)
+  // The answer input, attached by the captcha field.
+  const answerRef = useRef<HTMLInputElement>(null)
+  // Where the focus was when the user's focus or submit replaced an expired
+  // challenge: the answer takes the focus once the new image is shown.
+  const refocusFrom = useRef<Element | null>(null)
 
   const refresh = useCallback(async () => {
+    if (!mounted.current) return
     const request = ++latestRequest.current
     // The shown challenge is spent or stale: it must not be sent again, and
     // an answer typed for its image must not go with the next one.
@@ -98,6 +107,13 @@ export function useRegisterCaptcha() {
   }, [])
 
   useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  useEffect(() => {
     if (!enabled) return
     void refresh()
     return () => {
@@ -114,11 +130,30 @@ export function useRegisterCaptcha() {
     return () => window.clearTimeout(timer)
   }, [enabled, challenge])
 
+  useEffect(() => {
+    const from = refocusFrom.current
+    if (!from || isLoading) return
+    refocusFrom.current = null
+    // The answer, or the button that was pressed, was disabled while the
+    // image loaded and lost the focus. Give it to the answer, unless the
+    // user went on to another control meanwhile.
+    const active = document.activeElement
+    if (
+      !active ||
+      active === from ||
+      active === document.body ||
+      active.matches(':disabled')
+    ) {
+      answerRef.current?.focus()
+    }
+  }, [isLoading, challenge])
+
   /** Loads a new challenge in place of an expired one; true when it did. */
   const refreshIfExpired = (): boolean => {
     if (!challenge || (!expired && Date.now() < expiresAt.current)) {
       return false
     }
+    refocusFrom.current = document.activeElement ?? document.body
     void refresh()
     return true
   }
@@ -149,14 +184,15 @@ export function useRegisterCaptcha() {
   }
 
   /**
-   * Call after every request that reached the server with its response or
-   * error, and whether it carried the captcha. Not needed after a request
+   * Call after every registration or email code request with its response
+   * or error, and whether it carried the captcha. Not needed after a request
    * that leaves the page.
    */
   const handleRequestSettled = (outcome: unknown, sentCaptcha: boolean) => {
-    if (isCaptchaRejection(outcome) && !sentCaptcha) {
-      // The server wants a captcha this page did not send: the cached status
-      // (captcha switch or email verification) predates a settings change.
+    // A refusal can come from settings changed since the page read the
+    // status (the captcha, email verification or registration switches):
+    // read it again, so the page follows the server's current layout.
+    if (isServerRefusal(outcome)) {
       void queryClient.invalidateQueries({ queryKey: STATUS_QUERY_KEY })
     }
     // The server spent the challenge it was sent, right or wrong.
@@ -168,6 +204,7 @@ export function useRegisterCaptcha() {
     challenge,
     answer,
     setAnswer,
+    answerRef,
     isLoading,
     expired,
     // A loading challenge is null, so nothing is ready or sent meanwhile.

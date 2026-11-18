@@ -25,7 +25,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
 import { toast } from 'sonner'
@@ -44,9 +44,38 @@ let statusReplies: Partial<SystemStatus>[] = []
 let captchaCount = 0
 // While set, /api/captcha answers only once it resolves.
 let captchaGate: Promise<void> | null = null
+// The numbers of the /api/captcha requests the captcha limit refuses.
+let refusedCaptchaFetches: number[] = []
 
 function captchaImage(index: number) {
   return `data:image/png;base64,captcha-${index}`
+}
+
+/** A 429 from the per-network captcha image limit, as axios rejects it. */
+function captchaLimitError() {
+  return {
+    isAxiosError: true,
+    message: 'Request failed with status code 429',
+    response: {
+      status: 429,
+      data: {
+        success: false,
+        message: 'Too many captcha requests. Please try again later.',
+        message_key: 'Too many captcha requests. Please try again later.',
+      },
+    },
+  }
+}
+
+/**
+ * Takes the focus off a control that became disabled, as browsers do; jsdom
+ * would leave it there.
+ */
+function dropFocusLikeABrowser() {
+  const placeholder = document.createElement('button')
+  document.body.append(placeholder)
+  placeholder.focus()
+  placeholder.remove()
 }
 
 /**
@@ -96,6 +125,7 @@ function mockGet(routes: Record<string, () => Promise<ApiReply>> = {}) {
       captchaCount += 1
       const index = captchaCount
       if (captchaGate) await captchaGate
+      if (refusedCaptchaFetches.includes(index)) throw captchaLimitError()
       return {
         data: {
           success: true,
@@ -186,6 +216,7 @@ beforeEach(() => {
   localStorage.clear()
   captchaCount = 0
   captchaGate = null
+  refusedCaptchaFetches = []
 })
 
 afterEach(() => {
@@ -457,7 +488,7 @@ it('keeps Send code disabled until the captcha after a rejected one is shown', a
   ])
 })
 
-it('drops an answer typed for the old image when the new captcha arrives', async () => {
+it('drops an answer that reached the field while the new captcha loaded', async () => {
   const user = userEvent.setup()
   mockGet()
   await renderSignUp({ register_captcha: true, email_verification: false })
@@ -467,12 +498,44 @@ it('drops an answer typed for the old image when the new captcha arrives', async
   const releaseCaptchas = holdCaptchas()
 
   await user.click(screen.getByRole('button', { name: 'Refresh captcha' }))
-  await user.type(answer, '7')
+  expect(answer).toBeDisabled()
+  // A script, such as a browser extension, can still fill in a disabled
+  // field; whatever it gets belongs to the old image.
+  fireEvent.change(answer, { target: { value: '7' } })
+  expect(answer).toHaveValue('7')
   releaseCaptchas()
 
   await findCaptchaImage(2)
   expect(answer).toHaveValue('')
   expect(screen.getByRole('button', { name: 'Create account' })).toBeDisabled()
+})
+
+it('shows no captcha and sends no answer when loading the next one fails', async () => {
+  const user = userEvent.setup()
+  mockGet()
+  refusedCaptchaFetches = [2]
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: { success: false, message: 'Username already exists' },
+  })
+  const error = vi.spyOn(toast, 'error')
+  await renderSignUp({ register_captcha: true, email_verification: false })
+  await findCaptchaImage(1)
+  await fillAccount(user)
+  const answer = screen.getByRole('textbox', { name: 'Captcha' })
+  const submit = screen.getByRole('button', { name: 'Create account' })
+  await user.type(answer, '12')
+  await user.click(submit)
+
+  await waitFor(() =>
+    expect(error).toHaveBeenCalledWith(
+      'Too many captcha requests. Please try again later.'
+    )
+  )
+  // The spent challenge stays gone: nothing can be answered or sent for it.
+  expect(screen.queryByRole('img', { name: 'Captcha' })).not.toBeInTheDocument()
+  await user.type(answer, '34')
+  expect(submit).toBeDisabled()
+  expect(post).toHaveBeenCalledTimes(1)
 })
 
 it('marks an expired captcha without fetching and loads a new one once the answer is focused', async () => {
@@ -489,9 +552,11 @@ it('marks an expired captcha without fetching and loads a new one once the answe
   // An idle page keeps its expired challenge, however long it stays open.
   await act(() => vi.advanceTimersByTimeAsync(60 * 60_000))
 
+  // One short word fits the image in every language; the title says what a
+  // click does.
   expect(
-    screen.getByRole('button', { name: 'Expired Click to refresh' })
-  ).toBeInTheDocument()
+    screen.getByRole('button', { name: 'Expired' })
+  ).toHaveAccessibleDescription('Click to refresh')
   expect(captchaCount).toBe(1)
   await user.click(screen.getByRole('textbox', { name: 'Captcha' }))
   await findCaptchaImage(2)
@@ -513,13 +578,62 @@ it('gives the focus back to the answer after focusing it replaced an expired cap
 
   await user.click(answer)
   expect(answer).toBeDisabled()
-  // Browsers take the focus away from a field that becomes disabled.
-  act(() => answer.blur())
+  dropFocusLikeABrowser()
+  expect(answer).not.toHaveFocus()
   releaseCaptchas()
 
   await findCaptchaImage(2)
   await waitFor(() => expect(answer).toHaveFocus())
 })
+
+it.each([
+  {
+    button: 'Create account',
+    status: { register_captcha: true, email_verification: false },
+    fill: fillAccount,
+  },
+  {
+    button: 'Send code',
+    status: { register_captcha: true, email_verification: true },
+    fill: (user: ReturnType<typeof userEvent.setup>) =>
+      user.type(
+        screen.getByLabelText('Email (required for verification)'),
+        '123456789@qq.com'
+      ),
+  },
+])(
+  'gives the focus to the answer once the captcha that $button replaced is shown',
+  async ({ button, status, fill }) => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout'],
+      shouldAdvanceTime: true,
+    })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const get = mockGet()
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: { success: true, message: '' },
+    })
+    await renderSignUp(status)
+    await findCaptchaImage(1)
+    await fill(user)
+    const answer = screen.getByRole('textbox', { name: 'Captcha' })
+    await user.type(answer, '12')
+    await act(() => vi.advanceTimersByTimeAsync(300_000))
+    const releaseCaptchas = holdCaptchas()
+
+    const control = screen.getByRole('button', { name: button })
+    await user.click(control)
+    await waitFor(() => expect(control).toBeDisabled())
+    expect(control).toHaveFocus()
+    dropFocusLikeABrowser()
+    releaseCaptchas()
+
+    await findCaptchaImage(2)
+    await waitFor(() => expect(answer).toHaveFocus())
+    expect(post).not.toHaveBeenCalled()
+    expect(emailCodeRequests(get)).toEqual([])
+  }
+)
 
 it('loads a new captcha instead of registering with an expired one', async () => {
   vi.useFakeTimers({
@@ -586,6 +700,84 @@ it('re-reads the status when the server wants a captcha that the cached email ve
   expect(post.mock.calls[1][2]).toEqual({
     params: { turnstile: '', captcha_id: 'captcha-1', captcha: '12' },
   })
+})
+
+it('re-reads the status when the email code is refused because email verification was turned off', async () => {
+  const user = userEvent.setup()
+  mockGet({
+    // The server's answer while email verification is off; it has no code.
+    '/api/verification': async () => ({
+      data: {
+        success: false,
+        message: 'This verification method is currently unavailable.',
+      },
+    }),
+  })
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: { success: true, message: '' },
+  })
+  await renderSignUp(
+    { register_captcha: true, email_verification: true },
+    { register_captcha: true, email_verification: false }
+  )
+  await findCaptchaImage(1)
+  await fillAccount(user)
+  await user.type(
+    screen.getByLabelText('Email (required for verification)'),
+    '123456789@qq.com'
+  )
+  await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '7')
+  await user.click(screen.getByRole('button', { name: 'Send code' }))
+
+  // The page switches to the server's layout, and a new captcha replaces the
+  // one the refused request spent.
+  await waitFor(() =>
+    expect(
+      screen.queryByPlaceholderText('Verification code')
+    ).not.toBeInTheDocument()
+  )
+  await findCaptchaImage(2)
+  await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '12')
+  await user.click(screen.getByRole('button', { name: 'Create account' }))
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+  expect(post.mock.calls[0][2]).toEqual({
+    params: { turnstile: '', captcha_id: 'captcha-2', captcha: '12' },
+  })
+})
+
+it('fetches no captcha for a registration reply that arrives after the page was left', async () => {
+  const user = userEvent.setup()
+  mockGet()
+  let answerRegistration = (_reply: ApiReply) => {}
+  vi.spyOn(api, 'post').mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        answerRegistration = resolve
+      })
+  )
+  const error = vi.spyOn(toast, 'error')
+  const { router } = await renderSignUp({
+    register_captcha: true,
+    email_verification: false,
+  })
+  await findCaptchaImage(1)
+  await fillAccount(user)
+  await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '12')
+  await user.click(screen.getByRole('button', { name: 'Create account' }))
+  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1))
+
+  await act(() => router.navigate({ to: '/sign-in' }))
+  await screen.findByText('Sign-in page')
+  act(() =>
+    answerRegistration({
+      data: { success: false, message: 'Username already exists' },
+    })
+  )
+
+  await waitFor(() =>
+    expect(error).toHaveBeenCalledWith('Username already exists')
+  )
+  expect(captchaCount).toBe(1)
 })
 
 it('fetches no new captcha after a registration that leaves the page', async () => {
