@@ -1,12 +1,16 @@
 package authz
 
-import "slices"
+import (
+	"slices"
 
-import "github.com/casbin/casbin/v2"
+	"github.com/QuantumNous/new-api/common"
+	"github.com/casbin/casbin/v2"
+)
 
 // Can reports whether the subject may perform the permission. A superuser role
-// short-circuits to allow. Otherwise a per-user override wins, then the union of
-// the subject's role baselines applies.
+// short-circuits to allow. A deputy admin is refused every action of a recharge
+// resource, whatever overrides exist. Otherwise a per-user override wins, then
+// the union of the subject's role baselines applies.
 func Can(userID int, systemRole int, permission Permission) bool {
 	roles := resolveSubjectRoles(userID, systemRole)
 	if len(roles) == 0 {
@@ -22,6 +26,18 @@ func Can(userID int, systemRole int, permission Permission) bool {
 	e := currentEnforcer()
 	if e == nil {
 		return false
+	}
+	// The deputy assignment is read from the database on every recharge
+	// decision, so it applies on every node without waiting for a reload.
+	if isRechargeResource(permission.Resource) {
+		deputy, err := IsDeputy(userID)
+		if err != nil {
+			common.SysError(common.LogText("failed to read the deputy admin assignment of user %d: %s", userID, err.Error()))
+			return false // fail closed
+		}
+		if deputy {
+			return false
+		}
 	}
 	if effect, ok := explicitSubjectEffect(e, UserSubject(userID), permission); ok {
 		return effect == EffectAllow

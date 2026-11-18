@@ -27,6 +27,8 @@ func (a *gormAdapter) LoadPolicy(m casbinmodel.Model) error {
 	for _, rule := range rules {
 		if rule.Ptype != "p" {
 			// This model has no role-inheritance or other policy sections.
+			// g rows (deputy admin assignments) are read from the database by
+			// deputy.go at decision time and are intentionally not loaded.
 			continue
 		}
 		if rule.V0 == "" || rule.V1 == "" || rule.V2 == "" {
@@ -53,6 +55,9 @@ func (a *gormAdapter) LoadPolicy(m casbinmodel.Model) error {
 	return nil
 }
 
+// SavePolicy must never be called: it rewrites casbin_rule from the model,
+// which does not hold the g rows (deputy admin assignments) or legacy rows,
+// and would delete them. Nothing calls it today.
 func (a *gormAdapter) SavePolicy(m casbinmodel.Model) error {
 	return a.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("1 = 1").Delete(&model.CasbinRule{}).Error; err != nil {
