@@ -36,10 +36,14 @@ const ROLE_LABEL_KEYS: Record<RoleValue, string> = {
   [ROLE.GUEST]: 'Guest',
 }
 
-export function getRoleLabelKey(role?: number): string {
+/** `admin_role` of a role-10 user: a full admin or a deputy admin. */
+export type AdminRole = 'admin' | 'deputy'
+
+export function getRoleLabelKey(role?: number, adminRole?: AdminRole): string {
+  if (role === ROLE.ADMIN && adminRole === 'deputy') return 'Deputy Admin'
   return ROLE_LABEL_KEYS[role as RoleValue] ?? ROLE_LABEL_KEYS[DEFAULT_ROLE]
 }
 
-export function getRoleLabel(role?: number): string {
-  return t(getRoleLabelKey(role))
+export function getRoleLabel(role?: number, adminRole?: AdminRole): string {
+  return t(getRoleLabelKey(role, adminRole))
 }

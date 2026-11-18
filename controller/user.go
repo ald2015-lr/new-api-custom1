@@ -360,9 +360,39 @@ func Register(c *gin.Context) {
 	return
 }
 
+// applyAdminUserView prepares users for an administrator's list or detail
+// view: role-10 users get admin_role (admin or deputy), and the Stripe
+// customer id is blanked for a viewer without billing:read. Call it after the
+// users were read, never inside a transaction.
+func applyAdminUserView(c *gin.Context, users ...*model.User) error {
+	adminIDs := make([]int, 0, len(users))
+	for _, user := range users {
+		if user.Role == common.RoleAdminUser {
+			adminIDs = append(adminIDs, user.Id)
+		}
+	}
+	deputies, err := authz.DeputyUserIDs(adminIDs)
+	if err != nil {
+		return err
+	}
+	hideStripeCustomer := !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.BillingRead)
+	for _, user := range users {
+		if user.Role == common.RoleAdminUser {
+			user.AdminRole = authz.BuiltInRoleAdmin
+			if deputies[user.Id] {
+				user.AdminRole = authz.BuiltInRoleDeputy
+			}
+		}
+		if hideStripeCustomer {
+			user.StripeCustomer = ""
+		}
+	}
+	return nil
+}
+
 func GetAllUsers(c *gin.Context) {
-	// The inviter filter belongs to the search query.
-	if c.Query("inviter_id") != "" {
+	// The inviter and admin role filters belong to the search query.
+	if c.Query("inviter_id") != "" || c.Query("admin_role") != "" {
 		SearchUsers(c)
 		return
 	}
@@ -370,6 +400,10 @@ func GetAllUsers(c *gin.Context) {
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
 	users, total, err := model.GetAllUsers(pageInfo, sortOptions)
 	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := applyAdminUserView(c, users...); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -403,9 +437,35 @@ func SearchUsers(c *gin.Context) {
 		}
 	}
 	pageInfo := common.GetPageQuery(c)
+	// admin_role narrows role-10 users to full admins or deputy admins; other
+	// values are ignored like an unparsable role.
+	var idScope model.UserIDScope
+	if adminRole := c.Query("admin_role"); adminRole == authz.BuiltInRoleAdmin || adminRole == authz.BuiltInRoleDeputy {
+		adminLevel := common.RoleAdminUser
+		role = &adminLevel
+		deputies, err := authz.AllDeputyUserIDs()
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if adminRole == authz.BuiltInRoleAdmin {
+			idScope.Except = deputies
+		} else if len(deputies) == 0 {
+			pageInfo.SetTotal(0)
+			pageInfo.SetItems([]*model.User{})
+			common.ApiSuccess(c, pageInfo)
+			return
+		} else {
+			idScope.Only = deputies
+		}
+	}
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
-	users, total, err := model.SearchUsers(keyword, group, role, status, inviterId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
+	users, total, err := model.SearchUsers(keyword, group, role, status, inviterId, idScope, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
 	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := applyAdminUserView(c, users...); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -418,6 +478,20 @@ func SearchUsers(c *gin.Context) {
 
 func canManageTargetRole(myRole int, targetRole int) bool {
 	return myRole == common.RoleRootUser || myRole > targetRole
+}
+
+// requireCredentialResetPermission refuses to reset another user's password,
+// 2FA or passkey unless the operator may view recharge records (billing:read).
+// A reset lets the operator sign in as that user and read the user's own top-up
+// orders and recharge logs, so a deputy admin, and an admin whose recharge
+// permissions root removed, never resets them. Clearing a sign-in binding
+// stays allowed: it removes a way to sign in and never adds one.
+func requireCredentialResetPermission(c *gin.Context) bool {
+	if authz.Can(c.GetInt("id"), c.GetInt("role"), authz.BillingRead) {
+		return true
+	}
+	common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage("Unauthorized, insufficient privileges"))
+	return false
 }
 
 func GetUser(c *gin.Context) {
@@ -437,6 +511,10 @@ func GetUser(c *gin.Context) {
 		return
 	}
 	user.AdminPermissions = authz.Capabilities(user.Id, user.Role)
+	if err := applyAdminUserView(c, user); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -531,7 +609,7 @@ func buildSelfUserData(user *model.User) map[string]any {
 	userSetting := user.GetSetting()
 	permissions := calculateUserPermissions(user.Role)
 	permissions["admin_permissions"] = authz.Capabilities(user.Id, user.Role)
-	return map[string]any{
+	data := map[string]any{
 		"id":                user.Id,
 		"username":          user.Username,
 		"display_name":      user.DisplayName,
@@ -559,6 +637,20 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
 		"permissions":       permissions,
 	}
+	// admin_role only labels the account; what it may do comes from the
+	// capabilities, which fail closed on their own.
+	if user.Role == common.RoleAdminUser {
+		deputy, err := authz.IsDeputy(user.Id)
+		if err != nil {
+			common.SysError(common.LogText("failed to read the deputy admin assignment of user %d: %s", user.Id, err.Error()))
+			return data
+		}
+		data["admin_role"] = authz.BuiltInRoleAdmin
+		if deputy {
+			data["admin_role"] = authz.BuiltInRoleDeputy
+		}
+	}
+	return data
 }
 
 // 计算用户权限的辅助函数
@@ -717,6 +809,9 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	updatePassword := updatedUser.Password != ""
+	if updatePassword && !requireCredentialResetPermission(c) {
+		return
+	}
 	auditParams := map[string]any{
 		"username": originUser.Username,
 		"id":       updatedUser.Id,
@@ -981,10 +1076,21 @@ func DeleteUser(c *gin.Context) {
 	if authorization == nil {
 		return
 	}
-	revokedAccessTokens, err := model.HardDeleteUserById(id)
+	// A database can hand the id out again (MySQL 5.7 derives AUTO_INCREMENT
+	// from MAX(id) after a restart), so the user's authorization rows go in the
+	// delete transaction: a leftover allow override would grant the next
+	// account with this id permissions (only a leftover deputy assignment
+	// would restrict it).
+	deleted := model.User{Id: id}
+	revokedAccessTokens, err := deleted.HardDelete(func(tx *gorm.DB) error {
+		return authz.ClearUserAuthorizationInTx(tx, id)
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if err := authz.ReloadPolicy(); err != nil {
+		common.SysError(common.LogText("failed to reload authz policy: %s", err.Error()))
 	}
 	recordManageAuditFor(c, originUser.Id, "user.delete", map[string]any{
 		"username":              originUser.Username,
@@ -1048,6 +1154,21 @@ func CreateUser(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
+	// admin_role picks the kind of a new administrator: empty or "admin" is a
+	// full admin, "deputy" a deputy admin, which only exists at role 10.
+	deputy := false
+	switch user.AdminRole {
+	case "", authz.BuiltInRoleAdmin:
+	case authz.BuiltInRoleDeputy:
+		if user.Role != common.RoleAdminUser {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		deputy = true
+	default:
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
 	if user.DisplayName == "" {
 		user.DisplayName = user.Username
 	}
@@ -1057,9 +1178,14 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 	auditParams := map[string]any{"role": user.Role}
+	createContext := service.AdminUserCreateContext{Role: user.Role}
+	if deputy {
+		auditParams["admin_role"] = authz.BuiltInRoleDeputy
+		createContext.AdminRole = authz.BuiltInRoleDeputy
+	}
 	// Creating an administrator grants privilege just like promoting one.
 	if user.Role >= common.RoleAdminUser {
-		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserCreate, service.AdminUserCreateContext{Role: user.Role})
+		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserCreate, createContext)
 		if authorization == nil {
 			return
 		}
@@ -1077,8 +1203,14 @@ func CreateUser(c *gin.Context) {
 		if err := cleanUser.InsertWithTx(tx, 0); err != nil {
 			return err
 		}
+		// Assigned first, so the permission matrix below is checked against it.
+		if deputy {
+			if err := authz.AssignDeputyInTx(tx, cleanUser.Id); err != nil {
+				return err
+			}
+		}
 		touched, err := updateAdminPermissionsForUserInTx(c, tx, cleanUser.Id, cleanUser.Role, user.AdminPermissions)
-		authzTouched = touched
+		authzTouched = touched || deputy
 		return err
 	}); err != nil {
 		common.ApiError(c, err)
@@ -1134,6 +1266,11 @@ func ManageUser(c *gin.Context) {
 		return
 	}
 	if req.Action == "add_quota" {
+		// Adding, subtracting or overriding quota is a recharge.
+		if !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.BillingWrite) {
+			common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage("Unauthorized, insufficient privileges"))
+			return
+		}
 		manageUserQuota(c, req)
 		return
 	}
@@ -1211,6 +1348,30 @@ func ManageUser(c *gin.Context) {
 			return
 		}
 		user.Role = common.RoleCommonUser
+	case "set_deputy", "set_admin":
+		// Converting between full and deputy admin is root's, like promote.
+		if myRole != common.RoleRootUser {
+			common.ApiErrorT(c, "Regular administrators cannot promote other users to administrator")
+			return
+		}
+		if req.Action == "set_deputy" && user.Role == common.RoleRootUser {
+			common.ApiErrorT(c, "Cannot demote super administrator user")
+			return
+		}
+		deputy, err := authz.IsDeputy(user.Id)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		deputy = deputy && user.Role == common.RoleAdminUser
+		if req.Action == "set_deputy" && deputy {
+			common.ApiErrorT(c, "This user is already a deputy admin")
+			return
+		}
+		if req.Action == "set_admin" && !deputy {
+			common.ApiErrorT(c, "This user is not a deputy admin")
+			return
+		}
 	default:
 		common.ApiErrorT(c, "Invalid parameters")
 		return
@@ -1228,29 +1389,70 @@ func ManageUser(c *gin.Context) {
 			return
 		}
 	}
-	if req.Action == "demote" {
+	switch req.Action {
+	case "promote", "demote", "set_deputy", "set_admin":
+		// A privilege change: the role and the authorization rows commit
+		// together, so no node ever sees the new role with stale rows. Promote
+		// and demote drop every override and the deputy assignment, so a
+		// promoted user starts from the full admin baseline even when a stale
+		// assignment is left for the id. set_deputy on a common user drops them
+		// the same way before assigning, so it starts from the deputy baseline;
+		// on a full admin it keeps the non-recharge overrides root granted.
+		// set_admin removes the assignment.
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
-			if err := user.UpdateWithTx(tx, false); err != nil {
+			switch req.Action {
+			case "set_deputy":
+				if user.Role == common.RoleAdminUser {
+					if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
+						return err
+					}
+					_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
+					return err
+				}
+				if err := authz.ClearUserAuthorizationInTx(tx, user.Id); err != nil {
+					return err
+				}
+				if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
+					return err
+				}
+				user.Role = common.RoleAdminUser
+				return user.UpdateWithTx(tx, false)
+			case "set_admin":
+				if err := authz.UnassignDeputyInTx(tx, user.Id); err != nil {
+					return err
+				}
+				_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
 				return err
+			default:
+				if err := user.UpdateWithTx(tx, false); err != nil {
+					return err
+				}
+				return authz.ClearUserAuthorizationInTx(tx, user.Id)
 			}
-			return authz.ClearUserAuthorizationInTx(tx, user.Id)
 		}); err != nil {
 			common.ApiError(c, err)
 			return
 		}
+		// The change has committed and the new auth version already refuses
+		// the account's sessions everywhere; what follows refreshes caches and
+		// ends those sessions. A failure is logged and the change is still
+		// audited and reported (the deputy assignment is read from the
+		// database on every decision, so a stale policy snapshot cannot widen
+		// it).
 		if err := authz.ReloadPolicy(); err != nil {
-			common.ApiError(c, err)
-			return
+			common.SysError(common.LogText("failed to reload authz policy: %s", err.Error()))
 		}
 		if err := model.PublishUserAuthCache(user.Id); err != nil {
-			common.ApiError(c, err)
-			return
+			common.SysError(common.LogText("failed to publish the auth cache of user %d: %v", user.Id, err))
 		}
-		if _, err := model.RevokeAllUserSessions(user.Id, "admin_demote"); err != nil {
-			common.ApiError(c, err)
-			return
+		revokeReason := "admin_role_change"
+		if req.Action == "demote" {
+			revokeReason = "admin_demote"
 		}
-	} else {
+		if _, err := model.RevokeAllUserSessions(user.Id, revokeReason); err != nil {
+			common.SysError(common.LogText("failed to revoke the sessions of user %d: %v", user.Id, err))
+		}
+	default:
 		if err := user.Update(false); err != nil {
 			common.ApiError(c, err)
 			return

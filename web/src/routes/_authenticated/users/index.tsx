@@ -32,7 +32,7 @@ const usersSearchSchema = z.object({
     .optional()
     .catch([]),
   role: z
-    .array(z.enum(['1', '10', '100']))
+    .array(z.enum(['1', '10', 'deputy', '100']))
     .optional()
     .catch([]),
   group: z.array(z.string()).optional().catch([]),

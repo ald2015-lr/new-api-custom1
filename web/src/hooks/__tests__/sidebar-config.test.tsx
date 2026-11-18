@@ -46,7 +46,7 @@ import {
 } from '@/features/system-settings/models/pricing-issues'
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
-import { useAuthStore } from '@/stores/auth-store'
+import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 
 import { useSidebarConfig } from '../use-sidebar-config'
 import { useSidebarData } from '../use-sidebar-data'
@@ -363,5 +363,107 @@ describe('model pricing badge', () => {
     ).toBeInTheDocument()
     expect(get).not.toHaveBeenCalledWith('/api/option/model_pricing/issues')
     expect(badgedEntries()).toHaveLength(0)
+  })
+})
+
+describe('recharge admin entries', () => {
+  function AdminEntries() {
+    const { navGroups } = useSidebarView()
+    const items = navGroups.find((group) => group.id === 'admin')?.items ?? []
+    return (
+      <ul aria-label='Admin entries'>
+        {items.map((item) => (
+          <li key={item.title}>{item.title}</li>
+        ))}
+      </ul>
+    )
+  }
+
+  async function renderAdminEntries(user: AuthUser) {
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: [] },
+    })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    client.setQueryData(['status'], { SidebarModulesAdmin: '' })
+    useAuthStore.getState().auth.setUser(user)
+    const router = createRouter({
+      routeTree: createRootRoute({ component: AdminEntries }),
+      history: createMemoryHistory({ initialEntries: ['/dashboard/overview'] }),
+    })
+    await router.load()
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    )
+    const list = await screen.findByRole('list', { name: 'Admin entries' })
+    return Array.from(list.querySelectorAll('li'), (item) => item.textContent)
+  }
+
+  function recharge(granted: boolean) {
+    return {
+      admin_permissions: {
+        billing: { read: granted, write: granted },
+        redemption: { read: granted, write: granted },
+      },
+    }
+  }
+
+  // The entries follow the capabilities, not the admin kind: root can untick
+  // recharge permissions on a full admin too.
+  it.each([
+    ['a deputy admin', 'deputy' as const],
+    ['an admin whose recharge permissions root removed', 'admin' as const],
+  ])(
+    '%s without billing or redemption read sees neither Redemption Codes nor Subscriptions',
+    async (_kind, adminRole) => {
+      const titles = await renderAdminEntries({
+        id: 3,
+        username: adminRole,
+        role: ROLE.ADMIN,
+        admin_role: adminRole,
+        permissions: recharge(false),
+      })
+      expect(titles).toContain('Users')
+      expect(titles).not.toContain('Redemption Codes')
+      expect(titles).not.toContain('Subscriptions')
+    }
+  )
+
+  it('an admin with redemption read but no billing read sees Redemption Codes without Subscriptions', async () => {
+    const titles = await renderAdminEntries({
+      id: 4,
+      username: 'codes-admin',
+      role: ROLE.ADMIN,
+      admin_role: 'admin',
+      permissions: {
+        admin_permissions: {
+          billing: { read: false, write: false },
+          redemption: { read: true, write: false },
+        },
+      },
+    })
+    expect(titles).toContain('Redemption Codes')
+    expect(titles).not.toContain('Subscriptions')
+  })
+
+  it.each([
+    [
+      'an admin',
+      {
+        id: 2,
+        username: 'admin',
+        role: ROLE.ADMIN,
+        admin_role: 'admin' as const,
+        permissions: recharge(true),
+      },
+    ],
+    ['root', { id: 1, username: 'root', role: ROLE.SUPER_ADMIN }],
+  ])('%s sees Redemption Codes and Subscriptions', async (_kind, user) => {
+    const titles = await renderAdminEntries(user)
+    expect(titles).toContain('Redemption Codes')
+    expect(titles).toContain('Subscriptions')
   })
 })

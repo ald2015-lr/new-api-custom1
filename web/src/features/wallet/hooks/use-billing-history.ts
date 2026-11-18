@@ -20,9 +20,14 @@ import i18next from 'i18next'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
-import { useIsAdmin } from '@/hooks/use-admin'
 import { useDebounce } from '@/hooks/use-debounce'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
 import { handleServerError } from '@/lib/handle-server-error'
+import { useAuthStore } from '@/stores/auth-store'
 
 import {
   getUserBillingHistory,
@@ -45,7 +50,22 @@ interface UseBillingHistoryOptions {
 
 export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   const { initialPage = 1, initialPageSize = 10 } = options
-  const isAdmin = useIsAdmin()
+  const user = useAuthStore((state) => state.auth.user)
+  // Every user's orders are recharge information (billing:read); without it,
+  // e.g. as a deputy admin, the dialog lists the viewer's own orders only.
+  const canViewAllOrders = hasPermission(
+    user,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
+  // Completing an order credits the user, so it also needs billing:write.
+  const canCompleteOrders =
+    canViewAllOrders &&
+    hasPermission(
+      user,
+      ADMIN_PERMISSION_RESOURCES.BILLING,
+      ADMIN_PERMISSION_ACTIONS.WRITE
+    )
 
   const [records, setRecords] = useState<TopupRecord[]>([])
   const [total, setTotal] = useState(0)
@@ -64,7 +84,7 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
     const requestId = ++requestIdRef.current
     setLoading(true)
     try {
-      const response = isAdmin
+      const response = canViewAllOrders
         ? await getAllBillingHistory(page, pageSize, debouncedKeyword)
         : await getUserBillingHistory(page, pageSize, debouncedKeyword)
 
@@ -88,14 +108,14 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
         setLoading(false)
       }
     }
-  }, [debouncedKeyword, isAdmin, page, pageSize])
+  }, [debouncedKeyword, canViewAllOrders, page, pageSize])
 
   /**
-   * Complete a pending order (admin only)
+   * Complete a pending order (billing:write)
    */
   const handleCompleteOrder = useCallback(
     async (tradeNo: string) => {
-      if (!isAdmin) {
+      if (!canCompleteOrders) {
         toast.error(i18next.t('Admin access required'))
         return false
       }
@@ -119,7 +139,7 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
         setCompleting(false)
       }
     },
-    [isAdmin, fetchBillingHistory]
+    [canCompleteOrders, fetchBillingHistory]
   )
 
   /**
@@ -161,7 +181,8 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
     keyword,
     loading,
     completing,
-    isAdmin,
+    canViewAllOrders,
+    canCompleteOrders,
     handlePageChange,
     handlePageSizeChange,
     handleSearch,

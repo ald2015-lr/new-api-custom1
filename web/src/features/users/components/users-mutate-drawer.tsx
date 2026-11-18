@@ -68,7 +68,6 @@ import {
   ADMIN_PERMISSION_RESOURCES,
   EMPTY_PERMISSION_CATALOG,
   hasPermission,
-  normalizeAdminPermissions,
   type AdminPermissionMatrix,
 } from '@/lib/admin-permissions'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
@@ -87,11 +86,18 @@ import {
   getGroups,
   getPermissionCatalog,
 } from '../api'
-import { BINDING_FIELDS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
+import {
+  BINDING_FIELDS,
+  DEPUTY_ROLE_VALUE,
+  ERROR_MESSAGES,
+  SUCCESS_MESSAGES,
+} from '../constants'
 import {
   userFormSchema,
   type UserFormValues,
   USER_FORM_DEFAULT_VALUES,
+  adminPermissionEditorScope,
+  normalizeTargetPermissions,
   transformFormDataToPayload,
   transformUserToFormDefaults,
 } from '../lib'
@@ -167,8 +173,43 @@ export function UsersMutateDrawer({
 
   const currentQuotaRaw = form.watch('quota_dollars') || 0
   const selectedRole = form.watch('role')
+  const selectedAdminRole = form.watch('admin_role')
   const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
-  const targetIsAdmin = (selectedRole ?? currentRow?.role ?? 0) >= ROLE.ADMIN
+  // Only root creates administrators of either kind (the server refuses a
+  // role at or above the operator's own).
+  const roleOptions = [
+    { value: '1', label: t('Common User') },
+    ...(currentUser?.role === ROLE.SUPER_ADMIN
+      ? [
+          { value: '10', label: t('Admin') },
+          { value: DEPUTY_ROLE_VALUE, label: t('Deputy Admin') },
+        ]
+      : []),
+  ]
+  const targetRole = selectedRole ?? currentRow?.role ?? 0
+  const targetIsAdmin = targetRole >= ROLE.ADMIN
+  // A deputy admin: chosen in the create form, or on update the kind the
+  // freshly loaded user reports, like its role (the list row may be stale).
+  const targetIsDeputy =
+    targetRole === ROLE.ADMIN && selectedAdminRole === 'deputy'
+  const editorAdminRole = targetIsDeputy ? 'deputy' : undefined
+  const permissionEditor = adminPermissionEditorScope(
+    permissionCatalog,
+    editorAdminRole
+  )
+  // Quota adjustments are recharges (billing:write).
+  const canAdjustQuota = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.WRITE
+  )
+  // A new password lets the operator sign in as the user and read the user's
+  // own recharge records, so resetting one needs billing:read (server-enforced).
+  const canResetPassword = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
 
   const onSubmit = async (data: UserFormValues) => {
     if (!isUpdate || data.password) {
@@ -183,19 +224,24 @@ export function UsersMutateDrawer({
 
     setIsSubmitting(true)
     try {
+      const adminRole = data.admin_role
       const payload = transformFormDataToPayload(
         data,
         currentRow?.id,
-        permissionCatalog
+        permissionCatalog,
+        adminRole
       )
+      // Compare with the same normalisation (deputies: no recharge resources),
+      // or every save of a deputy would look like a permission change.
       if (
         isUpdate &&
         payload.admin_permissions &&
         JSON.stringify(payload.admin_permissions) ===
           JSON.stringify(
-            normalizeAdminPermissions(
+            normalizeTargetPermissions(
               loadedPermissions.current,
-              permissionCatalog
+              permissionCatalog,
+              adminRole
             )
           )
       ) {
@@ -221,7 +267,10 @@ export function UsersMutateDrawer({
       } else if ((payload.role ?? 0) >= ROLE.ADMIN) {
         const proof = await requestVerification({
           scope: 'admin.user.create',
-          context: { role: payload.role ?? ROLE.ADMIN },
+          context:
+            payload.admin_role === 'deputy'
+              ? { role: ROLE.ADMIN, admin_role: 'deputy' }
+              : { role: payload.role ?? ROLE.ADMIN },
           title: t('Verify to create administrator'),
           description: t(
             'Confirm your identity before creating an administrator account.'
@@ -288,7 +337,7 @@ export function UsersMutateDrawer({
         >
           <SheetHeader className={sideDrawerHeaderClassName()}>
             <SheetTitle>
-              {isUpdate ? t('Update') : t('Create')} {t('User')}
+              {isUpdate ? t('Update User') : t('Create User')}
             </SheetTitle>
             <SheetDescription>
               {isUpdate
@@ -334,15 +383,24 @@ export function UsersMutateDrawer({
                       <FormItem>
                         <FormLabel>{t('Role')}</FormLabel>
                         <Select
-                          items={[
-                            { value: '1', label: t('Common User') },
-                            { value: '10', label: t('Admin') },
-                          ]}
-                          onValueChange={(value) =>
-                            value !== null &&
+                          items={roleOptions}
+                          onValueChange={(value) => {
+                            if (value === null) return
+                            // A deputy admin is role 10 plus admin_role.
+                            if (value === DEPUTY_ROLE_VALUE) {
+                              field.onChange(ROLE.ADMIN)
+                              form.setValue('admin_role', 'deputy')
+                              return
+                            }
                             field.onChange(Number.parseInt(value))
+                            form.setValue('admin_role', undefined)
+                          }}
+                          value={
+                            field.value === ROLE.ADMIN &&
+                            selectedAdminRole === 'deputy'
+                              ? DEPUTY_ROLE_VALUE
+                              : String(field.value)
                           }
-                          value={String(field.value)}
                         >
                           <FormControl>
                             <SelectTrigger>
@@ -351,10 +409,14 @@ export function UsersMutateDrawer({
                           </FormControl>
                           <SelectContent alignItemWithTrigger={false}>
                             <SelectGroup>
-                              <SelectItem value='1'>
-                                {t('Common User')}
-                              </SelectItem>
-                              <SelectItem value='10'>{t('Admin')}</SelectItem>
+                              {roleOptions.map((option) => (
+                                <SelectItem
+                                  key={option.value}
+                                  value={option.value}
+                                >
+                                  {option.label}
+                                </SelectItem>
+                              ))}
                             </SelectGroup>
                           </SelectContent>
                         </Select>
@@ -387,27 +449,29 @@ export function UsersMutateDrawer({
                   )}
                 />
 
-                <FormField
-                  control={form.control}
-                  name='password'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t('Password')}</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          type='password'
-                          placeholder={
-                            isUpdate
-                              ? t('Leave empty to keep unchanged')
-                              : t('Enter password (8–128 characters)')
-                          }
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                {(!isUpdate || canResetPassword) && (
+                  <FormField
+                    control={form.control}
+                    name='password'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Password')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type='password'
+                            placeholder={
+                              isUpdate
+                                ? t('Leave empty to keep unchanged')
+                                : t('Enter password (8–128 characters)')
+                            }
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
               </SideDrawerSection>
 
               {/* Group & Quota Settings (Update only) */}
@@ -460,14 +524,16 @@ export function UsersMutateDrawer({
                               className='flex-1'
                             />
                           </FormControl>
-                          <Button
-                            type='button'
-                            variant='outline'
-                            onClick={() => setQuotaDialogOpen(true)}
-                          >
-                            <Pencil className='mr-1 h-4 w-4' />
-                            {t('Adjust Quota')}
-                          </Button>
+                          {canAdjustQuota && (
+                            <Button
+                              type='button'
+                              variant='outline'
+                              onClick={() => setQuotaDialogOpen(true)}
+                            >
+                              <Pencil className='mr-1 h-4 w-4' />
+                              {t('Adjust Quota')}
+                            </Button>
+                          )}
                         </div>
                         <FormDescription>
                           {formatQuota(parseQuotaFromDollars(field.value || 0))}
@@ -511,18 +577,26 @@ export function UsersMutateDrawer({
                         'Default administrator permissions can be overridden for this user.'
                       )}
                     </p>
+                    {targetIsDeputy && (
+                      <p className='text-muted-foreground text-xs'>
+                        {t(
+                          'Deputy admins can never view or manage recharge information.'
+                        )}
+                      </p>
+                    )}
                     <FormField
                       control={form.control}
                       name='admin_permissions'
                       render={({ field }) => {
-                        const selected = normalizeAdminPermissions(
+                        const selected = normalizeTargetPermissions(
                           field.value,
-                          permissionCatalog
+                          permissionCatalog,
+                          editorAdminRole
                         )
                         return (
                           <FormItem>
                             <PermissionMatrix
-                              resources={permissionCatalog.resources}
+                              resources={permissionEditor.catalog.resources}
                               value={selected}
                               onChange={field.onChange}
                             />
@@ -593,7 +667,7 @@ export function UsersMutateDrawer({
       </Sheet>
 
       {/* Adjust Quota Dialog */}
-      {currentRow && (
+      {currentRow && canAdjustQuota && (
         <UserQuotaDialog
           open={quotaDialogOpen}
           onOpenChange={setQuotaDialogOpen}

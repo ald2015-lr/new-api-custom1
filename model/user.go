@@ -147,6 +147,7 @@ type User struct {
 	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
 	InviteCount          int64                      `json:"invite_count,omitempty" gorm:"-:all"`     // admin list only: invited users, deleted ones included
 	InviteAbuseBan       string                     `json:"invite_abuse_ban,omitempty" gorm:"-:all"` // admin list only: kind of the active invite abuse ban
+	AdminRole            string                     `json:"admin_role,omitempty" gorm:"-:all"`       // role-10 users in admin views: admin or deputy; on create, the requested kind
 }
 
 func (user *User) ToBaseUser() *UserBase {
@@ -510,7 +511,14 @@ func fillUserInviteInfo(tx *gorm.DB, users []*User) error {
 	return nil
 }
 
-func SearchUsers(keyword string, group string, role *int, status *int, inviterId *int, startIdx int, num int, sortOptions ...UserSortOptions) ([]*User, int64, error) {
+// UserIDScope restricts a user search by id: Only, when not nil, keeps just
+// these ids (an empty Only matches nobody); Except drops these ids.
+type UserIDScope struct {
+	Only   []int
+	Except []int
+}
+
+func SearchUsers(keyword string, group string, role *int, status *int, inviterId *int, idScope UserIDScope, startIdx int, num int, sortOptions ...UserSortOptions) ([]*User, int64, error) {
 	var users []*User
 	var total int64
 	var err error
@@ -551,6 +559,13 @@ func SearchUsers(keyword string, group string, role *int, status *int, inviterId
 	}
 	if role != nil {
 		query = query.Where("role = ?", *role)
+	}
+	if idScope.Only != nil {
+		query = query.Where("id IN ?", idScope.Only)
+	}
+	// GORM renders an empty NOT IN list as NOT IN (NULL), which matches nothing.
+	if len(idScope.Except) > 0 {
+		query = query.Where("id NOT IN ?", idScope.Except)
 	}
 	if status != nil {
 		if *status == -1 {
@@ -653,7 +668,7 @@ func HardDeleteUserById(id int) (int64, error) {
 		return 0, common.NewMessage("ID is empty!")
 	}
 	user := User{Id: id}
-	return user.HardDelete()
+	return user.HardDelete(nil)
 }
 
 // TransferAffQuotaToQuota moves invitation balance into the wallet. Expiring
@@ -1142,7 +1157,10 @@ func (user *User) delete(identity *AuthSessionIdentity) (int64, error) {
 	return revokedAccessTokens, invalidateUserCache(user.Id)
 }
 
-func (user *User) HardDelete() (int64, error) {
+// HardDelete permanently deletes the user. alsoInTx, when not nil, runs in the
+// same transaction for rows another package keeps about the user (its
+// authorization rows), so they are deleted with the user or not at all.
+func (user *User) HardDelete(alsoInTx func(tx *gorm.DB) error) (int64, error) {
 	if user.Id == 0 {
 		return 0, common.NewMessage("ID is empty!")
 	}
@@ -1167,7 +1185,13 @@ func (user *User) HardDelete() (int64, error) {
 		if err := deleteUserAuthenticationData(tx, user.Id); err != nil {
 			return err
 		}
-		return tx.Unscoped().Delete(user).Error
+		if err := tx.Unscoped().Delete(user).Error; err != nil {
+			return err
+		}
+		if alsoInTx != nil {
+			return alsoInTx(tx)
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err

@@ -73,7 +73,8 @@ export function BillingHistoryDialog({
     keyword,
     loading,
     completing,
-    isAdmin,
+    canViewAllOrders,
+    canCompleteOrders,
     handlePageChange,
     handlePageSizeChange,
     handleSearch,
@@ -212,7 +213,7 @@ export function BillingHistoryDialog({
                                 <Copy className='h-3 w-3' />
                               )}
                             </Button>
-                            {isAdmin && record.user_id != null && (
+                            {canViewAllOrders && record.user_id != null && (
                               <StatusBadge
                                 label={`${t('User ID')}: ${record.user_id}`}
                                 variant='neutral'
@@ -266,7 +267,7 @@ export function BillingHistoryDialog({
                       </div>
 
                       {/* Admin Actions */}
-                      {isAdmin && record.status === 'pending' && (
+                      {canCompleteOrders && record.status === 'pending' && (
                         <div className='mt-4 flex justify-end'>
                           <Button
                             size='sm'
@@ -324,7 +325,7 @@ export function BillingHistoryDialog({
 
       {/* Confirm Complete Order Dialog */}
       <AlertDialog
-        open={!!confirmTradeNo}
+        open={canCompleteOrders && !!confirmTradeNo}
         onOpenChange={(open) => !open && setConfirmTradeNo(null)}
       >
         <AlertDialogContent>

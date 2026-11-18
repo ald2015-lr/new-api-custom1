@@ -16,6 +16,9 @@ type ResourceDefinition struct {
 	Resource string             `json:"resource"`
 	LabelKey string             `json:"label_key"`
 	Actions  []ActionDefinition `json:"actions"`
+	// Recharge marks resources that hold recharge (充值) information or
+	// actions; a deputy admin never holds their actions.
+	Recharge bool `json:"recharge,omitempty"`
 }
 
 var registry []ResourceDefinition
@@ -33,6 +36,7 @@ func Catalog() []ResourceDefinition {
 			Resource: resource.Resource,
 			LabelKey: resource.LabelKey,
 			Actions:  append([]ActionDefinition(nil), resource.Actions...),
+			Recharge: resource.Recharge,
 		})
 	}
 	return result
@@ -76,6 +80,15 @@ func isKnownResource(resource string) bool {
 	for _, known := range registry {
 		if known.Resource == resource {
 			return true
+		}
+	}
+	return false
+}
+
+func isRechargeResource(resource string) bool {
+	for _, known := range registry {
+		if known.Resource == resource {
+			return known.Recharge
 		}
 	}
 	return false

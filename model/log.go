@@ -90,6 +90,11 @@ const (
 	LogTypeLogin   = 7
 )
 
+// RechargeLogTypes are the log types holding recharge records: online and
+// manual top-ups, redemptions, subscription purchases and administrator quota
+// adjustments (type 1), and legacy administrator quota changes (type 3).
+var RechargeLogTypes = []int{LogTypeTopup, LogTypeManage}
+
 func ensureLogRequestId(log *Log) {
 	if log != nil && log.RequestId == "" {
 		log.RequestId = common.NewRequestId()
@@ -476,9 +481,11 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 }
 
 // LogFilter is the usage-log search shared by the log list and the log export.
-// Username and Channel are administrator filters.
+// Username and Channel are administrator filters. ExcludeTypes removes log
+// types whatever Type asks for.
 type LogFilter struct {
 	Type              int
+	ExcludeTypes      []int
 	StartTimestamp    int64
 	EndTimestamp      int64
 	ModelName         string
@@ -494,6 +501,9 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	var err error
 	if f.Type != LogTypeUnknown {
 		tx = tx.Where("logs.type = ?", f.Type)
+	}
+	if len(f.ExcludeTypes) > 0 {
+		tx = tx.Where("logs.type NOT IN ?", f.ExcludeTypes)
 	}
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", f.ModelName); err != nil {
 		return nil, err

@@ -68,8 +68,31 @@ afterEach(() => {
   window.localStorage.clear()
 })
 
-async function searchEntriesFor(role: number, sidebarModulesAdmin = '') {
-  useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role })
+// Recharge capabilities as the server reports them: full admins hold them,
+// deputy admins never do.
+function rechargeCapabilities(granted: boolean) {
+  return {
+    admin_permissions: {
+      billing: { read: granted, write: granted },
+      redemption: { read: granted, write: granted },
+    },
+  }
+}
+
+async function searchEntriesFor(
+  role: number,
+  sidebarModulesAdmin = '',
+  adminRole: 'admin' | 'deputy' = 'admin'
+) {
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'alice',
+    role,
+    admin_role: role === ROLE.ADMIN ? adminRole : undefined,
+    permissions: rechargeCapabilities(
+      role === ROLE.ADMIN && adminRole === 'admin'
+    ),
+  })
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -115,6 +138,21 @@ test('admins find admin pages in search but not super admin pages', async () => 
 
   expect(entries).toEqual(expect.arrayContaining(adminEntries))
   for (const entry of superAdminEntries) {
+    expect(entries).not.toContain(entry)
+  }
+})
+
+test('deputy admins find admin pages in search except the recharge pages', async () => {
+  const entries = await searchEntriesFor(ROLE.ADMIN, '', 'deputy')
+
+  expect(entries).toEqual(
+    expect.arrayContaining(['Channels', 'Models', 'Users'])
+  )
+  for (const entry of [
+    'Redemption Codes',
+    'Subscriptions',
+    ...superAdminEntries,
+  ]) {
     expect(entries).not.toContain(entry)
   }
 })

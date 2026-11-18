@@ -694,6 +694,46 @@ func TestAuditRoleVisibilityAndPermissions(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, auditRequest(router, "GET", "/api/audit", credential).Code)
 		assert.Equal(t, http.StatusOK, auditRequest(router, "GET", "/api/audit/self", credential).Code)
 	}
+
+	// A deputy admin granted audit:read never sees recharge rows of others,
+	// while a full admin with audit:read and root see them. The deputy's own
+	// rows stay visible on /api/audit/self.
+	deputyToken := "deputy-audit-token"
+	deputy := &model.User{Username: "deputy-audit", Role: common.RoleAdminUser, Status: common.UserStatusEnabled, AuthVersion: 1, AccessToken: &deputyToken, AffCode: "deputy-audit"}
+	require.NoError(t, model.DB.Create(deputy).Error)
+	require.NoError(t, model.DB.Transaction(func(tx *gorm.DB) error {
+		for _, userID := range []int{admin.Id, deputy.Id} {
+			if err := authz.SetUserPermissionsInTx(tx, userID, authz.PermissionsMap{authz.ResourceAudit: {authz.ActionRead: true}}); err != nil {
+				return err
+			}
+		}
+		return authz.AssignDeputyInTx(tx, deputy.Id)
+	}))
+	require.NoError(t, authz.ReloadPolicy())
+	recharge, kept := seedRechargeAuditRows(t, admin.Id, "recharge-audit-owner")
+	model.RecordAuditLog(nil, model.AuditLog{ActorRole: common.RoleAdminUser, UserId: deputy.Id, Username: deputy.Username, Category: model.AuditCategoryOperation, Action: "user.quota_add", RequestId: "deputy-own-quota"})
+	for _, viewer := range []struct {
+		name, credential string
+		want             []string
+	}{
+		{"deputy", deputyToken, kept},
+		{"admin", pat, append(append([]string{}, kept...), recharge...)},
+		{"root", rootToken, append(append([]string{}, kept...), recharge...)},
+	} {
+		response := auditRequest(router, "GET", "/api/audit?username=recharge-audit-owner&page_size=50", viewer.credential)
+		require.Equal(t, http.StatusOK, response.Code, viewer.name)
+		var result struct {
+			Data struct {
+				Total int
+				Items []*model.AuditLog
+			}
+		}
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+		assert.Equal(t, len(viewer.want), result.Data.Total, viewer.name)
+		assert.ElementsMatch(t, viewer.want, auditRequestIds(result.Data.Items), viewer.name)
+	}
+	assert.Contains(t, auditRequest(router, "GET", "/api/audit/self", deputyToken).Body.String(), "deputy-own-quota")
+	assert.NotContains(t, auditRequest(router, "GET", "/api/audit?username=deputy-audit", deputyToken).Body.String(), "deputy-own-quota")
 }
 
 func TestAuditRoleSnapshotSurvivesActorChanges(t *testing.T) {
@@ -914,6 +954,67 @@ func verifyAuditRoleStorage(t *testing.T) {
 	assert.EqualValues(t, 1, total)
 	require.Len(t, visible, 1)
 	assert.Equal(t, common.RoleRootUser, visible[0].ActorRole)
+}
+
+// seedRechargeAuditRows records, under username, one administrator audit row
+// matched by each clause of the recharge filter alone, plus rows the filter
+// keeps, and returns the request ids of both groups.
+func seedRechargeAuditRows(t *testing.T, owner int, username string) (recharge []string, kept []string) {
+	t.Helper()
+	rows := []struct {
+		requestID, category, action, route, content string
+		isRecharge                                  bool
+	}{
+		{"recharge-quota-add", model.AuditCategoryOperation, "user.quota_add", "/api/user/manage", "Increased user quota by 1", true},
+		{"recharge-quota-subtract", model.AuditCategoryOperation, "user.quota_subtract", "", "", true},
+		{"recharge-quota-override", model.AuditCategoryOperation, "user.quota_override", "", "", true},
+		{"recharge-topup-complete", model.AuditCategoryOperation, "user.topup_complete", "", "", true},
+		{"recharge-redemption-action", model.AuditCategoryOperation, "redemption.create", "", "", true},
+		{"recharge-subscription-action", model.AuditCategoryOperation, "subscription.plan_reset", "", "", true},
+		{"recharge-redemption-route", model.AuditCategoryOperation, "generic", "/api/redemption/", "", true},
+		{"recharge-subscription-route", model.AuditCategoryOperation, "", "/api/subscription/admin/plans/:id/subscriptions/reset", "", true},
+		{"recharge-topup-route", model.AuditCategoryAccessToken, "", "/api/user/topup/self", "", true},
+		{"recharge-payment-route", model.AuditCategoryAccessToken, "", "/api/user/waffo-pancake/pay", "", true},
+		{"recharge-failed-quota", model.AuditCategoryOperation, "generic", "/api/user/manage", model.FailedUserQuotaAdjustmentContent, true},
+		{"kept-manage", model.AuditCategoryOperation, "user.manage", "/api/user/manage", "Disabled user", false},
+		{"kept-generic", model.AuditCategoryOperation, "generic", "/api/user/", "", false},
+		{"kept-invite-ban", model.AuditCategoryOperation, "user.invite_abuse_ban", "", "", false},
+		{"kept-self", model.AuditCategoryAccessToken, "", "/api/user/self", "", false},
+		{"kept-channel", model.AuditCategoryOperation, "channel.update", "/api/channel/", "", false},
+	}
+	for i, row := range rows {
+		model.RecordAuditLog(nil, model.AuditLog{ActorRole: common.RoleAdminUser, UserId: owner, Username: username, CreatedAt: int64(300 + i), Category: row.category,
+			Action: row.action, Route: row.route, Content: row.content, RequestId: row.requestID, Success: true})
+		if row.isRecharge {
+			recharge = append(recharge, row.requestID)
+		} else {
+			kept = append(kept, row.requestID)
+		}
+	}
+	return recharge, kept
+}
+
+func auditRequestIds(entries []*model.AuditLog) []string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.RequestId)
+	}
+	return ids
+}
+
+// verifyAuditRechargeFilter runs the recharge filter's query on the current
+// log database.
+func verifyAuditRechargeFilter(t *testing.T) {
+	t.Helper()
+	recharge, kept := seedRechargeAuditRows(t, 1, "recharge-filter-owner")
+	filtered, total, err := model.GetAuditLogs(model.AuditLogFilter{Username: "recharge-filter-owner", ExcludeRecharge: true}, 0, 50, common.RoleAdminUser)
+	require.NoError(t, err)
+	assert.EqualValues(t, len(kept), total)
+	assert.ElementsMatch(t, kept, auditRequestIds(filtered))
+	all, total, err := model.GetAuditLogs(model.AuditLogFilter{Username: "recharge-filter-owner"}, 0, 50, common.RoleAdminUser)
+	require.NoError(t, err)
+	assert.EqualValues(t, len(kept)+len(recharge), total)
+	assert.ElementsMatch(t, append(kept, recharge...), auditRequestIds(all))
 }
 
 func verifyAuditJSONStorage(t *testing.T) {
@@ -1143,6 +1244,7 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 					assert.EqualValues(t, 3, total)
 					verifyAuditRoleStorage(t)
 					verifyAuditJSONStorage(t)
+					verifyAuditRechargeFilter(t)
 					require.NoError(t, authz.Init(model.DB))
 					assert.False(t, authz.Can(1, common.RoleAdminUser, authz.AuditRead))
 					require.NoError(t, model.DB.Transaction(func(tx *gorm.DB) error {
@@ -1217,6 +1319,7 @@ func TestIndependentAuditLogStores(t *testing.T) {
 				assert.Zero(t, mainCount)
 				verifyAuditRoleStorage(t)
 				verifyAuditJSONStorage(t)
+				verifyAuditRechargeFilter(t)
 				if tc.kind == "clickhouse" {
 					var create string
 					require.NoError(t, model.LOG_DB.Raw("SHOW CREATE TABLE audit_logs").Scan(&create).Error)

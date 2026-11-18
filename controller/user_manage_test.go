@@ -169,6 +169,7 @@ func TestManageUserDemoteAdvancesAuthVersionAndRevokesSessionsOnce(t *testing.T)
 		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1,
 	}
 	require.NoError(t, db.Create(&user).Error)
+	assignTestDeputy(t, db, user.Id)
 	for _, sid := range []string{"managed-demote-session-one", "managed-demote-session-two"} {
 		require.NoError(t, db.Create(&model.UserSession{
 			SID: sid, UserID: user.Id, Version: 1, UserAuthVersion: 1,
@@ -201,6 +202,9 @@ func TestManageUserDemoteAdvancesAuthVersionAndRevokesSessionsOnce(t *testing.T)
 		assert.Equal(t, "admin_demote", session.RevokedReason)
 	}
 	assert.Equal(t, 1, sessionUpdateCount)
+	deputy, err := authz.IsDeputy(user.Id)
+	require.NoError(t, err)
+	assert.False(t, deputy, "demoting a deputy admin removes the assignment")
 }
 
 func TestManageUserDeleteReturnsImmediatelyAndUnknownActionFails(t *testing.T) {
@@ -238,6 +242,485 @@ func createQuotaTestOperator(t *testing.T, db *gorm.DB, role int) model.User {
 	operator := model.User{Id: 9999, Username: "root-operator", Password: "root-operator-hash", Role: role, Status: common.UserStatusEnabled, AuthVersion: 1, AffCode: "root-operator-aff"}
 	require.NoError(t, db.Create(&operator).Error)
 	return operator
+}
+
+// initManageUserAuthz seeds the authorization baseline on db as the master
+// node, so a full admin holds the admin permissions.
+func initManageUserAuthz(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	previousMaster := common.IsMasterNode
+	common.IsMasterNode = true
+	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+	require.NoError(t, authz.Init(db))
+}
+
+func assignTestDeputy(t *testing.T, db *gorm.DB, userID int) {
+	t.Helper()
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return authz.AssignDeputyInTx(tx, userID) }))
+}
+
+// manageActionProof issues the root operator's proof for one ManageUser action.
+func manageActionProof(t *testing.T, identity service.AuthIdentity, userID int, action string) string {
+	t.Helper()
+	binding, err := service.BindVerificationOperation(service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":%q}`, userID, action))})
+	require.NoError(t, err)
+	proof, _, err := service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+	require.NoError(t, err)
+	return proof
+}
+
+// userCasbinRules lists the casbin rows of a user as "ptype resource action effect".
+func userCasbinRules(t *testing.T, db *gorm.DB, userID int) []string {
+	t.Helper()
+	var rules []model.CasbinRule
+	require.NoError(t, db.Where("v0 = ?", authz.UserSubject(userID)).Order("ptype, v1, v2").Find(&rules).Error)
+	result := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		result = append(result, strings.TrimSpace(rule.Ptype+" "+rule.V1+" "+rule.V2+" "+rule.V3))
+	}
+	return result
+}
+
+func TestManageUserQuotaRefusedForDeputyAdmins(t *testing.T) {
+	for _, tc := range []struct {
+		mode   string
+		deputy bool
+	}{{"add", true}, {"subtract", true}, {"override", true}, {"invalid", true}, {"add", false}} {
+		name := tc.mode + " by deputy"
+		if !tc.deputy {
+			name = tc.mode + " by full admin"
+		}
+		t.Run(name, func(t *testing.T) {
+			db := setupManageUserTestDB(t)
+			initManageUserAuthz(t, db)
+			operator := createQuotaTestOperator(t, db, common.RoleAdminUser)
+			if tc.deputy {
+				assignTestDeputy(t, db, operator.Id)
+			}
+			user := model.User{Username: "quota-owner", Role: common.RoleCommonUser, Quota: 1000, AffCode: "quota-owner-aff"}
+			require.NoError(t, db.Create(&user).Error)
+
+			body := fmt.Sprintf(`{"id":%d,"action":"add_quota","mode":%q,"value":500}`, user.Id, tc.mode)
+			recorder := adminUserRequest(http.MethodPost, "/api/user/manage", body, "", service.AuthIdentity{UserID: operator.Id}, common.RoleAdminUser, nil, ManageUser)
+			require.NoError(t, db.First(&user, user.Id).Error)
+			var logCount, quotaAuditCount int64
+			require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("type = ?", model.LogTypeTopup).Count(&logCount).Error)
+			require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("action LIKE ?", "user.quota_%").Count(&quotaAuditCount).Error)
+			if !tc.deputy {
+				assert.Contains(t, recorder.Body.String(), `"success":true`)
+				assert.Equal(t, 1500, user.Quota)
+				assert.EqualValues(t, 1, logCount)
+				assert.EqualValues(t, 1, quotaAuditCount)
+				return
+			}
+			assert.Equal(t, http.StatusForbidden, recorder.Code)
+			assert.Contains(t, recorder.Body.String(), "Unauthorized, insufficient privileges")
+			assert.Equal(t, 1000, user.Quota)
+			assert.Zero(t, logCount)
+			assert.Zero(t, quotaAuditCount)
+		})
+	}
+}
+
+func TestManageUserConvertsBetweenFullAndDeputyAdmin(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	initManageUserAuthz(t, db)
+	now := time.Now().Unix()
+	createTarget := func(name string, role int) model.User {
+		user := model.User{Username: name, Password: "password", Role: role, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: name}
+		require.NoError(t, db.Create(&user).Error)
+		require.NoError(t, db.Create(&model.UserSession{
+			SID: name + "-session", UserID: user.Id, Version: 1, UserAuthVersion: 1, Status: model.UserSessionStatusActive,
+			RefreshHash: "refresh-" + name, LoginMethod: "password", LastActiveAt: now, ExpiresAt: now + 3600,
+		}).Error)
+		return user
+	}
+	reactivateSession := func(user model.User) {
+		require.NoError(t, db.Model(&model.UserSession{}).Where("user_id = ?", user.Id).Updates(map[string]any{"status": model.UserSessionStatusActive, "revoked_reason": ""}).Error)
+	}
+	assertConverted := func(user model.User, role int, deputy bool, authVersion int64) {
+		t.Helper()
+		var stored model.User
+		require.NoError(t, db.First(&stored, user.Id).Error)
+		assert.Equal(t, role, stored.Role)
+		assert.Equal(t, authVersion, stored.AuthVersion, "the auth version moves once")
+		isDeputy, err := authz.IsDeputy(user.Id)
+		require.NoError(t, err)
+		assert.Equal(t, deputy, isDeputy)
+		var session model.UserSession
+		require.NoError(t, db.First(&session, "user_id = ?", user.Id).Error)
+		assert.Equal(t, model.UserSessionStatusRevoked, session.Status)
+		assert.Equal(t, "admin_role_change", session.RevokedReason)
+	}
+	member := createTarget("becomes-deputy", common.RoleCommonUser)
+	identity, proof := manageUserProof(t, db, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"set_deputy"}`, member.Id))})
+	// Allow overrides left for the id (an earlier account with a reused id)
+	// grant root-only permissions that the admin baseline does not hold.
+	staleGrants := []authz.Permission{authz.ChannelSecretView, authz.AuditRead, authz.TaskPluginBind}
+	for _, stale := range staleGrants {
+		require.NoError(t, db.Create(&model.CasbinRule{Ptype: "p", V0: authz.UserSubject(member.Id), V1: stale.Resource, V2: stale.Action, V3: authz.EffectAllow}).Error)
+	}
+	require.NoError(t, authz.ReloadPolicy())
+
+	// A common user becomes a deputy admin: role and assignment in one commit,
+	// starting from the deputy baseline like a promotion.
+	recorder := performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, member.Id), identity, proof)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"role":10`)
+	assertConverted(member, common.RoleAdminUser, true, 2)
+	assert.Equal(t, []string{"g role:deputy"}, userCasbinRules(t, db, member.Id))
+	assert.False(t, authz.Can(member.Id, common.RoleAdminUser, authz.BillingRead))
+	assert.True(t, authz.Can(member.Id, common.RoleAdminUser, authz.ChannelRead))
+	for _, stale := range staleGrants {
+		assert.False(t, authz.Can(member.Id, common.RoleAdminUser, stale), stale)
+	}
+	var audit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Order("id desc").First(&audit).Error)
+	params, err := common.Marshal(audit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf(`{"action":"set_deputy","username":"becomes-deputy","id":%d,"verification_method":"password","target_user_id":%d}`, member.Id, member.Id), string(params))
+
+	// A full admin with recharge overrides becomes a deputy admin: the
+	// recharge rows go, the other overrides stay.
+	admin := createTarget("admin-to-deputy", common.RoleAdminUser)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return authz.SetUserPermissionsInTx(tx, admin.Id, authz.PermissionsMap{
+			authz.ResourceChannel: {authz.ActionSensitiveWrite: true},
+			authz.ResourceBilling: {authz.ActionWrite: false},
+		})
+	}))
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, admin.Id), identity, manageActionProof(t, identity, admin.Id, "set_deputy"))
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assertConverted(admin, common.RoleAdminUser, true, 2)
+	assert.Equal(t, []string{"g role:deputy", "p channel sensitive_write allow"}, userCasbinRules(t, db, admin.Id))
+	assert.True(t, authz.Can(admin.Id, common.RoleAdminUser, authz.ChannelSensitiveWrite))
+
+	// Back to a full admin: the admin baseline applies again, recharge included.
+	reactivateSession(admin)
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_admin"}`, admin.Id), identity, manageActionProof(t, identity, admin.Id, "set_admin"))
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assertConverted(admin, common.RoleAdminUser, false, 3)
+	assert.Equal(t, []string{"p channel sensitive_write allow"}, userCasbinRules(t, db, admin.Id))
+	assert.True(t, authz.Can(admin.Id, common.RoleAdminUser, authz.BillingWrite))
+
+	// Refusals change nothing.
+	root := createTarget("root-target", common.RoleRootUser)
+	staleMarker := createTarget("stale-marker", common.RoleCommonUser)
+	assignTestDeputy(t, db, staleMarker.Id)
+	for _, tc := range []struct {
+		name, action, key string
+		target            model.User
+		operatorRole      int
+	}{
+		{"admin caller", "set_deputy", "Regular administrators cannot promote other users to administrator", staleMarker, common.RoleAdminUser},
+		{"admin caller to admin", "set_admin", "Regular administrators cannot promote other users to administrator", staleMarker, common.RoleAdminUser},
+		{"root target", "set_deputy", "Cannot demote super administrator user", root, common.RoleRootUser},
+		{"root target to admin", "set_admin", "This user is not a deputy admin", root, common.RoleRootUser},
+		{"already deputy", "set_deputy", "This user is already a deputy admin", member, common.RoleRootUser},
+		{"full admin", "set_admin", "This user is not a deputy admin", admin, common.RoleRootUser},
+		{"common user with a stale assignment", "set_admin", "This user is not a deputy admin", staleMarker, common.RoleRootUser},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var before model.User
+			require.NoError(t, db.First(&before, tc.target.Id).Error)
+			rulesBefore := userCasbinRules(t, db, tc.target.Id)
+			recorder := adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":%q}`, tc.target.Id, tc.action), "", identity, tc.operatorRole, nil, ManageUser)
+			assert.Contains(t, recorder.Body.String(), `"success":false`)
+			assert.Contains(t, recorder.Body.String(), `"message_key":"`+tc.key+`"`)
+			var after model.User
+			require.NoError(t, db.First(&after, tc.target.Id).Error)
+			assert.Equal(t, before.Role, after.Role)
+			assert.Equal(t, before.AuthVersion, after.AuthVersion)
+			assert.Equal(t, rulesBefore, userCasbinRules(t, db, tc.target.Id))
+		})
+	}
+
+	// Promote makes a full admin even when the id still carries a stale deputy
+	// assignment and an allow override: both go with the role change.
+	require.NoError(t, db.Create(&model.CasbinRule{Ptype: "p", V0: authz.UserSubject(staleMarker.Id), V1: authz.ResourceChannel, V2: authz.ActionSecretView, V3: "allow"}).Error)
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"promote"}`, staleMarker.Id), identity, manageActionProof(t, identity, staleMarker.Id, "promote"))
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assertConverted(staleMarker, common.RoleAdminUser, false, 2)
+	assert.Empty(t, userCasbinRules(t, db, staleMarker.Id))
+	assert.True(t, authz.Can(staleMarker.Id, common.RoleAdminUser, authz.BillingRead))
+	assert.False(t, authz.Can(staleMarker.Id, common.RoleAdminUser, authz.ChannelSecretView))
+	var promoted struct {
+		Data model.User `json:"data"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(performAdminUserGet(t, fmt.Sprintf("/api/user/%d", staleMarker.Id), model.User{Id: identity.UserID, Role: common.RoleRootUser}), &promoted))
+	assert.Equal(t, authz.BuiltInRoleAdmin, promoted.Data.AdminRole)
+
+	// Once the change has committed, a failed policy reload is logged: the
+	// sessions still end and the change is still audited and reported.
+	reloadFails := createTarget("reload-fails", common.RoleCommonUser)
+	const failReload = "test:fail_policy_reload"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(failReload, func(tx *gorm.DB) {
+		// Only the policy load reads whole rows; the assignment checks count.
+		if _, loading := tx.Statement.Dest.(*[]model.CasbinRule); loading {
+			tx.AddError(errors.New("policy store unavailable"))
+		}
+	}))
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, reloadFails.Id), identity, manageActionProof(t, identity, reloadFails.Id, "set_deputy"))
+	require.NoError(t, db.Callback().Query().Remove(failReload))
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assertConverted(reloadFails, common.RoleAdminUser, true, 2)
+	var reloadAudit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Order("id desc").First(&reloadAudit).Error)
+	params, err = common.Marshal(reloadAudit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf(`{"action":"set_deputy","username":"reload-fails","id":%d,"verification_method":"password","target_user_id":%d}`, reloadFails.Id, reloadFails.Id), string(params))
+
+	// The role change and the assignment commit together: a failed role
+	// update leaves no assignment behind.
+	failing := createTarget("failing-promotion", common.RoleCommonUser)
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:fail_role_change", func(tx *gorm.DB) {
+		if tx.Statement.Table == "users" {
+			tx.AddError(errors.New("role change unavailable"))
+		}
+	}))
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, failing.Id), identity, manageActionProof(t, identity, failing.Id, "set_deputy"))
+	require.NoError(t, db.Callback().Update().Remove("test:fail_role_change"))
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Empty(t, userCasbinRules(t, db, failing.Id))
+	require.NoError(t, db.First(&failing, failing.Id).Error)
+	assert.Equal(t, common.RoleCommonUser, failing.Role)
+}
+
+func TestDeleteUserClearsAuthorizationOfTheDeletedId(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.ExternalIdentityClaim{}, &model.Token{}, &model.TwoFABackupCode{}, &model.UserOAuthBinding{}))
+	initManageUserAuthz(t, db)
+	deputy := model.User{Username: "deleted-deputy", Password: "password", Role: common.RoleAdminUser, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "deleted-deputy"}
+	require.NoError(t, db.Create(&deputy).Error)
+	assignTestDeputy(t, db, deputy.Id)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return authz.SetUserPermissionsInTx(tx, deputy.Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSensitiveWrite: true}})
+	}))
+	rulesBefore := userCasbinRules(t, db, deputy.Id)
+	deleteOperation := service.VerificationOperation{Scope: service.VerificationScopeAdminUserDelete, Context: []byte(fmt.Sprintf(`{"user_id":%d}`, deputy.Id))}
+	identity, proof := manageUserProof(t, db, deleteOperation)
+	deleteDeputy := func(proof string) string {
+		return adminUserRequest(http.MethodDelete, "/api/user/:id", "", proof, identity, common.RoleRootUser, gin.Params{{Key: "id", Value: fmt.Sprint(deputy.Id)}}, DeleteUser).Body.String()
+	}
+
+	// The rows go in the delete transaction: when they cannot be removed, the
+	// user stays, so no id is freed with an allow override still attached.
+	const failCleanup = "test:fail_authorization_cleanup"
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(failCleanup, func(tx *gorm.DB) {
+		if tx.Statement.Table == "casbin_rule" {
+			tx.AddError(errors.New("policy store unavailable"))
+		}
+	}))
+	body := deleteDeputy(proof)
+	require.NoError(t, db.Callback().Delete().Remove(failCleanup))
+	assert.Contains(t, body, `"success":false`)
+	_, err := model.GetUserById(deputy.Id, false)
+	require.NoError(t, err, "the user is not deleted without its authorization rows")
+	assert.Equal(t, rulesBefore, userCasbinRules(t, db, deputy.Id))
+
+	binding, err := service.BindVerificationOperation(deleteOperation)
+	require.NoError(t, err)
+	proof, _, err = service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+	require.NoError(t, err)
+	body = deleteDeputy(proof)
+	require.Contains(t, body, `"success":true`, body)
+	var remaining int64
+	require.NoError(t, db.Unscoped().Model(&model.User{}).Where("id = ?", deputy.Id).Count(&remaining).Error)
+	assert.Zero(t, remaining)
+	assert.Empty(t, userCasbinRules(t, db, deputy.Id), "a reused id must not inherit the deleted user's rows")
+	assert.False(t, authz.Can(deputy.Id, common.RoleAdminUser, authz.ChannelSensitiveWrite))
+}
+
+func TestCreateUserDeputyAdmin(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	initManageUserAuthz(t, db)
+	deputyContext := service.VerificationOperation{Scope: service.VerificationScopeAdminUserCreate, Context: []byte(`{"role":10,"admin_role":"deputy"}`)}
+	identity, proof := manageUserProof(t, db, deputyContext)
+	issue := func() string {
+		binding, err := service.BindVerificationOperation(deputyContext)
+		require.NoError(t, err)
+		proof, _, err := service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+		require.NoError(t, err)
+		return proof
+	}
+	create := func(body, proof string) *httptest.ResponseRecorder {
+		return adminUserRequest(http.MethodPost, "/api/user/", body, proof, identity, common.RoleRootUser, nil, CreateUser)
+	}
+
+	recorder := create(`{"username":"new-deputy","password":"deputy-password-1","role":10,"admin_role":"deputy","admin_permissions":{"channel":{"sensitive_write":true},"billing":{"read":false,"write":false}}}`, proof)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	var created model.User
+	require.NoError(t, db.Where("username = ?", "new-deputy").First(&created).Error)
+	assert.Equal(t, common.RoleAdminUser, created.Role)
+	assert.Equal(t, []string{"g role:deputy", "p channel sensitive_write allow"}, userCasbinRules(t, db, created.Id))
+	assert.True(t, authz.Can(created.Id, common.RoleAdminUser, authz.ChannelSensitiveWrite))
+	assert.False(t, authz.Can(created.Id, common.RoleAdminUser, authz.BillingRead))
+	var audit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.create").First(&audit).Error)
+	params, err := common.Marshal(audit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.Contains(t, string(params), `"admin_role":"deputy"`)
+
+	// A recharge grant in the matrix rolls the whole creation back.
+	recorder = create(`{"username":"rich-deputy","password":"deputy-password-1","role":10,"admin_role":"deputy","admin_permissions":{"redemption":{"read":true}}}`, issue())
+	assert.Contains(t, recorder.Body.String(), `"message_key":"Deputy admins cannot hold recharge permissions"`)
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).Where("username = ?", "rich-deputy").Count(&count).Error)
+	assert.Zero(t, count)
+	deputies, err := authz.AllDeputyUserIDs()
+	require.NoError(t, err)
+	assert.Equal(t, []int{created.Id}, deputies)
+
+	for _, body := range []string{
+		`{"username":"deputy-member","password":"deputy-password-1","role":1,"admin_role":"deputy"}`,
+		`{"username":"odd-kind","password":"deputy-password-1","role":10,"admin_role":"root"}`,
+	} {
+		recorder = create(body, "")
+		assert.Contains(t, recorder.Body.String(), `"message_key":"Invalid parameters"`, body)
+	}
+	require.NoError(t, db.Model(&model.User{}).Where("username IN ?", []string{"deputy-member", "odd-kind"}).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestUpdateUserRefusesRechargePermissionsForDeputyAdmins(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	initManageUserAuthz(t, db)
+	deputy := model.User{Username: "edited-deputy", DisplayName: "Deputy", Password: "password", Role: common.RoleAdminUser, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "edited-deputy"}
+	require.NoError(t, db.Create(&deputy).Error)
+	assignTestDeputy(t, db, deputy.Id)
+	updateContext := service.VerificationOperation{Scope: service.VerificationScopeAdminUserUpdate, Context: []byte(fmt.Sprintf(`{"user_id":%d}`, deputy.Id))}
+	identity, proof := manageUserProof(t, db, updateContext)
+	update := func(body, proof string) *httptest.ResponseRecorder {
+		return adminUserRequest(http.MethodPut, "/api/user/", body, proof, identity, common.RoleRootUser, nil, UpdateUser)
+	}
+
+	recorder := update(fmt.Sprintf(`{"id":%d,"username":"edited-deputy","display_name":"Changed","admin_permissions":{"channel":{"sensitive_write":true},"billing":{"read":true,"write":false}}}`, deputy.Id), proof)
+	assert.Contains(t, recorder.Body.String(), `"message_key":"Deputy admins cannot hold recharge permissions"`)
+	var stored model.User
+	require.NoError(t, db.First(&stored, deputy.Id).Error)
+	assert.Equal(t, "Deputy", stored.DisplayName)
+	assert.Equal(t, []string{"g role:deputy"}, userCasbinRules(t, db, deputy.Id))
+
+	// admin_role in the body changes nothing: conversions go through ManageUser.
+	binding, err := service.BindVerificationOperation(updateContext)
+	require.NoError(t, err)
+	proof, _, err = service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+	require.NoError(t, err)
+	recorder = update(fmt.Sprintf(`{"id":%d,"username":"edited-deputy","display_name":"Changed","admin_role":"admin","admin_permissions":{"channel":{"sensitive_write":true},"billing":{"read":false,"write":false}}}`, deputy.Id), proof)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	require.NoError(t, db.First(&stored, deputy.Id).Error)
+	assert.Equal(t, "Changed", stored.DisplayName)
+	assert.Equal(t, []string{"g role:deputy", "p channel sensitive_write allow"}, userCasbinRules(t, db, deputy.Id))
+}
+
+// Resetting a user's password, 2FA or passkey lets the operator sign in as that
+// user and read the user's own recharge records, so it needs billing:read.
+func TestCredentialResetsRequireBillingRead(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.TwoFABackupCode{}))
+	initManageUserAuthz(t, db)
+	password, err := common.Password2Hash("managed-password")
+	require.NoError(t, err)
+	createUser := func(name string, role int) model.User {
+		user := model.User{Username: name, Password: password, Role: role, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: name}
+		require.NoError(t, db.Create(&user).Error)
+		return user
+	}
+	deputy := createUser("reset-deputy", common.RoleAdminUser)
+	assignTestDeputy(t, db, deputy.Id)
+	customAdmin := createUser("reset-custom-admin", common.RoleAdminUser)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return authz.SetUserPermissionsInTx(tx, customAdmin.Id, authz.PermissionsMap{authz.ResourceBilling: {authz.ActionRead: false, authz.ActionWrite: false}})
+	}))
+	admin := createUser("reset-admin", common.RoleAdminUser)
+	require.NoError(t, authz.ReloadPolicy())
+	signIn := func(operator model.User) service.AuthIdentity {
+		require.NoError(t, model.PublishUserAuthCache(operator.Id))
+		bundle, err := service.CreateLoginSession(operator.Id, "password", "127.0.0.1", "credential-reset-test")
+		require.NoError(t, err)
+		identity, err := service.ParseAccessToken(bundle.AccessToken)
+		require.NoError(t, err)
+		return identity
+	}
+
+	resets := []struct {
+		name, scope, method, path string
+		handler                   gin.HandlerFunc
+		body                      func(target model.User) string
+		reset                     func(t *testing.T, target model.User) bool
+	}{
+		{
+			name: "password", scope: service.VerificationScopeAdminUserUpdate, method: http.MethodPut, path: "/api/user/", handler: UpdateUser,
+			body: func(target model.User) string {
+				return fmt.Sprintf(`{"id":%d,"username":%q,"group":"default","password":"replacement-pass"}`, target.Id, target.Username)
+			},
+			reset: func(t *testing.T, target model.User) bool {
+				stored, err := model.GetUserById(target.Id, true)
+				require.NoError(t, err)
+				return !common.ValidatePasswordAndHash("managed-password", stored.Password)
+			},
+		},
+		{
+			name: "2fa", scope: service.VerificationScopeAdminUserTwoFADisable, method: http.MethodDelete, path: "/api/user/:id/2fa", handler: AdminDisable2FA,
+			reset: func(t *testing.T, target model.User) bool {
+				twoFA, err := model.GetTwoFAByUserId(target.Id)
+				require.NoError(t, err)
+				return twoFA == nil || !twoFA.IsEnabled
+			},
+		},
+		{
+			name: "passkey", scope: service.VerificationScopeAdminUserPasskeyReset, method: http.MethodDelete, path: "/api/user/:id/reset_passkey", handler: AdminResetPasskey,
+			reset: func(t *testing.T, target model.User) bool {
+				_, err := model.GetPasskeyByUserID(target.Id)
+				return errors.Is(err, model.ErrPasskeyNotFound)
+			},
+		},
+	}
+	for _, operator := range []struct {
+		kind    string
+		user    model.User
+		allowed bool
+	}{{"deputy admin", deputy, false}, {"admin without billing read", customAdmin, false}, {"full admin", admin, true}} {
+		identity := signIn(operator.user)
+		for _, reset := range resets {
+			t.Run(operator.kind+" resets "+reset.name, func(t *testing.T) {
+				target := createUser(fmt.Sprintf("target-%d-%s", operator.user.Id, reset.name), common.RoleCommonUser)
+				require.NoError(t, db.Create(&model.TwoFA{UserId: target.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}).Error)
+				require.NoError(t, db.Create(&model.PasskeyCredential{UserID: target.Id, CredentialID: target.Username, PublicKey: "public-key"}).Error)
+				binding, err := service.BindVerificationOperation(service.VerificationOperation{Scope: reset.scope, Context: []byte(fmt.Sprintf(`{"user_id":%d}`, target.Id))})
+				require.NoError(t, err)
+				// The operator's own valid proof: step-up verification proves who
+				// the operator is, not what the operator may do.
+				proof, _, err := service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+				require.NoError(t, err)
+				body := ""
+				if reset.body != nil {
+					body = reset.body(target)
+				}
+				recorder := adminUserRequest(reset.method, reset.path, body, proof, identity, common.RoleAdminUser, gin.Params{{Key: "id", Value: fmt.Sprint(target.Id)}}, reset.handler)
+				if operator.allowed {
+					require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+					assert.True(t, reset.reset(t, target))
+					return
+				}
+				assert.Equal(t, http.StatusForbidden, recorder.Code)
+				assert.Contains(t, recorder.Body.String(), "Unauthorized, insufficient privileges")
+				assert.False(t, reset.reset(t, target), "nothing is reset")
+				var resetAudits int64
+				require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("action IN ?", []string{"user.update", "user.2fa_disable", "user.reset_passkey"}).Where("user_id = ?", operator.user.Id).Count(&resetAudits).Error)
+				assert.Zero(t, resetAudits)
+			})
+		}
+	}
+
+	// The deputy keeps the routine edits and binding clears: neither lets it
+	// sign in as the user.
+	member := createUser("deputy-managed", common.RoleCommonUser)
+	deputyIdentity := signIn(deputy)
+	recorder := adminUserRequest(http.MethodPut, "/api/user/", fmt.Sprintf(`{"id":%d,"username":"deputy-managed","display_name":"Renamed","group":"default"}`, member.Id), "", deputyIdentity, common.RoleAdminUser, nil, UpdateUser)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	recorder = adminUserRequest(http.MethodDelete, "/api/user/:id/bindings/:binding_type", "", "", deputyIdentity, common.RoleAdminUser, gin.Params{{Key: "id", Value: fmt.Sprint(member.Id)}, {Key: "binding_type", Value: "github"}}, AdminClearUserBinding)
+	assert.Contains(t, recorder.Body.String(), `"code":"SECURITY_PROOF_REQUIRED"`, "only the step-up proof stands in the way")
 }
 
 func TestManageUserQuotaRecordsTopupAndAudit(t *testing.T) {
@@ -421,6 +904,7 @@ func TestManageUserQuotaTargetsAndWalletBounds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := setupManageUserTestDB(t)
+			initManageUserAuthz(t, db)
 			createQuotaTestOperator(t, db, tc.operatorRole)
 			user := model.User{Id: 1, Username: "private-target-name", Role: tc.targetRole, Quota: tc.before}
 			require.NoError(t, db.Create(&user).Error)
@@ -1125,4 +1609,147 @@ func TestAdminUserListInviteFields(t *testing.T) {
 	}
 	total, _ = list("/api/user/?inviter_id=abc&p=1&page_size=10")
 	assert.Equal(t, 4, total, "an invalid inviter id filters nothing")
+
+	// Role-10 users carry admin_role, and the admin role filter separates
+	// full admins from deputy admins. The Stripe customer id is a payment
+	// identifier: a viewer without billing:read gets it blank.
+	initManageUserAuthz(t, db)
+	createAdmin := func(name string, role int) model.User {
+		user := model.User{Username: name, DisplayName: name, Role: role, Status: common.UserStatusEnabled, Group: "default", AffCode: name, AuthVersion: 1, StripeCustomer: "cus_" + name}
+		require.NoError(t, db.Create(&user).Error)
+		return user
+	}
+	admin, root := createAdmin("full-admin", common.RoleAdminUser), createAdmin("root-admin", common.RoleRootUser)
+	require.NoError(t, db.Model(&quiet).Update("stripe_customer", "cus_quiet").Error)
+	type adminView struct {
+		Id             int     `json:"id"`
+		AdminRole      *string `json:"admin_role"`
+		StripeCustomer string  `json:"stripe_customer"`
+	}
+	view := func(path string, viewer model.User) (int, []adminView) {
+		var response struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Total int         `json:"total"`
+				Items []adminView `json:"items"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.UnmarshalJsonStr(performAdminUserGet(t, path, viewer), &response))
+		require.True(t, response.Success, path)
+		return response.Data.Total, response.Data.Items
+	}
+	viewIds := func(items []adminView) []int {
+		result := []int{}
+		for _, item := range items {
+			result = append(result, item.Id)
+		}
+		return result
+	}
+	total, items2 := view("/api/user/?admin_role=deputy&p=1&page_size=20", root)
+	assert.Zero(t, total, "no deputy admin yet")
+	assert.Empty(t, items2)
+	total, items2 = view("/api/user/search?keyword=&admin_role=admin&p=1&page_size=20", root)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, []int{admin.Id}, viewIds(items2))
+
+	deputy := createAdmin("deputy-admin", common.RoleAdminUser)
+	assignTestDeputy(t, db, deputy.Id)
+	for _, tc := range []struct {
+		path string
+		want []int
+	}{
+		{"/api/user/?admin_role=deputy&p=1&page_size=20", []int{deputy.Id}},
+		{"/api/user/search?keyword=&admin_role=deputy&p=1&page_size=20", []int{deputy.Id}},
+		{"/api/user/search?keyword=&admin_role=admin&p=1&page_size=20", []int{admin.Id}},
+		{"/api/user/search?keyword=&role=1&admin_role=deputy&p=1&page_size=20", []int{deputy.Id}},
+		{"/api/user/search?keyword=&role=10&admin_role=bogus&p=1&page_size=20", []int{deputy.Id, admin.Id}},
+	} {
+		total, items2 = view(tc.path, root)
+		assert.Equal(t, len(tc.want), total, tc.path)
+		assert.Equal(t, tc.want, viewIds(items2), tc.path)
+	}
+
+	_, items2 = view("/api/user/?p=1&page_size=20", root)
+	roles := map[int]*string{}
+	stripe := map[int]string{}
+	for _, item := range items2 {
+		roles[item.Id], stripe[item.Id] = item.AdminRole, item.StripeCustomer
+	}
+	require.NotNil(t, roles[admin.Id])
+	assert.Equal(t, "admin", *roles[admin.Id])
+	require.NotNil(t, roles[deputy.Id])
+	assert.Equal(t, "deputy", *roles[deputy.Id])
+	assert.Nil(t, roles[root.Id])
+	assert.Nil(t, roles[quiet.Id])
+	assert.Equal(t, "cus_quiet", stripe[quiet.Id])
+	for _, viewer := range []model.User{admin, root} {
+		_, items2 = view("/api/user/search?keyword=quiet&p=1&page_size=20", viewer)
+		require.Len(t, items2, 1)
+		assert.Equal(t, "cus_quiet", items2[0].StripeCustomer)
+	}
+	for _, path := range []string{"/api/user/?p=1&page_size=20", "/api/user/search?keyword=&p=1&page_size=20"} {
+		_, items2 = view(path, deputy)
+		require.NotEmpty(t, items2)
+		for _, item := range items2 {
+			assert.Empty(t, item.StripeCustomer, path)
+		}
+	}
+
+	detail := func(id int, viewer model.User) adminView {
+		var response struct {
+			Success bool      `json:"success"`
+			Data    adminView `json:"data"`
+		}
+		require.NoError(t, common.UnmarshalJsonStr(performAdminUserGet(t, fmt.Sprintf("/api/user/%d", id), viewer), &response))
+		require.True(t, response.Success)
+		return response.Data
+	}
+	deputyDetail := detail(deputy.Id, root)
+	require.NotNil(t, deputyDetail.AdminRole)
+	assert.Equal(t, "deputy", *deputyDetail.AdminRole)
+	assert.Equal(t, "cus_deputy-admin", deputyDetail.StripeCustomer)
+	assert.Equal(t, "cus_quiet", detail(quiet.Id, admin).StripeCustomer)
+	assert.Empty(t, detail(quiet.Id, deputy).StripeCustomer)
+
+	for _, tc := range []struct {
+		viewer      model.User
+		adminRole   string
+		billingRead bool
+	}{{deputy, "deputy", false}, {admin, "admin", true}} {
+		var response struct {
+			Data struct {
+				AdminRole   string `json:"admin_role"`
+				Permissions struct {
+					AdminPermissions authz.PermissionsMap `json:"admin_permissions"`
+				} `json:"permissions"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.UnmarshalJsonStr(performAdminUserGet(t, "/api/user/self", tc.viewer), &response))
+		assert.Equal(t, tc.adminRole, response.Data.AdminRole)
+		assert.Equal(t, tc.billingRead, response.Data.Permissions.AdminPermissions[authz.ResourceBilling][authz.ActionRead])
+		assert.Equal(t, tc.billingRead, response.Data.Permissions.AdminPermissions[authz.ResourceRedemption][authz.ActionRead])
+		assert.True(t, response.Data.Permissions.AdminPermissions[authz.ResourceChannel][authz.ActionRead])
+	}
+	self := performAdminUserGet(t, "/api/user/self", quiet)
+	assert.NotContains(t, self, "admin_role", "only role-10 accounts carry admin_role")
+}
+
+// performAdminUserGet serves the users list, search, detail and self routes
+// as viewer, the way AdminAuth/UserAuth would have identified the caller.
+func performAdminUserGet(t *testing.T, path string, viewer model.User) string {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("id", viewer.Id)
+		c.Set("role", viewer.Role)
+	})
+	router.GET("/api/user/", GetAllUsers)
+	router.GET("/api/user/search", SearchUsers)
+	router.GET("/api/user/self", GetSelf)
+	router.GET("/api/user/:id", GetUser)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	return recorder.Body.String()
 }

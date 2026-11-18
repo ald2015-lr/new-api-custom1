@@ -560,7 +560,7 @@ func TestDisablingUserKeepsAccessTokensAndDeletingRemovesThem(t *testing.T) {
 
 	hardDeleted := createAccessTokenTestUser(t, "token-hard-delete-user")
 	createTestUserAccessToken(t, hardDeleted.Id, "nap_hard_delete", 0)
-	revoked, err = hardDeleted.HardDelete()
+	revoked, err = hardDeleted.HardDelete(nil)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, revoked)
 	var remaining int64

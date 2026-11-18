@@ -2,6 +2,8 @@ package authz
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 
 	"github.com/QuantumNous/new-api/common"
@@ -39,18 +41,33 @@ func SetUserPermissions(userID int, permissions PermissionsMap) error {
 	return nil
 }
 
+// SetUserPermissionsInTx stores the overrides of userID in tx. A deputy admin
+// (also one assigned earlier in tx) keeps no row on a recharge resource: a
+// granted recharge action is refused with a Message error, so the caller's
+// transaction rolls back.
 func SetUserPermissionsInTx(tx *gorm.DB, userID int, permissions PermissionsMap) error {
 	e := currentEnforcer()
 	if e == nil {
 		return fmt.Errorf("authz enforcer is not initialized")
+	}
+	deputy, err := deputyAssigned(tx, userID)
+	if err != nil {
+		return err
 	}
 
 	for resource, actions := range permissions {
 		if !isKnownResource(resource) {
 			continue
 		}
+		deputyRecharge := deputy && isRechargeResource(resource)
+		if deputyRecharge && slices.Contains(slices.Collect(maps.Values(actions)), true) {
+			return common.NewMessage("Deputy admins cannot hold recharge permissions")
+		}
 		if err := tx.Where("ptype = ? AND v0 = ? AND v1 = ?", "p", UserSubject(userID), resource).Delete(&model.CasbinRule{}).Error; err != nil {
 			return err
+		}
+		if deputyRecharge {
+			continue
 		}
 		policies := userOverridePolicies(e, resource, actions)
 		if len(policies) == 0 {
@@ -94,8 +111,13 @@ func ClearUserAuthorization(userID int) error {
 	return ClearUserPermissions(userID)
 }
 
+// ClearUserAuthorizationInTx removes every override and the deputy admin
+// assignment of userID.
 func ClearUserAuthorizationInTx(tx *gorm.DB, userID int) error {
-	return ClearUserPermissionsInTx(tx, userID)
+	if err := ClearUserPermissionsInTx(tx, userID); err != nil {
+		return err
+	}
+	return UnassignDeputyInTx(tx, userID)
 }
 
 // ExplicitUserPermissions returns the effective permission matrix for the

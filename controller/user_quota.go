@@ -34,7 +34,7 @@ func manageUserQuota(c *gin.Context, req ManageRequest) {
 		content := auditContentEN(action, params)
 		if !success {
 			// Failed requests have no committed balance changes to render.
-			content = "Failed user quota adjustment"
+			content = model.FailedUserQuotaAdjustmentContent
 		}
 		model.RecordOperationAuditLog(c.GetInt("id"), c.GetInt("role"), content, c.ClientIP(), action, params,
 			auditOperatorInfo(c), &model.AuditRequestInfo{

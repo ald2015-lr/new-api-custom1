@@ -834,6 +834,11 @@ export const STATIC_I18N_KEYS = [
   'Verify to enable user',
   'Verify to promote user',
   'Verify to demote user',
+  'Verify to set deputy admin',
+  'Verify to set full admin',
+  // ManageUser success messages of the deputy admin actions.
+  'User set as deputy admin successfully',
+  'User set as full admin successfully',
   // Model and vendor management labels.
   'Vendors',
   'Vendor management',
@@ -864,6 +869,14 @@ export const STATIC_I18N_KEYS = [
   'Billing management',
   'View all top-up records, subscription plans, and user subscriptions.',
   'Complete top-up orders and manage subscription plans and user subscriptions.',
+  // Recharge permissions of the admin permission catalog (deputy admins never hold them).
+  'View recharge records',
+  "View every user's top-up orders, recharge logs, recharge audit records, subscription plans, and user subscriptions.",
+  'Recharge users and manage plans',
+  'Complete top-up orders, add or subtract user quota, and manage subscription plans and user subscriptions.',
+  'View redemption codes',
+  'View redemption codes, their quota, and who redeemed them.',
+  'Manage redemption codes',
   'View models and vendors, and preview upstream sync.',
   'Edit models and vendors, and sync them from upstream.',
   'Deployments',
@@ -988,4 +1001,8 @@ export const STATIC_I18N_KEYS = [
   'Registered via {{method}}, invited by user ID {{inviter_id}}',
   'Disabled automatically for invite abuse: {{invite_count}} invited users and none of them has recharged',
   'Disabled automatically for invite abuse: the {{invite_count}} users invited by user ID {{inviter_id}} have not recharged',
+  // Deputy admin errors returned by the users API.
+  'Deputy admins cannot hold recharge permissions',
+  'This user is already a deputy admin',
+  'This user is not a deputy admin',
 ] as const

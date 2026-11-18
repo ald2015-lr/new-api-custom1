@@ -59,7 +59,7 @@ func TestSearchUsersSortsBeforePagination(t *testing.T) {
 	truncateTables(t)
 	insertUsersForPaginationTest(t, 42)
 
-	users, total, err := SearchUsers("user", "", nil, nil, nil, 20, 20, NewUserSortOptions("id", "asc"))
+	users, total, err := SearchUsers("user", "", nil, nil, nil, UserIDScope{}, 20, 20, NewUserSortOptions("id", "asc"))
 	require.NoError(t, err)
 	assert.Equal(t, int64(42), total)
 	assert.Equal(t, []int{21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40}, collectUserIDs(users))
@@ -161,19 +161,38 @@ func TestUserInviteCountListDatabaseMatrix(t *testing.T) {
 				{name: "deleted", status: &deleted, want: inviteAbuseTestUserIds(firstInvitees[2])},
 				{name: "keyword and group", keyword: "first-2", group: "default", want: inviteAbuseTestUserIds(firstInvitees[1])},
 			} {
-				found, total, err := SearchUsers(tc.keyword, tc.group, nil, tc.status, &first.Id, 0, 20, NewUserSortOptions(UserSortByInviteCount, "desc"))
+				found, total, err := SearchUsers(tc.keyword, tc.group, nil, tc.status, &first.Id, UserIDScope{}, 0, 20, NewUserSortOptions(UserSortByInviteCount, "desc"))
 				require.NoError(t, err, tc.name)
 				assert.EqualValues(t, len(tc.want), total, tc.name)
 				assert.Equal(t, tc.want, collectUserIDs(found), tc.name)
 			}
-			_, total, err = SearchUsers("", "", nil, nil, &first.Id, 0, 20)
+			_, total, err = SearchUsers("", "", nil, nil, &first.Id, UserIDScope{}, 0, 20)
 			require.NoError(t, err)
 			assert.Equal(t, counts[first.Id], total, "the list behind the count has as many users as the count")
-			found, _, err := SearchUsers("", "", nil, nil, nil, 0, 3, NewUserSortOptions(UserSortByInviteCount, "desc"))
+			found, _, err := SearchUsers("", "", nil, nil, nil, UserIDScope{}, 0, 3, NewUserSortOptions(UserSortByInviteCount, "desc"))
 			require.NoError(t, err)
 			assert.Equal(t, inviteAbuseTestUserIds(second, first, third), collectUserIDs(found))
 			assert.Equal(t, int64(3), found[1].InviteCount)
 			assert.Equal(t, InviteAbuseKindInviter, found[1].InviteAbuseBan)
+
+			// The id scope behind the admin role filter: Only keeps just its
+			// ids (none at all when empty), Except drops its ids (nothing when
+			// empty); both stay unambiguous next to the sort's join.
+			for _, tc := range []struct {
+				name  string
+				scope UserIDScope
+				want  []int
+			}{
+				{name: "only", scope: UserIDScope{Only: []int{third.Id, first.Id}}, want: inviteAbuseTestUserIds(first, third)},
+				{name: "only nobody", scope: UserIDScope{Only: []int{}}, want: []int{}},
+				{name: "except", scope: UserIDScope{Except: []int{first.Id, second.Id}}, want: append([]int{third.Id}, withoutInviters...)},
+				{name: "except nobody", scope: UserIDScope{Except: []int{}}, want: descending},
+			} {
+				found, total, err := SearchUsers("", "", nil, nil, nil, tc.scope, 0, 20, NewUserSortOptions(UserSortByInviteCount, "desc"))
+				require.NoError(t, err, tc.name)
+				assert.EqualValues(t, len(tc.want), total, tc.name)
+				assert.Equal(t, tc.want, collectUserIDs(found), tc.name)
+			}
 		})
 	}
 }

@@ -108,8 +108,6 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 
 	// router/api-router.go: /api/user (admin)
 	"GET /api/user/":                                   accessTokenScopeRule("user:read"),
-	"GET /api/user/topup":                              accessTokenScopeRule("billing:read"),
-	"POST /api/user/topup/complete":                    accessTokenScopeRule("billing:write"),
 	"GET /api/user/search":                             accessTokenScopeRule("user:read"),
 	"GET /api/user/:id/oauth/bindings":                 accessTokenScopeRule("user:read"),
 	"DELETE /api/user/:id/oauth/bindings/:provider_id": accessTokenScopeRule("user:write"),
@@ -122,28 +120,16 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"DELETE /api/user/:id/reset_passkey":               accessTokenScopeRule("user:write"),
 	"GET /api/user/2fa/stats":                          accessTokenScopeRule("user:read"),
 	"DELETE /api/user/:id/2fa":                         accessTokenScopeRule("user:write"),
-	"GET /api/user/invite_abuse/preview":               accessTokenScopeRule("user:read"),
 
 	// router/api-router.go: /api/subscription
-	"GET /api/subscription/plans":                                    accessTokenScopeRule("wallet:read"),
-	"GET /api/subscription/self":                                     accessTokenScopeRule("wallet:read"),
-	"PUT /api/subscription/self/preference":                          accessTokenScopeRule("wallet:write"),
-	"POST /api/subscription/balance/pay":                             accessTokenScopeRule("wallet:write"),
-	"POST /api/subscription/epay/pay":                                accessTokenScopeRule("wallet:write"),
-	"POST /api/subscription/stripe/pay":                              accessTokenScopeRule("wallet:write"),
-	"POST /api/subscription/creem/pay":                               accessTokenScopeRule("wallet:write"),
-	"POST /api/subscription/waffo-pancake/pay":                       accessTokenScopeRule("wallet:write"),
-	"GET /api/subscription/admin/plans":                              accessTokenScopeRule("billing:read"),
-	"POST /api/subscription/admin/plans":                             accessTokenScopeRule("billing:write"),
-	"PUT /api/subscription/admin/plans/:id":                          accessTokenScopeRule("billing:write"),
-	"PATCH /api/subscription/admin/plans/:id":                        accessTokenScopeRule("billing:write"),
-	"POST /api/subscription/admin/bind":                              accessTokenScopeRule("billing:write"),
-	"POST /api/subscription/admin/plans/:id/subscriptions/reset":     accessTokenScopeRule("billing:write"),
-	"GET /api/subscription/admin/users/:id/subscriptions":            accessTokenScopeRule("billing:read"),
-	"POST /api/subscription/admin/users/:id/subscriptions":           accessTokenScopeRule("billing:write"),
-	"POST /api/subscription/admin/users/:id/subscriptions/reset":     accessTokenScopeRule("billing:write"),
-	"POST /api/subscription/admin/user_subscriptions/:id/invalidate": accessTokenScopeRule("billing:write"),
-	"DELETE /api/subscription/admin/user_subscriptions/:id":          accessTokenScopeRule("billing:write"),
+	"GET /api/subscription/plans":              accessTokenScopeRule("wallet:read"),
+	"GET /api/subscription/self":               accessTokenScopeRule("wallet:read"),
+	"PUT /api/subscription/self/preference":    accessTokenScopeRule("wallet:write"),
+	"POST /api/subscription/balance/pay":       accessTokenScopeRule("wallet:write"),
+	"POST /api/subscription/epay/pay":          accessTokenScopeRule("wallet:write"),
+	"POST /api/subscription/stripe/pay":        accessTokenScopeRule("wallet:write"),
+	"POST /api/subscription/creem/pay":         accessTokenScopeRule("wallet:write"),
+	"POST /api/subscription/waffo-pancake/pay": accessTokenScopeRule("wallet:write"),
 
 	// router/api-router.go: /api/option
 	"GET /api/option/":                                           accessTokenScopeRule("option:read"),
@@ -227,16 +213,6 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"DELETE /api/token/:id":      accessTokenScopeRule("api_key:write"),
 	"POST /api/token/batch":      accessTokenScopeRule("api_key:write"),
 	"POST /api/token/batch/keys": accessTokenScopeRule("api_key:reveal"),
-
-	// router/api-router.go: /api/redemption
-	"GET /api/redemption/":           accessTokenScopeRule("redemption:read"),
-	"GET /api/redemption/search":     accessTokenScopeRule("redemption:read"),
-	"GET /api/redemption/:id":        accessTokenScopeRule("redemption:read"),
-	"POST /api/redemption/":          accessTokenScopeRule("redemption:write"),
-	"POST /api/redemption/batch":     accessTokenScopeRule("redemption:write"),
-	"PUT /api/redemption/":           accessTokenScopeRule("redemption:write"),
-	"DELETE /api/redemption/invalid": accessTokenScopeRule("redemption:write"),
-	"DELETE /api/redemption/:id":     accessTokenScopeRule("redemption:write"),
 
 	// router/api-router.go: /api/audit, /api/log, /api/data
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),

@@ -19,15 +19,18 @@ For commercial licensing, please contact support@quantumnous.com
 import { z } from 'zod'
 
 import {
+  ADMIN_ROLE_KEY,
+  DEPUTY_ROLE_KEY,
   type PermissionCatalog,
   type AdminPermissionMatrix,
   normalizeAdminPermissions,
+  withoutRechargeResources,
 } from '@/lib/admin-permissions'
 import { quotaUnitsToDollars } from '@/lib/format'
-import { ROLE } from '@/lib/roles'
+import { ROLE, type AdminRole } from '@/lib/roles'
 
 import { DEFAULT_GROUP } from '../constants'
-import { type UserFormData, type User } from '../types'
+import type { UserFormData, User } from '../types'
 
 // ============================================================================
 // Form Schema
@@ -38,6 +41,9 @@ export const userFormSchema = z.object({
   display_name: z.string().optional(),
   password: z.string().optional(),
   role: z.number().optional(),
+  // With role 10: on create, makes a deputy admin instead of a full admin; on
+  // update, the kind GET /api/user/:id reports (changed only by row actions).
+  admin_role: z.enum(['deputy']).optional(),
   quota_dollars: z.number().min(0).optional(),
   group: z.string().optional(),
   remark: z.string().optional(),
@@ -57,6 +63,7 @@ export const USER_FORM_DEFAULT_VALUES: UserFormValues = {
   display_name: '',
   password: '',
   role: 1, // Default to common user
+  admin_role: undefined,
   quota_dollars: 0,
   group: DEFAULT_GROUP,
   remark: '',
@@ -65,16 +72,50 @@ export const USER_FORM_DEFAULT_VALUES: UserFormValues = {
 }
 
 // ============================================================================
+// Admin Permission Editor
+// ============================================================================
+
+/**
+ * The catalog and baseline role used to edit the permissions of a target
+ * administrator. A deputy admin never sees, holds or sends recharge resources,
+ * and its missing cells default to the deputy baseline.
+ */
+export function adminPermissionEditorScope(
+  catalog: PermissionCatalog,
+  adminRole?: AdminRole
+): { catalog: PermissionCatalog; roleKey: string } {
+  if (adminRole === 'deputy') {
+    return {
+      catalog: withoutRechargeResources(catalog),
+      roleKey: DEPUTY_ROLE_KEY,
+    }
+  }
+  return { catalog, roleKey: ADMIN_ROLE_KEY }
+}
+
+/** The full matrix of a target administrator, as the editor shows and sends it. */
+export function normalizeTargetPermissions(
+  value: AdminPermissionMatrix | null | undefined,
+  catalog: PermissionCatalog,
+  adminRole?: AdminRole
+): AdminPermissionMatrix {
+  const scope = adminPermissionEditorScope(catalog, adminRole)
+  return normalizeAdminPermissions(value, scope.catalog, scope.roleKey)
+}
+
+// ============================================================================
 // Form Data Transformation
 // ============================================================================
 
 /**
- * Transform form data to API payload
+ * Transform form data to API payload. `adminRole` is the kind of the target
+ * administrator (the form's choice on create, the user's on update).
  */
 export function transformFormDataToPayload(
   data: UserFormValues,
   userId?: number,
-  catalog?: PermissionCatalog
+  catalog?: PermissionCatalog,
+  adminRole?: AdminRole
 ): UserFormData & { id?: number } {
   const payload: UserFormData & { id?: number } = {
     username: data.username,
@@ -88,15 +129,19 @@ export function transformFormDataToPayload(
   // is available; without the catalog we cannot build a full matrix, so we omit
   // the field (the backend then leaves existing permissions untouched).
   if (role >= ROLE.ADMIN && catalog) {
-    payload.admin_permissions = normalizeAdminPermissions(
+    payload.admin_permissions = normalizeTargetPermissions(
       data.admin_permissions as AdminPermissionMatrix | undefined,
-      catalog
+      catalog,
+      adminRole
     )
   }
 
   // For create: only send required fields
   if (userId === undefined) {
     payload.role = role
+    if (role === ROLE.ADMIN && adminRole === 'deputy') {
+      payload.admin_role = 'deputy'
+    }
   } else {
     // For update: quota is adjusted atomically via /api/user/manage, not sent here
     payload.group = data.group
@@ -118,6 +163,10 @@ export function transformUserToFormDefaults(user: User): UserFormValues {
     display_name: user.display_name,
     password: '',
     role: user.role,
+    admin_role:
+      user.role === ROLE.ADMIN && user.admin_role === 'deputy'
+        ? 'deputy'
+        : undefined,
     quota_dollars: quotaUnitsToDollars(user.quota),
     group: user.group || DEFAULT_GROUP,
     remark: user.remark || '',

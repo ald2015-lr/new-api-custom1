@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"image"
@@ -2530,12 +2531,19 @@ func setupRelayRouterTestDB(t *testing.T) {
 	require.NoError(t, os.Setenv("SQL_DSN", "local"))
 	require.NoError(t, model.InitDB())
 	model.LOG_DB = model.DB
+	// A shared in-memory SQLite database lives only while one of its
+	// connections is open, and the pool closes each connection after
+	// SQL_MAX_LIFETIME (60s by default), which a long test outlives under
+	// -race: hold one connection for the whole test.
+	sqlDB, err := model.DB.DB()
+	require.NoError(t, err)
+	keepAlive, err := sqlDB.Conn(context.Background())
+	require.NoError(t, err)
 	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.Token{}, &model.Ability{}))
 
 	t.Cleanup(func() {
-		if sqlDB, err := model.DB.DB(); err == nil {
-			_ = sqlDB.Close()
-		}
+		_ = keepAlive.Close()
+		_ = sqlDB.Close()
 		common.IsMasterNode = originalIsMasterNode
 		common.RedisEnabled = originalRedisEnabled
 		common.SQLitePath = originalSQLitePath

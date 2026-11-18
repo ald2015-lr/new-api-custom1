@@ -50,12 +50,12 @@ function StatBadge(props: {
 
 export function CommonLogsStats() {
   const { t } = useTranslation()
-  const { isAdminView: isAdmin } = useLogsViewScope()
+  const { isAdminView: isAdmin, hideRechargeTypes } = useLogsViewScope()
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
 
   const { data: stats, isLoading } = useQuery({
-    queryKey: ['usage-logs-stats', isAdmin, searchParams],
+    queryKey: ['usage-logs-stats', isAdmin, hideRechargeTypes, searchParams],
     queryFn: async () => {
       const params = buildApiParams({
         page: 1,
@@ -63,6 +63,7 @@ export function CommonLogsStats() {
         searchParams,
         columnFilters: [],
         isAdmin,
+        hideRechargeTypes,
       })
 
       const result = isAdmin

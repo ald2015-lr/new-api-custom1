@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -29,10 +29,16 @@ import {
 } from '@/components/data-table'
 import {
   getAdminPlans,
+  getPublicPlans,
   getSelfSubscriptionFull,
 } from '@/features/subscriptions/api'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
 import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -94,16 +100,28 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     isAdminView: isAdmin,
     isRootView: isRoot,
     viewAccess,
+    hideRechargeTypes,
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
-  const userId = useAuthStore((state) => state.auth.user?.id)
-  const { data: showBillingSource = false } = useQuery({
-    queryKey: ['usage-log-billing-source', isAdmin, userId],
+  const user = useAuthStore((state) => state.auth.user)
+  const userId = user?.id
+  // The admin plan list is recharge information (billing:read). Without it,
+  // e.g. as a deputy admin, the enabled public plans answer the same question
+  // and no request ends in a 403 toast.
+  const canReadAdminPlans = hasPermission(
+    user,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
+  const { data: plansShowBillingSource = false } = useQuery({
+    queryKey: ['usage-log-billing-source', isAdmin, canReadAdminPlans, userId],
     enabled: logCategory === 'common' && userId != null,
     queryFn: async () => {
       if (isAdmin) {
-        const plansResult = await getAdminPlans()
+        const plansResult = canReadAdminPlans
+          ? await getAdminPlans()
+          : await getPublicPlans()
         return shouldShowBillingSource({
           isAdmin,
           plans: plansResult.success ? plansResult.data : undefined,
@@ -165,6 +183,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       'logs',
       logCategory,
       viewAccess,
+      hideRechargeTypes,
       pagination.pageIndex + 1,
       pagination.pageSize,
       columnFilters,
@@ -179,6 +198,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         pageSize: pagination.pageSize,
         searchParams,
         columnFilters,
+        hideRechargeTypes,
       })
 
       if (!result?.success) {
@@ -199,6 +219,20 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   })
 
   const logs = data?.items || []
+  // The public plan list stays empty until root confirms payment compliance,
+  // while plans bound by an admin still bill consume logs; without the admin
+  // list, a listed subscription-billed log shows that the system has plans.
+  const listsSubscriptionBilling = useMemo(
+    () =>
+      isAdmin &&
+      !canReadAdminPlans &&
+      ((data?.items ?? []) as Array<{ other?: string }>).some(
+        (log) =>
+          parseLogOther(log.other ?? '')?.billing_source === 'subscription'
+      ),
+    [isAdmin, canReadAdminPlans, data?.items]
+  )
+  const showBillingSource = plansShowBillingSource || listsSubscriptionBilling
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,

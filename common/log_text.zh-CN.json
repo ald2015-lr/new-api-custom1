@@ -588,6 +588,7 @@
   "failed to read Gemini free key channels: %s": "读取 Gemini 免费KEY渠道失败: %s",
   "failed to read TTS response body: %v": "读取 TTS 响应体失败: %v",
   "failed to read the cumulative recharge of user %d: %s": "读取用户 %d 的累计充值失败: %s",
+  "failed to read the deputy admin assignment of user %d: %s": "读取用户 %d 的副管理员标记失败: %s",
   "failed to record log: %s": "记录日志失败: %s",
   "failed to record task billing log: %s": "记录任务计费日志失败: %s",
   "failed to record the invite abuse ban of user %d: %v": "记录用户 %d 的邀请滥用封禁失败: %v",
