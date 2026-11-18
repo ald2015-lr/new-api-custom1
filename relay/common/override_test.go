@@ -2785,6 +2785,11 @@ func TestApplyGatewaySafetyIdentifier(t *testing.T) {
 
 	gateway := GatewaySafetyIdentifier(7)
 	require.Regexp(t, `^u_[0-9a-f]{32}$`, gateway)
+	// Pinned values (HMAC-SHA256 keyed "safety-identifier-v1:" + secret over
+	// "new-api-user:<id>", computed independently): a change to the formula
+	// would re-key every user's identifier after an upgrade.
+	assert.Equal(t, "u_7471caff9788f60bd25ca58494f41ae7", gateway)
+	assert.Equal(t, "u_6cb343e08328c9cba96ebf1cf3f4d99e", GatewaySafetyIdentifier(8))
 	assert.Equal(t, gateway, GatewaySafetyIdentifier(7))
 	assert.NotEqual(t, gateway, GatewaySafetyIdentifier(8))
 
