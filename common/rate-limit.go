@@ -150,6 +150,14 @@ func (l *InMemoryRateLimiter) touchEntry(key string, now time.Time) *rateLimitEn
 
 // Request parameter duration's unit is seconds
 func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration int64) bool {
+	allowed, _ := l.RequestWithRetryAfter(key, maxRequestNum, duration)
+	return allowed
+}
+
+// RequestWithRetryAfter is Request that also reports, for a rejected request,
+// how many seconds remain until the oldest accepted request leaves the window
+// (at least 1). It reports 0 for an accepted request.
+func (l *InMemoryRateLimiter) RequestWithRetryAfter(key string, maxRequestNum int, duration int64) (bool, int64) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
@@ -157,12 +165,15 @@ func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration in
 	entry := l.touchEntry(key, now)
 	entry.requests.removeExpired(now.Unix(), duration)
 
-	allowed := entry.requests.length < maxRequestNum
-	if allowed {
+	if entry.requests.length < maxRequestNum {
 		entry.requests.append(now.Unix())
+		return true, 0
 	}
-
-	return allowed
+	retryAfter := duration
+	if entry.requests.head != nil {
+		retryAfter = entry.requests.head.timestamp + duration - now.Unix()
+	}
+	return false, max(retryAfter, 1)
 }
 
 // RateLimitReservation counts an active request towards admission until its

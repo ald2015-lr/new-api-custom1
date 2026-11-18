@@ -143,6 +143,21 @@ func recordLoginAudit(user *model.User, c *gin.Context) {
 	model.RecordLoginLog(user.Id, user.Role, user.Username, content, ip, "login", params, extra, c)
 }
 
+// recordRegisterAudit records the creation of an account next to the login
+// audit entries, with the client IP and user agent, so sign-up abuse can be
+// traced later. method is "password" or the login method of the provider.
+func recordRegisterAudit(c *gin.Context, user *model.User, method string) {
+	params := map[string]any{
+		"method":     method,
+		"inviter_id": user.InviterId,
+	}
+	extra := model.AuditOther{
+		LoginMethod: method,
+		UserAgent:   c.Request.UserAgent(),
+	}
+	model.RecordLoginLog(user.Id, user.Role, user.Username, auditContentEN("user.register", params), c.ClientIP(), "user.register", params, extra, c)
+}
+
 // setupLogin evaluates the shared login policy after primary authentication.
 // Only a completed Passkey ceremony may go directly to session issuance. A
 // pending legacy GitHub binding rewrite travels inside the challenge and is
@@ -244,6 +259,11 @@ func Register(c *gin.Context) {
 			common.ApiErrorT(c, "Email verification is enabled, please enter email address and verification code")
 			return
 		}
+		// The email policy may have changed since the code was sent.
+		if user.Email, err = service.ValidateAccountEmail(user.Email); err != nil {
+			writeSecurityOperationError(c, err)
+			return
+		}
 		if !common.VerifyCodeWithKey(user.Email, user.VerificationCode, common.EmailVerificationPurpose) {
 			common.ApiErrorT(c, "Verification code is incorrect or has expired")
 			return
@@ -291,6 +311,11 @@ func Register(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if common.EmailVerificationEnabled {
+		// A registration code is single use.
+		common.DeleteKey(cleanUser.Email, common.EmailVerificationPurpose)
+	}
+	recordRegisterAudit(c, &cleanUser, "password")
 
 	// 获取插入后的用户ID
 	var insertedUser model.User

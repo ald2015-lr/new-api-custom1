@@ -1128,16 +1128,16 @@ func TestOAuthRegistrationPersistsInviter(t *testing.T) {
 	db, dialect := openTaskDialectDatabase(t, &model.User{}, &model.Log{})
 	oldDB, oldLogDB := model.DB, model.LOG_DB
 	oldMain, oldLog := common.MainDatabaseType(), common.LogDatabaseType()
-	oldRedis, oldRegister := common.RedisEnabled, common.RegisterEnabled
+	oldRedis, oldRegister, oldRegisterLimit := common.RedisEnabled, common.RegisterEnabled, common.RegisterIPRateLimitEnabled
 	oldNew, oldInvitee, oldInviter := common.QuotaForNewUser, common.QuotaForInvitee, common.QuotaForInviter
 	model.DB, model.LOG_DB = db, db
 	common.SetDatabaseTypes(dialect, dialect)
-	common.RedisEnabled, common.RegisterEnabled = false, true
+	common.RedisEnabled, common.RegisterEnabled, common.RegisterIPRateLimitEnabled = false, true, false
 	common.QuotaForNewUser, common.QuotaForInvitee, common.QuotaForInviter = 0, 0, 0
 	t.Cleanup(func() {
 		model.DB, model.LOG_DB = oldDB, oldLogDB
 		common.SetDatabaseTypes(oldMain, oldLog)
-		common.RedisEnabled, common.RegisterEnabled = oldRedis, oldRegister
+		common.RedisEnabled, common.RegisterEnabled, common.RegisterIPRateLimitEnabled = oldRedis, oldRegister, oldRegisterLimit
 		common.QuotaForNewUser, common.QuotaForInvitee, common.QuotaForInviter = oldNew, oldInvitee, oldInviter
 	})
 	inviter := model.User{Username: "inviter", AffCode: "valid-aff", Status: common.UserStatusEnabled}
@@ -1150,6 +1150,7 @@ func TestOAuthRegistrationPersistsInviter(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/github", nil)
 			provider := &oauth.GitHubProvider{}
 			identity := &oauth.OAuthUser{ProviderUserID: "inviter-test-" + tc.name, Username: "oauth-" + tc.name}
 			created, _, err := findOrCreateOAuthUser(ctx, provider, identity, &oauth.OAuthToken{}, tc.code)
@@ -1165,4 +1166,178 @@ func TestOAuthRegistrationPersistsInviter(t *testing.T) {
 			assert.Equal(t, tc.want, stored.InviterId, "login must not reassign the inviter")
 		})
 	}
+}
+
+// setupOAuthSignUpTest opens the database TEST_MANAGE_USER_DIALECT selects and
+// applies the email policy of the reported incident: qq.com addresses only,
+// by QQ number, without aliases.
+func setupOAuthSignUpTest(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.UserOAuthBinding{}))
+	previousRegister, previousQQ := common.RegisterEnabled, common.EmailQQNumericOnlyEnabled
+	previousDomain, previousWhitelist, previousAlias := common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist, common.EmailAliasRestrictionEnabled
+	previousLimit, previousNum, previousMinutes := common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes
+	common.RegisterEnabled, common.EmailQQNumericOnlyEnabled = true, true
+	common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist, common.EmailAliasRestrictionEnabled = true, []string{"qq.com"}, true
+	common.RegisterIPRateLimitEnabled = false
+	t.Cleanup(func() {
+		common.RegisterEnabled, common.EmailQQNumericOnlyEnabled = previousRegister, previousQQ
+		common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist, common.EmailAliasRestrictionEnabled = previousDomain, previousWhitelist, previousAlias
+		common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = previousLimit, previousNum, previousMinutes
+	})
+	return db
+}
+
+// oauthSignUpContext is the request context of an OAuth callback from remoteAddr.
+func oauthSignUpContext(remoteAddr string) *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/test", nil)
+	c.Request.RemoteAddr = remoteAddr
+	return c
+}
+
+func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
+	db := setupOAuthSignUpTest(t)
+	var userInfoMutex sync.Mutex
+	userInfo := ""
+	setUserInfo := func(body string) {
+		userInfoMutex.Lock()
+		defer userInfoMutex.Unlock()
+		userInfo = body
+	}
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer provider-token", r.Header.Get("Authorization"))
+		userInfoMutex.Lock()
+		defer userInfoMutex.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(userInfo))
+	}))
+	t.Cleanup(idp.Close)
+	oidcSettings := system_setting.GetOIDCSettings()
+	previousEndpoint := oidcSettings.UserInfoEndpoint
+	oidcSettings.UserInfoEndpoint = idp.URL
+	t.Cleanup(func() { oidcSettings.UserInfoEndpoint = previousEndpoint })
+	custom := oauth.NewGenericOAuthProvider(&model.CustomOAuthProvider{
+		Id: 77, Slug: "email-trust", Name: "Email trust", Enabled: true,
+		UserIdField: "sub", EmailField: "email", UserInfoEndpoint: idp.URL,
+	})
+	oidc := &oauth.OIDCProvider{}
+	providerToken := &oauth.OAuthToken{AccessToken: "provider-token", TokenType: "Bearer"}
+
+	for _, tc := range []struct {
+		name      string
+		provider  oauth.Provider
+		userInfo  string
+		wantEmail string
+	}{
+		{"oidc unverified", oidc, `{"sub":"oidc-1","email":"10001@qq.com","email_verified":false}`, ""},
+		{"oidc without the claim", oidc, `{"sub":"oidc-2","email":"10002@qq.com"}`, ""},
+		{"oidc claim that is not true", oidc, `{"sub":"oidc-3","email":"10003@qq.com","email_verified":1}`, ""},
+		{"oidc verified", oidc, `{"sub":"oidc-4","email":" 10004@QQ.com ","email_verified":true}`, "10004@qq.com"},
+		{"oidc verified as a string", oidc, `{"sub":"oidc-5","email":"10005@qq.com","email_verified":"TRUE"}`, "10005@qq.com"},
+		{"oidc verified outside the whitelist", oidc, `{"sub":"oidc-6","email":"someone@gmail.com","email_verified":true}`, ""},
+		{"oidc verified QQ alias", oidc, `{"sub":"oidc-7","email":"owner.name@qq.com","email_verified":true}`, ""},
+		{"custom verified", custom, `{"sub":"custom-1","email":"10006@qq.com","email_verified":true}`, "10006@qq.com"},
+		{"custom unverified", custom, `{"sub":"custom-2","email":"10007@qq.com","email_verified":"false"}`, ""},
+		{"custom without the claim", custom, `{"sub":"custom-3","email":"10008@qq.com"}`, ""},
+		{"custom claim below the root", custom, `{"sub":"custom-4","email":"10009@qq.com","profile":{"email_verified":true}}`, ""},
+		{"custom verified QQ alias", custom, `{"sub":"custom-5","email":"owner@qq.com","email_verified":true}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setUserInfo(tc.userInfo)
+			identity, err := tc.provider.GetUserInfo(context.Background(), providerToken)
+			require.NoError(t, err)
+			created, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), tc.provider, identity, providerToken, "")
+			require.NoError(t, err, "an unusable provider email never blocks the sign-up")
+			var stored model.User
+			require.NoError(t, db.First(&stored, created.Id).Error)
+			assert.Equal(t, tc.wantEmail, stored.Email)
+			assert.Equal(t, common.UserStatusEnabled, stored.Status)
+		})
+	}
+
+	// A verified address another account holds still refuses the sign-up.
+	require.NoError(t, db.Create(&model.User{Username: "email-owner", Password: "owner-password", Email: "10010@qq.com", AffCode: "email-owner"}).Error)
+	setUserInfo(`{"sub":"oidc-taken","email":"10010@qq.com","email_verified":true}`)
+	identity, err := oidc.GetUserInfo(context.Background(), providerToken)
+	require.NoError(t, err)
+	_, _, err = findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+	assert.IsType(t, &OAuthEmailAlreadyTakenError{}, err)
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).Where("oidc_id = ?", "oidc-taken").Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestOAuthSignUpCountsTowardTheRegistrationLimit(t *testing.T) {
+	db := setupOAuthSignUpTest(t)
+	common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = true, 2, 15
+	oauth.Register("auth-flow-test", &authFlowTestOAuthProvider{})
+	t.Cleanup(func() { oauth.Unregister("auth-flow-test") })
+	// A network of its own, so earlier runs in this process have not counted.
+	network := common.GetUUID()
+	remoteAddr := fmt.Sprintf("[2001:db8:%s:%s::1]:4321", network[:4], network[4:8])
+	router := gin.New()
+	router.GET("/api/oauth/:provider", HandleOAuth)
+	callback := func() *httptest.ResponseRecorder {
+		state, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+			Purpose: model.AuthFlowPurposeOAuth, Provider: "auth-flow-test", Intent: model.AuthFlowIntentLogin,
+			Payload: `{}`, ExpiresAt: time.Now().Add(time.Minute),
+		})
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodGet, "/api/oauth/auth-flow-test?state="+state+"&code=provider-code", nil)
+		request.RemoteAddr = remoteAddr
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	response := callback()
+	require.Contains(t, response.Body.String(), `"success":true`)
+	var audits []model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.register").Find(&audits).Error)
+	require.Len(t, audits, 1, "an OAuth sign-up is audited like a registration")
+	assert.Equal(t, model.AuditCategoryLogin, audits[0].Category)
+	assert.Equal(t, strings.Trim(strings.TrimSuffix(remoteAddr, ":4321"), "[]"), audits[0].Ip)
+	params, err := common.Marshal(audits[0].Other.Op.Params)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"method":"oauth:auth-flow-test","inviter_id":0}`, string(params))
+
+	github := &oauth.GitHubProvider{}
+	signUp := func(providerUserID string) (*model.User, error) {
+		user, _, err := findOrCreateOAuthUser(oauthSignUpContext(remoteAddr), github, &oauth.OAuthUser{ProviderUserID: providerUserID}, &oauth.OAuthToken{}, "")
+		return user, err
+	}
+	first, err := signUp("limit-github-1")
+	require.NoError(t, err)
+	_, err = signUp("limit-github-2")
+	var limited *OAuthRegistrationRateLimitedError
+	require.ErrorAs(t, err, &limited)
+	assert.InDelta(t, 15*60, limited.RetryAfter, 1)
+	existing, err := signUp("limit-github-1")
+	require.NoError(t, err, "a login of an existing account never counts")
+	assert.Equal(t, first.Id, existing.Id)
+
+	response = callback()
+	assert.Equal(t, http.StatusTooManyRequests, response.Code)
+	assert.JSONEq(t, `{"success":false,"code":"REGISTER_RATE_LIMITED","message":"Too many registration attempts from your network. Please try again in 15 minutes.","message_key":"Too many registration attempts from your network. Please try again in {{minutes}} minutes.","message_params":{"minutes":15}}`, response.Body.String())
+	assert.NotEmpty(t, response.Header().Get("Retry-After"))
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":"limit-wechat"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	previousWeChat, previousAddress := common.WeChatAuthEnabled, common.WeChatServerAddress
+	common.WeChatAuthEnabled, common.WeChatServerAddress = true, upstream.URL
+	t.Cleanup(func() { common.WeChatAuthEnabled, common.WeChatServerAddress = previousWeChat, previousAddress })
+	recorder := httptest.NewRecorder()
+	wechat, _ := gin.CreateTestContext(recorder)
+	wechat.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/wechat?code=wechat-code", nil)
+	wechat.Request.RemoteAddr = remoteAddr
+	WeChatAuth(wechat)
+	assert.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"code":"REGISTER_RATE_LIMITED"`)
+	var wechatUsers int64
+	require.NoError(t, db.Model(&model.User{}).Where("wechat_id = ?", "limit-wechat").Count(&wechatUsers).Error)
+	assert.Zero(t, wechatUsers)
 }

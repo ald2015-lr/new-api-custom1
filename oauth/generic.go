@@ -279,6 +279,9 @@ func (p *GenericOAuthProvider) GetUserInfo(ctx context.Context, token *OAuthToke
 		Username:       username,
 		DisplayName:    displayName,
 		Email:          email,
+		// Only the conventional root-level email_verified claim vouches for
+		// the address; a provider without it signs users up without an email.
+		EmailVerified: isTrueClaim([]byte(gjson.Get(bodyStr, "email_verified").Raw)),
 		Extra: map[string]any{
 			"provider": p.config.Slug,
 		},

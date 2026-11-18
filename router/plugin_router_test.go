@@ -1142,3 +1142,57 @@ func TestSecurityRoutesDisableCachingBeforeAuthentication(t *testing.T) {
 		})
 	}
 }
+
+// The registration routes count the per-network limits before any other
+// check, so requests the captcha check or the email limiter refuse count too.
+func TestRegistrationRoutesCountNetworkLimitsFirst(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRedis, previousCaptcha, previousVerification := common.RedisEnabled, common.RegisterCaptchaEnabled, common.EmailVerificationEnabled
+	previousLimit, previousNum, previousMinutes := common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes
+	common.RedisEnabled, common.RegisterCaptchaEnabled, common.EmailVerificationEnabled = false, true, false
+	common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = true, 3, 15
+	t.Cleanup(func() {
+		common.RedisEnabled, common.RegisterCaptchaEnabled, common.EmailVerificationEnabled = previousRedis, previousCaptcha, previousVerification
+		common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = previousLimit, previousNum, previousMinutes
+	})
+	outer := gin.New()
+	SetApiRouter(outer)
+	// A network of its own, so earlier runs in this process have not counted.
+	network := common.GetUUID()
+	remoteAddr := fmt.Sprintf("[2001:db8:%s:%s::1]:4321", network[:4], network[4:8])
+	perform := func(method string, path string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, strings.NewReader("{}"))
+		request.RemoteAddr = remoteAddr
+		outer.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for range 3 {
+		response := perform(http.MethodPost, "/api/user/register")
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Contains(t, response.Body.String(), `"code":"CAPTCHA_REQUIRED"`)
+	}
+	response := perform(http.MethodPost, "/api/user/register")
+	assert.Equal(t, http.StatusTooManyRequests, response.Code)
+	assert.Contains(t, response.Body.String(), `"code":"REGISTER_RATE_LIMITED"`)
+
+	// Two code requests reach the captcha check, the third is refused by the
+	// 30-second email limiter and the fourth by the registration code limit,
+	// which counted the third.
+	for range 2 {
+		response = perform(http.MethodGet, "/api/verification?email=10001@qq.com")
+		assert.Contains(t, response.Body.String(), `"code":"CAPTCHA_REQUIRED"`)
+	}
+	response = perform(http.MethodGet, "/api/verification?email=10001@qq.com")
+	assert.Equal(t, http.StatusTooManyRequests, response.Code)
+	assert.NotContains(t, response.Body.String(), `"code"`)
+	response = perform(http.MethodGet, "/api/verification?email=10001@qq.com")
+	assert.Equal(t, http.StatusTooManyRequests, response.Code)
+	assert.Contains(t, response.Body.String(), `"code":"REGISTER_CODE_RATE_LIMITED"`)
+
+	response = perform(http.MethodGet, "/api/captcha")
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), `"captcha_id":"`)
+	assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
+}

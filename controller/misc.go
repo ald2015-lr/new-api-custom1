@@ -70,6 +70,8 @@ func GetStatus(c *gin.Context) {
 		"server_address":              system_setting.ServerAddress,
 		"turnstile_check":             common.TurnstileCheckEnabled,
 		"turnstile_site_key":          common.TurnstileSiteKey,
+		"register_captcha":            common.RegisterCaptchaEnabled,
+		"email_qq_numeric_only":       common.EmailQQNumericOnlyEnabled,
 		"docs_link":                   operation_setting.GetGeneralSetting().DocsLink,
 		"quota_per_unit":              common.QuotaPerUnit,
 		// 兼容旧前端：保留 display_in_currency，同时提供新的 quota_display_type
@@ -214,6 +216,19 @@ func GetHomePageContent(c *gin.Context) {
 	homePageContent := common.OptionMap["HomePageContent"]
 	common.OptionMapRWMutex.RUnlock()
 	serveRevalidatedJSON(c, homePageContent)
+}
+
+// GetRegisterCaptcha issues a single-use arithmetic captcha for the sign-up
+// page. It is served whether or not the captcha is required, so the page never
+// depends on a cached status to fetch one.
+func GetRegisterCaptcha(c *gin.Context) {
+	captcha, err := service.NewCaptcha()
+	if err != nil {
+		logger.LogError(c.Request.Context(), common.LogText("failed to issue a captcha: %v", err))
+		common.ApiErrorT(c, "Please try again later.")
+		return
+	}
+	common.ApiSuccess(c, captcha)
 }
 
 func SendEmailVerification(c *gin.Context) {

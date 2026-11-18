@@ -75,6 +75,19 @@ var TelegramOAuthEnabled = false
 var TurnstileCheckEnabled = false
 var RegisterEnabled = true
 
+// Registration anti-abuse settings, stored under option keys of the same names.
+// RegisterCaptchaEnabled asks for the arithmetic image captcha before a
+// registration email code is sent (and before registration itself while email
+// verification is off). EmailQQNumericOnlyEnabled accepts only the QQ number
+// as the local part of qq.com addresses. RegisterIPRateLimit* allow each
+// client network RegisterIPRateLimitNum registration submissions and,
+// separately, as many email code requests per RegisterIPRateLimitMinutes.
+var RegisterCaptchaEnabled = true
+var EmailQQNumericOnlyEnabled = true
+var RegisterIPRateLimitEnabled = true
+var RegisterIPRateLimitNum = 5
+var RegisterIPRateLimitMinutes = 15
+
 var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
 var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
 var EmailDomainWhitelist = []string{

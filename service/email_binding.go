@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"math/big"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -16,9 +17,27 @@ import (
 )
 
 var (
-	ErrAccountEmailInvalid    = errors.New("Please enter a valid email address")
-	ErrAccountEmailRestricted = errors.New("This email address is not allowed by the administrator's email policy.")
-	ErrEmailBindingDelivery   = errors.New("Verification email could not be sent. Start email verification again.")
+	ErrAccountEmailInvalid          = errors.New("Please enter a valid email address")
+	ErrAccountEmailRestricted       = errors.New("This email address is not allowed by the administrator's email policy.")
+	ErrAccountEmailQQNumberRequired = errors.New("QQ mail addresses must use the QQ number, for example 123456789@qq.com.")
+	ErrEmailBindingDelivery         = errors.New("Verification email could not be sent. Start email verification again.")
+)
+
+var (
+	// accountEmailLocalPattern is the RFC 5322 atext set plus the dot. It keeps
+	// out quoted local parts, backslashes, spaces and any non-ASCII character
+	// (full-width digits, zero-width spaces), each of which would let one
+	// mailbox be registered under several "different" addresses.
+	accountEmailLocalPattern = regexp.MustCompile("^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$")
+	// accountEmailDomainPattern accepts ASCII letter-digit-hyphen labels only.
+	accountEmailDomainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
+	// qqNumberPattern is a QQ number: 5 to 12 ASCII digits without a leading 0.
+	qqNumberPattern = regexp.MustCompile(`^[1-9][0-9]{4,11}$`)
+	// qqNumericMailDomains are the QQ Mail domains whose addresses must use
+	// the QQ number while EmailQQNumericOnlyEnabled is on. The alias-only
+	// domains foxmail.com and vip.qq.com are left out: their addresses are
+	// English names, so the rule would only block them.
+	qqNumericMailDomains = []string{"qq.com"}
 )
 
 type EmailBindingData struct {
@@ -31,8 +50,9 @@ type EmailBindingData struct {
 	NotificationWarning bool   `json:"notification_warning"`
 }
 
-// ValidateAccountEmail is shared with registration mail delivery so binding
-// cannot bypass the site's existing domain, alias and address-length rules.
+// ValidateAccountEmail is shared by registration mail delivery, registration,
+// email binding and OAuth sign-up, so no path that stores an account email can
+// bypass the site's address format, domain, QQ number, alias and length rules.
 func ValidateAccountEmail(email string) (string, error) {
 	email = model.NormalizeEmail(email)
 	if common.Validate.Var(email, "required,email,max=50") != nil {
@@ -42,11 +62,19 @@ func ValidateAccountEmail(email string) (string, error) {
 	if len(parts) != 2 {
 		return "", ErrAccountEmailInvalid
 	}
+	if !accountEmailLocalPattern.MatchString(parts[0]) || !accountEmailDomainPattern.MatchString(parts[1]) {
+		return "", ErrAccountEmailInvalid
+	}
 	if common.EmailDomainRestrictionEnabled {
 		allowed := slices.Contains(common.EmailDomainWhitelist, parts[1])
 		if !allowed {
 			return "", ErrAccountEmailRestricted
 		}
+	}
+	// Checked before the alias rule: a numeric QQ address never has an alias
+	// character, and this message tells the user what to enter instead.
+	if common.EmailQQNumericOnlyEnabled && slices.Contains(qqNumericMailDomains, parts[1]) && !qqNumberPattern.MatchString(parts[0]) {
+		return "", ErrAccountEmailQQNumberRequired
 	}
 	if common.EmailAliasRestrictionEnabled && strings.ContainsAny(parts[0], "+.") {
 		return "", ErrAccountEmailRestricted

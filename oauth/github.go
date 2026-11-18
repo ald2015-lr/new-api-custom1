@@ -156,6 +156,9 @@ func (p *GitHubProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*O
 		Username:       githubUser.Login,
 		DisplayName:    githubUser.Name,
 		Email:          githubUser.Email,
+		// GitHub only lets a verified address be the public profile email,
+		// which is the only email this endpoint returns.
+		EmailVerified: githubUser.Email != "",
 		Extra: map[string]any{
 			"legacy_id": githubUser.Login, // Store login for migration from old accounts
 		},
