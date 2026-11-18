@@ -1267,10 +1267,10 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 		// Unicode case folding matches ſ and the Kelvin sign with s and k, and
 		// strings.ToLower turns the Kelvin sign and U+0130 into k and i: the
 		// provider verified none of the ASCII addresses that would come out.
-		{"custom mail field that a long s in the root email folds into", customMail, `{"sub":"mail-5","email":"ſales@example.com","email_verified":true,"mail":"sales@example.com"}`, ""},
-		{"custom mail field that a Kelvin sign in the root email folds into", customMail, `{"sub":"mail-6","email":"Krystal@example.com","email_verified":true,"mail":"krystal@example.com"}`, ""},
-		{"custom verified with a Kelvin sign", custom, `{"sub":"custom-6","email":"Kate@example.com","email_verified":true}`, ""},
-		{"oidc verified with a dotted capital I", oidc, `{"sub":"oidc-8","email":"İnfo@example.com","email_verified":true}`, ""},
+		{"custom mail field that a long s in the root email folds into", customMail, `{"sub":"mail-5","email":"\u017Fales@example.com","email_verified":true,"mail":"sales@example.com"}`, ""},
+		{"custom mail field that a Kelvin sign in the root email folds into", customMail, `{"sub":"mail-6","email":"\u212Arystal@example.com","email_verified":true,"mail":"krystal@example.com"}`, ""},
+		{"custom verified with a Kelvin sign", custom, `{"sub":"custom-6","email":"\u212Aate@example.com","email_verified":true}`, ""},
+		{"oidc verified with a dotted capital I", oidc, `{"sub":"oidc-8","email":"\u0130nfo@example.com","email_verified":true}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setUserInfo(tc.userInfo)
