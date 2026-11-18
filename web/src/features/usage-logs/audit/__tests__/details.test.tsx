@@ -559,6 +559,37 @@ it.each([
   expect(within(dialog).getAllByText(summary).length).toBeGreaterThan(0)
 })
 
+it('shows the invite abuse rule as the operator instead of the disabled account', async () => {
+  const { dialog } = await openDetails({
+    ...entry,
+    user_id: 4242,
+    username: 'farmer',
+    actor_role: 10,
+    category: 'operation',
+    action: 'user.invite_abuse_ban',
+    content: '',
+    other: {
+      admin_info: { admin_username: 'system', auth_method: 'system' },
+      op: {
+        action: 'user.invite_abuse_ban',
+        params: {
+          id: 4242,
+          username: 'farmer',
+          kind: 'inviter',
+          inviter_id: 4242,
+          invite_count: 57,
+        },
+      },
+    },
+  })
+
+  expect(within(dialog).getByText('farmer (ID: 4242)')).toBeVisible()
+  expect(within(dialog).getAllByText('System').length).toBeGreaterThan(0)
+  expect(dialog).not.toHaveTextContent('system (ID: 4242)')
+  expect(within(dialog).queryByText('admin')).not.toBeInTheDocument()
+  expect(within(dialog).getByText('Inviter')).toBeVisible()
+})
+
 it('shows the shared registration audit summaries in Chinese', async () => {
   const i18n = createInstance()
   await i18n.init({ lng: 'zh', resources: { zh } })

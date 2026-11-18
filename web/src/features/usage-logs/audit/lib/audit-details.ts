@@ -463,6 +463,9 @@ export function buildAuditDetails(
   const admin = isAuditDetailObject(metadata.admin_info)
     ? metadata.admin_info
     : {}
+  // An automatic action (the invite abuse rule) has no acting user; the
+  // entry's user is the account it acted on.
+  const systemActor = admin.auth_method === 'system'
   const actorName =
     typeof admin.admin_username === 'string'
       ? admin.admin_username
@@ -472,11 +475,13 @@ export function buildAuditDetails(
       ? admin.admin_id
       : entry.user_id
   let actor = actorName
-  if (actorId) {
+  if (systemActor) {
+    actor = t('System')
+  } else if (actorId) {
     actor = actorName ? `${actorName} (ID: ${actorId})` : `ID: ${actorId}`
   }
   let actorRole = ''
-  if ([1, 10, 100].includes(entry.actor_role)) {
+  if (!systemActor && [1, 10, 100].includes(entry.actor_role)) {
     actorRole = AUDIT_ROLE_NAMES[entry.actor_role]
   }
   const authMethod =
@@ -485,6 +490,7 @@ export function buildAuditDetails(
   let authentication = authMethod
   if (authMethod === 'session') authentication = t('Session')
   else if (authMethod === 'access_token') authentication = t('Access Token')
+  else if (systemActor) authentication = t('System')
   else if (authMethod) authentication = loginMethodLabel(authMethod, t)
 
   let targetName = ''
