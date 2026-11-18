@@ -219,6 +219,8 @@ export type AuthSettings = {
 export type ClientIpDiagnostics = {
   ip: string
   trusted_proxies_configured: boolean
+  /** TRUSTED_PROXIES trusts any address (such as 0.0.0.0/0), so clients can forge theirs */
+  trusted_proxies_catch_all: boolean
 }
 
 export type InviteAbusePreviewParams = {

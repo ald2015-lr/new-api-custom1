@@ -230,7 +230,50 @@ describe('Registration protection settings', () => {
 
       expect(await screen.findByText('203.0.113.7')).toBeInTheDocument()
       expect(screen.getByText(proxies)).toBeInTheDocument()
+      expect(
+        screen.getByText(
+          'TRUSTED_PROXIES replaces the built-in loopback and private network defaults. List only the addresses of your own proxies, never 0.0.0.0/0 or ::/0.'
+        )
+      ).toBeInTheDocument()
+      // A server that does not report a catch-all list shows no warning.
+      expect(
+        screen.queryByText('TRUSTED_PROXIES trusts every address')
+      ).not.toBeInTheDocument()
       expect(get).toHaveBeenCalledWith('/api/option/client_ip')
     }
   )
+
+  it('warns that any client can forge its address when TRUSTED_PROXIES trusts every address', async () => {
+    mockClientIp({
+      success: true,
+      data: {
+        ip: '203.0.113.7',
+        trusted_proxies_configured: true,
+        trusted_proxies_catch_all: true,
+      },
+    })
+    await renderSettings()
+
+    const warning = (
+      await screen.findByText('TRUSTED_PROXIES trusts every address')
+    ).closest('[data-slot=alert]')
+    expect(warning).toHaveTextContent(
+      'Any client can forge its IP address with X-Forwarded-For, so the registration IP limit and the login rate limit can be bypassed. List only the addresses of your own proxies.'
+    )
+  })
+
+  it('describes both IP limit inputs of the row, the window with its captcha image limit', async () => {
+    await renderSettings()
+
+    expect(
+      screen.getByRole('spinbutton', { name: 'Requests per IP' })
+    ).toHaveAccessibleDescription(
+      'Allowed in each time window, for registrations and for email codes alike'
+    )
+    expect(
+      screen.getByRole('spinbutton', { name: 'Time window (minutes)' })
+    ).toHaveAccessibleDescription(
+      'Captcha images are limited in the same window too: six times the requests per IP, at least 30'
+    )
+  })
 })
