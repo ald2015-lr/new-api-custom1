@@ -186,23 +186,25 @@ func TestRegisterWithEmailVerificationAsksForTheCaptchaBeforeTheCode(t *testing.
 	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10002@qq.com"))
 }
 
-// A registration code only serves password registration: while registration
-// or password registration is closed, the request is refused with Register's
-// message and nothing is mailed.
-func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
+// A registration code only serves password registration with email
+// verification: while registration or password registration is closed, the
+// request is refused with Register's message, while email verification is
+// off with the unavailable verification method, and nothing is mailed.
+func TestSendEmailVerificationIsRefusedWhileRegistrationTakesNoCode(t *testing.T) {
 	setupRegisterTest(t, true, false)
 	mailbox := newSecurityMailbox(t)
 	router := newRegisterTestRouter()
 	for _, tc := range []struct {
-		name               string
-		register, password bool
-		key                string
+		name                             string
+		register, password, verification bool
+		key                              string
 	}{
-		{"registration closed", false, true, "New user registration has been disabled by administrator"},
-		{"password registration closed", true, false, "Password registration has been disabled by administrator, please use third-party account verification"},
+		{"registration closed", false, true, true, "New user registration has been disabled by administrator"},
+		{"password registration closed", true, false, true, "Password registration has been disabled by administrator, please use third-party account verification"},
+		{"email verification off", true, true, false, "This verification method is currently unavailable."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			common.RegisterEnabled, common.PasswordRegisterEnabled = tc.register, tc.password
+			common.RegisterEnabled, common.PasswordRegisterEnabled, common.EmailVerificationEnabled = tc.register, tc.password, tc.verification
 			response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
 			assert.False(t, response.Success)
 			assert.Equal(t, tc.key, response.MessageKey)
@@ -212,7 +214,7 @@ func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
 	assert.Empty(t, mailbox.mail)
 	mailbox.mutex.Unlock()
 
-	common.RegisterEnabled, common.PasswordRegisterEnabled = true, true
+	common.RegisterEnabled, common.PasswordRegisterEnabled, common.EmailVerificationEnabled = true, true, true
 	response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
 	require.True(t, response.Success, response.Message)
 	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10007@qq.com"))
@@ -220,19 +222,30 @@ func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
 
 // The client IP diagnostic answers with the address the server derives for
 // the caller under TRUSTED_PROXIES, says whether TRUSTED_PROXIES is set (to a
-// list or to none) instead of left to the built-in defaults, and is never
-// cached.
+// list or to none) instead of left to the built-in defaults and whether it
+// trusts every IPv4 or IPv6 address, through one range or several (then any
+// client, the public peers here, chooses its address with X-Forwarded-For),
+// and is never cached.
 func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		name, trustedProxies, remoteAddr, ip string
-		configured                           bool
+		configured, catchAll                 bool
 	}{
-		{"defaults trust a private proxy", "", "172.20.0.2:4321", "203.0.113.10", false},
-		{"defaults ignore the header of a public peer", " ", "198.51.100.10:4321", "198.51.100.10", false},
-		{"explicit proxy list", "192.0.2.0/24", "192.0.2.10:4321", "203.0.113.10", true},
-		{"the outer proxy is not in the list", "192.0.2.0/24", "172.20.0.2:4321", "172.20.0.2", true},
-		{"no proxy trusted", "none", "172.20.0.2:4321", "172.20.0.2", true},
+		{"defaults trust a private proxy", "", "172.20.0.2:4321", "203.0.113.10", false, false},
+		{"defaults ignore the header of a public peer", " ", "198.51.100.10:4321", "198.51.100.10", false, false},
+		{"explicit proxy list", "192.0.2.0/24", "192.0.2.10:4321", "203.0.113.10", true, false},
+		{"the outer proxy is not in the list", "192.0.2.0/24", "172.20.0.2:4321", "172.20.0.2", true, false},
+		{"no proxy trusted", "none", "172.20.0.2:4321", "172.20.0.2", true, false},
+		{"every IPv4 address", "0.0.0.0/0", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv6 address next to a proxy", "192.0.2.10, ::/0", "[2001:db8::10]:4321", "203.0.113.10", true, true},
+		{"every IPv4 address written with another address", "10.1.2.3/0", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv4 address as IPv4-mapped IPv6", "::ffff:0:0/96", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv4 address in two halves next to a private range", "0.0.0.0/1,10.0.0.0/8,128.0.0.0/1", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv6 address in two halves", "::/1, 8000::/1", "[2001:db8::10]:4321", "203.0.113.10", true, true},
+		{"every IPv4 address in two IPv4-mapped halves", "::ffff:0:0/97,::ffff:128.0.0.0/97", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"the first and the last IPv4 addresses without those between", "0.0.0.0/8,255.0.0.0/8", "198.51.100.10:4321", "198.51.100.10", true, false},
+		{"IPv4-compatible IPv6 addresses", "::/96", "198.51.100.10:4321", "198.51.100.10", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TRUSTED_PROXIES", tc.trustedProxies)
@@ -245,28 +258,33 @@ func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 			request.Header.Set("X-Forwarded-For", "203.0.113.10")
 			router.ServeHTTP(recorder, request)
 			require.Equal(t, http.StatusOK, recorder.Code)
-			assert.JSONEq(t, fmt.Sprintf(`{"success":true,"message":"","data":{"ip":%q,"trusted_proxies_configured":%t}}`, tc.ip, tc.configured), recorder.Body.String())
+			assert.JSONEq(t, fmt.Sprintf(`{"success":true,"message":"","data":{"ip":%q,"trusted_proxies_configured":%t,"trusted_proxies_catch_all":%t}}`, tc.ip, tc.configured, tc.catchAll), recorder.Body.String())
 			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
 		})
 	}
 }
 
+// A registration code allows four wrong guesses; the fifth deletes it. Spaces
+// around the code and capital letters do not matter, and input that cannot be
+// a code (another length, not hexadecimal) is refused without spending a
+// guess.
 func TestRegisterEmailCodeIsDeletedAfterFiveWrongGuesses(t *testing.T) {
 	db := setupRegisterTest(t, true, false)
 	router := newRegisterTestRouter()
 
 	common.RegisterVerificationCodeWithKey("10003@qq.com", "a1b2c3", common.EmailVerificationPurpose)
-	for range 4 {
-		response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", "ffffff", ""))
-		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey)
+	for _, input := range []string{"ffffff", "ffffff", "ffffff", "ffffff", "a1b2c", "a1b2c3d", "a1b2cg", "a1 b2c3", "１２３４５６", "   "} {
+		response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", input, ""))
+		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, input)
 	}
-	response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", "a1b2c3", ""))
-	require.True(t, response.Success, response.Message, "four wrong guesses leave the code usable")
+	response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", " A1B2C3\n", ""))
+	require.True(t, response.Success, "four wrong guesses and any number of inputs that cannot be a code leave the code usable: %s", response.Message)
 
+	// Wrong guesses count after the same normalisation.
 	common.RegisterVerificationCodeWithKey("10004@qq.com", "d4e5f6", common.EmailVerificationPurpose)
-	for range 5 {
-		response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", "ffffff", ""))
-		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey)
+	for _, guess := range []string{"ffffff", " FFFFFF", "000000\n", "D4E5F7", "abcdef"} {
+		response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", guess, ""))
+		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, guess)
 	}
 	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", "d4e5f6", ""))
 	assert.False(t, response.Success)
@@ -334,6 +352,7 @@ func TestValidateAccountEmailRejectsAddressVariantsAndQQAliases(t *testing.T) {
 		err       error
 	}{
 		{email: " 10001@QQ.com ", qqRule: true, want: "10001@qq.com"},
+		{email: "\u00a010001@QQ.com\u3000", qqRule: true, want: "10001@qq.com"},
 		{email: "12345678901@qq.com", qqRule: true, want: "12345678901@qq.com"},
 		{email: "123456789012@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
 		{email: "1234@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
@@ -355,6 +374,9 @@ func TestValidateAccountEmailRejectsAddressVariantsAndQQAliases(t *testing.T) {
 		{email: `"1\2345"@qq.com`, err: service.ErrAccountEmailInvalid},
 		{email: `"a;b"@example.com`, err: service.ErrAccountEmailInvalid},
 		{email: "12345@ｑｑ.com", err: service.ErrAccountEmailInvalid},
+		// strings.ToLower would turn these into the ASCII kate@ and info.com.
+		{email: "\u212Aate@example.com", err: service.ErrAccountEmailInvalid},
+		{email: "owner@\u0130nfo.com", err: service.ErrAccountEmailInvalid},
 		{email: "12345@qq.com.", err: service.ErrAccountEmailInvalid},
 		{email: "12345@-qq.com", err: service.ErrAccountEmailInvalid},
 		{email: "not-an-email", err: service.ErrAccountEmailInvalid},

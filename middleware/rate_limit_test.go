@@ -487,6 +487,56 @@ func TestRegisterRateLimitFallsBackToMemoryWhenRedisFails(t *testing.T) {
 	assert.Contains(t, limited.Body.String(), `"message_params":{"minutes":15}`)
 }
 
+// Shortening the registration window applies at once on both backends: a
+// network that reached the limit under a long window waits at most the new
+// window, and Retry-After and the message say so. On Redis the counter
+// started under the long window then expires with the new one; later
+// requests do not restart it.
+func TestRegisterRateLimitShortenedWindowAppliesAtOnce(t *testing.T) {
+	for _, backend := range []struct{ name, clientIP string }{{"redis", "192.0.2.96"}, {"memory", "192.0.2.97"}} {
+		t.Run(backend.name, func(t *testing.T) {
+			var redisServer *miniredis.Miniredis
+			if backend.name == "redis" {
+				redisServer, _ = useRateLimitMiniRedis(t)
+			} else {
+				useMemoryRateLimitBackend(t)
+			}
+			useRegisterRateLimit(t, true, 1, 1440)
+			router := newRegisterLimitRouter(t)
+			register := func() *httptest.ResponseRecorder {
+				return performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", backend.clientIP+":4321")
+			}
+			retryAfter := func(response *httptest.ResponseRecorder) int {
+				seconds, err := strconv.Atoi(response.Header().Get("Retry-After"))
+				require.NoError(t, err)
+				return seconds
+			}
+
+			require.Equal(t, http.StatusNoContent, register().Code)
+			limited := register()
+			require.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.InDelta(t, 24*60*60, retryAfter(limited), 1)
+
+			common.RegisterIPRateLimitMinutes = 15
+			limited = register()
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.InDelta(t, 15*60, retryAfter(limited), 1)
+			assert.Contains(t, limited.Body.String(), `"message":"Too many registration attempts from your network. Please try again in 15 minutes."`)
+			if redisServer == nil {
+				return
+			}
+			key := redisIPRateLimitKey(RegisterAttemptRateLimitMark, backend.clientIP)
+			assert.Equal(t, 15*time.Minute, redisServer.TTL(key))
+			redisServer.FastForward(5 * time.Minute)
+			limited = register()
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.Equal(t, 10*60, retryAfter(limited), "a later request does not restart the window")
+			redisServer.FastForward(10 * time.Minute)
+			assert.Equal(t, http.StatusNoContent, register().Code, "the network may register again after the new window")
+		})
+	}
+}
+
 // The captcha image limit (CP) follows the per-network registration limit:
 // nothing is limited or counted while that is off, otherwise a network gets
 // max(30, 6 × RegisterIPRateLimitNum) images per RegisterIPRateLimitMinutes.

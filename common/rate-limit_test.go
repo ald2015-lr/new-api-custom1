@@ -148,3 +148,46 @@ func TestInMemoryRateLimiterConcurrentInitializationAndRequests(t *testing.T) {
 	assert.Len(t, limiter.store, 1)
 	assert.Equal(t, 10, limiter.store["client"].requests.length)
 }
+
+// A rejected request is told how long until the window has room for it. When
+// the limit was lowered while the window held more requests than the new
+// limit, that is when enough requests have left the window for the count to
+// drop below the new limit, not when the oldest one has.
+func TestInMemoryRateLimiterRetryAfterFollowsALoweredLimit(t *testing.T) {
+	var limiter InMemoryRateLimiter
+	limiter.Init(0)
+	now := time.Now()
+	entry := limiter.touchEntry("client", now)
+	for _, age := range []int64{50, 40, 30, 20, 10} {
+		entry.requests.append(now.Unix() - age)
+	}
+
+	allowed, retryAfter := limiter.RequestWithRetryAfter("client", 5, 60)
+	assert.False(t, allowed)
+	assert.InDelta(t, 10, retryAfter, 1, "the oldest request leaves the window after 10 seconds")
+
+	allowed, retryAfter = limiter.RequestWithRetryAfter("client", 2, 60)
+	assert.False(t, allowed)
+	assert.InDelta(t, 40, retryAfter, 1, "four of the five requests have to leave the window")
+	assert.Equal(t, 5, entry.requests.length, "rejected requests are not recorded")
+}
+
+// Request rejects from the request count alone, also after the limit was
+// lowered far below the requests in the window. Walking them, as
+// RequestWithRetryAfter does to find its wait, would hold the mutex the API,
+// login and model limiters share for as long as the backlog is long. This
+// window claims far more requests than it links, so a walk would run off its
+// end.
+func TestInMemoryRateLimiterRequestRejectsWithoutWalkingTheWindow(t *testing.T) {
+	var limiter InMemoryRateLimiter
+	limiter.Init(0)
+	now := time.Now()
+	entry := limiter.touchEntry("client", now)
+	entry.requests.append(now.Unix() - 10)
+	entry.requests.length = 200_000
+
+	assert.NotPanics(t, func() {
+		assert.False(t, limiter.Request("client", 1000, 60))
+	})
+	assert.Equal(t, 200_000, entry.requests.length, "the rejected request is not recorded")
+}

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1200,6 +1201,9 @@ func oauthSignUpContext(remoteAddr string) *gin.Context {
 
 func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 	db := setupOAuthSignUpTest(t)
+	// example.com is allowed too: unlike QQ numbers, its addresses have
+	// letters with Unicode case variants.
+	common.EmailDomainWhitelist = []string{"qq.com", "example.com"}
 	var userInfoMutex sync.Mutex
 	userInfo := ""
 	setUserInfo := func(body string) {
@@ -1223,6 +1227,16 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 		Id: 77, Slug: "email-trust", Name: "Email trust", Enabled: true,
 		UserIdField: "sub", EmailField: "email", UserInfoEndpoint: idp.URL,
 	})
+	// The root email_verified claim speaks for the root email claim only, not
+	// for an address mapped from another field.
+	customNested := oauth.NewGenericOAuthProvider(&model.CustomOAuthProvider{
+		Id: 78, Slug: "nested-email", Name: "Nested email", Enabled: true,
+		UserIdField: "sub", EmailField: "profile.contact_email", UserInfoEndpoint: idp.URL,
+	})
+	customMail := oauth.NewGenericOAuthProvider(&model.CustomOAuthProvider{
+		Id: 79, Slug: "mail-field", Name: "Mail field", Enabled: true,
+		UserIdField: "sub", EmailField: "mail", UserInfoEndpoint: idp.URL,
+	})
 	oidc := &oauth.OIDCProvider{}
 	providerToken := &oauth.OAuthToken{AccessToken: "provider-token", TokenType: "Bearer"}
 
@@ -1244,6 +1258,19 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 		{"custom without the claim", custom, `{"sub":"custom-3","email":"10008@qq.com"}`, ""},
 		{"custom claim below the root", custom, `{"sub":"custom-4","email":"10009@qq.com","profile":{"email_verified":true}}`, ""},
 		{"custom verified QQ alias", custom, `{"sub":"custom-5","email":"owner@qq.com","email_verified":true}`, ""},
+		{"custom nested field that is not the root email", customNested, `{"sub":"nested-1","email":"10012@qq.com","email_verified":true,"profile":{"contact_email":"10013@qq.com"}}`, ""},
+		{"custom nested field that is the root email", customNested, `{"sub":"nested-2","email":"10014@qq.com","email_verified":true,"profile":{"contact_email":" 10014@QQ.com "}}`, "10014@qq.com"},
+		{"custom mail field that is not the root email", customMail, `{"sub":"mail-1","email":"10015@qq.com","email_verified":true,"mail":"10016@qq.com"}`, ""},
+		{"custom mail field without a root email", customMail, `{"sub":"mail-2","email_verified":true,"mail":"10017@qq.com"}`, ""},
+		{"custom mail field that is the root email", customMail, `{"sub":"mail-3","email":"10018@qq.com","email_verified":true,"mail":"10018@qq.com"}`, "10018@qq.com"},
+		{"custom mail field that is the root email in another case", customMail, `{"sub":"mail-4","email":"Sales@Example.com","email_verified":true,"mail":"sales@example.com"}`, "sales@example.com"},
+		// Unicode case folding matches ſ and the Kelvin sign with s and k, and
+		// strings.ToLower turns the Kelvin sign and U+0130 into k and i: the
+		// provider verified none of the ASCII addresses that would come out.
+		{"custom mail field that a long s in the root email folds into", customMail, `{"sub":"mail-5","email":"\u017Fales@example.com","email_verified":true,"mail":"sales@example.com"}`, ""},
+		{"custom mail field that a Kelvin sign in the root email folds into", customMail, `{"sub":"mail-6","email":"\u212Arystal@example.com","email_verified":true,"mail":"krystal@example.com"}`, ""},
+		{"custom verified with a Kelvin sign", custom, `{"sub":"custom-6","email":"\u212Aate@example.com","email_verified":true}`, ""},
+		{"oidc verified with a dotted capital I", oidc, `{"sub":"oidc-8","email":"\u0130nfo@example.com","email_verified":true}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setUserInfo(tc.userInfo)
@@ -1268,6 +1295,117 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&model.User{}).Where("oidc_id = ?", "oidc-taken").Count(&count).Error)
 	assert.Zero(t, count)
+
+	// A deleted account keeps its OIDC subject: signing in with it again is
+	// answered like for GitHub, without signing up a second account, also
+	// when the provider email is not stored and so cannot collide with the
+	// deleted account (an unverified one, a verified one outside the policy).
+	// Each case signs up its own subject, so it does not depend on the cases
+	// above.
+	for _, tc := range []struct{ name, userInfo string }{
+		{"deleted account with an unverified email", `{"sub":"oidc-deleted-unverified","email":"10021@qq.com","email_verified":false}`},
+		{"deleted account with an email outside the policy", `{"sub":"oidc-deleted-outside-policy","email":"deleted@gmail.com","email_verified":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setUserInfo(tc.userInfo)
+			identity, err := oidc.GetUserInfo(context.Background(), providerToken)
+			require.NoError(t, err)
+			account, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+			require.NoError(t, err)
+			require.Empty(t, account.Email)
+			require.NoError(t, db.Delete(account).Error)
+
+			recorder := httptest.NewRecorder()
+			login, _ := gin.CreateTestContext(recorder)
+			login.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/oidc", nil)
+			login.Request.RemoteAddr = "203.0.113.8:4321"
+			handleOAuthLogin(login, oidc, identity, providerToken, &model.AuthFlow{Payload: `{}`})
+			assert.JSONEq(t, `{"success":false,"message":"User has been deleted","message_key":"User has been deleted"}`, recorder.Body.String())
+			var count int64
+			require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", identity.ProviderUserID).Count(&count).Error)
+			assert.EqualValues(t, 1, count, "no second account")
+		})
+	}
+	t.Run("live account", func(t *testing.T) {
+		setUserInfo(`{"sub":"oidc-live","email":"10022@qq.com","email_verified":true}`)
+		identity, err := oidc.GetUserInfo(context.Background(), providerToken)
+		require.NoError(t, err)
+		created, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+		require.NoError(t, err)
+		existing, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+		require.NoError(t, err, "a live OIDC account still signs in")
+		assert.Equal(t, created.Id, existing.Id)
+		assert.Equal(t, "10022@qq.com", existing.Email)
+		var count int64
+		require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", "oidc-live").Count(&count).Error)
+		assert.EqualValues(t, 1, count)
+	})
+}
+
+// GitHub's user endpoint returns only the public profile email, and GitHub
+// accepts only a verified address as that: a sign-up stores it, and an
+// account without a public email signs up without one.
+func TestGitHubSignUpStoresThePublicProfileEmail(t *testing.T) {
+	db := setupOAuthSignUpTest(t)
+	userInfo := ""
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = emailHTTPTransport(func(request *http.Request) (*http.Response, error) {
+		assert.Equal(t, "https://api.github.com/user", request.URL.String())
+		assert.Equal(t, "Bearer github-token", request.Header.Get("Authorization"))
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(userInfo))}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	github := &oauth.GitHubProvider{}
+	token := &oauth.OAuthToken{AccessToken: "github-token"}
+
+	for _, tc := range []struct {
+		name, userInfo, email string
+		verified              bool
+	}{
+		{"public email", `{"id":7001,"login":"octo-public","name":"Octo","email":"10019@qq.com"}`, "10019@qq.com", true},
+		{"no public email", `{"id":7002,"login":"octo-private","name":"Octo","email":null}`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userInfo = tc.userInfo
+			identity, err := github.GetUserInfo(context.Background(), token)
+			require.NoError(t, err)
+			assert.Equal(t, tc.email, identity.Email)
+			assert.Equal(t, tc.verified, identity.EmailVerified)
+			created, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), github, identity, token, "")
+			require.NoError(t, err)
+			var stored model.User
+			require.NoError(t, db.First(&stored, created.Id).Error)
+			assert.Equal(t, tc.email, stored.Email)
+			assert.Equal(t, identity.ProviderUserID, stored.GitHubId)
+		})
+	}
+}
+
+// A WeChat sign-up through its route is audited as a registration, with the
+// wechat method, the client address and the user agent.
+func TestWeChatSignUpIsAuditedAsARegistration(t *testing.T) {
+	db := setupOAuthSignUpTest(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "wechat-code", r.URL.Query().Get("code"))
+		_, _ = w.Write([]byte(`{"success":true,"data":"audit-wechat"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	previousWeChat, previousAddress := common.WeChatAuthEnabled, common.WeChatServerAddress
+	common.WeChatAuthEnabled, common.WeChatServerAddress = true, upstream.URL
+	t.Cleanup(func() { common.WeChatAuthEnabled, common.WeChatServerAddress = previousWeChat, previousAddress })
+	router := gin.New()
+	router.GET("/api/oauth/wechat", WeChatAuth)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/oauth/wechat?code=wechat-code", nil)
+	request.RemoteAddr = "203.0.113.7:4321"
+	request.Header.Set("User-Agent", "register-test-agent")
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	var created model.User
+	require.NoError(t, db.Where("wechat_id = ?", "audit-wechat").First(&created).Error)
+	assertRegisterAudit(t, created, "wechat")
 }
 
 func TestOAuthSignUpCountsTowardTheRegistrationLimit(t *testing.T) {

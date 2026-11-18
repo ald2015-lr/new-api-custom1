@@ -20,13 +20,21 @@ const redisRateLimitNamespace = "rateLimit:v2"
 // simple fixed-window behavior: traffic at a window boundary can burst up to
 // twice the configured limit. Do not replace this with a sliding-window ZSET
 // unless that externally visible behavior is intentionally changed.
+//
+// A counter without an expiry is given one. So is a counter with more time
+// left than the window: its window was longer when it started, and the
+// administrator has shortened it since (the registration limits read their
+// window per request), so the shorter window applies at once, and so does
+// the wait it reports. A lengthened window applies from the next window. A
+// limiter with a constant window is not affected: its counters never have
+// more than the window left.
 const redisFixedWindowScript = `
 local count = redis.call('INCR', KEYS[1])
 if count == 1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 local ttl = redis.call('TTL', KEYS[1])
-if ttl < 0 then
+if ttl < 0 or ttl > tonumber(ARGV[2]) then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
   ttl = redis.call('TTL', KEYS[1])
 end

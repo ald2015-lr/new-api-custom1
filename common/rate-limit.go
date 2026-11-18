@@ -59,6 +59,17 @@ func (q *rateLimitQueue) clear() {
 	q.length = 0
 }
 
+// admit drops the expired requests and records one more when the window
+// still has room for it. A rejection reads only the request count.
+func (q *rateLimitQueue) admit(now int64, duration int64, maxRequestNum int) bool {
+	q.removeExpired(now, duration)
+	if q.length >= maxRequestNum {
+		return false
+	}
+	q.append(now)
+	return true
+}
+
 // rateLimitEntry is both a rate-limit bucket and a node in the key-level LRU.
 type rateLimitEntry struct {
 	lastActive time.Time
@@ -148,30 +159,43 @@ func (l *InMemoryRateLimiter) touchEntry(key string, now time.Time) *rateLimitEn
 	return entry
 }
 
-// Request parameter duration's unit is seconds
+// Request parameter duration's unit is seconds. A rejection costs the same
+// however many requests a lowered limit has left in the window.
 func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration int64) bool {
-	allowed, _ := l.RequestWithRetryAfter(key, maxRequestNum, duration)
-	return allowed
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	now := time.Now()
+	return l.touchEntry(key, now).requests.admit(now.Unix(), duration, maxRequestNum)
 }
 
 // RequestWithRetryAfter is Request that also reports, for a rejected request,
-// how many seconds remain until the oldest accepted request leaves the window
-// (at least 1). It reports 0 for an accepted request.
+// how many seconds remain until the window has room for a request again (at
+// least 1). It reports 0 for an accepted request. After the limit was lowered
+// below the requests in the window, finding that wait walks the requests
+// above the new limit, so a limiter that does not report the wait uses
+// Request instead: one key's backlog must not slow down every other key that
+// shares the limiter's mutex.
 func (l *InMemoryRateLimiter) RequestWithRetryAfter(key string, maxRequestNum int, duration int64) (bool, int64) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
 	now := time.Now()
-	entry := l.touchEntry(key, now)
-	entry.requests.removeExpired(now.Unix(), duration)
-
-	if entry.requests.length < maxRequestNum {
-		entry.requests.append(now.Unix())
+	requests := &l.touchEntry(key, now).requests
+	if requests.admit(now.Unix(), duration, maxRequestNum) {
 		return true, 0
 	}
+	// The count drops below the limit once all but maxRequestNum - 1 of the
+	// accepted requests have left the window. That is the oldest one unless
+	// the limit was lowered while the window held more requests than the new
+	// limit.
 	retryAfter := duration
-	if entry.requests.head != nil {
-		retryAfter = entry.requests.head.timestamp + duration - now.Unix()
+	freeing := requests.head
+	for range requests.length - max(maxRequestNum, 1) {
+		freeing = freeing.next
+	}
+	if freeing != nil {
+		retryAfter = freeing.timestamp + duration - now.Unix()
 	}
 	return false, max(retryAfter, 1)
 }

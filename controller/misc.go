@@ -232,8 +232,10 @@ func GetRegisterCaptcha(c *gin.Context) {
 }
 
 // SendEmailVerification mails a registration code. The code only serves
-// password registration, so it is refused with Register's messages while
-// that is closed.
+// password registration with email verification, so it is refused while
+// registration is closed (with Register's messages) and while email
+// verification is off (Register then reads no code, and the web sign-up page
+// asks for none).
 func SendEmailVerification(c *gin.Context) {
 	if !common.RegisterEnabled {
 		common.ApiErrorT(c, "New user registration has been disabled by administrator")
@@ -241,6 +243,10 @@ func SendEmailVerification(c *gin.Context) {
 	}
 	if !common.PasswordRegisterEnabled {
 		common.ApiErrorT(c, "Password registration has been disabled by administrator, please use third-party account verification")
+		return
+	}
+	if !common.EmailVerificationEnabled {
+		common.ApiErrorT(c, "This verification method is currently unavailable.")
 		return
 	}
 	email, err := service.ValidateAccountEmail(c.Query("email"))
