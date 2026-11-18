@@ -82,6 +82,16 @@ const (
 	// administrators' part of its logs.
 	ContextKeyGeminiFreeKeyAudit ContextKey = "gemini_free_key_audit"
 
+	// ContextKeyModerationState stores the content moderation work of the
+	// request (extraction, verdicts, rule results) that its later attempts on
+	// moderated OpenAI channels reuse.
+	ContextKeyModerationState ContextKey = "moderation_state"
+
+	// ContextKeyModerationAudit stores the *relaycommon.ModerationAudit of the
+	// attempt that passed content moderation, for the administrators' part of
+	// that attempt's consume log.
+	ContextKeyModerationAudit ContextKey = "moderation_audit"
+
 	// ContextKeyGeminiFreeKeyRateLimits stores, by channel id, Google's last
 	// 429 that ended an attempt of the request on a Gemini channel in free
 	// key mode (map[int]*types.NewAPIError), which a later attempt the

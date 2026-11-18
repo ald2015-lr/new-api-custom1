@@ -96,6 +96,12 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		relayInfo != nil && relayInfo.ChannelMeta != nil && audit.ChannelID == relayInfo.ChannelId && audit.RetryIndex == relayInfo.RetryIndex {
 		other.SetAdmin("gemini_free_key", audit)
 	}
+	// What content moderation did on the attempt, when this is the attempt
+	// that passed it on a moderated OpenAI channel.
+	if audit, ok := common.GetContextKeyType[*relaycommon.ModerationAudit](ctx, constant.ContextKeyModerationAudit); ok && audit != nil &&
+		relayInfo != nil && relayInfo.ChannelMeta != nil && audit.ChannelID == relayInfo.ChannelId && audit.RetryIndex == relayInfo.RetryIndex {
+		other.SetAdmin("moderation", audit)
+	}
 
 	AppendChannelAffinityAdminInfo(ctx, other)
 	if events := RequestPolicy(ctx).Events(); len(events) > 0 {

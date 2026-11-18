@@ -202,6 +202,10 @@ func TestServerLogLanguage(t *testing.T) {
 	assert.Equal(t, "渠道 #7 未完成的任务有: 2", common.LogText(line, 7, 2))
 	assert.Equal(t, "a line without a Chinese text: x", common.LogText("a line without a Chinese text: %s", "x"))
 	assert.Equal(t, "任务进度轮询开始", common.LogText("task progress polling started"))
+	assert.Equal(t, "渠道 #3 的内容审查拒绝了请求：来源=rule，详情=preset:en-reveal-cot", common.LogText("content moderation rejected a request on channel #%d: source=%s, detail=%s", 3, "rule", "preset:en-reveal-cot"))
+	assert.Equal(t, "渠道 #3 的内容审查失败（timeout），该渠道设置了审查失败时放行，请求已发送", common.LogText("content moderation failed on channel #%d (%s); the request was sent because the channel lets requests through on failure", 3, "timeout"))
+	assert.Equal(t, "渠道 #3 的一条内容审查规则不是有效的正则表达式，已跳过", common.LogText("content moderation rule of channel #%d is not a valid regular expression and is skipped", 3))
+	assert.Equal(t, "渠道 #3 的审查接口测试：ok（状态 200，12 毫秒）", common.LogText("content moderation probe of channel #%d: %s (status %d, %d ms)", 3, "ok", 200, 12))
 	common.SetLogLanguage("en")
 	assert.Equal(t, "channel #7 has 2 unfinished tasks", common.LogText(line, 7, 2))
 }
