@@ -167,11 +167,11 @@ describe('Registration protection settings', () => {
     const count = screen.getByRole('spinbutton', { name: 'Requests per IP' })
     await user.clear(count)
     await user.type(count, '10')
-    const window = screen.getByRole('spinbutton', {
+    const timeWindow = screen.getByRole('spinbutton', {
       name: 'Time window (minutes)',
     })
-    await user.clear(window)
-    await user.type(window, '30')
+    await user.clear(timeWindow)
+    await user.type(timeWindow, '30')
     await user.click(screen.getByRole('button', { name: 'Save Changes' }))
 
     await waitFor(() => expect(put).toHaveBeenCalledTimes(3))

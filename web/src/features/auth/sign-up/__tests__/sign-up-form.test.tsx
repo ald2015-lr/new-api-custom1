@@ -187,6 +187,23 @@ it('sends the captcha with the registration and fetches a new one after the repl
   expect(screen.getByRole('textbox', { name: 'Captcha' })).toHaveValue('')
 })
 
+it('loads a new captcha from the image and from the keyboard on the refresh button', async () => {
+  const user = userEvent.setup()
+  mockGet()
+  await renderSignUp({ register_captcha: true, email_verification: false })
+  await findCaptchaImage(1)
+  const answer = screen.getByRole('textbox', { name: 'Captcha' })
+  await user.type(answer, '9')
+
+  await user.click(screen.getByRole('button', { name: 'Captcha' }))
+  await findCaptchaImage(2)
+  expect(answer).toHaveValue('')
+
+  screen.getByRole('button', { name: 'Refresh captcha' }).focus()
+  await user.keyboard('{Enter}')
+  await findCaptchaImage(3)
+})
+
 it('puts the captcha above the email code and requires it before sending the code', async () => {
   const user = userEvent.setup()
   mockGet()
