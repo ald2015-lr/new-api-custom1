@@ -19,11 +19,8 @@ const inviteAbuseBanTickInterval = 1 * time.Minute
 
 var inviteAbuseBanOnce sync.Once
 
-// StartInviteAbuseBanTask runs the invite abuse rule's sweep on the master
-// node: at startup, on a one-minute tick that sweeps when one is due, and at
-// once when the rule is turned on or its settings change on this node,
-// whether saved here or synced from another node (see
-// model.RunInviteAbuseSweepIfDue).
+// StartInviteAbuseBanTask runs the invite abuse rule's task on the master
+// node with a one-minute tick (see model.RunInviteAbuseSweepTask).
 func StartInviteAbuseBanTask() {
 	inviteAbuseBanOnce.Do(func() {
 		if !common.IsMasterNode {
@@ -33,22 +30,7 @@ func StartInviteAbuseBanTask() {
 			logger.LogInfo(context.Background(), common.LogText("invite abuse ban task started: tick=%s", inviteAbuseBanTickInterval))
 			ticker := time.NewTicker(inviteAbuseBanTickInterval)
 			defer ticker.Stop()
-
-			// Loading the saved options at startup may have woken the task
-			// already; the startup sweep covers them.
-			select {
-			case <-model.InviteAbuseSweepWake():
-			default:
-			}
-			model.RunInviteAbuseSweepIfDue(time.Now())
-			for {
-				select {
-				case now := <-ticker.C:
-					model.RunInviteAbuseSweepIfDue(now)
-				case <-model.InviteAbuseSweepWake():
-					model.RunInviteAbuseSweepIfDue(time.Now())
-				}
-			}
+			model.RunInviteAbuseSweepTask(ticker.C, nil)
 		})
 	})
 }
