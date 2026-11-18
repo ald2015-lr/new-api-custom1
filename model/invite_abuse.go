@@ -205,7 +205,7 @@ func loadInviteAbuseInviters(candidates []inviteAbuseCandidate, settings InviteA
 		ids = append(ids, candidate.InviterId)
 	}
 	var users []User
-	if err := DB.Select("id", "username", "display_name", "status", "role").
+	if err := DB.Select("id", "username", "display_name", "status", "role", "inviter_id").
 		Where("id IN ? AND role < ?", ids, common.RoleAdminUser).
 		Where("id NOT IN (?)", inviteAbuseExemptUsers()).
 		Find(&users).Error; err != nil {
@@ -398,11 +398,14 @@ func ReleaseInviteAbuseBan(userId int, adminId int) (bool, error) {
 }
 
 // PreviewInviteAbuse reports what the rule would disable now with settings,
-// whether or not the rule is enabled: totals and the abusive inviters with
-// the most invited users first.
+// whether or not the rule is enabled: totals that count every account once,
+// and the abusive inviters with the most invited users first (an item's
+// numbers are that inviter's own).
 func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, error) {
 	preview := &InviteAbusePreview{Threshold: settings.Threshold, MinRedeemQuota: settings.MinRedeemQuota, ExemptPaidInviter: settings.ExemptPaidInviter}
 	items := make([]InviteAbusePreviewItem, 0)
+	abusive := make(map[int]bool)
+	var enabledInviters []User
 	afterInviterId := 0
 	for {
 		candidates, err := listInviteAbuseCandidates(settings, afterInviterId, inviteAbuseBatchSize)
@@ -420,8 +423,10 @@ func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, erro
 				continue
 			}
 			preview.AbusiveInviters++
+			abusive[inviter.Id] = true
 			if inviter.Status == common.UserStatusEnabled {
 				preview.InvitersToDisable++
+				enabledInviters = append(enabledInviters, inviter)
 			}
 			preview.InviteesToDisable += candidate.InviteesToDisable
 			items = append(items, InviteAbusePreviewItem{
@@ -435,6 +440,14 @@ func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, erro
 		}
 		if len(candidates) < inviteAbuseBatchSize {
 			break
+		}
+	}
+	// An enabled abusive inviter invited by another abusive inviter is also
+	// one of that inviter's invited users to disable; it is counted once, as
+	// an inviter.
+	for _, inviter := range enabledInviters {
+		if abusive[inviter.InviterId] {
+			preview.InviteesToDisable--
 		}
 	}
 	slices.SortFunc(items, func(a, b InviteAbusePreviewItem) int {

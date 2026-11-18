@@ -188,6 +188,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
 			t.Run("sweep batches and budget", testInviteAbuseSweepBatches)
 			t.Run("preview", testInviteAbusePreview)
+			t.Run("preview of an invite chain", testInviteAbusePreviewChain)
 			t.Run("preview truncation", testInviteAbusePreviewTruncation)
 		})
 	}
@@ -870,6 +871,35 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Equal(t, 2, after.AbusiveInviters)
 	assert.Zero(t, after.InvitersToDisable)
 	assert.Zero(t, after.InviteesToDisable)
+}
+
+// a invites b and c, and b, an abusive inviter itself, invites d and e. The
+// totals count b once, as an inviter, so they add up to what a sweep
+// disables; each item keeps its own inviter's numbers.
+func testInviteAbusePreviewChain(t *testing.T) {
+	resetInviteAbuseTables(t)
+	useInviteAbuseSettings(t, true, 2, 500_000)
+	a := createInviteAbuseTestUser(t, "a", 0, common.RoleCommonUser)
+	b := createInviteAbuseTestUser(t, "b", a.Id, common.RoleCommonUser)
+	createInviteAbuseTestUser(t, "c", a.Id, common.RoleCommonUser)
+	createInviteAbuseTestUser(t, "d", b.Id, common.RoleCommonUser)
+	createInviteAbuseTestUser(t, "e", b.Id, common.RoleCommonUser)
+
+	preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
+	require.NoError(t, err)
+	assert.Equal(t, 2, preview.AbusiveInviters)
+	assert.Equal(t, 2, preview.InvitersToDisable)
+	assert.EqualValues(t, 3, preview.InviteesToDisable)
+	require.Len(t, preview.Items, 2)
+	for _, item := range preview.Items {
+		assert.EqualValues(t, 2, item.InviteesToDisable, item.Username)
+	}
+
+	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, complete)
+	assert.Len(t, disabledInviteAbuseTestUsers(t), 5)
+	assert.Len(t, disabledInviteAbuseTestUsers(t), preview.InvitersToDisable+int(preview.InviteesToDisable))
 }
 
 func testInviteAbusePreviewTruncation(t *testing.T) {
