@@ -411,16 +411,41 @@ describe('recharge admin entries', () => {
     }
   }
 
-  it('a deputy admin without billing or redemption read sees neither Redemption Codes nor Subscriptions', async () => {
+  // The entries follow the capabilities, not the admin kind: root can untick
+  // recharge permissions on a full admin too.
+  it.each([
+    ['a deputy admin', 'deputy' as const],
+    ['an admin whose recharge permissions root removed', 'admin' as const],
+  ])(
+    '%s without billing or redemption read sees neither Redemption Codes nor Subscriptions',
+    async (_kind, adminRole) => {
+      const titles = await renderAdminEntries({
+        id: 3,
+        username: adminRole,
+        role: ROLE.ADMIN,
+        admin_role: adminRole,
+        permissions: recharge(false),
+      })
+      expect(titles).toContain('Users')
+      expect(titles).not.toContain('Redemption Codes')
+      expect(titles).not.toContain('Subscriptions')
+    }
+  )
+
+  it('an admin with redemption read but no billing read sees Redemption Codes without Subscriptions', async () => {
     const titles = await renderAdminEntries({
-      id: 3,
-      username: 'deputy',
+      id: 4,
+      username: 'codes-admin',
       role: ROLE.ADMIN,
-      admin_role: 'deputy',
-      permissions: recharge(false),
+      admin_role: 'admin',
+      permissions: {
+        admin_permissions: {
+          billing: { read: false, write: false },
+          redemption: { read: true, write: false },
+        },
+      },
     })
-    expect(titles).toContain('Users')
-    expect(titles).not.toContain('Redemption Codes')
+    expect(titles).toContain('Redemption Codes')
     expect(titles).not.toContain('Subscriptions')
   })
 

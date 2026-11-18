@@ -204,8 +204,12 @@ it('disabling a user from the row menu binds the proof to the user and action', 
 
 const rootViewer: AuthUser = { id: 1, username: 'root', role: ROLE.SUPER_ADMIN }
 
-function adminViewer(adminRole: 'admin' | 'deputy'): AuthUser {
-  const granted = adminRole === 'admin'
+// The admin kind and the recharge capabilities vary independently: root can
+// untick recharge permissions on a full admin, and the menu follows them.
+function adminViewer(
+  adminRole: 'admin' | 'deputy',
+  granted = adminRole === 'admin'
+): AuthUser {
   return {
     id: 5,
     username: adminRole,
@@ -219,6 +223,14 @@ function adminViewer(adminRole: 'admin' | 'deputy'): AuthUser {
     },
   }
 }
+
+const withoutRecharge = [
+  ['a deputy admin', adminViewer('deputy')],
+  [
+    'an admin whose recharge permissions root removed',
+    adminViewer('admin', false),
+  ],
+] as const
 
 const fullAdminTarget: User = { ...target, role: 10, admin_role: 'admin' }
 const deputyTarget: User = { ...target, role: 10, admin_role: 'deputy' }
@@ -301,14 +313,17 @@ it.each([
   ).not.toBeInTheDocument()
 })
 
-it('a deputy admin is not offered the subscriptions of a user', async () => {
-  mockVerification('admin.user.manage', 'manage-proof')
-  await openRowMenu(adminViewer('deputy'), target)
+it.each(withoutRecharge)(
+  '%s is not offered the subscriptions of a user',
+  async (_kind, viewer) => {
+    mockVerification('admin.user.manage', 'manage-proof')
+    await openRowMenu(viewer, target)
 
-  expect(
-    screen.queryByRole('menuitem', { name: 'Manage Subscriptions' })
-  ).not.toBeInTheDocument()
-})
+    expect(
+      screen.queryByRole('menuitem', { name: 'Manage Subscriptions' })
+    ).not.toBeInTheDocument()
+  }
+)
 
 it('an admin with billing read opens the subscriptions of a user', async () => {
   mockVerification('admin.user.manage', 'manage-proof')

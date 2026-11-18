@@ -551,12 +551,17 @@ async function renderEditDrawer(viewer: AuthUser) {
   await screen.findByDisplayValue('Managed user')
 }
 
-function adminViewer(billingWrite: boolean): AuthUser {
+// The admin kind and billing:write vary independently: root can untick
+// recharge permissions on a full admin, and the drawer follows the capability.
+function adminViewer(
+  adminRole: 'admin' | 'deputy',
+  billingWrite: boolean
+): AuthUser {
   return {
     id: 1,
-    username: billingWrite ? 'admin' : 'deputy',
+    username: adminRole,
     role: ROLE.ADMIN,
-    admin_role: billingWrite ? 'admin' : 'deputy',
+    admin_role: adminRole,
     permissions: {
       admin_permissions: {
         billing: { read: billingWrite, write: billingWrite },
@@ -565,17 +570,26 @@ function adminViewer(billingWrite: boolean): AuthUser {
   }
 }
 
-it('a deputy admin sees the balance of a user but cannot adjust it', async () => {
-  await renderEditDrawer(adminViewer(false))
+it.each([
+  ['a deputy admin', adminViewer('deputy', false)],
+  [
+    'an admin whose recharge permissions root removed',
+    adminViewer('admin', false),
+  ],
+])(
+  '%s sees the balance of a user but cannot adjust it',
+  async (_kind, viewer) => {
+    await renderEditDrawer(viewer)
 
-  expect(screen.getByDisplayValue('1.000000')).toBeInTheDocument()
-  expect(
-    screen.queryByRole('button', { name: 'Adjust Quota' })
-  ).not.toBeInTheDocument()
-})
+    expect(screen.getByDisplayValue('1.000000')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Adjust Quota' })
+    ).not.toBeInTheDocument()
+  }
+)
 
 it('an admin with billing write opens the quota adjustment from the balance field', async () => {
-  await renderEditDrawer(adminViewer(true))
+  await renderEditDrawer(adminViewer('admin', true))
 
   await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
   expect(

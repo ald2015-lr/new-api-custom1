@@ -204,7 +204,12 @@ it('marks only retired log types as deprecated while keeping historical filters 
   )
 })
 
-function adminViewer(adminRole: 'admin' | 'deputy'): AuthUser {
+// billingRead varies on its own: root can untick recharge permissions on a
+// full admin, and the filter follows the capability, not the admin kind.
+function adminViewer(
+  adminRole: 'admin' | 'deputy',
+  billingRead = adminRole === 'admin'
+): AuthUser {
   return {
     id: 7,
     username: adminRole,
@@ -212,10 +217,7 @@ function adminViewer(adminRole: 'admin' | 'deputy'): AuthUser {
     admin_role: adminRole,
     permissions: {
       admin_permissions: {
-        billing: {
-          read: adminRole === 'admin',
-          write: adminRole === 'admin',
-        },
+        billing: { read: billingRead, write: billingRead },
       },
     },
   }
@@ -230,15 +232,24 @@ async function typeOptionNames() {
   return names
 }
 
-it("a deputy admin listing every user's logs is offered neither Top-up nor Manage", async () => {
-  await renderFilter({ user: adminViewer('deputy') })
+it.each([
+  ['a deputy admin', adminViewer('deputy')],
+  [
+    'an admin whose recharge permissions root removed',
+    adminViewer('admin', false),
+  ],
+])(
+  "%s listing every user's logs is offered neither Top-up nor Manage",
+  async (_kind, user) => {
+    await renderFilter({ user })
 
-  const names = await typeOptionNames()
-  expect(names).not.toContain('Top-up')
-  expect(names.some((name) => name.startsWith('Manage'))).toBe(false)
-  expect(names).toContain('Consume')
-  expect(names.some((name) => name.startsWith('Login'))).toBe(true)
-})
+    const names = await typeOptionNames()
+    expect(names).not.toContain('Top-up')
+    expect(names.some((name) => name.startsWith('Manage'))).toBe(false)
+    expect(names).toContain('Consume')
+    expect(names.some((name) => name.startsWith('Login'))).toBe(true)
+  }
+)
 
 it('a deputy admin viewing only their own logs is offered Top-up and Manage', async () => {
   await renderFilter({ user: adminViewer('deputy') })

@@ -26,18 +26,24 @@ import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 
 import { BillingHistoryDialog } from '../components/dialogs/billing-history-dialog'
 
-function viewer(billing: { read: boolean; write: boolean }): AuthUser {
+// The admin kind and the capabilities vary independently: root can untick
+// recharge permissions on a full admin, and the page follows the capabilities.
+function viewer(
+  adminRole: 'admin' | 'deputy',
+  billing: { read: boolean; write: boolean }
+): AuthUser {
   return {
     id: 5,
     username: 'operator',
     role: ROLE.ADMIN,
-    admin_role: billing.read ? 'admin' : 'deputy',
+    admin_role: adminRole,
     permissions: { admin_permissions: { billing } },
   }
 }
 
-const deputy = viewer({ read: false, write: false })
-const admin = viewer({ read: true, write: true })
+const deputy = viewer('deputy', { read: false, write: false })
+const customAdmin = viewer('admin', { read: false, write: false })
+const admin = viewer('admin', { read: true, write: true })
 
 function renderHistory(user: AuthUser) {
   useAuthStore.getState().auth.setUser(user)
@@ -73,17 +79,25 @@ afterEach(() => {
   useAuthStore.getState().auth.reset()
 })
 
-it('a deputy admin lists only their own orders, without user IDs or Complete Order on a pending order', async () => {
-  const get = renderHistory(deputy)
+it.each([
+  ['a deputy admin', deputy],
+  ['an admin whose recharge permissions root removed', customAdmin],
+])(
+  '%s lists only their own orders, without user IDs or Complete Order on a pending order',
+  async (_kind, user) => {
+    const get = renderHistory(user)
 
-  await screen.findByText('order-pending')
-  expect(requestedUrls(get)).toEqual(['/api/user/topup/self?p=1&page_size=10'])
-  expect(screen.getByText('Pending')).toBeVisible()
-  expect(screen.queryByText(/User ID/)).not.toBeInTheDocument()
-  expect(
-    screen.queryByRole('button', { name: 'Complete Order' })
-  ).not.toBeInTheDocument()
-})
+    await screen.findByText('order-pending')
+    expect(requestedUrls(get)).toEqual([
+      '/api/user/topup/self?p=1&page_size=10',
+    ])
+    expect(screen.getByText('Pending')).toBeVisible()
+    expect(screen.queryByText(/User ID/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Complete Order' })
+    ).not.toBeInTheDocument()
+  }
+)
 
 it('an admin lists every order with user IDs and completes a pending order after confirming', async () => {
   const get = renderHistory(admin)
@@ -110,7 +124,7 @@ it('an admin lists every order with user IDs and completes a pending order after
 })
 
 it('an admin who may view but not complete orders sees every order without Complete Order', async () => {
-  const get = renderHistory(viewer({ read: true, write: false }))
+  const get = renderHistory(viewer('admin', { read: true, write: false }))
 
   await screen.findByText('order-pending')
   expect(requestedUrls(get)).toEqual(['/api/user/topup?p=1&page_size=10'])
