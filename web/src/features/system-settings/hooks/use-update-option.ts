@@ -49,6 +49,8 @@ const STATUS_RELATED_KEYS = new Set([
   'passkey.origins',
   'QuotaRemindEnabled',
   'QuotaRemindThreshold',
+  'RegisterCaptchaEnabled',
+  'EmailQQNumericOnlyEnabled',
 ])
 
 export function useUpdateOption() {

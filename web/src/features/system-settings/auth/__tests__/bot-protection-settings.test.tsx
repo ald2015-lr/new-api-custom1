@@ -41,6 +41,17 @@ const defaults = {
   TurnstileCheckEnabled: false,
   TurnstileSiteKey: '',
   TurnstileSecretKey: '',
+  RegisterCaptchaEnabled: true,
+  RegisterIPRateLimitEnabled: false,
+  RegisterIPRateLimitNum: 5,
+  RegisterIPRateLimitMinutes: 15,
+}
+
+function mockClientIp(body: Record<string, unknown>) {
+  return vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/option/client_ip') return { data: body }
+    throw new Error(`Unexpected GET ${url}`)
+  })
 }
 
 let testI18n: i18n
@@ -82,6 +93,10 @@ beforeEach(async () => {
     interpolation: { escapeValue: false },
   })
   vi.spyOn(api, 'put').mockResolvedValue({ data: { success: true } })
+  mockClientIp({
+    success: true,
+    data: { ip: '203.0.113.7', trusted_proxies_configured: false },
+  })
 })
 
 describe('Bot Protection settings saves', () => {
@@ -116,4 +131,106 @@ describe('Bot Protection settings saves', () => {
       TurnstileCheckEnabled: true,
     })
   })
+})
+
+describe('Registration protection settings', () => {
+  function savedKeys(put: { mock: { calls: unknown[][] } }) {
+    return put.mock.calls.map((call) => call[1] as UpdateOptionRequest)
+  }
+
+  it('saves turning the registration captcha off and drops the cached sign-up status', async () => {
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    localStorage.setItem('status', JSON.stringify({ register_captcha: true }))
+    await renderSettings()
+
+    await user.click(
+      screen.getByRole('switch', { name: 'Registration captcha' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    expect(savedKeys(put)).toEqual([
+      { key: 'RegisterCaptchaEnabled', value: false },
+    ])
+    await waitFor(() => expect(localStorage.getItem('status')).toBeNull())
+  })
+
+  it('saves the IP limit count and window before turning the limit on', async () => {
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    await renderSettings()
+
+    await user.click(
+      screen.getByRole('switch', { name: 'Registration IP rate limit' })
+    )
+    const count = screen.getByRole('spinbutton', { name: 'Requests per IP' })
+    await user.clear(count)
+    await user.type(count, '10')
+    const window = screen.getByRole('spinbutton', {
+      name: 'Time window (minutes)',
+    })
+    await user.clear(window)
+    await user.type(window, '30')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(3))
+    expect(savedKeys(put)).toEqual([
+      { key: 'RegisterIPRateLimitNum', value: 10 },
+      { key: 'RegisterIPRateLimitMinutes', value: 30 },
+      { key: 'RegisterIPRateLimitEnabled', value: true },
+    ])
+  })
+
+  it.each([
+    [
+      'Requests per IP',
+      '0',
+      'Registration rate limit count must be an integer between 1 and 1000',
+    ],
+    [
+      'Time window (minutes)',
+      '1441',
+      'Registration rate limit window must be an integer between 1 and 1440 minutes',
+    ],
+  ])('refuses %s set to %s and saves nothing', async (name, value, message) => {
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    await renderSettings()
+    const input = screen.getByRole('spinbutton', { name })
+
+    await user.clear(input)
+    await user.type(input, value)
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'enveloped',
+      {
+        success: true,
+        data: { ip: '203.0.113.7', trusted_proxies_configured: false },
+      },
+      'TRUSTED_PROXIES is not configured, so only loopback and private network proxies are trusted.',
+    ],
+    [
+      'bare',
+      { ip: '203.0.113.7', trusted_proxies_configured: true },
+      'TRUSTED_PROXIES is configured.',
+    ],
+  ])(
+    'shows the IP address the server sees from a %s reply',
+    async (_shape, body, proxies) => {
+      const get = mockClientIp(body)
+      await renderSettings()
+
+      expect(await screen.findByText('203.0.113.7')).toBeInTheDocument()
+      expect(screen.getByText(proxies)).toBeInTheDocument()
+      expect(get).toHaveBeenCalledWith('/api/option/client_ip')
+    }
+  )
 })
