@@ -76,12 +76,58 @@ type InviteAbuseSettings struct {
 	ExemptPaidInviter bool
 }
 
-// CurrentInviteAbuseSettings returns the saved settings of the rule.
+// CurrentInviteAbuseSettings returns the rule's settings as this node has
+// them.
 func CurrentInviteAbuseSettings() InviteAbuseSettings {
+	return loadedInviteAbuseOptions().settings()
+}
+
+// inviteAbuseOptions are the rule's four options; this node's copy is in
+// common.InviteAbuseBan*, the saved one in the options table.
+type inviteAbuseOptions struct {
+	enabled           bool
+	threshold         int
+	minRedeemQuota    int
+	exemptPaidInviter bool
+}
+
+// inviteAbuseOptionKeys are the keys of the rule's options.
+var inviteAbuseOptionKeys = []string{
+	operation_setting.InviteAbuseBanEnabledKey, operation_setting.InviteAbuseBanThresholdKey,
+	operation_setting.InviteAbuseBanMinRedeemQuotaKey, operation_setting.InviteAbuseBanExemptPaidInviterKey,
+}
+
+// loadedInviteAbuseOptions returns this node's copy of the options.
+func loadedInviteAbuseOptions() inviteAbuseOptions {
+	return inviteAbuseOptions{
+		enabled:           common.InviteAbuseBanEnabled,
+		threshold:         common.InviteAbuseBanThreshold,
+		minRedeemQuota:    common.InviteAbuseBanMinRedeemQuota,
+		exemptPaidInviter: common.InviteAbuseBanExemptPaidInviter,
+	}
+}
+
+// set applies the saved value of one of the options.
+func (options *inviteAbuseOptions) set(key string, value string) {
+	switch key {
+	case operation_setting.InviteAbuseBanEnabledKey:
+		options.enabled = value == "true"
+	case operation_setting.InviteAbuseBanThresholdKey:
+		options.threshold, _ = strconv.Atoi(value)
+	case operation_setting.InviteAbuseBanMinRedeemQuotaKey:
+		options.minRedeemQuota, _ = strconv.Atoi(value)
+	case operation_setting.InviteAbuseBanExemptPaidInviterKey:
+		options.exemptPaidInviter = value == "true"
+	}
+}
+
+// settings returns the settings the options give the rule; a threshold
+// below 1 counts as 1 and a minimum below 0 as 0.
+func (options inviteAbuseOptions) settings() InviteAbuseSettings {
 	return InviteAbuseSettings{
-		Threshold:         max(common.InviteAbuseBanThreshold, 1),
-		MinRedeemQuota:    max(int64(common.InviteAbuseBanMinRedeemQuota), 0),
-		ExemptPaidInviter: common.InviteAbuseBanExemptPaidInviter,
+		Threshold:         max(options.threshold, 1),
+		MinRedeemQuota:    max(int64(options.minRedeemQuota), 0),
+		ExemptPaidInviter: options.exemptPaidInviter,
 	}
 }
 
@@ -300,17 +346,39 @@ func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings
 // rule off or changes its settings, so nothing more is disabled under
 // settings that no longer apply.
 func inviteAbuseRuleApplies(settings InviteAbuseSettings) bool {
-	return common.InviteAbuseBanEnabled && CurrentInviteAbuseSettings() == settings
+	options := loadedInviteAbuseOptions()
+	return options.enabled && options.settings() == settings
+}
+
+// inviteAbuseRuleSaved reports whether the options table still has the rule
+// on with settings. A change an administrator saved on another node reaches
+// this node only with its next option sync (SYNC_FREQUENCY, 60 s by default),
+// later than a pass's time budget, so the rule also confirms the saved
+// options while it disables accounts. An option never saved keeps this
+// node's value.
+func inviteAbuseRuleSaved(settings InviteAbuseSettings) (bool, error) {
+	var saved []Option
+	// A map condition lets GORM quote the key column for each database.
+	if err := DB.Where(map[string]any{"key": inviteAbuseOptionKeys}).Find(&saved).Error; err != nil {
+		return false, err
+	}
+	options := loadedInviteAbuseOptions()
+	for _, option := range saved {
+		options.set(option.Key, option.Value)
+	}
+	return options.enabled && options.settings() == settings, nil
 }
 
 // disableAbusiveInviter disables an abusive inviter and then its invited
 // users that are not deleted, enabled, not administrators and not exempt,
 // newest first, until the deadline or until the rule no longer applies with
-// settings. A big farm takes a while: an administrator who releases the
-// inviter meanwhile stops it at once, and a recharge or a deletion that
-// clears the inviter stops it when the verdict is taken again, at most
-// inviteAbuseRecheckInterval later. It returns how many accounts it disabled
-// and whether it got through all of them.
+// settings, here or as saved (inviteAbuseRuleSaved). It confirms the saved
+// options before the first account, and then confirms them and takes the
+// verdict again at most once per inviteAbuseRecheckInterval: a big farm
+// takes a while, and a recharge or a deletion that clears the inviter stops
+// it as well. An administrator who releases the inviter stops it at once. It
+// returns how many accounts it disabled and whether it got through all of
+// them.
 func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuseSettings, deadline time.Time) (int, bool, error) {
 	var invitees []User
 	if err := DB.Select("id", "username").
@@ -333,19 +401,26 @@ func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuse
 	}
 	disabled, finished := 0, true
 	var err error
-	verdictAt := time.Now()
+	var confirmedAt time.Time
 	for _, target := range accounts {
 		if time.Now().After(deadline) || !inviteAbuseRuleApplies(settings) {
 			finished = false
 			break
 		}
-		if time.Since(verdictAt) >= inviteAbuseRecheckInterval {
-			var current *User
-			if current, _, err = abusiveInviter(inviter.Id, settings); err != nil || current == nil {
-				finished = err == nil // no longer abusive: done with it
+		if time.Since(confirmedAt) >= inviteAbuseRecheckInterval {
+			if !confirmedAt.IsZero() { // the verdict is fresh before the first account
+				var current *User
+				if current, _, err = abusiveInviter(inviter.Id, settings); err != nil || current == nil {
+					finished = err == nil // no longer abusive: done with it
+					break
+				}
+			}
+			var saved bool
+			if saved, err = inviteAbuseRuleSaved(settings); err != nil || !saved {
+				finished = false
 				break
 			}
-			verdictAt = time.Now()
+			confirmedAt = time.Now()
 		}
 		var changed bool
 		// The exemptions are part of the update that disables: an account an
@@ -530,18 +605,12 @@ func InviteAbuseSweepWake() <-chan struct{} {
 // Applying a value that did not change, as the periodic option sync does,
 // changes nothing.
 func applyInviteAbuseOption(key string, value string) {
-	wasEnabled, previous := common.InviteAbuseBanEnabled, CurrentInviteAbuseSettings()
-	switch key {
-	case operation_setting.InviteAbuseBanEnabledKey:
-		common.InviteAbuseBanEnabled = value == "true"
-	case operation_setting.InviteAbuseBanThresholdKey:
-		common.InviteAbuseBanThreshold, _ = strconv.Atoi(value)
-	case operation_setting.InviteAbuseBanMinRedeemQuotaKey:
-		common.InviteAbuseBanMinRedeemQuota, _ = strconv.Atoi(value)
-	case operation_setting.InviteAbuseBanExemptPaidInviterKey:
-		common.InviteAbuseBanExemptPaidInviter = value == "true"
-	}
-	if !common.InviteAbuseBanEnabled || (wasEnabled && CurrentInviteAbuseSettings() == previous) {
+	options := loadedInviteAbuseOptions()
+	wasEnabled, previous := options.enabled, options.settings()
+	options.set(key, value)
+	common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold = options.enabled, options.threshold
+	common.InviteAbuseBanMinRedeemQuota, common.InviteAbuseBanExemptPaidInviter = options.minRedeemQuota, options.exemptPaidInviter
+	if !options.enabled || (wasEnabled && options.settings() == previous) {
 		return
 	}
 	inviteAbuseRuleGeneration.Add(1)
@@ -579,14 +648,15 @@ func RunInviteAbuseSweepIfDue(now time.Time) {
 	if inviteAbuseSweep.cursor == 0 && !inviteAbuseSweep.finishedAt.IsZero() && now.Sub(inviteAbuseSweep.finishedAt) < InviteAbuseSweepInterval {
 		return
 	}
-	cursor, complete, err := sweepInviteAbuse(settings, inviteAbuseSweep.cursor, time.Now().Add(inviteAbuseSweepBudget))
+	deadline := time.Now().Add(inviteAbuseSweepBudget)
+	cursor, complete, err := sweepInviteAbuse(settings, inviteAbuseSweep.cursor, deadline)
 	inviteAbuseSweep.cursor = cursor
 	switch {
 	case err != nil:
 		common.SysError(common.LogText("invite abuse sweep failed: %v", err))
 	case complete:
 		inviteAbuseSweep.cursor, inviteAbuseSweep.finishedAt = 0, now
-	case !inviteAbuseRuleApplies(settings):
+	case time.Now().Before(deadline): // here or, as saved, on another node
 		common.SysLog(common.LogText("invite abuse sweep stopped after inviter %d: the rule was turned off or its settings changed", cursor))
 	default:
 		common.SysLog(common.LogText("invite abuse sweep reached its time budget, continuing after inviter %d on the next tick", cursor))

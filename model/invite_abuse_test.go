@@ -70,7 +70,7 @@ func useInviteTestDatabase(t *testing.T, dialect string, prefix string, models .
 	return db
 }
 
-var inviteAbuseTestModels = []any{&User{}, &UserSession{}, &TopUp{}, &Redemption{}, &SubscriptionOrder{}, &InviteReward{}, &InviteAbuseBan{}}
+var inviteAbuseTestModels = []any{&User{}, &UserSession{}, &TopUp{}, &Redemption{}, &SubscriptionOrder{}, &InviteReward{}, &InviteAbuseBan{}, &Option{}}
 
 func resetInviteAbuseTables(t *testing.T) {
 	t.Helper()
@@ -186,6 +186,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("sign-up keeps a concurrent ban", testInviteAbuseSignUpKeepsConcurrentBan)
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
 			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
+			t.Run("change saved on another node", testInviteAbuseChangeSavedOnAnotherNode)
 			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
 			t.Run("sweep batches and budget", testInviteAbuseSweepBatches)
 			t.Run("preview", testInviteAbusePreview)
@@ -827,6 +828,69 @@ func testInviteAbuseSettingsChangeStopsPass(t *testing.T) {
 		all := append(append(append([]User{small}, smallInvitees...), stopped...), farm1Invitees...)
 		assert.Equal(t, inviteAbuseTestUserIds(all...), disabledInviteAbuseTestUsers(t), "the inviter before the stop is disabled with the new threshold")
 	})
+}
+
+// An administrator who turns the rule off or changes a setting through
+// another node saves the option there; this node's copy changes only with its
+// next option sync. A pass and a sign-up check here stop all the same as soon
+// as they confirm the saved options: before an inviter's first account, and
+// within an inviter's accounts at most inviteAbuseRecheckInterval later.
+// Saved options equal to this node's change nothing.
+func testInviteAbuseChangeSavedOnAnotherNode(t *testing.T) {
+	for _, tc := range []struct{ name, key, saved, changed string }{
+		{name: "rule turned off", key: "InviteAbuseBanEnabled", saved: "true", changed: "false"},
+		{name: "threshold raised", key: "InviteAbuseBanThreshold", saved: "1", changed: "100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 1, 500_000)
+			for key, value := range map[string]string{
+				"InviteAbuseBanEnabled": "true", "InviteAbuseBanThreshold": "1",
+				"InviteAbuseBanMinRedeemQuota": "500000", "InviteAbuseBanExemptPaidInviter": "true",
+			} {
+				require.NoError(t, DB.Save(&Option{Key: key, Value: value}).Error)
+			}
+			farm0, farm0Invitees := createInviteAbuseTestInviter(t, "farm0", common.RoleCommonUser, 2)
+			farm1, _ := createInviteAbuseTestInviter(t, "farm1", common.RoleCommonUser, 2)
+			createInviteAbuseTestInviter(t, "farm2", common.RoleCommonUser, 2)
+			onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+				// farm0's oldest invited user is its last account, farm1 the
+				// first of its own.
+				if ban.UserId == farm0Invitees[0].Id || ban.UserId == farm1.Id {
+					require.NoError(t, DB.Save(&Option{Key: tc.key, Value: tc.changed}).Error) // UpdateOption on the other node
+				}
+			})
+
+			start := time.Now()
+			RunInviteAbuseSweepIfDue(start)
+			farm0Accounts := inviteAbuseTestUserIds(append([]User{farm0}, farm0Invitees...)...)
+			assert.Equal(t, farm0Accounts, disabledInviteAbuseTestUsers(t), "the next inviter is not touched")
+			RunInviteAbuseSweepIfDue(start.Add(time.Minute))
+			assert.Equal(t, farm0Accounts, disabledInviteAbuseTestUsers(t), "nor by the next tick before the option sync")
+
+			require.NoError(t, DB.Save(&Option{Key: tc.key, Value: tc.saved}).Error)
+			savedInterval := inviteAbuseRecheckInterval
+			inviteAbuseRecheckInterval = 0 // confirmed before every account
+			t.Cleanup(func() { inviteAbuseRecheckInterval = savedInterval })
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(farm1.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			require.NoError(t, err)
+			assert.False(t, finished)
+			assert.Equal(t, 1, disabled, "farm1's invited users are not touched once the change is saved")
+
+			// A sign-up that brings a new inviter to the threshold.
+			inviter := createInviteAbuseTestUser(t, "inviter", 0, common.RoleCommonUser)
+			newcomer := User{Username: "newcomer", DisplayName: "newcomer", Role: common.RoleCommonUser, InviterId: inviter.Id}
+			require.NoError(t, newcomer.Insert(inviter.Id))
+			assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, inviter.Id).Status)
+			assert.Equal(t, common.UserStatusEnabled, newcomer.Status)
+
+			// This node's option sync applies the change: nothing is disabled
+			// with the old settings from then on.
+			require.NoError(t, updateOptionMap(tc.key, tc.changed))
+			RunInviteAbuseSweepIfDue(start.Add(2 * time.Minute))
+			assert.Equal(t, append(farm0Accounts, farm1.Id), disabledInviteAbuseTestUsers(t))
+		})
+	}
 }
 
 // A sweep's candidate batch only pre-selects inviters. A recharge that comes

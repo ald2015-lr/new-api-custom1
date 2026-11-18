@@ -731,11 +731,12 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 
 // setupInviteAbuseControllerTest is setupManageUserTestDB with the tables and
 // the options of the invite abuse rule: threshold 2, minimum redeemed quota
-// 500000, paid inviters exempt, rule off.
+// 500000, paid inviters exempt, rule off. None of the options is saved, so
+// the rule's check of the saved options finds this node's values.
 func setupInviteAbuseControllerTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupManageUserTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.TopUp{}, &model.Redemption{}, &model.InviteAbuseBan{}))
+	require.NoError(t, db.AutoMigrate(&model.TopUp{}, &model.Redemption{}, &model.InviteAbuseBan{}, &model.Option{}))
 	enabled, threshold, minRedeem := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
 	exemptPaid := common.InviteAbuseBanExemptPaidInviter
 	registerEnabled, newUserQuota := common.RegisterEnabled, common.QuotaForNewUser
