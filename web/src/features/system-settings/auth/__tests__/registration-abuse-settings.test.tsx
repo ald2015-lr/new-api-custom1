@@ -26,6 +26,7 @@ import {
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState, type ReactNode } from 'react'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -110,6 +111,19 @@ function mockPreview(data: InviteAbusePreview) {
   })
 }
 
+/** The preview totals shown in a dialog, as [label, value] pairs. */
+function totalsIn(dialog: HTMLElement) {
+  return within(dialog)
+    .getAllByRole('term')
+    .map((term) => [term.textContent, term.nextElementSibling?.textContent])
+}
+
+const previewTotals = [
+  ['Inviters matching the rule', '12'],
+  ['Inviters to disable', '10'],
+  ['Invited users to disable', '340'],
+]
+
 async function replaceNumber(
   user: ReturnType<typeof userEvent.setup>,
   name: string,
@@ -119,6 +133,39 @@ async function replaceNumber(
   await user.clear(input)
   await user.type(input, value)
   return input
+}
+
+/** Holds every option save until the returned call, like a slow link. */
+function holdSaves() {
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  vi.mocked(api.put).mockImplementation(async () => {
+    await gate
+    return { data: { success: true, message: '' } }
+  })
+  return release
+}
+
+/**
+ * Keeps a closing dialog on screen and clickable until the returned call, as
+ * a browser does while the exit animation plays; jsdom has no animations, so
+ * Base UI would remove it at once.
+ */
+function playExitAnimations() {
+  let finish = () => {}
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  Object.defineProperty(Element.prototype, 'getAnimations', {
+    configurable: true,
+    value: () => [{ finished }],
+  })
+  return () => {
+    finish()
+    Reflect.deleteProperty(Element.prototype, 'getAnimations')
+  }
 }
 
 beforeEach(() => {
@@ -193,15 +240,7 @@ describe('Invite abuse protection settings', () => {
       disableDuplicate: true,
     })
     expect(api.put).not.toHaveBeenCalled()
-    expect(
-      within(dialog)
-        .getAllByRole('term')
-        .map((term) => [term.textContent, term.nextElementSibling?.textContent])
-    ).toEqual([
-      ['Inviters matching the rule', '12'],
-      ['Inviters to disable', '10'],
-      ['Invited users to disable', '340'],
-    ])
+    expect(totalsIn(dialog)).toEqual(previewTotals)
     const row = within(dialog).getByRole('row', { name: /farmer/ })
     expect(within(row).getByText('88996')).toBeInTheDocument()
     expect(within(row).getByText('Farm owner')).toBeInTheDocument()
@@ -285,8 +324,18 @@ describe('Invite abuse protection settings', () => {
     expect(get).not.toHaveBeenCalled()
   })
 
-  it('asks before turning the ban on and saves the new threshold first', async () => {
+  it('shows what turning the ban on disables before it can be confirmed, then saves the new threshold first', async () => {
     const user = userEvent.setup()
+    let releasePreview = () => {}
+    const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      if (url !== '/api/user/invite_abuse/preview') {
+        throw new Error(`Unexpected GET ${url}`)
+      }
+      await new Promise<void>((resolve) => {
+        releasePreview = resolve
+      })
+      return { data: { success: true, message: '', data: preview } }
+    })
     await renderSection(
       <InviteAbuseSection defaultValues={inviteAbuseDefaults} />
     )
@@ -300,8 +349,22 @@ describe('Invite abuse protection settings', () => {
     const confirm = await screen.findByRole('alertdialog', {
       name: 'Turn on automatic invite abuse bans?',
     })
+    expect(get).toHaveBeenCalledWith('/api/user/invite_abuse/preview', {
+      params: {
+        threshold: 10,
+        min_redeem_quota: 500000,
+        exempt_paid_inviter: true,
+      },
+      disableDuplicate: true,
+    })
+    const turnOn = within(confirm).getByRole('button', { name: 'Turn on' })
+    expect(turnOn).toBeDisabled()
+    releasePreview()
+    await waitFor(() => expect(totalsIn(confirm)).toEqual(previewTotals))
+    expect(turnOn).toBeEnabled()
     expect(api.put).not.toHaveBeenCalled()
-    await user.click(within(confirm).getByRole('button', { name: 'Turn on' }))
+
+    await user.click(turnOn)
 
     await waitFor(() =>
       expect(savedOptions()).toEqual([
@@ -313,6 +376,7 @@ describe('Invite abuse protection settings', () => {
 
   it('saves nothing when turning the ban on is cancelled', async () => {
     const user = userEvent.setup()
+    mockPreview(preview)
     await renderSection(
       <InviteAbuseSection defaultValues={inviteAbuseDefaults} />
     )
@@ -330,24 +394,346 @@ describe('Invite abuse protection settings', () => {
     expect(api.put).not.toHaveBeenCalled()
   })
 
-  it('saves turning the paid inviter exemption off without asking', async () => {
+  it('saves a later change after an earlier save finished', async () => {
     const user = userEvent.setup()
+    await renderSection(
+      <InviteAbuseSection defaultValues={inviteAbuseDefaults} />
+    )
+    await replaceNumber(user, 'Invite count threshold', '8')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() => expect(savedOptions()).toHaveLength(1))
+
+    await replaceNumber(user, 'Invite count threshold', '9')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() =>
+      expect(savedOptions()).toEqual([
+        { key: 'InviteAbuseBanThreshold', value: 8 },
+        { key: 'InviteAbuseBanThreshold', value: 9 },
+      ])
+    )
+  })
+
+  it('asks again when Save Changes is clicked after a cancelled confirmation', async () => {
+    const user = userEvent.setup()
+    mockPreview(preview)
+    await renderSection(
+      <InviteAbuseSection defaultValues={inviteAbuseDefaults} />
+    )
+    await user.click(
+      screen.getByRole('switch', { name: 'Ban invite abuse automatically' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await user.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', {
+        name: 'Cancel',
+      })
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    expect(
+      await screen.findByRole('alertdialog', {
+        name: 'Turn on automatic invite abuse bans?',
+      })
+    ).toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      change: 'a lower threshold',
+      edit: (user: ReturnType<typeof userEvent.setup>) =>
+        replaceNumber(user, 'Invite count threshold', '3'),
+      params: { threshold: 3 },
+      saved: { key: 'InviteAbuseBanThreshold', value: 3 },
+    },
+    {
+      change: 'a higher minimum redeemed quota',
+      edit: (user: ReturnType<typeof userEvent.setup>) =>
+        replaceNumber(user, 'Minimum redeemed quota', '2000000'),
+      params: { min_redeem_quota: 2000000 },
+      saved: { key: 'InviteAbuseBanMinRedeemQuota', value: 2000000 },
+    },
+    {
+      change: 'the paid inviter exemption turned off',
+      edit: (user: ReturnType<typeof userEvent.setup>) =>
+        user.click(
+          screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
+        ),
+      params: { exempt_paid_inviter: false },
+      saved: { key: 'InviteAbuseBanExemptPaidInviter', value: false },
+    },
+  ])(
+    'asks before saving $change while the ban is on and shows what the save disables',
+    async ({ edit, params, saved }) => {
+      const user = userEvent.setup()
+      const get = mockPreview(preview)
+      await renderSection(
+        <InviteAbuseSection
+          defaultValues={{
+            ...inviteAbuseDefaults,
+            InviteAbuseBanEnabled: true,
+          }}
+        />
+      )
+
+      await edit(user)
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+      const confirm = await screen.findByRole('alertdialog', {
+        name: 'Save the changed invite abuse rule?',
+      })
+      expect(get).toHaveBeenCalledWith('/api/user/invite_abuse/preview', {
+        params: {
+          threshold: 5,
+          min_redeem_quota: 500000,
+          exempt_paid_inviter: true,
+          ...params,
+        },
+        disableDuplicate: true,
+      })
+      await waitFor(() => expect(totalsIn(confirm)).toEqual(previewTotals))
+      expect(api.put).not.toHaveBeenCalled()
+
+      await user.click(within(confirm).getByRole('button', { name: 'Save' }))
+
+      await waitFor(() => expect(savedOptions()).toEqual([saved]))
+    }
+  )
+
+  it('lets the admin confirm with a warning when the preview of the save fails', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockRejectedValue(new Error('Network Error'))
+    const error = vi.spyOn(toast, 'error')
     await renderSection(
       <InviteAbuseSection
         defaultValues={{ ...inviteAbuseDefaults, InviteAbuseBanEnabled: true }}
       />
     )
 
+    await replaceNumber(user, 'Invite count threshold', '3')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    const confirm = await screen.findByRole('alertdialog', {
+      name: 'Save the changed invite abuse rule?',
+    })
+    expect(
+      await within(confirm).findByText(
+        'The preview failed, so it is unknown how many accounts this disables. Saving can still disable many accounts at once.'
+      )
+    ).toBeInTheDocument()
+    expect(error).not.toHaveBeenCalled()
+    await user.click(within(confirm).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(savedOptions()).toEqual([
+        { key: 'InviteAbuseBanThreshold', value: 3 },
+      ])
+    )
+  })
+
+  it('turns the ban off before saving a lower threshold in the same save', async () => {
+    const user = userEvent.setup()
+    await renderSection(
+      <InviteAbuseSection
+        defaultValues={{
+          ...inviteAbuseDefaults,
+          InviteAbuseBanEnabled: true,
+          InviteAbuseBanThreshold: 50,
+        }}
+      />
+    )
+
+    await replaceNumber(user, 'Invite count threshold', '5')
     await user.click(
-      screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
+      screen.getByRole('switch', { name: 'Ban invite abuse automatically' })
     )
     await user.click(screen.getByRole('button', { name: 'Save Changes' }))
 
     await waitFor(() =>
       expect(savedOptions()).toEqual([
-        { key: 'InviteAbuseBanExemptPaidInviter', value: false },
+        { key: 'InviteAbuseBanEnabled', value: false },
+        { key: 'InviteAbuseBanThreshold', value: 5 },
       ])
     )
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      change: 'a lower threshold and the paid inviter exemption turned on',
+      defaults: {
+        InviteAbuseBanThreshold: 50,
+        InviteAbuseBanExemptPaidInviter: false,
+      },
+      edit: async (user: ReturnType<typeof userEvent.setup>) => {
+        await replaceNumber(user, 'Invite count threshold', '5')
+        await user.click(
+          screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
+        )
+      },
+      saved: [
+        { key: 'InviteAbuseBanExemptPaidInviter', value: true },
+        { key: 'InviteAbuseBanThreshold', value: 5 },
+      ],
+    },
+    {
+      change: 'a lower minimum redeemed quota and a lower threshold',
+      defaults: {
+        InviteAbuseBanThreshold: 50,
+        InviteAbuseBanMinRedeemQuota: 5000000,
+      },
+      edit: async (user: ReturnType<typeof userEvent.setup>) => {
+        await replaceNumber(user, 'Minimum redeemed quota', '100000')
+        await replaceNumber(user, 'Invite count threshold', '5')
+      },
+      saved: [
+        { key: 'InviteAbuseBanMinRedeemQuota', value: 100000 },
+        { key: 'InviteAbuseBanThreshold', value: 5 },
+      ],
+    },
+    {
+      change:
+        'a higher minimum redeemed quota and the paid inviter exemption turned on',
+      defaults: { InviteAbuseBanExemptPaidInviter: false },
+      edit: async (user: ReturnType<typeof userEvent.setup>) => {
+        await replaceNumber(user, 'Minimum redeemed quota', '2000000')
+        await user.click(
+          screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
+        )
+      },
+      saved: [
+        { key: 'InviteAbuseBanExemptPaidInviter', value: true },
+        { key: 'InviteAbuseBanMinRedeemQuota', value: 2000000 },
+      ],
+    },
+  ])(
+    'saves the looser part of $change first while the ban stays on, so a failed second save leaves the rule looser',
+    async ({ defaults, edit, saved }) => {
+      const user = userEvent.setup()
+      mockPreview(preview)
+      vi.mocked(api.put)
+        .mockResolvedValueOnce({ data: { success: true, message: '' } })
+        .mockRejectedValueOnce(new Error('Network Error'))
+      const error = vi.spyOn(toast, 'error')
+      await renderSection(
+        <InviteAbuseSection
+          defaultValues={{
+            ...inviteAbuseDefaults,
+            InviteAbuseBanEnabled: true,
+            ...defaults,
+          }}
+        />
+      )
+
+      await edit(user)
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+      const confirm = await screen.findByRole('alertdialog', {
+        name: 'Save the changed invite abuse rule?',
+      })
+      await waitFor(() => expect(totalsIn(confirm)).toEqual(previewTotals))
+      await user.click(within(confirm).getByRole('button', { name: 'Save' }))
+
+      // Only the first, looser value reached the server.
+      await waitFor(() => expect(error).toHaveBeenCalledWith('Network Error'))
+      expect(savedOptions()).toEqual(saved)
+    }
+  )
+
+  it('saves once when the confirmation is double-clicked while it closes', async () => {
+    const user = userEvent.setup()
+    mockPreview(preview)
+    await renderSection(
+      <InviteAbuseSection defaultValues={inviteAbuseDefaults} />
+    )
+    await replaceNumber(user, 'Invite count threshold', '10')
+    await user.click(
+      screen.getByRole('switch', { name: 'Ban invite abuse automatically' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    const confirm = await screen.findByRole('alertdialog', {
+      name: 'Turn on automatic invite abuse bans?',
+    })
+    const turnOn = within(confirm).getByRole('button', { name: 'Turn on' })
+    await waitFor(() => expect(turnOn).toBeEnabled())
+    const releaseSaves = holdSaves()
+    const finishExitAnimations = playExitAnimations()
+
+    try {
+      await user.dblClick(turnOn)
+      releaseSaves()
+      await waitFor(() => expect(savedOptions()).toHaveLength(2))
+    } finally {
+      finishExitAnimations()
+    }
+
+    await waitFor(() =>
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    )
+    expect(savedOptions()).toEqual([
+      { key: 'InviteAbuseBanThreshold', value: 10 },
+      { key: 'InviteAbuseBanEnabled', value: true },
+    ])
+  })
+
+  it('previews once when Save Changes is double-clicked', async () => {
+    const user = userEvent.setup()
+    const get = mockPreview(preview)
+    await renderSection(
+      <InviteAbuseSection
+        defaultValues={{ ...inviteAbuseDefaults, InviteAbuseBanEnabled: true }}
+      />
+    )
+
+    await replaceNumber(user, 'Invite count threshold', '3')
+    await user.dblClick(screen.getByRole('button', { name: 'Save Changes' }))
+
+    const confirm = await screen.findByRole('alertdialog', {
+      name: 'Save the changed invite abuse rule?',
+    })
+    await waitFor(() => expect(totalsIn(confirm)).toEqual(previewTotals))
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the error of a failed second save once and leaves no unhandled rejection', async () => {
+    const user = userEvent.setup()
+    vi.mocked(api.put)
+      .mockResolvedValueOnce({ data: { success: true, message: '' } })
+      .mockRejectedValueOnce(new Error('Network Error'))
+    const error = vi.spyOn(toast, 'error')
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      await renderSection(
+        <InviteAbuseSection
+          defaultValues={{
+            ...inviteAbuseDefaults,
+            InviteAbuseBanEnabled: true,
+            InviteAbuseBanThreshold: 50,
+          }}
+        />
+      )
+
+      await replaceNumber(user, 'Invite count threshold', '5')
+      await user.click(
+        screen.getByRole('switch', { name: 'Ban invite abuse automatically' })
+      )
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+      await waitFor(() => expect(error).toHaveBeenCalledWith('Network Error'))
+      // Node reports a rejection nobody handled after the current task.
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(unhandled).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledTimes(1)
+      expect(savedOptions()).toEqual([
+        { key: 'InviteAbuseBanEnabled', value: false },
+        { key: 'InviteAbuseBanThreshold', value: 5 },
+      ])
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
   })
 })

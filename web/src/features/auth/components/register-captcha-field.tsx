@@ -37,13 +37,23 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
   const { t } = useTranslation()
   const inputId = useId()
   const challenge = props.captcha.challenge
+  const isLoading = props.captcha.isLoading
 
+  // Wraps where the language makes it wider than the image.
   let preview: ReactNode = (
-    <span className='text-muted-foreground text-xs'>
+    <span className='text-muted-foreground px-1 text-center text-xs leading-tight whitespace-normal'>
       {t('Click to refresh')}
     </span>
   )
-  if (challenge) {
+  if (isLoading) {
+    preview = <Loader2 className='size-4 animate-spin' aria-hidden='true' />
+  } else if (challenge && props.captcha.expired) {
+    // One word fits the image in every language; the button's title says
+    // what a click does.
+    preview = (
+      <span className='text-muted-foreground text-xs'>{t('Expired')}</span>
+    )
+  } else if (challenge) {
     preview = (
       <img
         src={challenge.image}
@@ -53,8 +63,6 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
         className='h-10 w-[120px] object-contain'
       />
     )
-  } else if (props.captcha.isLoading) {
-    preview = <Loader2 className='size-4 animate-spin' aria-hidden='true' />
   }
 
   return (
@@ -62,6 +70,7 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
       <Label htmlFor={inputId}>{t('Captcha')}</Label>
       <div className='flex items-center gap-2'>
         <Input
+          ref={props.captcha.answerRef}
           id={inputId}
           inputMode='numeric'
           maxLength={3}
@@ -69,7 +78,9 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
           placeholder={t('Enter the result')}
           value={props.captcha.answer}
           onChange={(event) => props.captcha.setAnswer(event.target.value)}
-          disabled={props.disabled}
+          onFocus={() => props.captcha.refreshIfExpired()}
+          // Nothing typed while a new image loads can belong to it.
+          disabled={props.disabled || isLoading}
           className='h-10 min-w-0 flex-1'
         />
         <Button
@@ -92,7 +103,7 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
           disabled={props.disabled}
         >
           <RefreshCw
-            className={cn(props.captcha.isLoading && 'animate-spin')}
+            className={cn(isLoading && 'animate-spin')}
             aria-hidden='true'
           />
         </Button>

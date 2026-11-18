@@ -188,7 +188,7 @@ export function SignUpForm({
         toast.error(t('Please enter your email'))
         return
       }
-      if (!verificationCode) {
+      if (!verificationCode.trim()) {
         toast.error(t('Please enter the verification code'))
         return
       }
@@ -204,12 +204,14 @@ export function SignUpForm({
 
     setIsLoading(true)
     let outcome: unknown
+    let registered = false
     try {
       const res = await register({
         username: data.username,
         password: data.password,
         email: data.email || undefined,
-        verification_code: verificationCode || undefined,
+        // A code pasted from the mail often carries spaces around it.
+        verification_code: verificationCode.trim() || undefined,
         aff_code: getAffiliateCode(),
         turnstile: turnstileToken,
         ...captchaParams,
@@ -217,6 +219,7 @@ export function SignUpForm({
       outcome = res
 
       if (res?.success) {
+        registered = true
         toast.success(t('Account created! Please sign in'))
         redirectToLogin()
       } else {
@@ -230,7 +233,10 @@ export function SignUpForm({
     } finally {
       setIsLoading(false)
       resetTurnstile()
-      registerCaptcha.handleRequestSettled(outcome, Boolean(captchaParams))
+      // The page is left after a registration, so no new captcha is needed.
+      if (!registered) {
+        registerCaptcha.handleRequestSettled(outcome, Boolean(captchaParams))
+      }
     }
   }
 
@@ -275,9 +281,8 @@ export function SignUpForm({
         handleServerError(createServerError(res, t('Login failed')))
       }
     } catch (error: unknown) {
-      handleServerError(
-        new AuthOperationError(t('Login failed'), undefined, { cause: error })
-      )
+      // Keeps the reason of a refusal such as the registration IP limit.
+      handleServerError(AuthOperationError.from(error, t('Login failed')))
     } finally {
       setIsWeChatSubmitting(false)
     }
@@ -391,6 +396,10 @@ export function SignUpForm({
                   placeholder={t('Verification code')}
                   value={verificationCode}
                   onChange={(e) => setVerificationCode(e.target.value)}
+                  autoComplete='one-time-code'
+                  autoCapitalize='off'
+                  autoCorrect='off'
+                  spellCheck={false}
                 />
               </div>
               <Button

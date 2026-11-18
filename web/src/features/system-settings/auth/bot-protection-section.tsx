@@ -110,19 +110,36 @@ function ClientIpDiagnostic() {
   }
 
   return (
-    <Alert>
-      <AlertTitle>
-        {t('The IP address the server sees for you')}: {address}
-      </AlertTitle>
-      <AlertDescription>
-        {proxies ? <p>{proxies}</p> : null}
-        <p>
-          {t(
-            'Compare it with your real public IP before turning on the IP limit. If it shows a reverse proxy or CDN address instead, all visitors share one limit and registration can be blocked for everyone: list those proxies in TRUSTED_PROXIES and make them forward the client address in X-Forwarded-For first.'
-          )}
-        </p>
-      </AlertDescription>
-    </Alert>
+    <>
+      {data?.trusted_proxies_catch_all ? (
+        <Alert variant='destructive'>
+          <AlertTitle>{t('TRUSTED_PROXIES trusts every address')}</AlertTitle>
+          <AlertDescription>
+            {t(
+              'Any client can forge its IP address with X-Forwarded-For, so the registration IP limit and the login rate limit can be bypassed. List only the addresses of your own proxies.'
+            )}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <Alert>
+        <AlertTitle>
+          {t('The IP address the server sees for you')}: {address}
+        </AlertTitle>
+        <AlertDescription>
+          {proxies ? <p>{proxies}</p> : null}
+          <p>
+            {t(
+              'Compare it with your real public IP before turning on the IP limit. If it shows a reverse proxy or CDN address instead, all visitors share one limit and registration can be blocked for everyone: list those proxies in TRUSTED_PROXIES and make them forward the client address in X-Forwarded-For first.'
+            )}
+          </p>
+          <p>
+            {t(
+              'TRUSTED_PROXIES replaces the built-in loopback and private network defaults. List only the addresses of your own proxies, never 0.0.0.0/0 or ::/0.'
+            )}
+          </p>
+        </AlertDescription>
+      </Alert>
+    </>
   )
 }
 
@@ -277,11 +294,13 @@ export function BotProtectionSection({
             )}
           />
 
+          {/* Top-aligned, so both inputs of this row line up whatever the
+              length of their descriptions. */}
           <FormField
             control={form.control}
             name='RegisterIPRateLimitNum'
             render={({ field }) => (
-              <FormItem>
+              <FormItem className='self-start'>
                 <FormLabel>{t('Requests per IP')}</FormLabel>
                 <FormControl>
                   <Input
@@ -312,7 +331,7 @@ export function BotProtectionSection({
             control={form.control}
             name='RegisterIPRateLimitMinutes'
             render={({ field }) => (
-              <FormItem>
+              <FormItem className='self-start'>
                 <FormLabel>{t('Time window (minutes)')}</FormLabel>
                 <FormControl>
                   <Input
@@ -329,6 +348,11 @@ export function BotProtectionSection({
                     ref={field.ref}
                   />
                 </FormControl>
+                <FormDescription>
+                  {t(
+                    'Captcha images are limited in the same window too: six times the requests per IP, at least 30'
+                  )}
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}

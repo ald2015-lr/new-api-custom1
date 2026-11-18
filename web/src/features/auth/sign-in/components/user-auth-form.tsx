@@ -232,9 +232,8 @@ export function UserAuthForm({
         handleServerError(createServerError(res, loginFailedMessage))
       }
     } catch (error: unknown) {
-      handleServerError(
-        new AuthOperationError(loginFailedMessage, undefined, { cause: error })
-      )
+      // Keeps the reason of a refusal such as the registration IP limit.
+      handleServerError(AuthOperationError.from(error, loginFailedMessage))
     } finally {
       setIsWeChatSubmitting(false)
     }

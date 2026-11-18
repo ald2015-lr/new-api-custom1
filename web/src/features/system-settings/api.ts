@@ -77,6 +77,8 @@ export async function getClientIpDiagnostics(): Promise<ClientIpDiagnostics> {
   return {
     ip: typeof payload.ip === 'string' ? payload.ip : '',
     trusted_proxies_configured: payload.trusted_proxies_configured === true,
+    // Older servers leave it out.
+    trusted_proxies_catch_all: payload.trusted_proxies_catch_all === true,
   }
 }
 
