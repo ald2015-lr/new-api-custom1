@@ -1293,9 +1293,17 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if channel.OtherSettings != "" {
 		// The content moderation and safety identifier settings, compared
-		// as the settings JSON stores them.
+		// as the settings JSON stores them. Both sides are parsed here
+		// without GetOtherSettings: on a stored value that no longer parses
+		// it saves the pre-update originChannel over the row just updated.
+		// A value that does not parse counts as changed.
 		var moderationParts [2][]byte
-		for i, settings := range []dto.ChannelOtherSettings{channel.GetOtherSettings(), originChannel.GetOtherSettings()} {
+		settingsUnparseable := false
+		for i, raw := range []string{channel.OtherSettings, originChannel.OtherSettings} {
+			settings := dto.ChannelOtherSettings{}
+			if raw != "" && common.UnmarshalJsonStr(raw, &settings) != nil {
+				settingsUnparseable = true
+			}
 			moderationParts[i], _ = common.Marshal(dto.ChannelOtherSettings{
 				ModerationEnabled:        settings.ModerationEnabled,
 				ModerationFailOpen:       settings.ModerationFailOpen,
@@ -1308,7 +1316,7 @@ func UpdateChannel(c *gin.Context) {
 				SendSafetyIdentifier:     settings.SendSafetyIdentifier,
 			})
 		}
-		if !bytes.Equal(moderationParts[0], moderationParts[1]) {
+		if settingsUnparseable || !bytes.Equal(moderationParts[0], moderationParts[1]) {
 			changedFields = append(changedFields, "content_moderation")
 		}
 	}

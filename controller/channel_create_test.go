@@ -374,9 +374,9 @@ func TestUpdateChannelAuditsContentModerationChanges(t *testing.T) {
 		_, err := model.BatchDeleteChannels([]int{channel.Id})
 		require.NoError(t, err)
 	})
-	edit := func(t *testing.T, fields map[string]any) []string {
+	edit := func(t *testing.T, target *model.Channel, fields map[string]any) []string {
 		t.Helper()
-		body := map[string]any{"id": channel.Id, "type": channel.Type, "name": channel.Name, "models": channel.Models, "group": channel.Group}
+		body := map[string]any{"id": target.Id, "type": target.Type, "name": target.Name, "models": target.Models, "group": target.Group}
 		maps.Copy(body, fields)
 		request, err := common.Marshal(body)
 		require.NoError(t, err)
@@ -404,8 +404,25 @@ func TestUpdateChannelAuditsContentModerationChanges(t *testing.T) {
 		return other.Op.Params.ChangedFields
 	}
 
-	assert.Equal(t, []string{"content_moderation"}, edit(t, map[string]any{"settings": `{"moderation_enabled":true,"moderation_fail_open":true}`}))
-	assert.Equal(t, []string{"content_moderation"}, edit(t, map[string]any{"settings": `{"moderation_enabled":true,"moderation_fail_open":true,"send_safety_identifier":true}`}))
-	assert.Equal(t, []string{"models"}, edit(t, map[string]any{"models": "gpt-4o,gpt-4o-mini", "settings": `{"moderation_enabled":true,"moderation_fail_open":true,"send_safety_identifier":true,"allow_service_tier":true}`}))
-	assert.Empty(t, edit(t, map[string]any{"models": "gpt-4o,gpt-4o-mini"}))
+	assert.Equal(t, []string{"content_moderation"}, edit(t, channel, map[string]any{"settings": `{"moderation_enabled":true,"moderation_fail_open":true}`}))
+	assert.Equal(t, []string{"content_moderation"}, edit(t, channel, map[string]any{"settings": `{"moderation_enabled":true,"moderation_fail_open":true,"send_safety_identifier":true}`}))
+	assert.Equal(t, []string{"models"}, edit(t, channel, map[string]any{"models": "gpt-4o,gpt-4o-mini", "settings": `{"moderation_enabled":true,"moderation_fail_open":true,"send_safety_identifier":true,"allow_service_tier":true}`}))
+	assert.Empty(t, edit(t, channel, map[string]any{"models": "gpt-4o,gpt-4o-mini"}))
+
+	// A stored value that no longer parses must not be rewritten by the
+	// audit: the update (a key rotation here) stays as saved.
+	unparseable := &model.Channel{Name: "moderation-audit-unparseable", Type: constant.ChannelTypeOpenAI, Key: "sk-old", Status: common.ChannelStatusManuallyDisabled,
+		Models: "m-old", Group: "default", OtherSettings: `{"moderation_enabled":"1"}`}
+	require.NoError(t, model.DB.Create(unparseable).Error)
+	t.Cleanup(func() {
+		_, err := model.BatchDeleteChannels([]int{unparseable.Id})
+		require.NoError(t, err)
+	})
+	assert.Equal(t, []string{"models", "key", "content_moderation"},
+		edit(t, unparseable, map[string]any{"models": "m-new", "key": "sk-new", "settings": `{"moderation_enabled":true}`}))
+	var stored model.Channel
+	require.NoError(t, model.DB.First(&stored, unparseable.Id).Error)
+	assert.Equal(t, "m-new", stored.Models)
+	assert.Equal(t, "sk-new", stored.Key)
+	assert.JSONEq(t, `{"moderation_enabled":true}`, stored.OtherSettings)
 }
