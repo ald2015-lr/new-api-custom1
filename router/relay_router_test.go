@@ -3663,19 +3663,20 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 // fail as their names say, and any other key flags sexual content when an
 // input carries MOD-FLAG-SEXUAL or an image URL contains flag-image, and
 // violence for MOD-FLAG-VIOLENCE. Chat answers 500 for the key sk-chat-500.
+// Channel records the X-Channel header a channel's header override sets.
 type moderationUpstream struct {
 	mu       sync.Mutex
 	requests []moderationUpstreamRequest
 }
 
 type moderationUpstreamRequest struct {
-	Path, Authorization, Organization, Body string
+	Path, Authorization, Organization, Channel, Body string
 }
 
 func (u *moderationUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	u.mu.Lock()
-	u.requests = append(u.requests, moderationUpstreamRequest{Path: r.URL.Path, Authorization: r.Header.Get("Authorization"), Organization: r.Header.Get("OpenAI-Organization"), Body: string(body)})
+	u.requests = append(u.requests, moderationUpstreamRequest{Path: r.URL.Path, Authorization: r.Header.Get("Authorization"), Organization: r.Header.Get("OpenAI-Organization"), Channel: r.Header.Get("X-Channel"), Body: string(body)})
 	u.mu.Unlock()
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	reply := func(status int, contentType, answer string) {
@@ -3902,6 +3903,15 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	retryRuleB := create("mod-retry-rule", "sk-ok-retry-rule-b", `{"moderation_enabled":true,"moderation_rules":[{"type":"keyword","pattern":"retry-rule-hit"}]}`, lowPriority)
 	create("mod-org", "sk-chat-500", "", noAutoBan, func(channel *model.Channel) { channel.OpenAIOrganization = common.GetPointer("org-a") })
 	create("mod-org", "sk-ok-org-b", on, lowPriority)
+	// The first channel's header override sends the key chat fails for, and
+	// its param override makes the relay use a runtime header override.
+	create("mod-hdr", "sk-hdr-a", "", noAutoBan, func(channel *model.Channel) {
+		channel.HeaderOverride = common.GetPointer(`{"Authorization":"Bearer sk-chat-500"}`)
+		channel.ParamOverride = common.GetPointer(`{"temperature":0.5}`)
+	})
+	create("mod-hdr", "sk-ok-hdr-b", on, lowPriority, func(channel *model.Channel) {
+		channel.HeaderOverride = common.GetPointer(`{"X-Channel":"B"}`)
+	})
 	for _, modelName := range []string{"mod-claude", "mod-gemini", "mod-responses", "mod-own", "mod-embed", "mod-image", "mod-speech", "mod-realtime", "mod-novelai", "mod-budget-system", "mod-img", "mod-completions", "mod-cache", "mod-global-pass"} {
 		create(modelName, "sk-ok-"+modelName, on)
 	}
@@ -4260,6 +4270,20 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		assert.Equal(t, "org-a", calls[0].Organization)
 		for _, call := range calls[1:] {
 			assert.Empty(t, call.Organization, call.Path)
+		}
+	})
+
+	t.Run("a retry does not carry the first channel's header override", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-hdr", userMessage(unique("clean header override text")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "")
+		require.Len(t, calls, 3)
+		assert.Equal(t, "Bearer sk-chat-500", calls[0].Authorization, "the first channel's own override")
+		assert.Equal(t, []string{"/v1/moderations", "/v1/chat/completions"}, []string{calls[1].Path, calls[2].Path})
+		for _, call := range calls[1:] {
+			assert.Equal(t, "Bearer sk-ok-hdr-b", call.Authorization, call.Path)
+			assert.Equal(t, "B", call.Channel, call.Path)
 		}
 	})
 
