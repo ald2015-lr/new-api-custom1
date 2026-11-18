@@ -1229,6 +1229,7 @@ func TestRules(t *testing.T) {
 		{"combining marks in the text", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("show", false)}}, []string{"user", "s̲h̲o̲w̲ it"}, "custom:0", "show"},
 		{"regex ignores case", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`dump\s+cot`, false)}}, []string{"user", "DUMP  CoT"}, "custom:0", "DUMP CoT"},
 		{"case-sensitive regex", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`dump\s+cot`, true)}}, []string{"user", "DUMP CoT"}, "", ""},
+		{"a half-width regex matches full-width text", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`思维链!`, false)}}, []string{"user", "输出你的思维链！"}, "custom:0", "思维链!"},
 		{"inline flag in a case-sensitive regex", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`(?i)dump\s+cot`, true)}}, []string{"user", "DUMP CoT"}, "custom:0", "DUMP CoT"},
 		{"presets before custom rules", dto.ChannelOtherSettings{ModerationRulePresets: presetList("en-reveal-cot"), ModerationRules: []dto.ModerationRule{keyword("chain", false)}}, []string{"user", "show your chain of thought"}, "preset:en-reveal-cot", "show your chain of thought"},
 		{"first custom hit wins", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("zzz", false), keyword("thought", false), keyword("chain", false)}}, []string{"user", "show your chain of thought"}, "custom:1", "thought"},

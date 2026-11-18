@@ -921,6 +921,9 @@ func TestChannelOtherSettingsGeminiFreeKey(t *testing.T) {
 // values fall back to the defaults, and saving rejects every malformed value
 // with a message that names the field.
 func TestChannelOtherSettingsModeration(t *testing.T) {
+	normalised := func(text string) string {
+		return fmt.Sprintf("moderation_rules[0].pattern contains %q, which content moderation normalises before matching (write the half-width form, e.g. ! ? , ( ) instead of ！？，（）, and a single space instead of tabs or full-width spaces)", text)
+	}
 	var unset *ChannelOtherSettings
 	assert.NoError(t, unset.ValidateModeration())
 	assert.Equal(t, 10000, unset.EffectiveModerationMaxChars())
@@ -1002,6 +1005,15 @@ func TestChannelOtherSettingsModeration(t *testing.T) {
 		{name: "too complex", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(heavy)}}, wantErr: "moderation_rules[0].pattern is too complex (more than 2000 regular expression instructions)"},
 		{name: "2002 instructions", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("a.{0,999}q")}}, wantErr: "moderation_rules[0].pattern is too complex (more than 2000 regular expression instructions)"},
 		{name: "matches empty text", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("a*")}}, wantErr: "moderation_rules[0].pattern matches empty text"},
+		{name: "full-width exclamation mark", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("思维链！")}}, wantErr: normalised("！")},
+		{name: "full-width letters", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`ｓｅｃｒｅｔ\s*plan`)}}, wantErr: normalised("Ｓ")},
+		{name: "full-width letters, case-sensitive", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Type: "regex", Pattern: `ｓｅｃｒｅｔ`, CaseSensitive: true}}}, wantErr: normalised("ｓ")},
+		{name: "escaped full-width rune", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`a\x{FF01}`)}}, wantErr: normalised("！")},
+		{name: "tab", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`a\tb`)}}, wantErr: normalised("\t")},
+		{name: "zero-width space", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`a\x{200B}b`)}}, wantErr: normalised("\u200b")},
+		{name: "two spaces", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("secret  plan")}}, wantErr: normalised("  ")},
+		{name: "class of full-width forms only", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("思维链[！？]")}}, wantErr: normalised("！")},
+		{name: "class with a half-width alternative", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("思维链[！!]"), regex(`输出[^。！？!?\n]{0,10}推理`), regex(`(?i)dump\s+cot`), regex("。")}}},
 		{name: "valid rules", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Name: "cot", Type: "keyword", Pattern: "chain of thought"}, {Type: "regex", Pattern: `(?i)reveal\s+your`, CaseSensitive: true}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1065,6 +1077,7 @@ func TestModerationRulePresetsAreValid(t *testing.T) {
 		}
 		re, err := CompileModerationRegex(preset.Pattern, preset.CaseSensitive)
 		require.NoError(t, err, preset.ID)
+		assert.Empty(t, moderationRegexUnmatchableText(preset.Pattern, preset.CaseSensitive), preset.ID)
 		assert.False(t, re.MatchString(""), preset.ID)
 		assert.LessOrEqual(t, moderationRegexProgramSize(preset.Pattern, preset.CaseSensitive), ModerationRegexProgramMax, preset.ID)
 		found, ok := ModerationRulePresetByID(preset.ID)

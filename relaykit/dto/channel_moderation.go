@@ -307,7 +307,74 @@ func validateModerationRule(rules []ModerationRule, i int) error {
 	if re.MatchString("") {
 		return fmt.Errorf("moderation_rules[%d].pattern matches empty text", i)
 	}
+	if text := moderationRegexUnmatchableText(rule.Pattern, rule.CaseSensitive); text != "" {
+		return fmt.Errorf("moderation_rules[%d].pattern contains %q, which content moderation normalises before matching (write the half-width form, e.g. ! ? , ( ) instead of ！？，（）, and a single space instead of tabs or full-width spaces)", i, text)
+	}
 	return nil
+}
+
+// moderationRegexUnmatchableText is text a regex requires that the rule view
+// of normalised text never contains: a literal rune the normalisation
+// rewrites or drops (full-width forms, tabs, format characters, combining
+// marks), two whitespace runes in a row, or a character class made only of
+// such runes. It returns "" when there is none. The pattern is walked as RE2
+// parses it, so escapes count and a class with a live alternative such as
+// [！!] does not.
+func moderationRegexUnmatchableText(pattern string, caseSensitive bool) string {
+	parsed, err := syntax.Parse(moderationRegexSource(pattern, caseSensitive), syntax.Perl)
+	if err != nil {
+		return ""
+	}
+	stack := []*syntax.Regexp{parsed}
+	for len(stack) > 0 {
+		node := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		switch node.Op {
+		case syntax.OpLiteral:
+			for j, r := range node.Rune {
+				if !moderationRuleViewKeeps(r) {
+					return string(r)
+				}
+				if j > 0 && unicode.IsSpace(r) && unicode.IsSpace(node.Rune[j-1]) {
+					return string(node.Rune[j-1 : j+1])
+				}
+			}
+		case syntax.OpCharClass:
+			if len(node.Rune) > 0 && moderationClassIsUnmatchable(node.Rune) {
+				return string(node.Rune[0])
+			}
+		}
+		for j := len(node.Sub) - 1; j >= 0; j-- {
+			stack = append(stack, node.Sub[j])
+		}
+	}
+	return ""
+}
+
+// moderationRuleViewKeeps reports whether r survives normalisation and the
+// rule view unchanged between two letters.
+func moderationRuleViewKeeps(r rune) bool {
+	text := "a" + string(r) + "a"
+	return ModerationRuleView(NormalizeModerationText(text)) == text
+}
+
+// moderationClassIsUnmatchable reports whether every rune of a parsed
+// character class (lo-hi pairs) is one the rule view never contains. It
+// gives up, treating the class as matchable, after 1<<16 runes.
+func moderationClassIsUnmatchable(ranges []rune) bool {
+	checked := 0
+	for j := 0; j+1 < len(ranges); j += 2 {
+		for r := ranges[j]; r <= ranges[j+1]; r++ {
+			if moderationRuleViewKeeps(r) {
+				return false
+			}
+			checked++
+			if checked >= 1<<16 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // CompileModerationRegex compiles a moderation regex as the rules engine runs
