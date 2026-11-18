@@ -301,7 +301,9 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
             control={form.control}
             name='InviteAbuseBanThreshold'
             render={({ field }) => (
-              <FormItem>
+              // Top-aligned: the two help texts of this row can wrap to a
+              // different number of lines, which would shift the inputs.
+              <FormItem className='self-start'>
                 <FormLabel>{t('Invite count threshold')}</FormLabel>
                 <FormControl>
                   <Input
@@ -332,7 +334,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
             control={form.control}
             name='InviteAbuseBanMinRedeemQuota'
             render={({ field }) => (
-              <FormItem>
+              <FormItem className='self-start'>
                 <FormLabel>{t('Minimum redeemed quota')}</FormLabel>
                 <FormControl>
                   <Input
