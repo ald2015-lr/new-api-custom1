@@ -563,6 +563,24 @@ it('marks an expired captcha without fetching and loads a new one once the answe
   expect(captchaCount).toBe(2)
 })
 
+it('treats a captcha as expired ten seconds before the server drops it', async () => {
+  vi.useFakeTimers({
+    toFake: ['setTimeout', 'clearTimeout'],
+    shouldAdvanceTime: true,
+  })
+  mockGet()
+  await renderSignUp({ register_captcha: true, email_verification: false })
+  await findCaptchaImage(1)
+
+  // The server keeps the challenge for 300 s from before its reply arrived.
+  await act(() => vi.advanceTimersByTimeAsync(285_000))
+  expect(screen.queryByRole('button', { name: 'Expired' })).toBeNull()
+
+  await act(() => vi.advanceTimersByTimeAsync(6_000))
+  expect(screen.getByRole('button', { name: 'Expired' })).toBeInTheDocument()
+  expect(captchaCount).toBe(1)
+})
+
 it('gives the focus back to the answer after focusing it replaced an expired captcha', async () => {
   vi.useFakeTimers({
     toFake: ['setTimeout', 'clearTimeout'],

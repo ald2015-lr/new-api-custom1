@@ -44,6 +44,15 @@ function isServerRefusal(outcome: unknown): boolean {
 }
 
 /**
+ * How long the page treats a challenge as valid: a little less than the
+ * server's lifetime, which started before the reply arrived, so a submit in
+ * the last seconds does not send a challenge the server already dropped.
+ */
+export function clientCaptchaLifetimeMs(seconds: number): number {
+  return Math.max(seconds - 10, seconds / 2) * 1000
+}
+
+/**
  * The arithmetic image captcha of the sign-up page.
  *
  * A challenge is single use: the server deletes it on every check, right or
@@ -88,7 +97,9 @@ export function useRegisterCaptcha() {
       if (res?.success && res.data) {
         const seconds = res.data.expires_in
         expiresAt.current =
-          seconds > 0 ? Date.now() + seconds * 1000 : Number.POSITIVE_INFINITY
+          seconds > 0
+            ? Date.now() + clientCaptchaLifetimeMs(seconds)
+            : Number.POSITIVE_INFINITY
         setChallenge(res.data)
         setAnswer('')
         return
@@ -126,7 +137,10 @@ export function useRegisterCaptcha() {
     const seconds = challenge?.expires_in ?? 0
     if (!enabled || !(seconds > 0)) return
     // Only mark it: fetching here would spend the budget of an idle tab.
-    const timer = window.setTimeout(() => setExpired(true), seconds * 1000)
+    const timer = window.setTimeout(
+      () => setExpired(true),
+      clientCaptchaLifetimeMs(seconds)
+    )
     return () => window.clearTimeout(timer)
   }, [enabled, challenge])
 
