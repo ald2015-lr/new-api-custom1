@@ -45,7 +45,7 @@ export function isValidBackupCode(code: string): boolean {
  */
 export function formatBackupCode(value: string): string {
   // Remove all non-alphanumeric characters and convert to uppercase
-  let cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, '')
+  let cleaned = value.toUpperCase().replaceAll(/[^A-Z0-9]/g, '')
 
   // Limit to 8 characters
   if (cleaned.length > 8) {
@@ -54,7 +54,7 @@ export function formatBackupCode(value: string): string {
 
   // Add hyphen after 4th character
   if (cleaned.length > 4) {
-    return cleaned.slice(0, 4) + '-' + cleaned.slice(4)
+    return `${cleaned.slice(0, 4)}-${cleaned.slice(4)}`
   }
 
   return cleaned
@@ -64,7 +64,7 @@ export function formatBackupCode(value: string): string {
  * Remove hyphens from backup code before sending to server
  */
 export function cleanBackupCode(code: string): string {
-  return code.replace(/-/g, '')
+  return code.replaceAll('-', '')
 }
 
 // ============================================================================
@@ -77,4 +77,19 @@ export function cleanBackupCode(code: string): string {
 export function isValidEmail(email: string): boolean {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
   return emailRegex.test(email)
+}
+
+// A QQ number has 5 to 11 ASCII digits and no leading zero.
+const QQ_NUMBER_REGEX = /^[1-9][0-9]{4,10}$/
+
+/**
+ * True for a qq.com address whose local part is not a QQ number, such as an
+ * English alias. The server rejects these when EmailQQNumericOnlyEnabled is
+ * on and stays the authority; this only lets the form say so early.
+ */
+export function isNonNumericQQEmail(email: string): boolean {
+  const normalized = email.trim().toLowerCase()
+  const at = normalized.lastIndexOf('@')
+  if (at < 0 || normalized.slice(at + 1) !== 'qq.com') return false
+  return !QQ_NUMBER_REGEX.test(normalized.slice(0, at))
 }

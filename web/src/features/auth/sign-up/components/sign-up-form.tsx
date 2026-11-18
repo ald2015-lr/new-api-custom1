@@ -41,14 +41,17 @@ import { Label } from '@/components/ui/label'
 import { register, wechatLoginByCode } from '@/features/auth/api'
 import { LegalConsent } from '@/features/auth/components/legal-consent'
 import { OAuthProviders } from '@/features/auth/components/oauth-providers'
+import { RegisterCaptchaField } from '@/features/auth/components/register-captcha-field'
 import { registerFormSchema } from '@/features/auth/constants'
 import { useAuthRedirect } from '@/features/auth/hooks/use-auth-redirect'
 import { useEmailVerification } from '@/features/auth/hooks/use-email-verification'
+import { useRegisterCaptcha } from '@/features/auth/hooks/use-register-captcha'
 import { useTurnstile } from '@/features/auth/hooks/use-turnstile'
 import {
   getAffiliateCode,
   saveAffiliateCode,
 } from '@/features/auth/lib/storage'
+import { isNonNumericQQEmail } from '@/features/auth/lib/validation'
 import { useStatus } from '@/hooks/use-status'
 import { handleServerError } from '@/lib/handle-server-error'
 import { AuthOperationError } from '@/lib/secure-verification'
@@ -77,7 +80,15 @@ export function SignUpForm({
     setTurnstileToken,
     validateTurnstile,
   } = useTurnstile()
+  const registerCaptcha = useRegisterCaptcha()
   const { redirectToLogin, handleLoginResult } = useAuthRedirect()
+
+  // The server spends a Turnstile token once it has checked it.
+  function resetTurnstile() {
+    setTurnstileToken('')
+    setTurnstileWidgetKey((current) => current + 1)
+  }
+
   const {
     isSending: isSendingCode,
     secondsLeft,
@@ -86,10 +97,35 @@ export function SignUpForm({
   } = useEmailVerification({
     turnstileToken,
     validateTurnstile,
+    captcha: registerCaptcha.params,
+    validateCaptcha: registerCaptcha.validate,
+    onRequestSettled: (outcome) => {
+      resetTurnstile()
+      registerCaptcha.handleRequestSettled(
+        outcome,
+        Boolean(registerCaptcha.params)
+      )
+    },
   })
 
+  const qqNumberOnly = Boolean(status?.email_qq_numeric_only)
+  const formSchema = useMemo(
+    () =>
+      qqNumberOnly
+        ? registerFormSchema.refine(
+            (data) => !isNonNumericQQEmail(data.email ?? ''),
+            {
+              message:
+                'QQ mail addresses must use the QQ number, for example 123456789@qq.com.',
+              path: ['email'],
+            }
+          )
+        : registerFormSchema,
+    [qqNumberOnly]
+  )
+
   const form = useForm<z.infer<typeof registerFormSchema>>({
-    resolver: zodResolver(registerFormSchema),
+    resolver: zodResolver(formSchema),
     defaultValues: {
       username: '',
       email: '',
@@ -99,6 +135,7 @@ export function SignUpForm({
   })
 
   const emailValue = form.watch('email')
+  const emailError = form.formState.errors.email
   const emailVerificationRequired = !!status?.email_verification
   const hasUserAgreement = Boolean(status?.user_agreement_enabled)
   const hasPrivacyPolicy = Boolean(status?.privacy_policy_enabled)
@@ -159,7 +196,14 @@ export function SignUpForm({
 
     if (!validateTurnstile()) return
 
+    // With email verification on, the captcha was solved to get the email
+    // code, so the server checks it on registration only otherwise.
+    const captchaOnSubmit = !emailVerificationRequired
+    if (captchaOnSubmit && !registerCaptcha.validate()) return
+    const captchaParams = captchaOnSubmit ? registerCaptcha.params : undefined
+
     setIsLoading(true)
+    let outcome: unknown
     try {
       const res = await register({
         username: data.username,
@@ -168,7 +212,9 @@ export function SignUpForm({
         verification_code: verificationCode || undefined,
         aff_code: getAffiliateCode(),
         turnstile: turnstileToken,
+        ...captchaParams,
       })
+      outcome = res
 
       if (res?.success) {
         toast.success(t('Account created! Please sign in'))
@@ -177,19 +223,21 @@ export function SignUpForm({
         handleServerError(createServerError(res, t('Failed to create account')))
       }
     } catch (error) {
+      outcome = error
       handleServerError(
         AuthOperationError.from(error, t('Failed to create account'))
       )
     } finally {
       setIsLoading(false)
+      resetTurnstile()
+      registerCaptcha.handleRequestSettled(outcome, Boolean(captchaParams))
     }
   }
 
   async function handleSendVerificationCode() {
-    if (await sendCode(emailValue || '')) {
-      setTurnstileToken('')
-      setTurnstileWidgetKey((current) => current + 1)
-    }
+    // Show a field error, such as the QQ number rule, before asking the server.
+    if (!(await form.trigger('email'))) return
+    await sendCode(emailValue || '')
   }
 
   const handleOpenWeChatDialog = () => {
@@ -316,12 +364,25 @@ export function SignUpForm({
                       placeholder={t('name@example.com')}
                       type='email'
                       {...field}
+                      onChange={(event) => {
+                        field.onChange(event)
+                        // Show the QQ number rule while typing.
+                        if (qqNumberOnly) void form.trigger('email')
+                      }}
                     />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
               )}
             />
+
+            {/* The captcha has to be solved before the email code is sent */}
+            {registerCaptcha.enabled && (
+              <RegisterCaptchaField
+                captcha={registerCaptcha}
+                disabled={isLoading || isSendingCode}
+              />
+            )}
 
             {/* Verification Code Field */}
             <div className='flex items-end gap-2'>
@@ -340,7 +401,9 @@ export function SignUpForm({
                   isSendingCode ||
                   isActive ||
                   !emailValue ||
-                  !turnstileReady
+                  Boolean(emailError) ||
+                  !turnstileReady ||
+                  !registerCaptcha.ready
                 }
                 onClick={handleSendVerificationCode}
               >
@@ -348,6 +411,14 @@ export function SignUpForm({
               </Button>
             </div>
           </>
+        )}
+
+        {/* Without email verification the captcha guards the submission */}
+        {!emailVerificationRequired && registerCaptcha.enabled && (
+          <RegisterCaptchaField
+            captcha={registerCaptcha}
+            disabled={isLoading}
+          />
         )}
 
         {/* Turnstile */}
@@ -375,7 +446,8 @@ export function SignUpForm({
           disabled={
             isLoading ||
             (requiresLegalConsent && !agreedToLegal) ||
-            !turnstileReady
+            !turnstileReady ||
+            (!emailVerificationRequired && !registerCaptcha.ready)
           }
         >
           {isLoading ? <Loader2 className='h-4 w-4 animate-spin' /> : null}

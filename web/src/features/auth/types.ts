@@ -43,6 +43,24 @@ export interface RegisterPayload {
   verification_code?: string
   aff_code?: string
   turnstile?: string
+  /** Registration captcha, sent as query parameters like `turnstile`. */
+  captcha_id?: string
+  captcha?: string
+}
+
+/** The answer to a single-use registration captcha. */
+export interface RegisterCaptchaParams {
+  captcha_id: string
+  captcha: string
+}
+
+/** A registration captcha challenge from GET /api/captcha. */
+export interface RegisterCaptcha {
+  captcha_id: string
+  /** PNG data URI */
+  image: string
+  /** Seconds until the server forgets the challenge */
+  expires_in: number
 }
 
 export interface PasswordResetPayload {
@@ -134,6 +152,8 @@ export interface SystemStatus {
     password_login_enabled?: boolean
     password_login_encryption_enabled?: boolean
     password_register_enabled?: boolean
+    register_captcha?: boolean
+    email_qq_numeric_only?: boolean
     custom_oauth_providers?: CustomOAuthProviderInfo[]
     [key: string]: unknown
   }
@@ -181,6 +201,10 @@ export interface SystemStatus {
   password_login_enabled?: boolean
   password_login_encryption_enabled?: boolean
   password_register_enabled?: boolean
+  /** Sign-up requires the arithmetic image captcha */
+  register_captcha?: boolean
+  /** qq.com sign-up addresses must use the numeric QQ number */
+  email_qq_numeric_only?: boolean
   custom_oauth_providers?: CustomOAuthProviderInfo[]
   log_export_enabled?: boolean
   log_max_range_days?: number

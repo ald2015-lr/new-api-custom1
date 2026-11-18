@@ -121,21 +121,6 @@ export function deleteUserAccount(
 // ============================================================================
 
 /**
- * Send email verification code
- */
-export async function sendEmailVerification(
-  email: string,
-  turnstileToken?: string
-): Promise<ApiResponse> {
-  const params = new URLSearchParams({ email })
-  if (turnstileToken) {
-    params.append('turnstile', turnstileToken)
-  }
-  const res = await api.get(`/api/verification?${params}`)
-  return res.data
-}
-
-/**
  * Bind email account
  */
 export function startEmailBinding(
