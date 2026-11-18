@@ -46,6 +46,13 @@ export function InviteAbusePreviewDialog(props: InviteAbusePreviewDialogProps) {
   const preview = props.preview
   const items = preview?.items ?? []
 
+  let exemption = ''
+  if (preview?.exempt_paid_inviter !== undefined) {
+    exemption = preview.exempt_paid_inviter
+      ? t('Inviters who recharged are exempt')
+      : t('Inviters who recharged are not exempt')
+  }
+
   const totals = preview
     ? [
         {
@@ -70,13 +77,18 @@ export function InviteAbusePreviewDialog(props: InviteAbusePreviewDialogProps) {
       title={t('Invite abuse preview')}
       description={
         preview
-          ? t(
-              'Threshold: {{threshold}} invited users · minimum redeemed quota: {{amount}}',
-              {
-                threshold: formatNumber(preview.threshold, locale),
-                amount: formatQuota(preview.min_redeem_quota),
-              }
-            )
+          ? [
+              t(
+                'Threshold: {{threshold}} invited users · minimum redeemed quota: {{amount}}',
+                {
+                  threshold: formatNumber(preview.threshold, locale),
+                  amount: formatQuota(preview.min_redeem_quota),
+                }
+              ),
+              exemption,
+            ]
+              .filter(Boolean)
+              .join(' · ')
           : undefined
       }
       contentClassName='sm:max-w-3xl'

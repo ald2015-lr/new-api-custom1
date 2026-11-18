@@ -224,6 +224,8 @@ export type ClientIpDiagnostics = {
 export type InviteAbusePreviewParams = {
   threshold: number
   min_redeem_quota: number
+  /** Whether inviters with a qualifying recharge of their own are exempt */
+  exempt_paid_inviter: boolean
 }
 
 /** An inviter the invite abuse rule would disable */
@@ -237,7 +239,11 @@ export type InviteAbusePreviewItem = {
 }
 
 /** GET /api/user/invite_abuse/preview */
-export type InviteAbusePreview = InviteAbusePreviewParams & {
+export type InviteAbusePreview = {
+  threshold: number
+  min_redeem_quota: number
+  /** The exemption the preview applied; older servers leave it out */
+  exempt_paid_inviter?: boolean
   abusive_inviters: number
   inviters_to_disable: number
   invitees_to_disable: number

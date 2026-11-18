@@ -84,6 +84,7 @@ const inviteAbuseDefaults = {
 const preview: InviteAbusePreview = {
   threshold: 8,
   min_redeem_quota: 1000000,
+  exempt_paid_inviter: true,
   abusive_inviters: 12,
   inviters_to_disable: 10,
   invitees_to_disable: 340,
@@ -184,7 +185,11 @@ describe('Invite abuse protection settings', () => {
       name: 'Invite abuse preview',
     })
     expect(get).toHaveBeenCalledWith('/api/user/invite_abuse/preview', {
-      params: { threshold: 8, min_redeem_quota: 1000000 },
+      params: {
+        threshold: 8,
+        min_redeem_quota: 1000000,
+        exempt_paid_inviter: true,
+      },
       disableDuplicate: true,
     })
     expect(api.put).not.toHaveBeenCalled()
@@ -207,6 +212,33 @@ describe('Invite abuse protection settings', () => {
         'Only the 1 inviters with the most invites are listed.'
       )
     ).toBeInTheDocument()
+  })
+
+  it('previews with the unsaved paid inviter exemption and shows the one applied', async () => {
+    const user = userEvent.setup()
+    const get = mockPreview({ ...preview, exempt_paid_inviter: false })
+    await renderSection(
+      <InviteAbuseSection defaultValues={inviteAbuseDefaults} />
+    )
+
+    await user.click(
+      screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Preview' }))
+
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Invite abuse preview',
+    })
+    expect(get).toHaveBeenCalledWith('/api/user/invite_abuse/preview', {
+      params: {
+        threshold: 5,
+        min_redeem_quota: 500000,
+        exempt_paid_inviter: false,
+      },
+      disableDuplicate: true,
+    })
+    expect(dialog).toHaveTextContent('Inviters who recharged are not exempt')
+    expect(api.put).not.toHaveBeenCalled()
   })
 
   it('says so when no inviter matches the previewed rule', async () => {

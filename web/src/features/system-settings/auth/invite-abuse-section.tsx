@@ -147,6 +147,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
     preview.mutate({
       threshold: Number(form.getValues('InviteAbuseBanThreshold')),
       min_redeem_quota: Number(form.getValues('InviteAbuseBanMinRedeemQuota')),
+      exempt_paid_inviter: form.getValues('InviteAbuseBanExemptPaidInviter'),
     })
   }
 
@@ -330,7 +331,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
             </Button>
             <p className='text-muted-foreground text-sm'>
               {t(
-                'Counts the users the rule would disable with the threshold and quota above, before they are saved. Nobody is disabled by a preview.'
+                'Counts the users the rule would disable with the settings above, before they are saved. Nobody is disabled by a preview.'
               )}
             </p>
           </div>
