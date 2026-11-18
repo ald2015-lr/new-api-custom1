@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -55,6 +56,14 @@ type EmailBindingData struct {
 // email binding and OAuth sign-up, so no path that stores an account email can
 // bypass the site's address format, domain, QQ number, alias and length rules.
 func ValidateAccountEmail(email string) (string, error) {
+	// Non-ASCII characters are refused before the address is lowercased:
+	// strings.ToLower turns some of them into ASCII letters (the Kelvin sign
+	// into k, U+0130 into i), so the stored address would not be the one an
+	// OAuth provider vouched for.
+	email = strings.TrimSpace(email)
+	if strings.ContainsFunc(email, func(r rune) bool { return r > unicode.MaxASCII }) {
+		return "", ErrAccountEmailInvalid
+	}
 	email = model.NormalizeEmail(email)
 	if common.Validate.Var(email, "required,email,max=50") != nil {
 		return "", ErrAccountEmailInvalid

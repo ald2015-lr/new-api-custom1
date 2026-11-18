@@ -346,6 +346,7 @@ func TestValidateAccountEmailRejectsAddressVariantsAndQQAliases(t *testing.T) {
 		err       error
 	}{
 		{email: " 10001@QQ.com ", qqRule: true, want: "10001@qq.com"},
+		{email: " 10001@QQ.com　", qqRule: true, want: "10001@qq.com"},
 		{email: "12345678901@qq.com", qqRule: true, want: "12345678901@qq.com"},
 		{email: "123456789012@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
 		{email: "1234@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
@@ -367,6 +368,9 @@ func TestValidateAccountEmailRejectsAddressVariantsAndQQAliases(t *testing.T) {
 		{email: `"1\2345"@qq.com`, err: service.ErrAccountEmailInvalid},
 		{email: `"a;b"@example.com`, err: service.ErrAccountEmailInvalid},
 		{email: "12345@ｑｑ.com", err: service.ErrAccountEmailInvalid},
+		// strings.ToLower would turn these into the ASCII kate@ and info.com.
+		{email: "Kate@example.com", err: service.ErrAccountEmailInvalid},
+		{email: "owner@İnfo.com", err: service.ErrAccountEmailInvalid},
 		{email: "12345@qq.com.", err: service.ErrAccountEmailInvalid},
 		{email: "12345@-qq.com", err: service.ErrAccountEmailInvalid},
 		{email: "not-an-email", err: service.ErrAccountEmailInvalid},

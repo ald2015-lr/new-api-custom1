@@ -1201,6 +1201,9 @@ func oauthSignUpContext(remoteAddr string) *gin.Context {
 
 func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 	db := setupOAuthSignUpTest(t)
+	// example.com is allowed too: unlike QQ numbers, its addresses have
+	// letters with Unicode case variants.
+	common.EmailDomainWhitelist = []string{"qq.com", "example.com"}
 	var userInfoMutex sync.Mutex
 	userInfo := ""
 	setUserInfo := func(body string) {
@@ -1260,6 +1263,14 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 		{"custom mail field that is not the root email", customMail, `{"sub":"mail-1","email":"10015@qq.com","email_verified":true,"mail":"10016@qq.com"}`, ""},
 		{"custom mail field without a root email", customMail, `{"sub":"mail-2","email_verified":true,"mail":"10017@qq.com"}`, ""},
 		{"custom mail field that is the root email", customMail, `{"sub":"mail-3","email":"10018@qq.com","email_verified":true,"mail":"10018@qq.com"}`, "10018@qq.com"},
+		{"custom mail field that is the root email in another case", customMail, `{"sub":"mail-4","email":"Sales@Example.com","email_verified":true,"mail":"sales@example.com"}`, "sales@example.com"},
+		// Unicode case folding matches ſ and the Kelvin sign with s and k, and
+		// strings.ToLower turns the Kelvin sign and U+0130 into k and i: the
+		// provider verified none of the ASCII addresses that would come out.
+		{"custom mail field that a long s in the root email folds into", customMail, `{"sub":"mail-5","email":"ſales@example.com","email_verified":true,"mail":"sales@example.com"}`, ""},
+		{"custom mail field that a Kelvin sign in the root email folds into", customMail, `{"sub":"mail-6","email":"Krystal@example.com","email_verified":true,"mail":"krystal@example.com"}`, ""},
+		{"custom verified with a Kelvin sign", custom, `{"sub":"custom-6","email":"Kate@example.com","email_verified":true}`, ""},
+		{"oidc verified with a dotted capital I", oidc, `{"sub":"oidc-8","email":"İnfo@example.com","email_verified":true}`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setUserInfo(tc.userInfo)
