@@ -155,8 +155,8 @@ func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration in
 }
 
 // RequestWithRetryAfter is Request that also reports, for a rejected request,
-// how many seconds remain until the oldest accepted request leaves the window
-// (at least 1). It reports 0 for an accepted request.
+// how many seconds remain until the window has room for a request again (at
+// least 1). It reports 0 for an accepted request.
 func (l *InMemoryRateLimiter) RequestWithRetryAfter(key string, maxRequestNum int, duration int64) (bool, int64) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -169,9 +169,17 @@ func (l *InMemoryRateLimiter) RequestWithRetryAfter(key string, maxRequestNum in
 		entry.requests.append(now.Unix())
 		return true, 0
 	}
+	// The count drops below the limit once all but maxRequestNum - 1 of the
+	// accepted requests have left the window. That is the oldest one unless
+	// the limit was lowered while the window held more requests than the new
+	// limit.
 	retryAfter := duration
-	if entry.requests.head != nil {
-		retryAfter = entry.requests.head.timestamp + duration - now.Unix()
+	freeing := entry.requests.head
+	for range entry.requests.length - max(maxRequestNum, 1) {
+		freeing = freeing.next
+	}
+	if freeing != nil {
+		retryAfter = freeing.timestamp + duration - now.Unix()
 	}
 	return false, max(retryAfter, 1)
 }
