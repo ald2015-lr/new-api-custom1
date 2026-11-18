@@ -254,4 +254,33 @@ describe('usage log content moderation details', () => {
     expect(screen.queryByText('Content moderation')).toBeNull()
     expect(screen.queryByText('OpenAI moderation')).toBeNull()
   })
+
+  test('a non-admin view hides the moderation details even when the row carries an audit', () => {
+    renderDetails(false, {
+      ...flagged,
+      source: 'rule',
+      rule: { kind: 'custom', index: 1, name: 'Leak', type: 'keyword' },
+      match: 'secret-match',
+    })
+
+    expect(
+      screen.getAllByText('Rejected by content moderation').length
+    ).toBeGreaterThan(0)
+    expect(screen.queryByText('Content moderation')).toBeNull()
+    for (const text of [
+      'Result',
+      'Source',
+      'Categories',
+      'Scores',
+      'Rule',
+      'Matched text',
+      'Moderation ID',
+      'Keyword or regex rule',
+      'Custom rule #2: Leak · Keyword',
+      'secret-match',
+      'modr-42',
+    ]) {
+      expect(screen.queryByText(text), text).toBeNull()
+    }
+  })
 })
