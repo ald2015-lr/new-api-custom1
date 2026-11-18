@@ -223,8 +223,9 @@ func TestSendEmailVerificationIsRefusedWhileRegistrationTakesNoCode(t *testing.T
 // The client IP diagnostic answers with the address the server derives for
 // the caller under TRUSTED_PROXIES, says whether TRUSTED_PROXIES is set (to a
 // list or to none) instead of left to the built-in defaults and whether it
-// trusts every IPv4 or IPv6 address (then any client, the public peers here,
-// chooses its address with X-Forwarded-For), and is never cached.
+// trusts every IPv4 or IPv6 address, through one range or several (then any
+// client, the public peers here, chooses its address with X-Forwarded-For),
+// and is never cached.
 func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
@@ -240,6 +241,11 @@ func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 		{"every IPv6 address next to a proxy", "192.0.2.10, ::/0", "[2001:db8::10]:4321", "203.0.113.10", true, true},
 		{"every IPv4 address written with another address", "10.1.2.3/0", "198.51.100.10:4321", "203.0.113.10", true, true},
 		{"every IPv4 address as IPv4-mapped IPv6", "::ffff:0:0/96", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv4 address in two halves next to a private range", "0.0.0.0/1,10.0.0.0/8,128.0.0.0/1", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv6 address in two halves", "::/1, 8000::/1", "[2001:db8::10]:4321", "203.0.113.10", true, true},
+		{"every IPv4 address in two IPv4-mapped halves", "::ffff:0:0/97,::ffff:128.0.0.0/97", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"the first and the last IPv4 addresses without those between", "0.0.0.0/8,255.0.0.0/8", "198.51.100.10:4321", "198.51.100.10", true, false},
+		{"IPv4-compatible IPv6 addresses", "::/96", "198.51.100.10:4321", "198.51.100.10", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TRUSTED_PROXIES", tc.trustedProxies)

@@ -145,8 +145,9 @@ func GetOptions(c *gin.Context) {
 //   - trusted_proxies_configured: TRUSTED_PROXIES is set (to a list or to
 //     none) rather than left to the built-in private-network defaults.
 //   - trusted_proxies_catch_all: the list trusts every IPv4 or every IPv6
-//     address (0.0.0.0/0, ::/0 or the like). Then any client can choose the
-//     IP the server sees for it with X-Forwarded-For, and so get around the
+//     address, through one range or several (0.0.0.0/0, ::/0, 0.0.0.0/1
+//     with 128.0.0.0/1 or the like). Then any client can choose the IP the
+//     server sees for it with X-Forwarded-For, and so get around the
 //     per-network limits, even though ip looks right; the list must name only
 //     the proxies' own addresses.
 func GetClientIP(c *gin.Context) {
