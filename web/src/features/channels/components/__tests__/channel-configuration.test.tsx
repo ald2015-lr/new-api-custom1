@@ -37,9 +37,14 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import {
+  MODERATION_PRESET_DEFAULT_IDS,
+  MODERATION_PRESETS,
+} from '@/lib/content-moderation'
 import { createAppQueryClient } from '@/lib/query-client'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
@@ -4866,4 +4871,715 @@ test('the thinking suffix switch is locked without sensitive channel write permi
   expect(toggle).toHaveAttribute('aria-disabled', 'true')
   await user.click(toggle)
   expect(toggle).toBeChecked()
+})
+
+const MODERATION = 'Enable external moderation'
+const FAIL_OPEN = 'Allow requests when moderation fails'
+const SAFETY_IDENTIFIER = 'Send a user safety identifier to OpenAI'
+const MAX_CHARS = 'Maximum characters checked per request'
+const MODERATION_TIMEOUT = 'Moderation timeout (seconds)'
+const SAVE_TO_TEST =
+  'Save the channel as an OpenAI channel to test its moderation endpoint.'
+
+function presetName(preset: (typeof MODERATION_PRESETS)[number]): string {
+  return `${preset.labelKey} (${preset.language === 'en' ? 'English' : 'Chinese'})`
+}
+
+function checkedPresetIds(): string[] {
+  return MODERATION_PRESETS.filter(
+    (preset) =>
+      screen
+        .getByRole('checkbox', { name: presetName(preset) })
+        .getAttribute('aria-checked') === 'true'
+  ).map((preset) => preset.id)
+}
+
+function openAIChannel(settings: Record<string, unknown>): Channel {
+  return { ...editingChannel, type: 1, settings: JSON.stringify(settings) }
+}
+
+async function openModerationCard(channel: Channel) {
+  editingChannel = channel
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const requestTab = screen.getByRole('tab', { name: /Request & Response/ })
+  await user.click(requestTab)
+  return { user, requestTab }
+}
+
+function moderationSettingsOf(
+  settings: Record<string, unknown>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(settings).filter(
+      ([key]) =>
+        key.startsWith('moderation_') || key === 'send_safety_identifier'
+    )
+  )
+}
+
+function operatorWith(channelPermissions: Record<string, boolean>) {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: channelPermissions },
+        },
+      },
+    },
+  })
+}
+
+test('an OpenAI channel shows the content moderation card with moderation off and its other settings hidden', async () => {
+  await openModerationCard(openAIChannel({}))
+  const card = screen.getByRole('group', { name: 'Content moderation' })
+  const toggle = within(card).getByRole('switch', { name: MODERATION })
+  expect(toggle).not.toBeChecked()
+  expect(toggle).toHaveAccessibleDescription(/omni-moderation-latest/)
+  expect(
+    within(card).queryByRole('switch', { name: FAIL_OPEN })
+  ).not.toBeInTheDocument()
+  expect(
+    within(card).getByRole('switch', { name: SAFETY_IDENTIFIER })
+  ).not.toBeChecked()
+})
+
+test.each([3, 8, 57, 59, 60, 14])(
+  'a channel of type %i, next to OpenAI, has no content moderation card',
+  async (type) => {
+    await openModerationCard({ ...editingChannel, type, settings: '{}' })
+    expect(
+      screen.queryByRole('group', { name: 'Content moderation' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('switch', { name: SAFETY_IDENTIFIER })
+    ).not.toBeInTheDocument()
+  }
+)
+
+test('saving an OpenAI channel without touching moderation writes no moderation setting and keeps unknown settings', async () => {
+  const { user, requestTab } = await openModerationCard(
+    openAIChannel({ future_option: { level: 2 } })
+  )
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({})
+  expect(settings).toMatchObject({ future_option: { level: 2 } })
+})
+
+test('turning moderation on for the first time selects exactly the lower-risk presets and marks Request & Response', async () => {
+  const { user, requestTab } = await openModerationCard(openAIChannel({}))
+  await user.click(screen.getByRole('switch', { name: MODERATION }))
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  expect(checkedPresetIds()).toEqual(MODERATION_PRESET_DEFAULT_IDS)
+  expect(screen.getByRole('switch', { name: FAIL_OPEN })).not.toBeChecked()
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({
+    moderation_enabled: true,
+    moderation_rule_presets: MODERATION_PRESET_DEFAULT_IDS,
+  })
+})
+
+test('a channel saved with presets keeps its selection when moderation is turned off and on', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({ moderation_rule_presets: ['en-think-tags'] })
+  )
+  const toggle = screen.getByRole('switch', { name: MODERATION })
+  await user.click(toggle)
+  expect(checkedPresetIds()).toEqual(['en-think-tags'])
+  await user.click(toggle)
+  await user.click(toggle)
+  expect(checkedPresetIds()).toEqual(['en-think-tags'])
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({
+    moderation_enabled: true,
+    moderation_rule_presets: ['en-think-tags'],
+  })
+})
+
+test('saving writes trimmed rules without empty names or false case flags, and categories in OpenAI order', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_fail_open: true,
+      moderation_skip_images: true,
+      moderation_categories: ['violence', 'hate'],
+      moderation_rule_presets: [],
+    })
+  )
+  await user.click(screen.getByRole('button', { name: 'Add rule' }))
+  await user.type(screen.getByRole('textbox', { name: 'Name #1' }), '   ')
+  await user.type(screen.getByRole('textbox', { name: 'Pattern #1' }), ' cot ')
+  await user.click(screen.getByRole('button', { name: 'Add rule' }))
+  await user.type(screen.getByRole('textbox', { name: 'Name #2' }), ' Leak ')
+  await user.click(screen.getByRole('combobox', { name: 'Type #2' }))
+  await user.click(screen.getByRole('option', { name: 'Regular expression' }))
+  await user.click(screen.getByRole('textbox', { name: 'Pattern #2' }))
+  await user.paste(String.raw`show\s+your\s+cot`)
+  await user.click(screen.getByRole('switch', { name: 'Case sensitive #2' }))
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({
+    moderation_enabled: true,
+    moderation_fail_open: true,
+    moderation_skip_images: true,
+    moderation_categories: ['hate', 'violence'],
+    moderation_rule_presets: [],
+    moderation_rules: [
+      { type: 'keyword', pattern: 'cot' },
+      {
+        name: 'Leak',
+        type: 'regex',
+        pattern: String.raw`show\s+your\s+cot`,
+        case_sensitive: true,
+      },
+    ],
+  })
+})
+
+test.each([
+  ['10000', '10', undefined, undefined],
+  ['5000', '30', 5000, 30],
+  ['', '', undefined, undefined],
+])(
+  'a character limit of "%s" and a timeout of "%s" save as %s and %s',
+  async (chars, timeout, savedChars, savedTimeout) => {
+    const { user } = await openModerationCard(
+      openAIChannel({
+        moderation_enabled: true,
+        moderation_max_chars: 20000,
+        moderation_timeout_seconds: 20,
+        moderation_rule_presets: [],
+      })
+    )
+    const charsInput = screen.getByRole('spinbutton', { name: MAX_CHARS })
+    expect(charsInput).toHaveValue(20000)
+    await user.clear(charsInput)
+    if (chars) await user.type(charsInput, chars)
+    const timeoutInput = screen.getByRole('spinbutton', {
+      name: MODERATION_TIMEOUT,
+    })
+    await user.clear(timeoutInput)
+    if (timeout) await user.type(timeoutInput, timeout)
+    const settings = await saveAndReadSettings(user)
+    expect(settings.moderation_max_chars).toBe(savedChars)
+    expect(settings.moderation_timeout_seconds).toBe(savedTimeout)
+  }
+)
+
+test.each([
+  [
+    MAX_CHARS,
+    '999',
+    'Enter a whole number from 1,000 to 200,000, or leave it empty for 10,000',
+  ],
+  [
+    MAX_CHARS,
+    '1500.5',
+    'Enter a whole number from 1,000 to 200,000, or leave it empty for 10,000',
+  ],
+  [
+    MODERATION_TIMEOUT,
+    '61',
+    'Enter a whole number from 1 to 60, or leave it empty for 10',
+  ],
+])(
+  '%s of %s is not saved and shows the allowed range',
+  async (label, typed, message) => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const { user } = await openModerationCard(
+      openAIChannel({ moderation_enabled: true, moderation_rule_presets: [] })
+    )
+    const input = screen.getByRole('spinbutton', { name: label })
+    await user.type(input, typed)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    expect(await screen.findByText(message)).toBeVisible()
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  }
+)
+
+test.each([
+  ['Pattern #2', '   ', 'Enter a pattern'],
+  ['Pattern #2', '‎️', 'The pattern must contain a visible character'],
+  ['Pattern #2', 'x'.repeat(513), 'A pattern must be at most 512 characters'],
+  ['Name #2', '名'.repeat(65), 'A name must be at most 64 characters'],
+  [
+    'Pattern #2',
+    'CHAIN OF THOUGHT',
+    'This pattern is already used by another rule',
+  ],
+])(
+  'a rule whose %s is %j is not saved and shows why',
+  async (cell, typed, message) => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const { user } = await openModerationCard(
+      openAIChannel({
+        moderation_enabled: true,
+        moderation_rule_presets: [],
+        moderation_rules: [
+          { type: 'keyword', pattern: 'chain of thought' },
+          { type: 'keyword', pattern: 'ok' },
+        ],
+      })
+    )
+    const input = screen.getByRole('textbox', { name: cell })
+    await user.clear(input)
+    await user.click(input)
+    await user.paste(typed)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    expect(await screen.findByText(message)).toBeVisible()
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  }
+)
+
+test.each([
+  [101, 'keyword', 'At most 100 rules', true],
+  [31, 'regex', 'At most 30 regular expression rules', false],
+])(
+  '%i saved %s rules are not saved again and the table says why',
+  async (count, type, message, full) => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const { user } = await openModerationCard(
+      openAIChannel({
+        moderation_enabled: true,
+        moderation_rule_presets: [],
+        moderation_rules: Array.from({ length: count }, (_, i) => ({
+          type,
+          pattern: `p${i}`,
+        })),
+      })
+    )
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    expect(await screen.findByText(message)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Add rule' })).toHaveProperty(
+      'disabled',
+      full
+    )
+    expect(put).not.toHaveBeenCalled()
+  }
+)
+
+test('turning moderation off puts refused limits and new regular expressions back to their saved values, so the channel still saves', async () => {
+  const savedRules = [{ type: 'regex', pattern: 'a+' }]
+  const { user } = await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_max_chars: 5000,
+      moderation_timeout_seconds: 20,
+      moderation_rule_presets: [],
+      moderation_rules: savedRules,
+    })
+  )
+  const chars = screen.getByRole('spinbutton', { name: MAX_CHARS })
+  await user.clear(chars)
+  await user.type(chars, '999')
+  const timeout = screen.getByRole('spinbutton', { name: MODERATION_TIMEOUT })
+  await user.clear(timeout)
+  await user.type(timeout, '99')
+  // Valid for the console, but only the server can check RE2 syntax.
+  await user.click(screen.getByRole('button', { name: 'Add rule' }))
+  await user.click(screen.getByRole('combobox', { name: 'Type #2' }))
+  await user.click(screen.getByRole('option', { name: 'Regular expression' }))
+  await user.type(screen.getByRole('textbox', { name: 'Pattern #2' }), 'b+')
+
+  await user.click(screen.getByRole('switch', { name: MODERATION }))
+  expect(
+    screen.queryByRole('spinbutton', { name: MAX_CHARS })
+  ).not.toBeInTheDocument()
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({
+    moderation_max_chars: 5000,
+    moderation_timeout_seconds: 20,
+    moderation_rule_presets: [],
+    moderation_rules: savedRules,
+  })
+})
+
+test.each([
+  ['ChatGPT Subscription (Codex) Built-in #57'],
+  ['Azure Built-in #3'],
+])(
+  'changing an OpenAI channel to %s saves its settings without any moderation or safety identifier setting',
+  async (provider) => {
+    const { user } = await openModerationCard({
+      ...openAIChannel({
+        moderation_enabled: true,
+        moderation_fail_open: true,
+        moderation_categories: ['hate'],
+        moderation_skip_images: true,
+        moderation_max_chars: 5000,
+        moderation_timeout_seconds: 20,
+        moderation_rule_presets: ['en-reveal-cot'],
+        moderation_rules: [{ type: 'keyword', pattern: 'cot' }],
+        send_safety_identifier: true,
+        future_option: { level: 2 },
+      }),
+      // The API version an Azure channel requires.
+      other: '2025-04-01-preview',
+    })
+    await user.click(screen.getByRole('button', { name: 'Change provider' }))
+    await user.click(screen.getByRole('option', { name: provider }))
+    const settings = await saveAndReadSettings(user)
+    expect(moderationSettingsOf(settings)).toEqual({})
+    expect(settings).toMatchObject({ future_option: { level: 2 } })
+  }
+)
+
+test('without sensitive write permission the moderation settings are locked while the endpoint test still works with operate permission', async () => {
+  operatorWith({ read: true, write: true, operate: true })
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        ok: true,
+        status: 200,
+        latency_ms: 87,
+        model: 'omni-moderation-2024-09-26',
+        flagged: false,
+        error_class: '',
+        error_message: '',
+      },
+    },
+  })
+  const { user } = await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_rule_presets: ['en-reveal-cot'],
+      moderation_rules: [{ type: 'keyword', pattern: 'cot' }],
+    })
+  )
+  const toggle = screen.getByRole('switch', { name: MODERATION })
+  expect(toggle).toHaveAttribute('aria-disabled', 'true')
+  await user.click(toggle)
+  expect(toggle).toBeChecked()
+  expect(screen.getByRole('switch', { name: FAIL_OPEN })).toHaveAttribute(
+    'aria-disabled',
+    'true'
+  )
+  expect(
+    screen.getByRole('switch', { name: SAFETY_IDENTIFIER })
+  ).toHaveAttribute('aria-disabled', 'true')
+  expect(screen.getByRole('spinbutton', { name: MAX_CHARS })).toBeDisabled()
+  expect(
+    screen.getByRole('checkbox', { name: presetName(MODERATION_PRESETS[0]) })
+  ).toHaveAttribute('aria-disabled', 'true')
+  expect(screen.getByRole('textbox', { name: 'Pattern #1' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Add rule' })).toBeDisabled()
+
+  await user.click(
+    screen.getByRole('button', { name: 'Test moderation endpoint' })
+  )
+  expect(
+    await screen.findByText('Moderation endpoint works (87 ms)')
+  ).toBeVisible()
+  expect(post).toHaveBeenCalledWith(
+    '/api/channel/42/moderation_test',
+    undefined,
+    expect.anything()
+  )
+})
+
+test.each([
+  [
+    {
+      error_class: 'http_401',
+      status: 401,
+      error_message: 'Incorrect API key provided: ***',
+    },
+    'Moderation endpoint failed: Key rejected (HTTP 401)',
+  ],
+  [
+    { error_class: 'timeout', status: 0, error_message: '' },
+    'Moderation endpoint failed: Timed out',
+  ],
+  [
+    { error_class: 'http_499_new', status: 499, error_message: '' },
+    'Moderation endpoint failed: http_499_new (HTTP 499)',
+  ],
+])('a failed endpoint test shows why: %j', async (failure, line) => {
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        ok: false,
+        latency_ms: 120,
+        model: '',
+        flagged: false,
+        ...failure,
+      },
+    },
+  })
+  const { user } = await openModerationCard(openAIChannel({}))
+  await user.click(
+    screen.getByRole('button', { name: 'Test moderation endpoint' })
+  )
+  const status = await screen.findByRole('status')
+  await waitFor(() => expect(status).toHaveTextContent(line))
+  if (failure.error_message) {
+    expect(status).toHaveTextContent(failure.error_message)
+  }
+})
+
+test('an endpoint test the server refuses shows its message and no result line', async () => {
+  const error = vi.spyOn(toast, 'error')
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: false,
+      message: 'The channel has no enabled key',
+      message_key: 'The channel has no enabled key',
+    },
+  })
+  const { user } = await openModerationCard(openAIChannel({}))
+  await user.click(
+    screen.getByRole('button', { name: 'Test moderation endpoint' })
+  )
+  await waitFor(() =>
+    expect(error).toHaveBeenCalledWith('The channel has no enabled key')
+  )
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
+})
+
+test('a new OpenAI channel offers no endpoint test until it is saved', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness />)
+  await user.click(screen.getByRole('option', { name: 'OpenAI Built-in #1' }))
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  expect(screen.getByText(SAVE_TO_TEST)).toBeVisible()
+  expect(
+    screen.queryByRole('button', { name: 'Test moderation endpoint' })
+  ).not.toBeInTheDocument()
+})
+
+test('a saved Azure channel changed to OpenAI offers no endpoint test until it is saved as OpenAI', async () => {
+  const { user } = await openModerationCard({
+    ...editingChannel,
+    type: 3,
+    settings: '{}',
+  })
+  await user.click(screen.getByRole('button', { name: 'Change provider' }))
+  await user.click(screen.getByRole('option', { name: 'OpenAI Built-in #1' }))
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  expect(screen.getByText(SAVE_TO_TEST)).toBeVisible()
+  expect(
+    screen.queryByRole('button', { name: 'Test moderation endpoint' })
+  ).not.toBeInTheDocument()
+})
+
+test('without operate permission an OpenAI channel offers no endpoint test', async () => {
+  operatorWith({ read: true, write: true, sensitive_write: true })
+  await openModerationCard(openAIChannel({}))
+  expect(screen.getByText(SAVE_TO_TEST)).toBeVisible()
+  expect(
+    screen.queryByRole('button', { name: 'Test moderation endpoint' })
+  ).not.toBeInTheDocument()
+})
+
+test('the safety identifier saves alone with moderation off, marks Request & Response, and overrides the passthrough switch', async () => {
+  const { user, requestTab } = await openModerationCard(openAIChannel({}))
+  const passthrough = screen.getByRole('switch', {
+    name: 'Allow safety_identifier passthrough',
+  })
+  expect(passthrough).toHaveAccessibleDescription(
+    'Pass through the safety_identifier field'
+  )
+  await user.click(screen.getByRole('switch', { name: SAFETY_IDENTIFIER }))
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  expect(passthrough).toHaveAccessibleDescription(
+    'Ignored while “Send a user safety identifier to OpenAI” is on'
+  )
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({
+    send_safety_identifier: true,
+  })
+})
+
+test('a regular expression JavaScript cannot compile is left to the server', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({ moderation_enabled: true, moderation_rule_presets: [] })
+  )
+  await user.click(screen.getByRole('button', { name: 'Add rule' }))
+  await user.click(screen.getByRole('combobox', { name: 'Type #1' }))
+  await user.click(screen.getByRole('option', { name: 'Regular expression' }))
+  await user.click(screen.getByRole('textbox', { name: 'Pattern #1' }))
+  await user.paste('(?=cot)[')
+  const settings = await saveAndReadSettings(user)
+  expect(settings.moderation_rules).toEqual([
+    { type: 'regex', pattern: '(?=cot)[' },
+  ])
+})
+
+test('a channel saved with an empty preset list selects none when moderation is turned off and on, and saves it empty', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({ moderation_enabled: true, moderation_rule_presets: [] })
+  )
+  const toggle = screen.getByRole('switch', { name: MODERATION })
+  await user.click(toggle)
+  await user.click(toggle)
+  expect(checkedPresetIds()).toEqual([])
+  const settings = await saveAndReadSettings(user)
+  expect(settings.moderation_rule_presets).toEqual([])
+})
+
+test('presets cleared after the first enable are not selected again when moderation is turned off and on', async () => {
+  const { user } = await openModerationCard(openAIChannel({}))
+  const toggle = screen.getByRole('switch', { name: MODERATION })
+  await user.click(toggle)
+  for (const preset of MODERATION_PRESETS.filter((item) =>
+    MODERATION_PRESET_DEFAULT_IDS.includes(item.id)
+  )) {
+    await user.click(screen.getByRole('checkbox', { name: presetName(preset) }))
+  }
+  await user.click(toggle)
+  await user.click(toggle)
+  expect(checkedPresetIds()).toEqual([])
+  const settings = await saveAndReadSettings(user)
+  expect(settings.moderation_rule_presets).toEqual([])
+})
+
+test('turning moderation on and off without changing the presets saves no preset list', async () => {
+  const { user } = await openModerationCard(openAIChannel({}))
+  const toggle = screen.getByRole('switch', { name: MODERATION })
+  await user.click(toggle)
+  await user.click(toggle)
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({})
+})
+
+test('clearing every saved preset saves an empty preset list', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_rule_presets: ['en-reveal-cot'],
+    })
+  )
+  await user.click(
+    screen.getByRole('checkbox', { name: presetName(MODERATION_PRESETS[0]) })
+  )
+  const settings = await saveAndReadSettings(user)
+  expect(settings.moderation_rule_presets).toEqual([])
+})
+
+test('a rule the server refuses is marked on its row in Request & Response, even with moderation off', async () => {
+  const error =
+    'moderation_rules[1].pattern is not a valid regular expression: error parsing regexp: missing closing ]: `[`'
+  const put = vi.spyOn(api, 'put').mockResolvedValue({
+    data: {
+      success: false,
+      message: `Invalid channel settings format: ${error}`,
+      message_key: 'Invalid channel settings format: {{error}}',
+      message_params: { error },
+    },
+  })
+  editingChannel = openAIChannel({
+    moderation_rules: [
+      { type: 'keyword', pattern: 'cot' },
+      { type: 'regex', pattern: '[' },
+    ],
+  })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  expect(
+    screen.queryByRole('textbox', { name: 'Pattern #2' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const pattern = await screen.findByRole('textbox', { name: 'Pattern #2' })
+  expect(pattern).toHaveAttribute('aria-invalid', 'true')
+  expect(
+    screen.getByText(`The server rejected this rule: ${error}`)
+  ).toBeVisible()
+  expect(
+    screen.getByRole('tab', { name: /Request & Response/ })
+  ).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('switch', { name: MODERATION })).not.toBeChecked()
+})
+
+test('turning moderation off keeps every other setting the server accepts', async () => {
+  const saved = {
+    moderation_fail_open: true,
+    moderation_categories: ['hate'],
+    moderation_skip_images: true,
+    moderation_max_chars: 5000,
+    moderation_timeout_seconds: 20,
+    moderation_rule_presets: ['en-reveal-cot'],
+    moderation_rules: [{ name: 'CoT', type: 'keyword', pattern: 'cot' }],
+  }
+  const { user, requestTab } = await openModerationCard(
+    openAIChannel({ moderation_enabled: true, ...saved })
+  )
+  expect(requestTab).toHaveAccessibleName(/Configured/)
+  await user.click(screen.getByRole('switch', { name: MODERATION }))
+  expect(requestTab).not.toHaveAccessibleName(/Configured/)
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual(saved)
+})
+
+test('settings this console does not accept are dropped on load and not saved back', async () => {
+  const { user } = await openModerationCard({
+    ...editingChannel,
+    type: 1,
+    settings:
+      '{"moderation_rule_presets":["gone","en-reveal-cot"],"moderation_categories":["x"],"moderation_max_chars":"x","moderation_rules":{}}',
+  })
+  const settings = await saveAndReadSettings(user)
+  expect(moderationSettingsOf(settings)).toEqual({
+    moderation_rule_presets: ['en-reveal-cot'],
+  })
+})
+
+test('the two presets of a pair have different names and each shows its rule on request', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({ moderation_enabled: true, moderation_rule_presets: [] })
+  )
+  expect(
+    screen.getByRole('checkbox', {
+      name: "Asks for the model's chain of thought (English)",
+    })
+  ).toBeInTheDocument()
+  expect(
+    screen.getByRole('checkbox', {
+      name: "Asks for the model's chain of thought (Chinese)",
+    })
+  ).toBeInTheDocument()
+  for (const preset of MODERATION_PRESETS) {
+    const item = screen
+      .getByRole('checkbox', { name: presetName(preset) })
+      .closest('li') as HTMLElement
+    expect(within(item).queryByText(preset.pattern)).not.toBeInTheDocument()
+    await user.click(within(item).getByRole('button', { name: 'Show rule' }))
+    expect(within(item).getByText(preset.pattern)).toBeVisible()
+  }
+})
+
+test('the custom rules table numbers its rows from 1', async () => {
+  await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_rule_presets: [],
+      moderation_rules: [
+        { type: 'keyword', pattern: 'a' },
+        { type: 'keyword', pattern: 'b' },
+      ],
+    })
+  )
+  const table = screen.getByRole('table')
+  expect(within(table).getByRole('columnheader', { name: '#' })).toBeVisible()
+  const rows = within(table).getAllByRole('row').slice(1)
+  expect(rows.map((row) => within(row).getAllByRole('cell')[0])).toEqual([
+    expect.objectContaining({ textContent: '1' }),
+    expect.objectContaining({ textContent: '2' }),
+  ])
 })

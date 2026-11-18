@@ -41,7 +41,6 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -149,31 +148,33 @@ function PresetOption(props: {
   onCheckedChange: (checked: boolean) => void
 }) {
   const { t } = useTranslation()
-  const id = useId()
+  const nameId = useId()
   const label = t(props.preset.labelKey)
   const language = t(props.preset.language === 'en' ? 'English' : 'Chinese')
   return (
     <li className='space-y-1'>
-      <div className='flex items-start gap-2'>
+      {/* The checkbox is named with the language, so the two presets of a
+        pair differ for assistive technology; the label text stays
+        clickable. */}
+      <label className='flex cursor-pointer items-start gap-2 text-sm'>
+        <span id={nameId} className='sr-only'>
+          {`${label} (${language})`}
+        </span>
         <Checkbox
-          id={id}
           className='mt-0.5'
-          aria-label={`${label} (${language})`}
+          aria-labelledby={nameId}
           checked={props.checked}
           disabled={props.locked}
           onCheckedChange={props.onCheckedChange}
         />
-        <Label
-          htmlFor={id}
-          className='flex flex-wrap items-center gap-1.5 text-sm font-normal'
-        >
+        <span className='flex flex-wrap items-center gap-1.5'>
           {label}
           <Badge variant='outline'>{language}</Badge>
           {!props.preset.caseSensitive && (
             <Badge variant='secondary'>{t('Case-insensitive')}</Badge>
           )}
-        </Label>
-      </div>
+        </span>
+      </label>
       <Collapsible className='pl-6'>
         <CollapsibleTrigger
           render={<Button type='button' variant='link' size='xs' />}
@@ -388,8 +389,15 @@ export const ChannelModerationSettings = memo(
           MODERATION_PRESET_DEFAULT_IDS
         )
       ) {
-        form.resetField('moderation_rule_presets')
-        form.resetField('moderation_rule_presets_set')
+        // Not registered inputs, so resetField would not reset them.
+        form.setValue(
+          'moderation_rule_presets',
+          [...(saved?.moderation_rule_presets ?? [])].filter(
+            (id): id is string => typeof id === 'string'
+          ),
+          { shouldDirty: true }
+        )
+        form.setValue('moderation_rule_presets_set', false)
         preselectedRef.current = false
       }
       if (!isValidModerationMaxChars(form.getValues('moderation_max_chars'))) {

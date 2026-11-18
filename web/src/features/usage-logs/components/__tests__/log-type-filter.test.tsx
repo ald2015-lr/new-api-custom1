@@ -37,6 +37,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
+import { Route as UsageLogsRoute } from '@/routes/_authenticated/usage-logs/$section'
 import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -105,6 +106,20 @@ const consumeLog = usageLogSchema.parse({
   quota: 5000,
 })
 
+const moderationLog = usageLogSchema.parse({
+  id: 2,
+  user_id: 2,
+  created_at: 1788840000,
+  type: 100,
+  content: 'Rejected by content moderation',
+  model_name: 'gpt-moderated',
+  quota: 0,
+  use_time: 1,
+  other: JSON.stringify({
+    content_parts: [{ key: 'Rejected by content moderation' }],
+  }),
+})
+
 async function renderFilter(
   options: { user?: AuthUser; path?: string; table?: boolean } = {}
 ) {
@@ -118,7 +133,8 @@ async function renderFilter(
     if (url.startsWith('/api/log?') || url.startsWith('/api/log/self?')) {
       // Like the server, which returns no row for a type it filters out.
       const type = new URLSearchParams(url.split('?')[1]).get('type')
-      const items = type === '1' ? [] : [consumeLog]
+      let items = type === '1' ? [] : [consumeLog]
+      if (type === '100') items = [moderationLog]
       data = { items, total: items.length }
     }
     return { data: { success: true, data } }
@@ -129,7 +145,9 @@ async function renderFilter(
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
     component: options.table ? TableFixture : FilterFixture,
-    validateSearch: (search: Record<string, unknown>) => search,
+    // The page's own search schema, so a type it does not know is dropped
+    // here as it is in the console.
+    validateSearch: UsageLogsRoute.options.validateSearch,
   })
   const router = createRouter({
     routeTree: root.addChildren([auth.addChildren([logs])]),
@@ -331,4 +349,49 @@ it("an admin opening a Top-up logs link of every user's logs keeps asking for To
   expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(
     'Top-up'
   )
+})
+
+it.each([
+  ['an admin', adminViewer('admin'), '/api/log?'],
+  ['a deputy admin without billing read', adminViewer('deputy'), '/api/log?'],
+])(
+  '%s is offered Moderation and selecting it asks for type 100',
+  async (_kind, user, endpoint) => {
+    const router = await renderFilter({ user, table: true })
+    expect(await typeOptionNames()).toContain('Moderation')
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Type' }))
+    await userEvent.click(screen.getByRole('option', { name: 'Moderation' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    await waitFor(() =>
+      expect(lastLogRequest(endpoint).get('type')).toBe('100')
+    )
+    expect(router.state.location.search).toMatchObject({ type: ['100'] })
+  }
+)
+
+it('a user viewing their own logs is offered Moderation', async () => {
+  await renderFilter({ user: { id: 3, username: 'user', role: ROLE.USER } })
+  expect(await typeOptionNames()).toContain('Moderation')
+})
+
+it('opening a Moderation logs link keeps the type and asks for type 100', async () => {
+  const router = await renderFilter({
+    user: adminViewer('admin'),
+    table: true,
+    path: '/usage-logs/common?type=%5B%22100%22%5D',
+  })
+
+  await waitFor(() =>
+    expect(lastLogRequest('/api/log?').get('type')).toBe('100')
+  )
+  expect(router.state.location.search).toMatchObject({ type: ['100'] })
+  expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(
+    'Moderation'
+  )
+  const details = await screen.findByText('Rejected by content moderation')
+  const row = details.closest('tr')
+  expect(row).toHaveClass('bg-amber-50/40')
+  expect(within(row as HTMLElement).getByText('gpt-moderated')).toBeVisible()
 })
