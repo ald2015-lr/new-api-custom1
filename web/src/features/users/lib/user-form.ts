@@ -41,7 +41,8 @@ export const userFormSchema = z.object({
   display_name: z.string().optional(),
   password: z.string().optional(),
   role: z.number().optional(),
-  // Create only: with role 10, creates a deputy admin instead of a full admin.
+  // With role 10: on create, makes a deputy admin instead of a full admin; on
+  // update, the kind GET /api/user/:id reports (changed only by row actions).
   admin_role: z.enum(['deputy']).optional(),
   quota_dollars: z.number().min(0).optional(),
   group: z.string().optional(),
@@ -162,6 +163,10 @@ export function transformUserToFormDefaults(user: User): UserFormValues {
     display_name: user.display_name,
     password: '',
     role: user.role,
+    admin_role:
+      user.role === ROLE.ADMIN && user.admin_role === 'deputy'
+        ? 'deputy'
+        : undefined,
     quota_dollars: quotaUnitsToDollars(user.quota),
     group: user.group || DEFAULT_GROUP,
     remark: user.remark || '',

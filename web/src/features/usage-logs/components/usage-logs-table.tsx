@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
-import { useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -100,6 +100,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     isAdminView: isAdmin,
     isRootView: isRoot,
     viewAccess,
+    hideRechargeTypes,
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
@@ -113,7 +114,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ADMIN_PERMISSION_RESOURCES.BILLING,
     ADMIN_PERMISSION_ACTIONS.READ
   )
-  const { data: showBillingSource = false } = useQuery({
+  const { data: plansShowBillingSource = false } = useQuery({
     queryKey: ['usage-log-billing-source', isAdmin, canReadAdminPlans, userId],
     enabled: logCategory === 'common' && userId != null,
     queryFn: async () => {
@@ -182,6 +183,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       'logs',
       logCategory,
       viewAccess,
+      hideRechargeTypes,
       pagination.pageIndex + 1,
       pagination.pageSize,
       columnFilters,
@@ -196,6 +198,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         pageSize: pagination.pageSize,
         searchParams,
         columnFilters,
+        hideRechargeTypes,
       })
 
       if (!result?.success) {
@@ -216,6 +219,20 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   })
 
   const logs = data?.items || []
+  // The public plan list stays empty until root confirms payment compliance,
+  // while plans bound by an admin still bill consume logs; without the admin
+  // list, a listed subscription-billed log shows that the system has plans.
+  const listsSubscriptionBilling = useMemo(
+    () =>
+      isAdmin &&
+      !canReadAdminPlans &&
+      ((data?.items ?? []) as Array<{ other?: string }>).some(
+        (log) =>
+          parseLogOther(log.other ?? '')?.billing_source === 'subscription'
+      ),
+    [isAdmin, canReadAdminPlans, data?.items]
+  )
+  const showBillingSource = plansShowBillingSource || listsSubscriptionBilling
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,

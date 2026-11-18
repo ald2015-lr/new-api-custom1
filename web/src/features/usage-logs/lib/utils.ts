@@ -31,6 +31,8 @@ import {
   LOG_TYPES,
   DISPLAYABLE_LOG_TYPES,
   TIMING_LOG_TYPES,
+  LOG_TYPE_ALL_VALUE,
+  RECHARGE_LOG_TYPE_FILTER_VALUES,
 } from '../constants'
 import type {
   GetLogsParams,
@@ -160,6 +162,8 @@ export function buildApiParams(config: {
   searchParams: Record<string, unknown>
   columnFilters?: Array<{ id: string; value: unknown }>
   isAdmin: boolean
+  /** The viewer cannot see recharge log types (see useLogsViewScope). */
+  hideRechargeTypes?: boolean
 }): GetLogsParams {
   const { page, pageSize, searchParams, columnFilters = [], isAdmin } = config
 
@@ -230,6 +234,17 @@ export function buildApiParams(config: {
     })
   }
 
+  // A recharge type the viewer cannot see (kept in the URL from "Only mine"
+  // or a shared link) asks for all types, as the type filter shows, instead
+  // of a page the server always returns empty.
+  if (
+    config.hideRechargeTypes &&
+    params.type !== undefined &&
+    RECHARGE_LOG_TYPE_FILTER_VALUES.includes(String(params.type))
+  ) {
+    params.type = Number(LOG_TYPE_ALL_VALUE)
+  }
+
   return params
 }
 
@@ -253,6 +268,7 @@ export async function fetchLogsByCategory(
       searchParams,
       columnFilters,
       isAdmin,
+      hideRechargeTypes: config.hideRechargeTypes,
     })
     return isAdmin ? await getAllLogs(params) : await getUserLogs(params)
   }

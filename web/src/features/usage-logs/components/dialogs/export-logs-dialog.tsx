@@ -51,7 +51,7 @@ const DEFAULT_MAX_RANGE_DAYS = 365
 export function ExportLogsDialog() {
   const { t } = useTranslation()
   const searchParams = route.useSearch()
-  const { canManageScope, isAdminView } = useLogsViewScope()
+  const { canManageScope, isAdminView, hideRechargeTypes } = useLogsViewScope()
   const { status } = useStatus()
   const [open, setOpen] = useState(false)
   const [range, setRange] = useState<{ start?: Date; end?: Date }>({})
@@ -108,6 +108,7 @@ export function ExportLogsDialog() {
             pageSize: 1,
             searchParams,
             isAdmin: isAdminView,
+            hideRechargeTypes,
           }),
           p: undefined,
           page_size: undefined,

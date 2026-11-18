@@ -41,14 +41,8 @@ import {
 } from '@/components/ui/tooltip'
 import { getGroups } from '@/features/users/api'
 import { useMediaQuery } from '@/hooks'
-import {
-  ADMIN_PERMISSION_ACTIONS,
-  ADMIN_PERMISSION_RESOURCES,
-  hasPermission,
-} from '@/lib/admin-permissions'
 import { getUserGroups } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
-import { useAuthStore } from '@/stores/auth-store'
 
 import {
   LOG_TYPE_ALL_VALUE,
@@ -134,17 +128,7 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
-  const { isAdminView: isAdmin } = useLogsViewScope()
-  const user = useAuthStore((state) => state.auth.user)
-  // Every user's recharge logs need billing:read (a deputy admin lacks it);
-  // the viewer's own logs keep every type.
-  const hideRechargeTypes =
-    isAdmin &&
-    !hasPermission(
-      user,
-      ADMIN_PERMISSION_RESOURCES.BILLING,
-      ADMIN_PERMISSION_ACTIONS.READ
-    )
+  const { isAdminView: isAdmin, hideRechargeTypes } = useLogsViewScope()
   const logTypeFilters = useMemo(
     () =>
       hideRechargeTypes
@@ -223,7 +207,13 @@ export function CommonLogsFilterBar<TData>(
   const activeDraft =
     draft.sourceKey === searchState.sourceKey ? draft : searchState
   const filters = activeDraft.filters
-  const logType = activeDraft.logType
+  // A recharge type the viewer cannot see (picked under "Only mine", or in a
+  // shared link) reads as all types, which is what buildApiParams requests.
+  const logType =
+    hideRechargeTypes &&
+    RECHARGE_LOG_TYPE_FILTER_VALUES.includes(activeDraft.logType)
+      ? LOG_TYPE_ALL_VALUE
+      : activeDraft.logType
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {

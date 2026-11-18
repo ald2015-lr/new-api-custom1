@@ -60,6 +60,8 @@ async function renderLogs(props: {
   billingRead?: boolean
   /** Enabled plans returned by the public plan list */
   publicPlans?: number
+  /** billing_source of the listed consume logs */
+  sources?: string[]
 }) {
   useAuthStore.getState().auth.setUser({
     id: 1,
@@ -74,16 +76,17 @@ async function renderLogs(props: {
       },
     },
   })
-  const records = ['wallet', 'subscription'].map((source, index) =>
-    usageLogSchema.parse({
-      id: index + 1,
-      user_id: 1,
-      created_at: 1788840000,
-      type: 2,
-      content: '',
-      quota: 5000,
-      other: JSON.stringify({ billing_source: source }),
-    })
+  const records = (props.sources ?? ['wallet', 'subscription']).map(
+    (source, index) =>
+      usageLogSchema.parse({
+        id: index + 1,
+        user_id: 1,
+        created_at: 1788840000,
+        type: 2,
+        content: '',
+        quota: 5000,
+        other: JSON.stringify({ billing_source: source }),
+      })
   )
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
     let data: unknown = { quota: 0, rpm: 0, tpm: 0 }
@@ -229,11 +232,11 @@ test.each([
       enabledPlans: [true],
       activeSubscription: false,
       publicPlans,
+      sources: ['wallet'],
     })
 
     expect(requestedUrls()).toContain('/api/subscription/plans')
     expect(requestedUrls()).not.toContain('/api/subscription/admin/plans')
-    expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
     if (walletShown) {
       expect(screen.getByRole('img', { name: 'Wallet' })).toBeVisible()
     } else {
@@ -243,6 +246,19 @@ test.each([
     }
   }
 )
+
+test('a deputy admin still sees the wallet icon when the public plan list is empty before payment compliance but a listed log was billed from a subscription', async () => {
+  await renderLogs({
+    role: ROLE.ADMIN,
+    billingRead: false,
+    enabledPlans: [true],
+    activeSubscription: false,
+    publicPlans: 0,
+  })
+
+  expect(screen.getByRole('img', { name: 'Wallet' })).toBeVisible()
+  expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
+})
 
 test('an admin with billing read decides the wallet icon from the admin plan list', async () => {
   await renderLogs({

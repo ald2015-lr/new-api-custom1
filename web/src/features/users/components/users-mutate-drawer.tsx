@@ -177,11 +177,10 @@ export function UsersMutateDrawer({
   const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
   const targetRole = selectedRole ?? currentRow?.role ?? 0
   const targetIsAdmin = targetRole >= ROLE.ADMIN
-  // A deputy admin: chosen in the create form, or the edited user's kind
-  // (role changes only go through the row actions).
-  const targetAdminRole = isUpdate ? currentRow?.admin_role : selectedAdminRole
+  // A deputy admin: chosen in the create form, or on update the kind the
+  // freshly loaded user reports, like its role (the list row may be stale).
   const targetIsDeputy =
-    targetRole === ROLE.ADMIN && targetAdminRole === 'deputy'
+    targetRole === ROLE.ADMIN && selectedAdminRole === 'deputy'
   const editorAdminRole = targetIsDeputy ? 'deputy' : undefined
   const permissionEditor = adminPermissionEditorScope(
     permissionCatalog,
@@ -207,7 +206,7 @@ export function UsersMutateDrawer({
 
     setIsSubmitting(true)
     try {
-      const adminRole = isUpdate ? currentRow?.admin_role : data.admin_role
+      const adminRole = data.admin_role
       const payload = transformFormDataToPayload(
         data,
         currentRow?.id,

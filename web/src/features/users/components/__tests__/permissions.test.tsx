@@ -264,7 +264,8 @@ const rechargeCatalog = {
 const deputyNote =
   'Deputy admins can never view or manage recharge information.'
 
-function renderRechargeDrawer(currentRow?: User) {
+/** served: what GET /api/user/:id returns over the list row. */
+function renderRechargeDrawer(currentRow?: User, served: Partial<User> = {}) {
   useAuthStore.getState().auth.setUser({ id: 1, username: 'root', role: 100 })
   const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
     if (url === '/api/authz/catalog') {
@@ -287,12 +288,13 @@ function renderRechargeDrawer(currentRow?: User) {
       }
     }
     // GET /api/user/:id returns the effective capabilities of the target.
-    const deputy = currentRow?.admin_role === 'deputy'
+    const deputy = (served.admin_role ?? currentRow?.admin_role) === 'deputy'
     return {
       data: {
         success: true,
         data: {
           ...currentRow,
+          ...served,
           admin_permissions: {
             audit: { read: true },
             billing: { read: !deputy, write: !deputy },
@@ -371,6 +373,33 @@ it('root editing a full admin still sees the recharge permissions', async () => 
   ).toHaveAttribute('aria-pressed', 'true')
   expect(screen.queryByText(deputyNote)).not.toBeInTheDocument()
 })
+
+it.each([
+  { listed: 'admin', loaded: 'deputy', rechargeRows: false },
+  { listed: 'deputy', loaded: 'admin', rechargeRows: true },
+] as const)(
+  'root editing a user listed as $listed but loaded as $loaded follows the loaded kind',
+  async ({ listed, loaded, rechargeRows }) => {
+    renderRechargeDrawer(
+      { ...target, admin_role: listed },
+      { admin_role: loaded }
+    )
+    await screen.findByDisplayValue('Managed admin')
+    await screen.findByRole('button', { name: label })
+
+    if (rechargeRows) {
+      expect(
+        screen.getByRole('button', { name: 'View recharge records' })
+      ).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.queryByText(deputyNote)).not.toBeInTheDocument()
+    } else {
+      expect(screen.getByText(deputyNote)).toBeVisible()
+      expect(
+        screen.queryByRole('button', { name: 'View recharge records' })
+      ).not.toBeInTheDocument()
+    }
+  }
+)
 
 it('root saving a changed deputy matrix sends no recharge resource', async () => {
   const put = vi
