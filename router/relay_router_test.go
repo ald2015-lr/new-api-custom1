@@ -3913,6 +3913,8 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	create("mod-presets", "sk-ok-presets", `{"moderation_enabled":true,"moderation_rule_presets":["en-reveal-cot"]}`)
 	create("mod-pass", "sk-ok-pass", on, withSetting(`{"pass_through_body_enabled":true}`))
 	guarded("mod-pass")
+	create("mod-pass-img", "sk-ok-pass-img", on, withSetting(`{"pass_through_body_enabled":true}`))
+	guarded("mod-pass-img")
 	const identifierOn = `{"send_safety_identifier":true}`
 	create("mod-sid", "sk-ok-sid", identifierOn)
 	sidResponses := create("mod-sid-resp", "sk-ok-sid-resp", identifierOn, func(channel *model.Channel) {
@@ -4328,6 +4330,21 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		})
 	}
 
+	t.Run("Claude- and Gemini-format bodies passed through to Chat Completions are moderated as chat bodies", func(t *testing.T) {
+		flagURL := "https://img.example/" + strings.ReplaceAll(unique("flag-image-claude-pass"), " ", "") + ".png"
+		for _, tc := range []struct{ name, path, body string }{
+			{"a chat image part in a Claude-format body", "/v1/messages", `{"model":"mod-pass","max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"` + flagURL + `"}}]}]}`},
+			{"chat messages in a Gemini-format body", "/v1beta/models/mod-pass:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"messages":[{"role":"user","content":"` + unique("MOD-FLAG-SEXUAL gemini pass-through") + `"}]}`},
+		} {
+			mark := upstream.mark()
+			recorder := post(tc.path, tc.body)
+			require.Equal(t, http.StatusBadRequest, recorder.Code, tc.name+": "+recorder.Body.String())
+			assert.Contains(t, recorder.Body.String(), "rejected by content moderation", tc.name)
+			assert.NotEmpty(t, upstream.since(mark, "/v1/moderations"), tc.name)
+			assert.Empty(t, upstream.since(mark, "/v1/chat/completions"), tc.name)
+		}
+	})
+
 	t.Run("with the global pass-through setting a flagged request is rejected", func(t *testing.T) {
 		globalSettings.PassThroughRequestEnabled = true
 		t.Cleanup(func() { globalSettings.PassThroughRequestEnabled = passThrough })
@@ -4401,6 +4418,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		{"a token-id prompt", "/v1/completions", `{"model":"mod-completions","prompt":[[1,2,3]]}`, "token_prompt"},
 		{"a Responses item with a case-variant key", "/v1/responses", `{"model":"mod-responses","input":[{"type":"message","role":"user","content":"x","ROLE":"assistant"}]}`, "ambiguous_keys"},
 		{"a passed-through message with a case-variant key", "/v1/chat/completions", `{"model":"mod-pass","messages":[{"role":"user","content":"MOD-FLAG-SEXUAL","Content":"hi"}]}`, "ambiguous_keys"},
+		{"a passed-through image prompt with a case-variant key", "/v1/images/generations", `{"model":"mod-pass-img","prompt":"MOD-FLAG-SEXUAL image","PROMPT":"a calm lake"}`, "ambiguous_keys"},
 	} {
 		t.Run(tc.name+" cannot be moderated and is refused", func(t *testing.T) {
 			mark := upstream.mark()
@@ -4583,14 +4601,16 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			assert.Contains(t, body, `"safety_identifier":"`+gatewayIdentifier+`"`, tc.name)
 			assert.NotContains(t, body, "evil", tc.name)
 		}
-		for _, tc := range []struct{ path, body string }{
-			{"/v1/chat/completions", `{"model":"mod-sid-pass", "messages" : [{"role":"user","content":"hi"}], "safety_identifier":"evil"}`},
-			{"/v1/responses", `{"safety_identifier":"evil",  "model":"mod-sid-pass","input":"hi"}`},
+		for _, tc := range []struct{ path, body, upstreamPath string }{
+			{"/v1/chat/completions", `{"model":"mod-sid-pass", "messages" : [{"role":"user","content":"hi"}], "safety_identifier":"evil"}`, "/v1/chat/completions"},
+			{"/v1/responses", `{"safety_identifier":"evil",  "model":"mod-sid-pass","input":"hi"}`, "/v1/responses"},
+			{"/v1/messages", `{"model":"mod-sid-pass","max_tokens":16, "safety_identifier":"evil","messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions"},
+			{"/v1beta/models/mod-sid-pass:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"safety_identifier":"evil" }`, "/v1/chat/completions"},
 		} {
 			mark := upstream.mark()
 			recorder := post(tc.path, tc.body)
-			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-			assert.Equal(t, strings.Replace(tc.body, `"evil"`, `"`+gatewayIdentifier+`"`, 1), lastBody(t, mark, tc.path), "only the identifier changes")
+			require.Equal(t, http.StatusOK, recorder.Code, tc.path+": "+recorder.Body.String())
+			assert.Equal(t, strings.Replace(tc.body, `"evil"`, `"`+gatewayIdentifier+`"`, 1), lastBody(t, mark, tc.upstreamPath), tc.path+": only the identifier changes")
 		}
 	})
 

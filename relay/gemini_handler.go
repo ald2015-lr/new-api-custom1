@@ -94,7 +94,16 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
-		requestBody = common.NewReplayableBodyReader(storage)
+		// On an OpenAI channel the raw Gemini body goes to /v1/chat/completions
+		// and gets the gateway safety_identifier like any chat body.
+		body, closer, apiErr := passthroughChatBody(storage, info)
+		if apiErr != nil {
+			return apiErr
+		}
+		if closer != nil {
+			defer closer.Close()
+		}
+		requestBody = body
 	} else {
 		// 使用 ConvertGeminiRequest 转换请求格式
 		convertedRequest, err := adaptor.ConvertGeminiRequest(c, info, request)

@@ -114,9 +114,22 @@ func extractRequest(c *gin.Context, info *relaycommon.RelayInfo, viaResponses, p
 	case *dto.OpenAIResponsesCompactionRequest:
 		e.responses(req.Input, req.Instructions, nil)
 	case *dto.ClaudeRequest:
-		e.claude(req, viaResponses)
+		if passthrough {
+			// An OpenAI channel sends the raw body to /v1/chat/completions,
+			// which reads it as a chat body; only the top-level system is
+			// Claude's own.
+			e.claudeSystem(req, false)
+			e.passthroughChat(c)
+		} else {
+			e.claude(req, viaResponses)
+		}
 	case *dto.GeminiChatRequest:
 		e.gemini(req)
+		if passthrough {
+			// The raw body goes to /v1/chat/completions too, where a lenient
+			// upstream may read messages next to contents.
+			e.passthroughChat(c)
+		}
 	case *dto.ImageRequest:
 		if c != nil && c.Request != nil && c.Request.MultipartForm != nil && len(c.Request.MultipartForm.Value["prompt"]) > 0 {
 			for _, prompt := range c.Request.MultipartForm.Value["prompt"] {
@@ -133,7 +146,7 @@ func extractRequest(c *gin.Context, info *relaycommon.RelayInfo, viaResponses, p
 	}
 	if passthrough && e.ex.unsupported == "" {
 		switch info.Request.(type) {
-		case *dto.GeneralOpenAIRequest, *dto.OpenAIResponsesRequest, *dto.OpenAIResponsesCompactionRequest, *dto.ClaudeRequest, *dto.GeminiChatRequest:
+		case *dto.GeneralOpenAIRequest, *dto.OpenAIResponsesRequest, *dto.OpenAIResponsesCompactionRequest, *dto.ClaudeRequest, *dto.GeminiChatRequest, *dto.ImageRequest:
 			if passthroughBodyIsAmbiguous(c) {
 				e.fail(relaycommon.ModerationDetailAmbiguousKeys)
 			}
@@ -454,20 +467,50 @@ func (e *extractor) promptVariables(prompt map[string]any) {
 	}
 }
 
-func (e *extractor) claude(req *dto.ClaudeRequest, viaResponses bool) {
+// passthroughChat reads a passthrough body the way the Chat Completions
+// endpoint it is sent to reads it. A body that does not decode as a chat
+// request cannot be checked.
+func (e *extractor) passthroughChat(c *gin.Context) {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		e.fail(relaycommon.ModerationDetailAmbiguousKeys)
+		return
+	}
+	body, err := storage.Bytes()
+	if err != nil {
+		e.fail(relaycommon.ModerationDetailAmbiguousKeys)
+		return
+	}
+	var req dto.GeneralOpenAIRequest
+	if common.Unmarshal(body, &req) != nil {
+		e.fail(relaycommon.ModerationDetailAmbiguousKeys)
+		return
+	}
+	e.chat(&req, false)
+}
+
+// claudeSystem reads the top-level system of a Claude request: both
+// conversions concatenate the blocks' text, the Responses one keeps only
+// text blocks.
+func (e *extractor) claudeSystem(req *dto.ClaudeRequest, viaResponses bool) {
 	if req.IsStringSystem() {
 		e.add(roleSystem, req.GetStringSystem())
-	} else if req.System != nil {
-		// Both conversions concatenate the blocks' text; the Responses one
-		// keeps only text blocks.
-		var system strings.Builder
-		for _, block := range req.ParseSystem() {
-			if !viaResponses || block.Type == "text" || block.Type == "input_text" || block.Type == "" {
-				system.WriteString(block.GetText())
-			}
-		}
-		e.add(roleSystem, system.String())
+		return
 	}
+	if req.System == nil {
+		return
+	}
+	var system strings.Builder
+	for _, block := range req.ParseSystem() {
+		if !viaResponses || block.Type == "text" || block.Type == "input_text" || block.Type == "" {
+			system.WriteString(block.GetText())
+		}
+	}
+	e.add(roleSystem, system.String())
+}
+
+func (e *extractor) claude(req *dto.ClaudeRequest, viaResponses bool) {
+	e.claudeSystem(req, viaResponses)
 	for i := range req.Messages {
 		msg := &req.Messages[i]
 		r := strings.TrimSpace(msg.Role)

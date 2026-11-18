@@ -293,6 +293,12 @@ func described(ex *extraction) (segments []string, images []string) {
 
 // ---- extraction ----
 
+const (
+	claudePassthroughBody = `{"model":"m","max_tokens":10,"system":"MOD sys","messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"https://x/flag-image.png"}},{"type":"image","source":{"type":"url","url":"https://x/claude.png"}},{"type":"text","text":"MOD more"}]},{"role":"assistant","content":"MOD assistant"}]}`
+	geminiPassthroughBody = `{"systemInstruction":{"parts":[{"text":"MOD sys"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}],"messages":[{"role":"user","content":"MOD-FLAG-SEXUAL in messages"}]}`
+	imagePassthroughBody  = `{"model":"m","prompt":"MOD-FLAG-SEXUAL image","PROMPT":"a calm lake"}`
+)
+
 // The extraction returns the system and user content the attempt's upstream
 // body carries on its conversion path, never assistant or tool output, and
 // refuses input it cannot check.
@@ -500,6 +506,40 @@ func TestExtractionFollowsWhatTheUpstreamReceives(t *testing.T) {
 			request:     func(t *testing.T) dto.Request { return chatRequest(t, "user", "hi") },
 			passthrough: `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"Content":1}]}`,
 			segments:    []string{"user: hi"},
+		},
+		{
+			name: "passthrough Claude body is read as the chat body it is sent as",
+			request: func(t *testing.T) dto.Request {
+				return decodeRequest[dto.ClaudeRequest](t, claudePassthroughBody)
+			},
+			passthrough: claudePassthroughBody,
+			segments:    []string{"system: MOD sys", "user: describe\nMOD more"},
+			images:      []string{"https://x/flag-image.png"},
+			unchecked:   1,
+		},
+		{
+			name: "passthrough Gemini body is also read as a chat body",
+			request: func(t *testing.T) dto.Request {
+				return decodeRequest[dto.GeminiChatRequest](t, geminiPassthroughBody)
+			},
+			passthrough: geminiPassthroughBody,
+			segments:    []string{"system: MOD sys", "user: hi", "user: MOD-FLAG-SEXUAL in messages"},
+		},
+		{
+			name: "passthrough Claude body that is no chat body",
+			request: func(t *testing.T) dto.Request {
+				return decodeRequest[dto.ClaudeRequest](t, `{"messages":[{"role":"user","content":"hi"}]}`)
+			},
+			passthrough: `{"messages":[{"role":"user","content":"hi"}],"stream_options":7}`,
+			unsupported: "ambiguous_keys",
+		},
+		{
+			name:        "passthrough image body with a case-variant prompt",
+			request:     func(t *testing.T) dto.Request { return decodeRequest[dto.ImageRequest](t, imagePassthroughBody) },
+			mode:        relayconstant.RelayModeImagesGenerations,
+			passthrough: imagePassthroughBody,
+			segments:    []string{"user: a calm lake"},
+			unsupported: "ambiguous_keys",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
