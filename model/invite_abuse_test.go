@@ -833,16 +833,42 @@ func testInviteAbuseSettingsChangeStopsPass(t *testing.T) {
 // in while the pass is busy with an earlier inviter of the batch — by an
 // invited user, or by the inviter while paid inviters are exempt — clears
 // the later farm, and an account an administrator released after the pass
-// loaded the invited users is not disabled again.
+// loaded the invited users is not disabled again. While one inviter's
+// accounts are disabled, a recharge clears it when the verdict is taken
+// again and a release of the inviter keeps its remaining accounts enabled.
 func testInviteAbuseVerdictAtDisableTime(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		payer func(inviter User, invitees []User) User
 	}{
-		{name: "an invited user pays during the pass", payer: func(_ User, invitees []User) User { return invitees[0] }},
-		{name: "the inviter pays during the pass", payer: func(inviter User, _ []User) User { return inviter }},
+		{name: "an invited user", payer: func(_ User, invitees []User) User { return invitees[0] }},
+		{name: "the inviter", payer: func(inviter User, _ []User) User { return inviter }},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name+" pays while the inviter's accounts are disabled", func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 3, 500_000)
+			savedInterval := inviteAbuseRecheckInterval
+			inviteAbuseRecheckInterval = 0 // the verdict is taken again before every account
+			t.Cleanup(func() { inviteAbuseRecheckInterval = savedInterval })
+			inviter, invitees := createInviteAbuseTestInviter(t, "farmer", common.RoleCommonUser, 3)
+			payer := tc.payer(inviter, invitees)
+			paid := false
+			onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+				if !paid && ban.UserId == inviter.Id {
+					paid = true // the inviter is disabled; its invited users are next
+					seedTestTopUp(t, TopUp{UserId: payer.Id, Amount: 2, Money: 14, PaymentProvider: PaymentProviderEpay})
+				}
+			})
+
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			require.NoError(t, err)
+			require.True(t, paid)
+			assert.True(t, finished, "the inviter is no longer abusive")
+			assert.Equal(t, 1, disabled)
+			assert.Equal(t, inviteAbuseTestUserIds(inviter), disabledInviteAbuseTestUsers(t), "its invited users stay enabled")
+		})
+
+		t.Run(tc.name+" pays during the pass", func(t *testing.T) {
 			resetInviteAbuseTables(t)
 			useInviteAbuseSettings(t, true, 2, 500_000)
 			first, firstInvitees := createInviteAbuseTestInviter(t, "first", common.RoleCommonUser, 2)
@@ -886,6 +912,32 @@ func testInviteAbuseVerdictAtDisableTime(t *testing.T) {
 		assert.Equal(t, 3, disabled)
 		assert.Equal(t, inviteAbuseTestUserIds(inviter, invitees[1], invitees[2]), disabledInviteAbuseTestUsers(t))
 		assert.Zero(t, countSystemLogs(t, invitees[0].Id, "invited users have no recharge."))
+	})
+
+	t.Run("an administrator releases the inviter while its invited users are disabled", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 3, 500_000)
+		inviter, invitees := createInviteAbuseTestInviter(t, "farmer", common.RoleCommonUser, 3)
+		released := false
+		onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+			if !released && ban.UserId == inviter.Id {
+				released = true // what ManageUser "enable" does: release the record, enable the account
+				ok, err := ReleaseInviteAbuseBan(inviter.Id, 1)
+				require.NoError(t, err)
+				require.True(t, ok)
+				require.NoError(t, DB.Model(&User{}).Where("id = ?", inviter.Id).Update("status", common.UserStatusEnabled).Error)
+			}
+		})
+
+		disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+		require.NoError(t, err)
+		require.True(t, released)
+		assert.True(t, finished)
+		assert.Equal(t, 1, disabled, "only the inviter, before its release")
+		assert.Empty(t, disabledInviteAbuseTestUsers(t), "the invited users of an exempt inviter stay enabled")
+		for _, invitee := range invitees {
+			assert.Zero(t, countSystemLogs(t, invitee.Id, "invited users have no recharge."), invitee.Username)
+		}
 	})
 }
 

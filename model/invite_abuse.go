@@ -40,9 +40,14 @@ const (
 	inviteAbuseAuditAction  = "user.invite_abuse_ban"
 )
 
-// inviteAbuseBatchSize is how many candidate inviters one grouped query
-// returns; the sweep and the preview page through them by inviter id.
-var inviteAbuseBatchSize = 200
+var (
+	// inviteAbuseBatchSize is how many candidate inviters one grouped query
+	// returns; the sweep and the preview page through them by inviter id.
+	inviteAbuseBatchSize = 200
+	// inviteAbuseRecheckInterval is how often the rule takes its verdict on an
+	// inviter again while it disables the inviter's accounts.
+	inviteAbuseRecheckInterval = time.Second
+)
 
 // InviteAbuseBan records an account the invite abuse rule disabled. A record
 // an administrator released by enabling the account again exempts the
@@ -237,51 +242,57 @@ func loadInviteAbuseInviters(candidates []inviteAbuseCandidate, settings InviteA
 	return inviters, nil
 }
 
-// enforceInviteAbuseRuleOnInviter applies the rule to one inviter with a few
-// indexed single-inviter queries. It reads the inviter, its counted invited
-// users, the paid-inviter exemption and the invited users' recharges right
-// before it disables anybody, so the sign-up hook and the sweep act on a
-// current verdict. It returns how many accounts it disabled and whether it
-// got through all of them (the deadline or a change of the rule stops it).
-func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings, deadline time.Time) (int, bool, error) {
+// abusiveInviter takes the rule's verdict on one inviter with a few indexed
+// single-inviter queries: the inviter, its counted invited users, the
+// paid-inviter exemption and the invited users' recharges. It returns the
+// inviter and its invited users count when the rule calls it abusive with
+// settings, and nil otherwise.
+func abusiveInviter(inviterId int, settings InviteAbuseSettings) (*User, int64, error) {
 	var inviter User
 	err := DB.Select("id", "username", "status", "role").
 		Where("id = ? AND role < ?", inviterId, common.RoleAdminUser).
 		Where(inviteAbuseNotReleased(inviterId)).
 		Take(&inviter).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, true, nil // deleted, an administrator or exempt
+		return nil, 0, nil // deleted, an administrator or exempt
 	}
 	if err != nil {
-		return 0, false, err
+		return nil, 0, err
 	}
 	var inviteCount int64
 	if err := countedInvitees(DB).Where("inviter_id = ?", inviterId).Count(&inviteCount).Error; err != nil {
-		return 0, false, err
+		return nil, 0, err
 	}
 	if inviteCount < int64(settings.Threshold) {
-		return 0, true, nil
+		return nil, 0, nil
 	}
 	if settings.ExemptPaidInviter {
 		paid, err := rechargedUserIds([]int{inviterId}, settings.MinRedeemQuota, 1)
-		if err != nil {
-			return 0, false, err
-		}
-		if len(paid) > 0 {
-			return 0, true, nil
+		if err != nil || len(paid) > 0 {
+			return nil, 0, err
 		}
 	}
 	// Deleted invited users are included: one who paid before being deleted
 	// still clears the inviter.
 	invitees := countedInvitees(DB).Select("id").Where("inviter_id = ?", inviterId)
 	paid, err := rechargedUserIds(invitees, settings.MinRedeemQuota, 1)
-	if err != nil {
-		return 0, false, err
+	if err != nil || len(paid) > 0 {
+		return nil, 0, err
 	}
-	if len(paid) > 0 {
-		return 0, true, nil
+	return &inviter, inviteCount, nil
+}
+
+// enforceInviteAbuseRuleOnInviter applies the rule to one inviter. The
+// verdict is taken right before anything is disabled, so the sign-up hook and
+// the sweep act on a current one. It returns how many accounts it disabled
+// and whether it got through all of them (the deadline or a change of the
+// rule stops it).
+func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings, deadline time.Time) (int, bool, error) {
+	inviter, inviteCount, err := abusiveInviter(inviterId, settings)
+	if err != nil || inviter == nil {
+		return 0, err == nil, err
 	}
-	return disableAbusiveInviter(inviter, inviteCount, settings, deadline)
+	return disableAbusiveInviter(*inviter, inviteCount, settings, deadline)
 }
 
 // inviteAbuseRuleApplies reports whether the rule is still on with settings.
@@ -295,8 +306,11 @@ func inviteAbuseRuleApplies(settings InviteAbuseSettings) bool {
 // disableAbusiveInviter disables an abusive inviter and then its invited
 // users that are not deleted, enabled, not administrators and not exempt,
 // newest first, until the deadline or until the rule no longer applies with
-// settings. It returns how many accounts it disabled and whether it got
-// through all of them.
+// settings. A big farm takes a while: an administrator who releases the
+// inviter meanwhile stops it at once, and a recharge or a deletion that
+// clears the inviter stops it when the verdict is taken again, at most
+// inviteAbuseRecheckInterval later. It returns how many accounts it disabled
+// and whether it got through all of them.
 func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuseSettings, deadline time.Time) (int, bool, error) {
 	var invitees []User
 	if err := DB.Select("id", "username").
@@ -319,15 +333,25 @@ func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuse
 	}
 	disabled, finished := 0, true
 	var err error
+	verdictAt := time.Now()
 	for _, target := range accounts {
 		if time.Now().After(deadline) || !inviteAbuseRuleApplies(settings) {
 			finished = false
 			break
 		}
+		if time.Since(verdictAt) >= inviteAbuseRecheckInterval {
+			var current *User
+			if current, _, err = abusiveInviter(inviter.Id, settings); err != nil || current == nil {
+				finished = err == nil // no longer abusive: done with it
+				break
+			}
+			verdictAt = time.Now()
+		}
 		var changed bool
-		// The exemption is part of the update that disables: an account an
-		// administrator released after the list above was loaded stays enabled.
-		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason, inviteAbuseNotReleased(target.user.Id))
+		// The exemptions are part of the update that disables: an account an
+		// administrator released after the list above was loaded stays
+		// enabled, and so does every account left once the inviter is released.
+		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason, inviteAbuseNotReleased(target.user.Id, inviter.Id))
 		if err != nil {
 			finished = false
 			break
