@@ -171,3 +171,23 @@ func TestInMemoryRateLimiterRetryAfterFollowsALoweredLimit(t *testing.T) {
 	assert.InDelta(t, 40, retryAfter, 1, "four of the five requests have to leave the window")
 	assert.Equal(t, 5, entry.requests.length, "rejected requests are not recorded")
 }
+
+// Request rejects from the request count alone, also after the limit was
+// lowered far below the requests in the window. Walking them, as
+// RequestWithRetryAfter does to find its wait, would hold the mutex the API,
+// login and model limiters share for as long as the backlog is long. This
+// window claims far more requests than it links, so a walk would run off its
+// end.
+func TestInMemoryRateLimiterRequestRejectsWithoutWalkingTheWindow(t *testing.T) {
+	var limiter InMemoryRateLimiter
+	limiter.Init(0)
+	now := time.Now()
+	entry := limiter.touchEntry("client", now)
+	entry.requests.append(now.Unix() - 10)
+	entry.requests.length = 200_000
+
+	assert.NotPanics(t, func() {
+		assert.False(t, limiter.Request("client", 1000, 60))
+	})
+	assert.Equal(t, 200_000, entry.requests.length, "the rejected request is not recorded")
+}
