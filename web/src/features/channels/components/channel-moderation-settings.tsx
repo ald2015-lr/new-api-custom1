@@ -55,6 +55,7 @@ import {
 } from '@/lib/content-moderation'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
+import { cn } from '@/lib/utils'
 
 import { testChannelModeration } from '../api'
 import {
@@ -149,6 +150,7 @@ function PresetOption(props: {
 }) {
   const { t } = useTranslation()
   const nameId = useId()
+  const triggerId = useId()
   const label = t(props.preset.labelKey)
   const language = t(props.preset.language === 'en' ? 'English' : 'Chinese')
   return (
@@ -156,7 +158,12 @@ function PresetOption(props: {
       {/* The checkbox is named with the language, so the two presets of a
         pair differ for assistive technology; the label text stays
         clickable. */}
-      <label className='flex cursor-pointer items-start gap-2 text-sm'>
+      <label
+        className={cn(
+          'flex items-start gap-2 text-sm',
+          props.locked ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+        )}
+      >
         <span id={nameId} className='sr-only'>
           {`${label} (${language})`}
         </span>
@@ -175,8 +182,12 @@ function PresetOption(props: {
           )}
         </span>
       </label>
+      {/* The pattern is read-only, so locked admins can open it too; the
+        trigger is named after its preset, as the checkbox is. */}
       <Collapsible className='pl-6'>
         <CollapsibleTrigger
+          id={triggerId}
+          aria-labelledby={`${triggerId} ${nameId}`}
           render={<Button type='button' variant='link' size='xs' />}
           className='h-auto px-0'
         >
@@ -429,7 +440,15 @@ export const ChannelModerationSettings = memo(
       }
     }
 
-    const showRules = enabled || errors.moderation_rules !== undefined
+    // A rule the server refused keeps the editor open for this channel even
+    // while moderation is off: the error clears on the first keystroke, and
+    // the editor must not disappear while the admin corrects the rule.
+    const [rulesErrorShown, setRulesErrorShown] = useState(false)
+    if (errors.moderation_rules !== undefined && !rulesErrorShown) {
+      setRulesErrorShown(true)
+    }
+    const showRules =
+      enabled || rulesErrorShown || errors.moderation_rules !== undefined
 
     return (
       <div className='space-y-4'>
@@ -474,125 +493,129 @@ export const ChannelModerationSettings = memo(
             )}
           </p>
         )}
-        {(enabled || showRules) && (
+        {enabled && (
           <fieldset
             disabled={props.locked}
             className='space-y-4 disabled:opacity-60'
           >
-            {enabled && (
-              <>
-                <FormField
-                  control={form.control}
-                  name='moderation_fail_open'
-                  render={({ field }) => (
-                    <FormItem className='flex items-center justify-between gap-4'>
-                      <div className='space-y-0.5'>
-                        <FormLabel>
-                          {t('Allow requests when moderation fails')}
-                        </FormLabel>
-                        <FormDescription>
-                          {t(
-                            'Off (default): when the moderation call fails (timeout, rate limit, a key without moderation access, or a base URL without /v1/moderations), the request is rejected and not sent. On: such a request is sent upstream without moderation and the usage log marks it “Failed, request let through”. This keeps the channel usable while moderation is down, but unchecked requests can still put the OpenAI account at risk.'
-                          )}
-                        </FormDescription>
-                      </div>
-                      <FormControl>
-                        <Switch
-                          disabled={props.locked}
-                          checked={field.value === true}
-                          onCheckedChange={field.onChange}
-                        />
-                      </FormControl>
-                    </FormItem>
-                  )}
-                />
-                {!failOpen && (
-                  <Alert className='border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-50'>
-                    <AlertTriangle aria-hidden />
-                    <AlertDescription className='text-current'>
+            <FormField
+              control={form.control}
+              name='moderation_fail_open'
+              render={({ field }) => (
+                <FormItem className='flex items-center justify-between gap-4'>
+                  <div className='space-y-0.5'>
+                    <FormLabel>
+                      {t('Allow requests when moderation fails')}
+                    </FormLabel>
+                    <FormDescription>
                       {t(
-                        'While moderation calls fail (a key or base URL that cannot call /v1/moderations, or OpenAI rate-limiting the moderation model), every request on this channel is rejected. Test the moderation endpoint before you rely on it.'
+                        'Off (default): when the moderation call fails (timeout, rate limit, a key without moderation access, or a base URL without /v1/moderations), the request is rejected and not sent. On: such a request is sent upstream without moderation and the usage log marks it “Failed, request let through”. This keeps the channel usable while moderation is down, but unchecked requests can still put the OpenAI account at risk.'
                       )}
-                    </AlertDescription>
-                  </Alert>
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      disabled={props.locked}
+                      checked={field.value === true}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            {!failOpen && (
+              <Alert className='border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-50'>
+                <AlertTriangle aria-hidden />
+                <AlertDescription className='text-current'>
+                  {t(
+                    'While moderation calls fail (a key or base URL that cannot call /v1/moderations, or OpenAI rate-limiting the moderation model), every request on this channel is rejected. Test the moderation endpoint before you rely on it.'
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+            <FormField
+              control={form.control}
+              name='moderation_categories'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Block only these categories')}</FormLabel>
+                  <FormControl>
+                    <MultiSelect
+                      options={categoryOptions}
+                      selected={field.value ?? []}
+                      onChange={field.onChange}
+                      placeholder={t('Select categories')}
+                      disabled={props.locked}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Empty: reject whatever OpenAI flags. Otherwise only a flag in a selected category rejects the request.'
+                    )}
+                  </FormDescription>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='moderation_skip_images'
+              render={({ field }) => (
+                <FormItem className='flex items-center justify-between gap-4'>
+                  <div className='space-y-0.5'>
+                    <FormLabel>{t('Do not check images')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'By default up to 3 images of a request are checked, newest first.'
+                      )}
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      disabled={props.locked}
+                      checked={field.value === true}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </FormItem>
+              )}
+            />
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <NumberField
+                form={form}
+                name='moderation_max_chars'
+                label={t('Maximum characters checked per request')}
+                description={t(
+                  "Default 10,000 characters per request; text checked within the last hour does not count again. OpenAI limits the moderation model per organization, shared by all its keys: about 10,000 tokens and 500 requests per minute on free and Tier 1 accounts (Tier 2: 20,000 tokens; Tier 3: 50,000; see your organization's Limits page). A Chinese character is about one token; English is about four letters per token; each image is one more request. When the minute's budget is used up, moderation calls fail with a rate-limit error and requests are rejected unless “Allow requests when moderation fails” is on, so lower this value on Tier 1 accounts with busy or Chinese traffic. The system prompt is checked first, up to half of the limit, then the newest user message, then the rest of the system prompt and older user messages from the newest; text beyond the limit is not checked and the request is still sent. A user can exceed the limit on purpose, so it limits cost; it does not guarantee that everything is checked."
                 )}
-                <FormField
-                  control={form.control}
-                  name='moderation_categories'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t('Block only these categories')}</FormLabel>
-                      <FormControl>
-                        <MultiSelect
-                          options={categoryOptions}
-                          selected={field.value ?? []}
-                          onChange={field.onChange}
-                          placeholder={t('Select categories')}
-                          disabled={props.locked}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        {t(
-                          'Empty: reject whatever OpenAI flags. Otherwise only a flag in a selected category rejects the request.'
-                        )}
-                      </FormDescription>
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name='moderation_skip_images'
-                  render={({ field }) => (
-                    <FormItem className='flex items-center justify-between gap-4'>
-                      <div className='space-y-0.5'>
-                        <FormLabel>{t('Do not check images')}</FormLabel>
-                        <FormDescription>
-                          {t(
-                            'By default up to 3 images of a request are checked, newest first.'
-                          )}
-                        </FormDescription>
-                      </div>
-                      <FormControl>
-                        <Switch
-                          disabled={props.locked}
-                          checked={field.value === true}
-                          onCheckedChange={field.onChange}
-                        />
-                      </FormControl>
-                    </FormItem>
-                  )}
-                />
-                <div className='grid gap-4 sm:grid-cols-2'>
-                  <NumberField
-                    form={form}
-                    name='moderation_max_chars'
-                    label={t('Maximum characters checked per request')}
-                    description={t(
-                      "Default 10,000 characters per request; text checked within the last hour does not count again. OpenAI limits the moderation model per organization, shared by all its keys: about 10,000 tokens and 500 requests per minute on free and Tier 1 accounts (Tier 2: 20,000 tokens; Tier 3: 50,000; see your organization's Limits page). A Chinese character is about one token; English is about four letters per token; each image is one more request. When the minute's budget is used up, moderation calls fail with a rate-limit error and requests are rejected unless “Allow requests when moderation fails” is on, so lower this value on Tier 1 accounts with busy or Chinese traffic. The system prompt is checked first, up to half of the limit, then the newest user message, then the rest of the system prompt and older user messages from the newest; text beyond the limit is not checked and the request is still sent. A user can exceed the limit on purpose, so it limits cost; it does not guarantee that everything is checked."
-                    )}
-                    placeholder={MODERATION_MAX_CHARS_DEFAULT}
-                    locked={props.locked}
-                  />
-                  <NumberField
-                    form={form}
-                    name='moderation_timeout_seconds'
-                    label={t('Moderation timeout (seconds)')}
-                    description={t(
-                      'Default 10. One time limit for all moderation calls made before a request is sent to this channel (a retry on another channel starts a new one).'
-                    )}
-                    placeholder={MODERATION_TIMEOUT_SECONDS_DEFAULT}
-                    locked={props.locked}
-                  />
-                </div>
-                <PresetList form={form} locked={props.locked} />
-              </>
-            )}
-            {showRules && (
-              <ChannelModerationRulesEditor
-                control={form.control}
-                disabled={props.locked}
+                placeholder={MODERATION_MAX_CHARS_DEFAULT}
+                locked={props.locked}
               />
-            )}
+              <NumberField
+                form={form}
+                name='moderation_timeout_seconds'
+                label={t('Moderation timeout (seconds)')}
+                description={t(
+                  'Default 10. One time limit for all moderation calls made before a request is sent to this channel (a retry on another channel starts a new one).'
+                )}
+                placeholder={MODERATION_TIMEOUT_SECONDS_DEFAULT}
+                locked={props.locked}
+              />
+            </div>
+          </fieldset>
+        )}
+        {/* Outside the disabled fieldset: "Show rule" only reveals a
+          pattern, so it works for locked admins; the checkboxes are
+          disabled on their own. */}
+        {enabled && <PresetList form={form} locked={props.locked} />}
+        {showRules && (
+          <fieldset
+            disabled={props.locked}
+            className='space-y-4 disabled:opacity-60'
+          >
+            <ChannelModerationRulesEditor
+              control={form.control}
+              disabled={props.locked}
+            />
           </fieldset>
         )}
         <Separator />

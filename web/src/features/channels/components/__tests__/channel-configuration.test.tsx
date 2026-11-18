@@ -5277,6 +5277,12 @@ test('without sensitive write permission the moderation settings are locked whil
   ).toHaveAttribute('aria-disabled', 'true')
   expect(screen.getByRole('textbox', { name: 'Pattern #1' })).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Add rule' })).toBeDisabled()
+  const showRule = screen.getByRole('button', {
+    name: `Show rule ${presetName(MODERATION_PRESETS[0])}`,
+  })
+  await user.click(showRule)
+  expect(showRule).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByText(MODERATION_PRESETS[0].pattern)).toBeVisible()
 
   await user.click(
     screen.getByRole('button', { name: 'Test moderation endpoint' })
@@ -5507,6 +5513,89 @@ test('a rule the server refuses is marked on its row in Request & Response, even
   expect(screen.getByRole('switch', { name: MODERATION })).not.toBeChecked()
 })
 
+async function refuseSecondRuleWithModerationOff(
+  error: string,
+  field: { role: 'textbox' | 'combobox'; name: string }
+) {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValueOnce({
+      data: {
+        success: false,
+        message: `Invalid channel settings format: ${error}`,
+        message_key: 'Invalid channel settings format: {{error}}',
+        message_params: { error },
+      },
+    })
+    .mockResolvedValue({ data: { success: true } })
+  editingChannel = openAIChannel({
+    moderation_rules: [
+      { type: 'keyword', pattern: 'cot' },
+      { type: 'regex', pattern: '[' },
+    ],
+  })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+  const refused = await screen.findByRole(field.role, { name: field.name })
+  await waitFor(() => expect(refused).toHaveFocus())
+  return { user, put, refused }
+}
+
+function savedSettingsOf(
+  put: { mock: { calls: unknown[][] } },
+  call: number
+): Record<string, unknown> {
+  const payload = put.mock.calls[call]?.[1] as { settings: string }
+  return JSON.parse(payload.settings)
+}
+
+test('a refused rule stays editable with moderation off while the admin types the fix, and the fix is saved', async () => {
+  const {
+    user,
+    put,
+    refused: pattern,
+  } = await refuseSecondRuleWithModerationOff(
+    'moderation_rules[1].pattern is not a valid regular expression: error parsing regexp: missing closing ]: `[`',
+    { role: 'textbox', name: 'Pattern #2' }
+  )
+  for (const key of ['{Home}', '\\', '{End}', 'x', '{Backspace}']) {
+    await user.keyboard(key)
+    expect(screen.getByRole('textbox', { name: 'Pattern #2' })).toBe(pattern)
+    expect(pattern).toHaveFocus()
+  }
+  expect(pattern).toHaveValue('\\[')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+  expect(savedSettingsOf(put, 1).moderation_rules).toEqual([
+    { type: 'keyword', pattern: 'cot' },
+    { type: 'regex', pattern: '\\[' },
+  ])
+  expect(savedSettingsOf(put, 1)).not.toHaveProperty('moderation_enabled')
+})
+
+test('a rule type the server refuses can be changed with moderation off', async () => {
+  const { user, put, refused } = await refuseSecondRuleWithModerationOff(
+    'moderation_rules[1].type must be keyword or regex',
+    { role: 'combobox', name: 'Type #2' }
+  )
+  expect(refused).toHaveAttribute('aria-invalid', 'true')
+  await user.click(refused)
+  await user.click(screen.getByRole('option', { name: 'Keyword' }))
+  expect(screen.getByRole('combobox', { name: 'Type #2' })).toHaveTextContent(
+    'Keyword'
+  )
+  expect(screen.getByRole('textbox', { name: 'Pattern #2' })).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+  expect(savedSettingsOf(put, 1).moderation_rules).toEqual([
+    { type: 'keyword', pattern: 'cot' },
+    { type: 'keyword', pattern: '[' },
+  ])
+})
+
 test('turning moderation off keeps every other setting the server accepts', async () => {
   const saved = {
     moderation_fail_open: true,
@@ -5554,12 +5643,21 @@ test('the two presets of a pair have different names and each shows its rule on 
       name: "Asks for the model's chain of thought (Chinese)",
     })
   ).toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: /^Show rule/ })).toHaveLength(
+    MODERATION_PRESETS.length
+  )
   for (const preset of MODERATION_PRESETS) {
     const item = screen
       .getByRole('checkbox', { name: presetName(preset) })
       .closest('li') as HTMLElement
+    // Each trigger is named after its preset: exactly one button on the
+    // card has this name, and it is the one in the preset's row.
+    const trigger = screen.getByRole('button', {
+      name: `Show rule ${presetName(preset)}`,
+    })
+    expect(item).toContainElement(trigger)
     expect(within(item).queryByText(preset.pattern)).not.toBeInTheDocument()
-    await user.click(within(item).getByRole('button', { name: 'Show rule' }))
+    await user.click(trigger)
     expect(within(item).getByText(preset.pattern)).toBeVisible()
   }
 })
