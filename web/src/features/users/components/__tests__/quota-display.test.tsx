@@ -46,7 +46,8 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
 import { formatTimestampToDate } from '@/lib/format'
-import { useAuthStore } from '@/stores/auth-store'
+import { ROLE } from '@/lib/roles'
+import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 import {
   DEFAULT_CURRENCY_CONFIG,
   useSystemConfigStore,
@@ -54,6 +55,7 @@ import {
 
 import type { User } from '../../types'
 import { useUsersColumns } from '../users-columns'
+import { UsersMutateDrawer } from '../users-mutate-drawer'
 import { UsersProvider } from '../users-provider'
 import { UsersTable } from '../users-table'
 
@@ -504,5 +506,79 @@ it('labels raw quota mode as tokens without introducing a currency symbol', () =
   ).toBeInTheDocument()
   expect(
     within(screen.getAllByRole('cell')[0]).getByText('200')
+  ).toBeInTheDocument()
+})
+
+async function renderEditDrawer(viewer: AuthUser) {
+  useAuthStore.getState().auth.setUser(viewer)
+  const managed: User = {
+    id: 2,
+    username: 'managed-user',
+    display_name: 'Managed user',
+    role: 1,
+    status: 1,
+    quota: 500000,
+    used_quota: 0,
+    request_count: 0,
+    group: 'default',
+  }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/group/') {
+      return { data: { success: true, data: ['default'] } }
+    }
+    if (url === '/api/authz/catalog') {
+      return { data: { success: true, data: { resources: [], roles: [] } } }
+    }
+    return { data: { success: true, data: managed } }
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  clients.push(client)
+  render(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>
+        <UsersProvider>
+          <UsersMutateDrawer
+            open
+            onOpenChange={() => undefined}
+            currentRow={managed}
+          />
+        </UsersProvider>
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+  await screen.findByDisplayValue('Managed user')
+}
+
+function adminViewer(billingWrite: boolean): AuthUser {
+  return {
+    id: 1,
+    username: billingWrite ? 'admin' : 'deputy',
+    role: ROLE.ADMIN,
+    admin_role: billingWrite ? 'admin' : 'deputy',
+    permissions: {
+      admin_permissions: {
+        billing: { read: billingWrite, write: billingWrite },
+      },
+    },
+  }
+}
+
+it('a deputy admin sees the balance of a user but cannot adjust it', async () => {
+  await renderEditDrawer(adminViewer(false))
+
+  expect(screen.getByDisplayValue('1.000000')).toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Adjust Quota' })
+  ).not.toBeInTheDocument()
+})
+
+it('an admin with billing write opens the quota adjustment from the balance field', async () => {
+  await renderEditDrawer(adminViewer(true))
+
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  expect(
+    await screen.findByRole('dialog', { name: 'Adjust Quota' })
   ).toBeInTheDocument()
 })

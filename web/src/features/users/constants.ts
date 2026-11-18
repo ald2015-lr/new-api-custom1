@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Shield, User, Users } from 'lucide-react'
+import { Shield, User, UserCog, Users } from 'lucide-react'
 
 import type { User as UserType } from './types'
 
@@ -90,11 +90,31 @@ export const USER_ROLES = {
   },
 } as const
 
+/**
+ * Role option value of deputy admins (role 10 with admin_role `deputy`), used
+ * by the role filter and the create form.
+ */
+export const DEPUTY_ROLE_VALUE = 'deputy'
+
 export const getUserRoleOptions = (t: (key: string) => string) => [
   { label: t('User'), value: String(USER_ROLE.USER), icon: User },
   { label: t('Admin'), value: String(USER_ROLE.ADMIN), icon: Users },
+  { label: t('Deputy Admin'), value: DEPUTY_ROLE_VALUE, icon: UserCog },
   { label: t('Root'), value: String(USER_ROLE.ROOT), icon: Shield },
 ]
+
+/**
+ * The role filter value a user matches: `deputy` for deputy admins, otherwise
+ * the numeric role (so the Admin filter `10` matches full admins only).
+ */
+export function userRoleFilterValue(
+  user: Pick<UserType, 'role' | 'admin_role'>
+): string {
+  if (user.role === USER_ROLE.ADMIN && user.admin_role === 'deputy') {
+    return DEPUTY_ROLE_VALUE
+  }
+  return String(user.role)
+}
 
 // ============================================================================
 // Inviter Filter

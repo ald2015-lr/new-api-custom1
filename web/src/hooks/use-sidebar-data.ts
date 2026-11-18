@@ -46,6 +46,10 @@ import type {
   SidebarData,
 } from '@/components/layout/types'
 import { useStatus } from '@/hooks/use-status'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+} from '@/lib/admin-permissions'
 import { getModuleAccessFromStatus } from '@/lib/nav-modules'
 import { ROLE } from '@/lib/roles'
 
@@ -171,11 +175,19 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Redemption Codes'),
             url: '/redemption-codes',
             icon: Ticket,
+            requiredPermission: {
+              resource: ADMIN_PERMISSION_RESOURCES.REDEMPTION,
+              action: ADMIN_PERMISSION_ACTIONS.READ,
+            },
           },
           {
             title: t('Subscriptions'),
             url: '/subscriptions',
             icon: CreditCard,
+            requiredPermission: {
+              resource: ADMIN_PERMISSION_RESOURCES.BILLING,
+              action: ADMIN_PERMISSION_ACTIONS.READ,
+            },
           },
           {
             title: t('System Info'),

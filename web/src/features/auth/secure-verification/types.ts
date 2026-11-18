@@ -48,7 +48,13 @@ export type SecurityProofScope =
   | 'admin.user.binding.clear'
 
 /** ManageUser actions that change a user's status or role and need step-up. */
-export type AdminUserManageAction = 'disable' | 'enable' | 'promote' | 'demote'
+export type AdminUserManageAction =
+  | 'disable'
+  | 'enable'
+  | 'promote'
+  | 'demote'
+  | 'set_deputy'
+  | 'set_admin'
 
 export type VerificationOperation =
   | { scope: 'channel.key.read'; context: { channel_id: number } }
@@ -57,7 +63,12 @@ export type VerificationOperation =
       context: { provider: string; email?: string; code?: string }
     }
   | { scope: 'account.binding.unbind'; context: { provider_id: number } }
-  | { scope: 'admin.user.create'; context: { role: number } }
+  | {
+      scope: 'admin.user.create'
+      // admin_role is set only when creating a deputy admin, so a proof for
+      // one kind of administrator cannot create the other.
+      context: { role: number; admin_role?: 'deputy' }
+    }
   | {
       scope:
         | 'admin.user.update'

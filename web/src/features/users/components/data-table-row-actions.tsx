@@ -28,6 +28,8 @@ import {
   ShieldAlert,
   Link2,
   CreditCard,
+  ShieldCheck,
+  UserCog,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -48,8 +50,15 @@ import {
 } from '@/components/ui/tooltip'
 import type { AdminUserManageAction } from '@/features/auth/secure-verification'
 import { UserSubscriptionsDialog } from '@/features/subscriptions/components/dialogs/user-subscriptions-dialog'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import { AuthOperationError } from '@/lib/secure-verification'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { manageUser, resetUserPasskey, resetUserTwoFA } from '../api'
 import {
@@ -68,6 +77,8 @@ const MANAGE_ACTION_TITLES: Record<AdminUserManageAction, string> = {
   enable: 'Verify to enable user',
   promote: 'Verify to promote user',
   demote: 'Verify to demote user',
+  set_deputy: 'Verify to set deputy admin',
+  set_admin: 'Verify to set full admin',
 }
 
 interface DataTableRowActionsProps {
@@ -77,6 +88,7 @@ interface DataTableRowActionsProps {
 export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const { t } = useTranslation()
   const user = row.original
+  const currentUser = useAuthStore((s) => s.auth.user)
   const {
     setOpen,
     setCurrentRow,
@@ -187,6 +199,15 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const isDisabled = user.status === USER_STATUS.DISABLED
   const isAdmin = user.role >= USER_ROLE.ADMIN
   const isRoot = user.role === USER_ROLE.ROOT
+  const isDeputy = user.role === USER_ROLE.ADMIN && user.admin_role === 'deputy'
+  // Only root creates or converts deputy admins (the server enforces it too).
+  const viewerIsRoot = currentUser?.role === ROLE.SUPER_ADMIN
+  // User subscriptions are recharge information (prices, free plan grants).
+  const canManageSubscriptions = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
 
   if (isUserDeleted(user)) {
     return null
@@ -251,6 +272,24 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuItem>
         )}
 
+        {viewerIsRoot && !isRoot && !isDeputy && (
+          <DropdownMenuItem onClick={() => handleManage('set_deputy')}>
+            {t('Set as deputy admin')}
+            <DropdownMenuShortcut>
+              <UserCog size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
+
+        {viewerIsRoot && isDeputy && (
+          <DropdownMenuItem onClick={() => handleManage('set_admin')}>
+            {t('Set as full admin')}
+            <DropdownMenuShortcut>
+              <ShieldCheck size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
+
         <DropdownMenuItem
           onSelect={(event) => {
             event.preventDefault()
@@ -263,17 +302,19 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuShortcut>
         </DropdownMenuItem>
 
-        <DropdownMenuItem
-          onSelect={(event) => {
-            event.preventDefault()
-            setSubscriptionsDialogOpen(true)
-          }}
-        >
-          {t('Manage Subscriptions')}
-          <DropdownMenuShortcut>
-            <CreditCard size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
+        {canManageSubscriptions && (
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault()
+              setSubscriptionsDialogOpen(true)
+            }}
+          >
+            {t('Manage Subscriptions')}
+            <DropdownMenuShortcut>
+              <CreditCard size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
 
         <DropdownMenuSeparator />
 
@@ -348,12 +389,14 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         onUnbindSuccess={triggerRefresh}
       />
 
-      <UserSubscriptionsDialog
-        open={subscriptionsDialogOpen}
-        onOpenChange={setSubscriptionsDialogOpen}
-        user={{ id: user.id, username: user.username }}
-        onSuccess={triggerRefresh}
-      />
+      {canManageSubscriptions && (
+        <UserSubscriptionsDialog
+          open={subscriptionsDialogOpen}
+          onOpenChange={setSubscriptionsDialogOpen}
+          user={{ id: user.id, username: user.username }}
+          onSuccess={triggerRefresh}
+        />
+      )}
     </div>
   )
 }

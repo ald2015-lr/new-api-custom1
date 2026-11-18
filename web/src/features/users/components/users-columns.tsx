@@ -38,11 +38,13 @@ import { formatQuota } from '@/lib/format'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import {
+  DEPUTY_ROLE_VALUE,
   INVITER_FILTER_ID,
   USER_STATUS,
   USER_STATUSES,
   USER_ROLES,
   isUserDeleted,
+  userRoleFilterValue,
 } from '../constants'
 import type { User } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
@@ -259,10 +261,14 @@ export function useUsersColumns(): ColumnDef<User>[] {
             return null
           }
 
+          if (userRoleFilterValue(row.original) === DEPUTY_ROLE_VALUE) {
+            return <span className='text-sm'>{t('Deputy Admin')}</span>
+          }
+
           return <span className='text-sm'>{t(roleConfig.labelKey)}</span>
         },
-        filterFn: (row, id, value) => {
-          return value.includes(String(row.getValue(id)))
+        filterFn: (row, _id, value) => {
+          return value.includes(userRoleFilterValue(row.original))
         },
         enableSorting: false,
         size: 120,

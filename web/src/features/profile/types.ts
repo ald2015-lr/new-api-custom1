@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { AdminRole } from '@/lib/roles'
 import type { UserPermissions } from '@/stores/auth-store'
 
 // ============================================================================
@@ -45,6 +46,8 @@ export interface UserProfile {
   display_name: string
   /** User role (1=普通用户, 10=管理员, 100=超级管理员) */
   role: number
+  /** Role-10 users only: full admin or deputy admin (副管理员) */
+  admin_role?: AdminRole
   /** Email address */
   email?: string
   /** User group */

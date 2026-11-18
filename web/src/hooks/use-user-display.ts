@@ -63,7 +63,7 @@ export function useUserDisplay(user: AuthUser | null | undefined) {
       .slice(0, 2)
 
     // Get role label
-    const roleLabel = getRoleLabel(user.role)
+    const roleLabel = getRoleLabel(user.role, user.admin_role)
 
     return {
       displayName,
