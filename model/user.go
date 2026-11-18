@@ -904,16 +904,21 @@ func (user *User) Update(updatePassword bool) error {
 // administrator for an automatic rule and ends its access the way an
 // administrator's "disable" does: the authentication version moves on, the
 // cached user is republished, browser sessions are revoked with reason and
-// cached API tokens are dropped. It reports whether this call disabled the
-// account; a disabled, deleted or administrator account is left alone, so
-// repeated or concurrent runs are harmless. Failures after the commit are
-// logged: the disabled status already refuses the account everywhere.
-func DisableUserBySystem(userId int, reason string) (bool, error) {
+// cached API tokens are dropped. conditions are the rule's own exemptions;
+// they belong to the same conditional update, so an exemption granted after
+// the rule loaded the account still holds. It reports whether this call
+// disabled the account; a disabled, deleted, administrator or exempt account
+// is left alone, so repeated or concurrent runs are harmless. Failures after
+// the commit are logged: the disabled status already refuses the account
+// everywhere.
+func DisableUserBySystem(userId int, reason string, conditions ...clause.Expression) (bool, error) {
 	disabled := false
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&User{}).
-			Where("id = ? AND status = ? AND role < ?", userId, common.UserStatusEnabled, common.RoleAdminUser).
-			Update("status", common.UserStatusDisabled)
+		query := tx.Model(&User{}).Where("id = ? AND status = ? AND role < ?", userId, common.UserStatusEnabled, common.RoleAdminUser)
+		for _, condition := range conditions {
+			query = query.Where(condition)
+		}
+		result := query.Update("status", common.UserStatusDisabled)
 		if result.Error != nil || result.RowsAffected != 1 {
 			return result.Error
 		}

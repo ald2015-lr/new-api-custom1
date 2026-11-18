@@ -228,41 +228,50 @@ func loadInviteAbuseInviters(candidates []inviteAbuseCandidate, settings InviteA
 }
 
 // enforceInviteAbuseRuleOnInviter applies the rule to one inviter with a few
-// indexed single-inviter queries and returns how many accounts it disabled.
-func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings, deadline time.Time) (int, error) {
+// indexed single-inviter queries. It reads the inviter, its counted invited
+// users, the paid-inviter exemption and the invited users' recharges right
+// before it disables anybody, so the sign-up hook and the sweep act on a
+// current verdict. It returns how many accounts it disabled and whether it
+// got through all of them (the deadline or a change of the rule stops it).
+func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings, deadline time.Time) (int, bool, error) {
 	var inviter User
 	err := DB.Select("id", "username", "status", "role").
 		Where("id = ? AND role < ?", inviterId, common.RoleAdminUser).
 		Where("id NOT IN (?)", inviteAbuseExemptUsers()).
 		Take(&inviter).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, nil // deleted, an administrator or exempt
+		return 0, true, nil // deleted, an administrator or exempt
 	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var inviteCount int64
 	if err := countedInvitees(DB).Where("inviter_id = ?", inviterId).Count(&inviteCount).Error; err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if inviteCount < int64(settings.Threshold) {
-		return 0, nil
+		return 0, true, nil
 	}
 	if settings.ExemptPaidInviter {
 		paid, err := rechargedUserIds([]int{inviterId}, settings.MinRedeemQuota, 1)
-		if err != nil || len(paid) > 0 {
-			return 0, err
+		if err != nil {
+			return 0, false, err
+		}
+		if len(paid) > 0 {
+			return 0, true, nil
 		}
 	}
 	// Deleted invited users are included: one who paid before being deleted
 	// still clears the inviter.
 	invitees := countedInvitees(DB).Select("id").Where("inviter_id = ?", inviterId)
 	paid, err := rechargedUserIds(invitees, settings.MinRedeemQuota, 1)
-	if err != nil || len(paid) > 0 {
-		return 0, err
+	if err != nil {
+		return 0, false, err
 	}
-	disabled, _, err := disableAbusiveInviter(inviter, inviteCount, settings, deadline)
-	return disabled, err
+	if len(paid) > 0 {
+		return 0, true, nil
+	}
+	return disableAbusiveInviter(inviter, inviteCount, settings, deadline)
 }
 
 // inviteAbuseRuleApplies reports whether the rule is still on with settings.
@@ -306,7 +315,10 @@ func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuse
 			break
 		}
 		var changed bool
-		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason)
+		// The exemption is part of the update that disables: an account an
+		// administrator released after the list above was loaded stays enabled.
+		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason,
+			clause.Expr{SQL: "id NOT IN (?)", Vars: []any{inviteAbuseExemptUsers()}})
 		if err != nil {
 			finished = false
 			break
@@ -364,7 +376,7 @@ func (user *User) applyInviteAbuseRuleAfterSignUp(inviterId int) {
 	if inviterId == 0 || !common.InviteAbuseBanEnabled {
 		return
 	}
-	if _, err := enforceInviteAbuseRuleOnInviter(inviterId, CurrentInviteAbuseSettings(), time.Now().Add(inviteAbuseSignUpBudget)); err != nil {
+	if _, _, err := enforceInviteAbuseRuleOnInviter(inviterId, CurrentInviteAbuseSettings(), time.Now().Add(inviteAbuseSignUpBudget)); err != nil {
 		common.SysError(common.LogText("invite abuse check of inviter %d failed: %v", inviterId, err))
 	}
 	var current User
@@ -510,7 +522,10 @@ func sweepInviteAbuse(settings InviteAbuseSettings, afterInviterId int, deadline
 				if time.Now().After(deadline) || !inviteAbuseRuleApplies(settings) {
 					return afterInviterId, false, nil
 				}
-				_, finished, err := disableAbusiveInviter(inviter, candidate.InviteCount, settings, deadline)
+				// The batch only pre-selects: a recharge or a release may have
+				// come in while the pass worked through earlier inviters, so the
+				// verdict is taken again right before anything is disabled.
+				_, finished, err := enforceInviteAbuseRuleOnInviter(candidate.InviterId, settings, deadline)
 				if err != nil || !finished {
 					return afterInviterId, false, err
 				}

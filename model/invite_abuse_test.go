@@ -185,6 +185,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("sign-up", testInviteAbuseSignUp)
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
 			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
+			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
 			t.Run("sweep batches and budget", testInviteAbuseSweepBatches)
 			t.Run("preview", testInviteAbusePreview)
 			t.Run("preview truncation", testInviteAbusePreviewTruncation)
@@ -266,8 +267,9 @@ func testInviteAbuseQualifyingRecharge(t *testing.T) {
 
 			preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
 			require.NoError(t, err)
-			disabled, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 			require.NoError(t, err)
+			assert.True(t, finished)
 			if !tc.abusive {
 				assert.Zero(t, preview.AbusiveInviters)
 				assert.Zero(t, disabled)
@@ -385,8 +387,9 @@ func testInviteAbuseThreshold(t *testing.T) {
 
 			preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
 			require.NoError(t, err)
-			disabled, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 			require.NoError(t, err)
+			assert.True(t, finished)
 			if !tc.abusive {
 				assert.Zero(t, preview.AbusiveInviters)
 				assert.Zero(t, disabled)
@@ -412,8 +415,9 @@ func testInviteAbuseAdministratorsAndExemptUsers(t *testing.T) {
 	releaseInviteAbuseTestUser(t, invitees[0])
 
 	for _, skipped := range []User{admin, root, exempt} {
-		disabled, err := enforceInviteAbuseRuleOnInviter(skipped.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+		disabled, finished, err := enforceInviteAbuseRuleOnInviter(skipped.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 		require.NoError(t, err)
+		assert.True(t, finished)
 		assert.Zero(t, disabled, skipped.Username)
 	}
 	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
@@ -439,8 +443,9 @@ func testInviteAbuseBanEffects(t *testing.T) {
 	}).Error)
 	banned := append([]User{inviter}, invitees...)
 
-	disabled, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+	disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 	require.NoError(t, err)
+	assert.True(t, finished)
 	assert.Equal(t, 3, disabled)
 	for _, user := range banned {
 		state := inviteAbuseUserState(t, user.Id)
@@ -491,8 +496,9 @@ func testInviteAbuseBanEffects(t *testing.T) {
 	}
 
 	// Running the rule again, by a sign-up or a sweep, changes nothing.
-	again, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+	again, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 	require.NoError(t, err)
+	assert.True(t, finished)
 	assert.Zero(t, again)
 	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
 	require.NoError(t, err)
@@ -542,8 +548,9 @@ func testInviteAbuseRelease(t *testing.T) {
 
 	other, otherInvitees := createInviteAbuseTestInviter(t, "other", common.RoleCommonUser, 1)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", invitees[0].Id).Update("inviter_id", other.Id).Error)
-	disabled, err := enforceInviteAbuseRuleOnInviter(other.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+	disabled, finished, err := enforceInviteAbuseRuleOnInviter(other.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 	require.NoError(t, err)
+	assert.True(t, finished)
 	assert.Equal(t, 2, disabled, "the inviter and its invited user that is not exempt")
 	assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, invitees[0].Id).Status)
 	assert.Equal(t, common.UserStatusDisabled, inviteAbuseUserState(t, otherInvitees[0].Id).Status)
@@ -691,8 +698,69 @@ func testInviteAbuseSettingsChangeStopsPass(t *testing.T) {
 	}
 }
 
-// A pass reads the candidates in batches and stops at its time budget without
-// losing its place.
+// A sweep's candidate batch only pre-selects inviters. A recharge that comes
+// in while the pass is busy with an earlier inviter of the batch — by an
+// invited user, or by the inviter while paid inviters are exempt — clears
+// the later farm, and an account an administrator released after the pass
+// loaded the invited users is not disabled again.
+func testInviteAbuseVerdictAtDisableTime(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		payer func(inviter User, invitees []User) User
+	}{
+		{name: "an invited user pays during the pass", payer: func(_ User, invitees []User) User { return invitees[0] }},
+		{name: "the inviter pays during the pass", payer: func(inviter User, _ []User) User { return inviter }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 2, 500_000)
+			first, firstInvitees := createInviteAbuseTestInviter(t, "first", common.RoleCommonUser, 2)
+			second, secondInvitees := createInviteAbuseTestInviter(t, "second", common.RoleCommonUser, 2)
+			payer := tc.payer(second, secondInvitees)
+			paid := false
+			onInviteAbuseBan(t, func(InviteAbuseBan) {
+				if !paid {
+					paid = true // the pass has just disabled the first inviter
+					seedTestTopUp(t, TopUp{UserId: payer.Id, Amount: 2, Money: 14, PaymentProvider: PaymentProviderEpay})
+				}
+			})
+
+			_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
+			require.NoError(t, err)
+			require.True(t, complete)
+			require.True(t, paid)
+			assert.Equal(t, inviteAbuseTestUserIds(append([]User{first}, firstInvitees...)...), disabledInviteAbuseTestUsers(t),
+				"the second inviter and its invited users stay enabled")
+		})
+	}
+
+	t.Run("an administrator releases an invited user during the pass", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 2, 500_000)
+		inviter, invitees := createInviteAbuseTestInviter(t, "farmer", common.RoleCommonUser, 3)
+		released := false
+		onInviteAbuseBan(t, func(InviteAbuseBan) {
+			if !released {
+				// The inviter is disabled and its invited users are loaded;
+				// the oldest one, disabled last, is enabled again meanwhile.
+				released = true
+				releaseInviteAbuseTestUser(t, invitees[0])
+			}
+		})
+
+		disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+		require.NoError(t, err)
+		assert.True(t, finished)
+		require.True(t, released)
+		assert.Equal(t, 3, disabled)
+		assert.Equal(t, inviteAbuseTestUserIds(inviter, invitees[1], invitees[2]), disabledInviteAbuseTestUsers(t))
+		assert.Zero(t, countSystemLogs(t, invitees[0].Id, "invited users have no recharge."))
+	})
+}
+
+// A pass reads the candidates in batches and stops at its time budget, or in
+// the middle of an inviter, without losing its place: it continues with the
+// inviter it did not finish.
 func testInviteAbuseSweepBatches(t *testing.T) {
 	resetInviteAbuseTables(t)
 	useInviteAbuseSettings(t, true, 1, 500_000)
@@ -712,6 +780,19 @@ func testInviteAbuseSweepBatches(t *testing.T) {
 	assert.Zero(t, cursor)
 	assert.Empty(t, disabledInviteAbuseTestUsers(t), "the budget was spent before the first inviter")
 
+	// The third inviter's pass stops right after the inviter itself.
+	onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+		if ban.UserId == all[4].Id {
+			common.InviteAbuseBanThreshold = 2
+		}
+	})
+	cursor, complete, err = sweepInviteAbuse(settings, cursor, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	assert.False(t, complete)
+	assert.Equal(t, all[2].Id, cursor, "the pass continues with the third inviter")
+	assert.Equal(t, inviteAbuseTestUserIds(all[:5]...), disabledInviteAbuseTestUsers(t))
+
+	common.InviteAbuseBanThreshold = 1
 	cursor, complete, err = sweepInviteAbuse(settings, cursor, time.Now().Add(time.Minute))
 	require.NoError(t, err)
 	assert.True(t, complete)
