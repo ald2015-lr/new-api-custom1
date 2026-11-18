@@ -19,6 +19,11 @@ For commercial licensing, please contact support@quantumnous.com
 import { z } from 'zod'
 
 import {
+  MODERATION_CATEGORIES,
+  MODERATION_PRESETS,
+} from '@/lib/content-moderation'
+
+import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_TYPE_GEMINI,
   CHANNEL_TYPE_NEW_API,
@@ -36,6 +41,9 @@ import {
   GEMINI_FREE_KEY_TOKEN_COUNTERS,
   type GeminiFreeKeyTokenCounter,
   MODEL_FETCHABLE_TYPES,
+  MODERATION_MAX_CHARS_DEFAULT,
+  MODERATION_SETTINGS_KEYS,
+  MODERATION_TIMEOUT_SECONDS_DEFAULT,
   NOVELAI_QUEUE_LIMIT_DEFAULT,
   NOVELAI_QUEUE_LIMIT_MAX,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
@@ -53,6 +61,12 @@ import {
   validateAdvancedCustomConfig,
 } from './advanced-custom'
 import { readTaskExtendPluginKeys } from './channel-plugin-extensions'
+import {
+  isValidModerationMaxChars,
+  isValidModerationTimeout,
+  validateModerationRuleRows,
+  type ModerationRuleRow,
+} from './content-moderation-rules'
 import {
   isDefaultGeminiFreeKeyModelLimits,
   isValidGeminiFreeKeyMaxAttempts,
@@ -349,6 +363,32 @@ export const channelFormSchema = z
     // into thinking settings before the request goes upstream (stored in
     // settings JSON); off when unset.
     gemini_thinking_suffix_enabled: z.boolean().optional(),
+    // OpenAI: content moderation before a request goes upstream (stored in
+    // settings JSON); off when unset. A cleared limit is null, saved as the
+    // default. moderation_rule_presets_set is form-only: whether the preset
+    // list was ever saved or selected, so the default presets are selected
+    // only the first time moderation is turned on.
+    moderation_enabled: z.boolean().optional(),
+    moderation_fail_open: z.boolean().optional(),
+    moderation_categories: z.array(z.string()).optional(),
+    moderation_skip_images: z.boolean().optional(),
+    moderation_max_chars: z.number().nullable().optional(),
+    moderation_timeout_seconds: z.number().nullable().optional(),
+    moderation_rule_presets: z.array(z.string()).optional(),
+    moderation_rule_presets_set: z.boolean().optional(),
+    moderation_rules: z
+      .array(
+        z.object({
+          name: z.string(),
+          type: z.enum(['keyword', 'regex']),
+          pattern: z.string(),
+          case_sensitive: z.boolean(),
+        })
+      )
+      .optional(),
+    // OpenAI: send a hashed user ID as safety_identifier (stored in
+    // settings JSON); off when unset, independent of moderation.
+    send_safety_identifier: z.boolean().optional(),
     disable_task_polling_sleep: z.boolean().optional(),
     // Upstream model update settings (stored in settings JSON)
     upstream_model_update_check_enabled: z.boolean().optional(),
@@ -537,6 +577,37 @@ export const channelFormSchema = z
         })
       }
     }
+
+    // The server checks the moderation settings even while moderation is
+    // off; regular expression syntax is left to it (RE2, not JavaScript).
+    if (data.type === 1) {
+      if (!isValidModerationMaxChars(data.moderation_max_chars)) {
+        addRequiredIssue(
+          ctx,
+          'moderation_max_chars',
+          ERROR_MESSAGES.INVALID_MODERATION_MAX_CHARS
+        )
+      }
+      if (!isValidModerationTimeout(data.moderation_timeout_seconds)) {
+        addRequiredIssue(
+          ctx,
+          'moderation_timeout_seconds',
+          ERROR_MESSAGES.INVALID_MODERATION_TIMEOUT
+        )
+      }
+      for (const issue of validateModerationRuleRows(
+        data.moderation_rules ?? []
+      )) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path:
+            issue.field === undefined
+              ? ['moderation_rules']
+              : ['moderation_rules', issue.index ?? 0, issue.field],
+          message: issue.message,
+        })
+      }
+    }
   })
 
 /**
@@ -642,6 +713,16 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
     GEMINI_FREE_KEY_DEFAULT_MODEL_LIMITS
   ),
   gemini_thinking_suffix_enabled: false,
+  moderation_enabled: false,
+  moderation_fail_open: false,
+  moderation_categories: [],
+  moderation_skip_images: false,
+  moderation_max_chars: null,
+  moderation_timeout_seconds: null,
+  moderation_rule_presets: [],
+  moderation_rule_presets_set: false,
+  moderation_rules: [],
+  send_safety_identifier: false,
   disable_task_polling_sleep: false,
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
@@ -733,6 +814,16 @@ export function transformChannelToFormDefaults(
   let geminiFreeKeyMaxAttempts: number | null = null
   let geminiFreeKeyModelLimits = readGeminiFreeKeyModelLimitRows(undefined)
   let geminiThinkingSuffixEnabled = false
+  let moderationEnabled = false
+  let moderationFailOpen = false
+  let moderationCategories: string[] = []
+  let moderationSkipImages = false
+  let moderationMaxChars: number | null = null
+  let moderationTimeoutSeconds: number | null = null
+  let moderationRulePresets: string[] = []
+  let moderationRulePresetsSet = false
+  let moderationRules: ModerationRuleRow[] = []
+  let sendSafetyIdentifier = false
   let disableTaskPollingSleep = false
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
@@ -803,6 +894,50 @@ export function transformChannelToFormDefaults(
       )
       geminiThinkingSuffixEnabled =
         parsed.gemini_thinking_suffix_enabled === true
+      moderationEnabled = parsed.moderation_enabled === true
+      moderationFailOpen = parsed.moderation_fail_open === true
+      moderationSkipImages = parsed.moderation_skip_images === true
+      sendSafetyIdentifier = parsed.send_safety_identifier === true
+      // Values this console does not know are dropped, as the server would
+      // refuse them.
+      if (Array.isArray(parsed.moderation_categories)) {
+        moderationCategories = parsed.moderation_categories.filter(
+          (value: unknown) =>
+            MODERATION_CATEGORIES.some((category) => category.value === value)
+        )
+      }
+      // An explicit list, even an empty one, was saved: the default presets
+      // are not selected again.
+      if (Array.isArray(parsed.moderation_rule_presets)) {
+        moderationRulePresetsSet = true
+        moderationRulePresets = parsed.moderation_rule_presets.filter(
+          (value: unknown) =>
+            MODERATION_PRESETS.some((preset) => preset.id === value)
+        )
+      }
+      // 0 or absent is the default, shown as the placeholder.
+      if (
+        Number.isInteger(parsed.moderation_max_chars) &&
+        parsed.moderation_max_chars !== 0
+      ) {
+        moderationMaxChars = parsed.moderation_max_chars
+      }
+      if (
+        Number.isInteger(parsed.moderation_timeout_seconds) &&
+        parsed.moderation_timeout_seconds !== 0
+      ) {
+        moderationTimeoutSeconds = parsed.moderation_timeout_seconds
+      }
+      if (Array.isArray(parsed.moderation_rules)) {
+        moderationRules = parsed.moderation_rules.map(
+          (rule: Record<string, unknown> | null): ModerationRuleRow => ({
+            name: typeof rule?.name === 'string' ? rule.name : '',
+            type: rule?.type === 'regex' ? 'regex' : 'keyword',
+            pattern: typeof rule?.pattern === 'string' ? rule.pattern : '',
+            case_sensitive: rule?.case_sensitive === true,
+          })
+        )
+      }
       disableTaskPollingSleep = parsed.disable_task_polling_sleep === true
       upstreamModelUpdateCheckEnabled =
         parsed.upstream_model_update_check_enabled === true
@@ -878,6 +1013,16 @@ export function transformChannelToFormDefaults(
     gemini_free_key_max_attempts: geminiFreeKeyMaxAttempts,
     gemini_free_key_model_limits: geminiFreeKeyModelLimits,
     gemini_thinking_suffix_enabled: geminiThinkingSuffixEnabled,
+    moderation_enabled: moderationEnabled,
+    moderation_fail_open: moderationFailOpen,
+    moderation_categories: moderationCategories,
+    moderation_skip_images: moderationSkipImages,
+    moderation_max_chars: moderationMaxChars,
+    moderation_timeout_seconds: moderationTimeoutSeconds,
+    moderation_rule_presets: moderationRulePresets,
+    moderation_rule_presets_set: moderationRulePresetsSet,
+    moderation_rules: moderationRules,
+    send_safety_identifier: sendSafetyIdentifier,
     disable_task_polling_sleep: disableTaskPollingSleep,
     allow_safety_identifier: allowSafetyIdentifier,
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
@@ -1134,6 +1279,81 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     settingsObj.gemini_thinking_suffix_enabled = true
   } else {
     delete settingsObj.gemini_thinking_suffix_enabled
+  }
+
+  // Only an OpenAI channel moderates its requests and sends the safety
+  // identifier. Only what differs from the defaults is written, so an
+  // untouched channel saves no key; the other moderation settings are kept
+  // while the switch is off.
+  if (formData.type === 1) {
+    if (formData.moderation_enabled === true) {
+      settingsObj.moderation_enabled = true
+    } else {
+      delete settingsObj.moderation_enabled
+    }
+    if (formData.moderation_fail_open === true) {
+      settingsObj.moderation_fail_open = true
+    } else {
+      delete settingsObj.moderation_fail_open
+    }
+    const selectedCategories = formData.moderation_categories ?? []
+    const categories = MODERATION_CATEGORIES.map(
+      (category) => category.value
+    ).filter((value) => selectedCategories.includes(value))
+    if (categories.length > 0) {
+      settingsObj.moderation_categories = categories
+    } else {
+      delete settingsObj.moderation_categories
+    }
+    if (formData.moderation_skip_images === true) {
+      settingsObj.moderation_skip_images = true
+    } else {
+      delete settingsObj.moderation_skip_images
+    }
+    const maxChars = formData.moderation_max_chars
+    if (maxChars && maxChars !== MODERATION_MAX_CHARS_DEFAULT) {
+      settingsObj.moderation_max_chars = maxChars
+    } else {
+      delete settingsObj.moderation_max_chars
+    }
+    const timeout = formData.moderation_timeout_seconds
+    if (timeout && timeout !== MODERATION_TIMEOUT_SECONDS_DEFAULT) {
+      settingsObj.moderation_timeout_seconds = timeout
+    } else {
+      delete settingsObj.moderation_timeout_seconds
+    }
+    // An explicit list, even an empty one, once loaded or selected: the
+    // server keeps [] apart from a list that was never saved.
+    const selectedPresets = formData.moderation_rule_presets ?? []
+    const presets = MODERATION_PRESETS.map((preset) => preset.id).filter((id) =>
+      selectedPresets.includes(id)
+    )
+    if (presets.length > 0 || formData.moderation_rule_presets_set === true) {
+      settingsObj.moderation_rule_presets = presets
+    } else {
+      delete settingsObj.moderation_rule_presets
+    }
+    const rules = (formData.moderation_rules ?? []).map((row) => {
+      const name = row.name.trim()
+      return {
+        ...(name ? { name } : {}),
+        type: row.type,
+        pattern: row.pattern.trim(),
+        ...(row.case_sensitive ? { case_sensitive: true } : {}),
+      }
+    })
+    if (rules.length > 0) {
+      settingsObj.moderation_rules = rules
+    } else {
+      delete settingsObj.moderation_rules
+    }
+    if (formData.send_safety_identifier === true) {
+      settingsObj.send_safety_identifier = true
+    } else {
+      delete settingsObj.send_safety_identifier
+    }
+  } else {
+    for (const key of MODERATION_SETTINGS_KEYS) delete settingsObj[key]
   }
 
   settingsObj.disable_task_polling_sleep =

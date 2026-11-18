@@ -41,6 +41,8 @@ const logTypeRowTint: Record<number, string> = {
     'bg-rose-50/40 dark:bg-rose-950/20 border-rose-200/50 dark:border-rose-900/30',
   [LOG_TYPE_ENUM.REFUND]:
     'bg-blue-50/30 dark:bg-blue-950/15 border-blue-200/50 dark:border-blue-900/30',
+  [LOG_TYPE_ENUM.MODERATION]:
+    'bg-amber-50/40 dark:bg-amber-950/20 border-amber-200/50 dark:border-amber-900/30',
 }
 
 interface UsageLogsMobileListProps<TData> {

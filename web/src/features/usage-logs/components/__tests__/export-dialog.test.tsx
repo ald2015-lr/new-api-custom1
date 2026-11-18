@@ -275,3 +275,37 @@ it('treats a stream that ends without the success line as a failed export', asyn
   )
   expect(createObjectURL).not.toHaveBeenCalled()
 })
+
+it('exports a content moderation row with the Moderation type and its rejection text', async () => {
+  mockExportResponse([
+    {
+      id: 3,
+      created_at: 1760000000,
+      type: 100,
+      content: 'Rejected by content moderation',
+      token_name: 'prod',
+      model_name: 'gpt-4o',
+      quota: 0,
+      other: JSON.stringify({
+        content_parts: [{ key: 'Rejected by content moderation' }],
+      }),
+      request_id: 'req-3',
+    },
+    { success: true, message: '', data: { count: 1 } },
+  ])
+  const user = userEvent.setup()
+  renderExport({ role: ROLE.ADMIN, search: { ...recentRange(), type: 100 } })
+
+  await user.click(await screen.findByRole('button', { name: 'Export' }))
+  await user.click(
+    within(screen.getByRole('dialog')).getByRole('button', { name: 'Export' })
+  )
+
+  await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+  const file = createObjectURL.mock.calls[0][0]
+  const [header = '', row = ''] = (await file.text()).trimEnd().split('\r\n')
+  const columns = header.replace(/^﻿/, '').split(',')
+  const values = row.split(',')
+  expect(values[columns.indexOf('"Type"')]).toBe('"Moderation"')
+  expect(row).toContain('"Rejected by content moderation"')
+})

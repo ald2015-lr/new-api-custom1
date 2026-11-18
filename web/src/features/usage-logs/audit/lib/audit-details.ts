@@ -162,6 +162,8 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Type')
     case 'base_url':
       return t('Base URL')
+    case 'content_moderation':
+      return t('Content moderation')
     case 'quota':
       return t('Quota')
     case 'admin_info':

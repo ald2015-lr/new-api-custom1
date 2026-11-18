@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+import type { ModerationProbeResult } from '@/lib/content-moderation'
+
 // ============================================================================
 // Channel Schema & Types
 // ============================================================================
@@ -129,6 +131,21 @@ export interface ChannelOtherSettings {
   // Thinking suffixes on the model names of a Gemini (AI Studio) channel;
   // off when unset.
   gemini_thinking_suffix_enabled?: boolean
+  // Content moderation of an OpenAI channel; off when unset. An unset or 0
+  // limit means the server's default. An unset preset list was never saved
+  // (the console selects the default presets on the first enable); an
+  // empty one means no preset.
+  moderation_enabled?: boolean
+  moderation_fail_open?: boolean
+  moderation_categories?: string[]
+  moderation_skip_images?: boolean
+  moderation_max_chars?: number
+  moderation_timeout_seconds?: number
+  moderation_rule_presets?: string[]
+  moderation_rules?: ModerationRule[]
+  // An OpenAI channel sets safety_identifier to a hashed user ID; off when
+  // unset, independent of moderation.
+  send_safety_identifier?: boolean
   disable_task_polling_sleep?: boolean
   upstream_model_update_check_enabled?: boolean
   upstream_model_update_auto_sync_enabled?: boolean
@@ -136,6 +153,15 @@ export interface ChannelOtherSettings {
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
   advanced_custom?: AdvancedCustomConfig
+}
+
+/** A custom content moderation rule of an OpenAI channel. */
+export interface ModerationRule {
+  name?: string
+  type: 'keyword' | 'regex'
+  pattern: string
+  /** False or unset: the keyword or regular expression ignores case. */
+  case_sensitive?: boolean
 }
 
 /**
@@ -237,6 +263,12 @@ export interface ChannelTestResponse {
     response_time?: number
     error?: string
   }
+}
+
+export interface ChannelModerationProbeResponse {
+  success: boolean
+  message?: string
+  data?: ModerationProbeResult
 }
 
 export interface ChannelBalanceResponse {
