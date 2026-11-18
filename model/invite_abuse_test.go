@@ -803,6 +803,30 @@ func testInviteAbuseSettingsChangeStopsPass(t *testing.T) {
 			assert.Equal(t, inviteAbuseTestUserIds(first), disabledInviteAbuseTestUsers(t), "the next tick does not finish the old pass")
 		})
 	}
+
+	// A pass that stops after it got through an inviter does not go on from
+	// there with the new settings: the next tick starts over, so an inviter
+	// before the stop is checked with them too.
+	t.Run("threshold lowered after the first inviter", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 2, 500_000)
+		small, smallInvitees := createInviteAbuseTestInviter(t, "small", common.RoleCommonUser, 1)
+		farm0, farm0Invitees := createInviteAbuseTestInviter(t, "farm0", common.RoleCommonUser, 2)
+		farm1, farm1Invitees := createInviteAbuseTestInviter(t, "farm1", common.RoleCommonUser, 2)
+		onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+			if ban.UserId == farm1.Id {
+				require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "1"))
+			}
+		})
+
+		start := time.Now()
+		RunInviteAbuseSweepIfDue(start)
+		stopped := append(append([]User{farm0}, farm0Invitees...), farm1)
+		assert.Equal(t, inviteAbuseTestUserIds(stopped...), disabledInviteAbuseTestUsers(t), "the pass stops in the second inviter")
+		RunInviteAbuseSweepIfDue(start.Add(time.Minute))
+		all := append(append(append([]User{small}, smallInvitees...), stopped...), farm1Invitees...)
+		assert.Equal(t, inviteAbuseTestUserIds(all...), disabledInviteAbuseTestUsers(t), "the inviter before the stop is disabled with the new threshold")
+	})
 }
 
 // A sweep's candidate batch only pre-selects inviters. A recharge that comes
