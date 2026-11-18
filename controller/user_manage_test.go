@@ -613,6 +613,116 @@ func TestUpdateUserRefusesRechargePermissionsForDeputyAdmins(t *testing.T) {
 	assert.Equal(t, []string{"g role:deputy", "p channel sensitive_write allow"}, userCasbinRules(t, db, deputy.Id))
 }
 
+// Resetting a user's password, 2FA or passkey lets the operator sign in as that
+// user and read the user's own recharge records, so it needs billing:read.
+func TestCredentialResetsRequireBillingRead(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.TwoFABackupCode{}))
+	initManageUserAuthz(t, db)
+	password, err := common.Password2Hash("managed-password")
+	require.NoError(t, err)
+	createUser := func(name string, role int) model.User {
+		user := model.User{Username: name, Password: password, Role: role, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: name}
+		require.NoError(t, db.Create(&user).Error)
+		return user
+	}
+	deputy := createUser("reset-deputy", common.RoleAdminUser)
+	assignTestDeputy(t, db, deputy.Id)
+	customAdmin := createUser("reset-custom-admin", common.RoleAdminUser)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return authz.SetUserPermissionsInTx(tx, customAdmin.Id, authz.PermissionsMap{authz.ResourceBilling: {authz.ActionRead: false, authz.ActionWrite: false}})
+	}))
+	admin := createUser("reset-admin", common.RoleAdminUser)
+	require.NoError(t, authz.ReloadPolicy())
+	signIn := func(operator model.User) service.AuthIdentity {
+		require.NoError(t, model.PublishUserAuthCache(operator.Id))
+		bundle, err := service.CreateLoginSession(operator.Id, "password", "127.0.0.1", "credential-reset-test")
+		require.NoError(t, err)
+		identity, err := service.ParseAccessToken(bundle.AccessToken)
+		require.NoError(t, err)
+		return identity
+	}
+
+	resets := []struct {
+		name, scope, method, path string
+		handler                   gin.HandlerFunc
+		body                      func(target model.User) string
+		reset                     func(t *testing.T, target model.User) bool
+	}{
+		{
+			name: "password", scope: service.VerificationScopeAdminUserUpdate, method: http.MethodPut, path: "/api/user/", handler: UpdateUser,
+			body: func(target model.User) string {
+				return fmt.Sprintf(`{"id":%d,"username":%q,"group":"default","password":"replacement-pass"}`, target.Id, target.Username)
+			},
+			reset: func(t *testing.T, target model.User) bool {
+				stored, err := model.GetUserById(target.Id, true)
+				require.NoError(t, err)
+				return !common.ValidatePasswordAndHash("managed-password", stored.Password)
+			},
+		},
+		{
+			name: "2fa", scope: service.VerificationScopeAdminUserTwoFADisable, method: http.MethodDelete, path: "/api/user/:id/2fa", handler: AdminDisable2FA,
+			reset: func(t *testing.T, target model.User) bool {
+				twoFA, err := model.GetTwoFAByUserId(target.Id)
+				require.NoError(t, err)
+				return twoFA == nil || !twoFA.IsEnabled
+			},
+		},
+		{
+			name: "passkey", scope: service.VerificationScopeAdminUserPasskeyReset, method: http.MethodDelete, path: "/api/user/:id/reset_passkey", handler: AdminResetPasskey,
+			reset: func(t *testing.T, target model.User) bool {
+				_, err := model.GetPasskeyByUserID(target.Id)
+				return errors.Is(err, model.ErrPasskeyNotFound)
+			},
+		},
+	}
+	for _, operator := range []struct {
+		kind    string
+		user    model.User
+		allowed bool
+	}{{"deputy admin", deputy, false}, {"admin without billing read", customAdmin, false}, {"full admin", admin, true}} {
+		identity := signIn(operator.user)
+		for _, reset := range resets {
+			t.Run(operator.kind+" resets "+reset.name, func(t *testing.T) {
+				target := createUser(fmt.Sprintf("target-%d-%s", operator.user.Id, reset.name), common.RoleCommonUser)
+				require.NoError(t, db.Create(&model.TwoFA{UserId: target.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}).Error)
+				require.NoError(t, db.Create(&model.PasskeyCredential{UserID: target.Id, CredentialID: target.Username, PublicKey: "public-key"}).Error)
+				binding, err := service.BindVerificationOperation(service.VerificationOperation{Scope: reset.scope, Context: []byte(fmt.Sprintf(`{"user_id":%d}`, target.Id))})
+				require.NoError(t, err)
+				// The operator's own valid proof: step-up verification proves who
+				// the operator is, not what the operator may do.
+				proof, _, err := service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+				require.NoError(t, err)
+				body := ""
+				if reset.body != nil {
+					body = reset.body(target)
+				}
+				recorder := adminUserRequest(reset.method, reset.path, body, proof, identity, common.RoleAdminUser, gin.Params{{Key: "id", Value: fmt.Sprint(target.Id)}}, reset.handler)
+				if operator.allowed {
+					require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+					assert.True(t, reset.reset(t, target))
+					return
+				}
+				assert.Equal(t, http.StatusForbidden, recorder.Code)
+				assert.Contains(t, recorder.Body.String(), "Unauthorized, insufficient privileges")
+				assert.False(t, reset.reset(t, target), "nothing is reset")
+				var resetAudits int64
+				require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("action IN ?", []string{"user.update", "user.2fa_disable", "user.reset_passkey"}).Where("user_id = ?", operator.user.Id).Count(&resetAudits).Error)
+				assert.Zero(t, resetAudits)
+			})
+		}
+	}
+
+	// The deputy keeps the routine edits and binding clears: neither lets it
+	// sign in as the user.
+	member := createUser("deputy-managed", common.RoleCommonUser)
+	deputyIdentity := signIn(deputy)
+	recorder := adminUserRequest(http.MethodPut, "/api/user/", fmt.Sprintf(`{"id":%d,"username":"deputy-managed","display_name":"Renamed","group":"default"}`, member.Id), "", deputyIdentity, common.RoleAdminUser, nil, UpdateUser)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	recorder = adminUserRequest(http.MethodDelete, "/api/user/:id/bindings/:binding_type", "", "", deputyIdentity, common.RoleAdminUser, gin.Params{{Key: "id", Value: fmt.Sprint(member.Id)}, {Key: "binding_type", Value: "github"}}, AdminClearUserBinding)
+	assert.Contains(t, recorder.Body.String(), `"code":"SECURITY_PROOF_REQUIRED"`, "only the step-up proof stands in the way")
+}
+
 func TestManageUserQuotaRecordsTopupAndAudit(t *testing.T) {
 	for _, tc := range []struct {
 		name, mode, action, content string

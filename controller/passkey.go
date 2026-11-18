@@ -437,6 +437,9 @@ func AdminResetPasskey(c *gin.Context) {
 		common.ApiErrorMsg(c, "no permission")
 		return
 	}
+	if !requireCredentialResetPermission(c) {
+		return
+	}
 	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserPasskeyReset, service.AdminUserContext{UserID: user.Id})
 	if authorization == nil {
 		return

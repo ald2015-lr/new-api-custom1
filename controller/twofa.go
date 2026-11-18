@@ -197,6 +197,9 @@ func AdminDisable2FA(c *gin.Context) {
 		common.ApiErrorT(c, "No permission to change the 2FA settings of users at the same or higher level")
 		return
 	}
+	if !requireCredentialResetPermission(c) {
+		return
+	}
 	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserTwoFADisable, service.AdminUserContext{UserID: userId})
 	if authorization == nil {
 		return

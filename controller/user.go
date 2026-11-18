@@ -480,6 +480,20 @@ func canManageTargetRole(myRole int, targetRole int) bool {
 	return myRole == common.RoleRootUser || myRole > targetRole
 }
 
+// requireCredentialResetPermission refuses to reset another user's password,
+// 2FA or passkey unless the operator may view recharge records (billing:read).
+// A reset lets the operator sign in as that user and read the user's own top-up
+// orders and recharge logs, so a deputy admin, and an admin whose recharge
+// permissions root removed, never resets them. Clearing a sign-in binding
+// stays allowed: it removes a way to sign in and never adds one.
+func requireCredentialResetPermission(c *gin.Context) bool {
+	if authz.Can(c.GetInt("id"), c.GetInt("role"), authz.BillingRead) {
+		return true
+	}
+	common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage("Unauthorized, insufficient privileges"))
+	return false
+}
+
 func GetUser(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -795,6 +809,9 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	updatePassword := updatedUser.Password != ""
+	if updatePassword && !requireCredentialResetPermission(c) {
+		return
+	}
 	auditParams := map[string]any{
 		"username": originUser.Username,
 		"id":       updatedUser.Id,

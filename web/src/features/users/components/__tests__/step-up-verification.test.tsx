@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Row } from '@tanstack/react-table'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useEffect } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -30,6 +36,7 @@ import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 import type { User } from '../../types'
 import { DataTableRowActions } from '../data-table-row-actions'
 import { UsersDeleteDialog } from '../users-delete-dialog'
+import { UsersMutateDrawer } from '../users-mutate-drawer'
 import { UsersProvider, useUsers } from '../users-provider'
 
 const target: User = {
@@ -335,4 +342,144 @@ it('an admin with billing read opens the subscriptions of a user', async () => {
   expect(
     await screen.findByRole('dialog', { name: 'User Subscription Management' })
   ).toBeInTheDocument()
+})
+
+// A reset password, passkey or 2FA lets the operator sign in as the user and
+// read the user's own recharge records, so the resets need billing:read.
+it.each(withoutRecharge)(
+  '%s is offered neither a passkey nor a 2FA reset',
+  async (_kind, viewer) => {
+    mockVerification('admin.user.manage', 'manage-proof')
+    await openRowMenu(viewer, target)
+
+    expect(
+      screen.queryByRole('menuitem', { name: 'Reset Passkey' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Reset 2FA' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeVisible()
+  }
+)
+
+it('an admin with billing read resets the 2FA of a user with a proof bound to that user', async () => {
+  const proof = mockVerification('admin.user.2fa.disable', 'twofa-proof')
+  const post = vi.spyOn(api, 'post').mockResolvedValue(proof)
+  const del = vi
+    .spyOn(api, 'delete')
+    .mockResolvedValue({ data: { success: true } })
+  await openRowMenu(adminViewer('admin'), target)
+  expect(screen.getByRole('menuitem', { name: 'Reset Passkey' })).toBeVisible()
+
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Reset 2FA' }))
+  await userEvent.click(
+    within(await screen.findByRole('alertdialog')).getByRole('button', {
+      name: 'Reset 2FA',
+    })
+  )
+  await completeTwoFactorVerification()
+
+  await waitFor(() =>
+    expect(del).toHaveBeenCalledWith(
+      '/api/user/2/2fa',
+      expect.objectContaining({
+        headers: { 'X-Security-Proof': 'twofa-proof' },
+        singleUseAuthorization: true,
+      })
+    )
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'admin.user.2fa.disable',
+      context: { user_id: 2 },
+    }),
+    expect.anything()
+  )
+})
+
+async function openEditDrawer(viewer: AuthUser) {
+  useAuthStore.getState().auth.setUser(viewer)
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/verify/methods') {
+      return {
+        data: {
+          success: true,
+          data: {
+            scope: 'admin.user.update',
+            methods: [{ method: '2fa', available: true }],
+            oauth_providers: [],
+            password_encryption_enabled: false,
+          },
+        },
+      }
+    }
+    if (url === '/api/group/') {
+      return { data: { success: true, data: ['default'] } }
+    }
+    if (url === '/api/authz/catalog') {
+      return { data: { success: true, data: { resources: [], roles: [] } } }
+    }
+    return { data: { success: true, data: target } }
+  })
+  renderInProvider(
+    <UsersMutateDrawer
+      open
+      onOpenChange={() => undefined}
+      currentRow={target}
+    />
+  )
+  await screen.findByDisplayValue('Managed user')
+}
+
+it.each(withoutRecharge)(
+  '%s edits a user without a password field',
+  async (_kind, viewer) => {
+    await openEditDrawer(viewer)
+
+    expect(screen.queryByLabelText('Password')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeVisible()
+  }
+)
+
+it('an admin with billing read resets the password of a user with a proof bound to that user', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        proof_token: 'update-proof',
+        method: '2fa',
+        scope: 'admin.user.update',
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+      },
+    },
+  })
+  await openEditDrawer(adminViewer('admin'))
+
+  await userEvent.type(screen.getByLabelText('Password'), 'a-new-password')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(put).not.toHaveBeenCalled()
+  await completeTwoFactorVerification()
+
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(
+      '/api/user/',
+      expect.objectContaining({ id: 2, password: 'a-new-password' }),
+      expect.objectContaining({
+        headers: { 'X-Security-Proof': 'update-proof' },
+        singleUseAuthorization: true,
+      })
+    )
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'admin.user.update',
+      context: { user_id: 2 },
+    }),
+    expect.anything()
+  )
 })

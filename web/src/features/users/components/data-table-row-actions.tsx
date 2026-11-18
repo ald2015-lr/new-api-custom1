@@ -208,6 +208,13 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     ADMIN_PERMISSION_RESOURCES.BILLING,
     ADMIN_PERMISSION_ACTIONS.READ
   )
+  // Resetting a passkey or 2FA helps the operator sign in as the user and read
+  // the user's own recharge records, so it needs billing:read (server-enforced).
+  const canResetCredentials = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
 
   if (isUserDeleted(user)) {
     return null
@@ -316,33 +323,37 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuItem>
         )}
 
-        <DropdownMenuSeparator />
+        {canResetCredentials && (
+          <>
+            <DropdownMenuSeparator />
 
-        <DropdownMenuItem
-          onSelect={(event) => {
-            event.preventDefault()
-            setResetPasskeyOpen(true)
-          }}
-          disabled={isRoot}
-        >
-          {t('Reset Passkey')}
-          <DropdownMenuShortcut>
-            <KeyRound size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault()
+                setResetPasskeyOpen(true)
+              }}
+              disabled={isRoot}
+            >
+              {t('Reset Passkey')}
+              <DropdownMenuShortcut>
+                <KeyRound size={16} />
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
 
-        <DropdownMenuItem
-          onSelect={(event) => {
-            event.preventDefault()
-            setResetTwoFAOpen(true)
-          }}
-          disabled={isRoot}
-        >
-          {t('Reset 2FA')}
-          <DropdownMenuShortcut>
-            <ShieldAlert size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault()
+                setResetTwoFAOpen(true)
+              }}
+              disabled={isRoot}
+            >
+              {t('Reset 2FA')}
+              <DropdownMenuShortcut>
+                <ShieldAlert size={16} />
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
+          </>
+        )}
 
         <DropdownMenuSeparator />
 
@@ -358,29 +369,33 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         </DropdownMenuItem>
       </DataTableRowActionMenu>
 
-      <ConfirmDialog
-        open={resetPasskeyOpen && !verificationActive}
-        onOpenChange={setResetPasskeyOpen}
-        title={t('Reset Passkey')}
-        desc={t(
-          'Reset Passkey for {{username}}? The user will need to register a new Passkey before using passwordless login.',
-          { username: user.username }
-        )}
-        confirmText={t('Reset Passkey')}
-        handleConfirm={handleResetPasskey}
-      />
+      {canResetCredentials && (
+        <>
+          <ConfirmDialog
+            open={resetPasskeyOpen && !verificationActive}
+            onOpenChange={setResetPasskeyOpen}
+            title={t('Reset Passkey')}
+            desc={t(
+              'Reset Passkey for {{username}}? The user will need to register a new Passkey before using passwordless login.',
+              { username: user.username }
+            )}
+            confirmText={t('Reset Passkey')}
+            handleConfirm={handleResetPasskey}
+          />
 
-      <ConfirmDialog
-        open={resetTwoFAOpen && !verificationActive}
-        onOpenChange={setResetTwoFAOpen}
-        title={t('Reset Two-Factor Authentication')}
-        desc={t(
-          'Reset 2FA for {{username}}? The user must set up 2FA again to continue using it.',
-          { username: user.username }
-        )}
-        confirmText={t('Reset 2FA')}
-        handleConfirm={handleResetTwoFA}
-      />
+          <ConfirmDialog
+            open={resetTwoFAOpen && !verificationActive}
+            onOpenChange={setResetTwoFAOpen}
+            title={t('Reset Two-Factor Authentication')}
+            desc={t(
+              'Reset 2FA for {{username}}? The user must set up 2FA again to continue using it.',
+              { username: user.username }
+            )}
+            confirmText={t('Reset 2FA')}
+            handleConfirm={handleResetTwoFA}
+          />
+        </>
+      )}
 
       <UserBindingDialog
         open={bindingDialogOpen}
