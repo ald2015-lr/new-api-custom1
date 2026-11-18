@@ -30,6 +30,7 @@ const (
 	ModerationMaxCharsMin           = 1000
 	ModerationMaxCharsMax           = 200000
 	ModerationTimeoutSecondsDefault = 10
+	ModerationTimeoutSecondsMin     = 1
 	ModerationTimeoutSecondsMax     = 60
 	ModerationRulesMax              = 100
 	ModerationRegexRulesMax         = 30
@@ -190,7 +191,7 @@ func (s *ChannelOtherSettings) EffectiveModerationMaxChars() int {
 // EffectiveModerationTimeout is ModerationTimeoutSeconds, or
 // ModerationTimeoutSecondsDefault when it is unset or out of range.
 func (s *ChannelOtherSettings) EffectiveModerationTimeout() time.Duration {
-	if s == nil || s.ModerationTimeoutSeconds < 1 || s.ModerationTimeoutSeconds > ModerationTimeoutSecondsMax {
+	if s == nil || s.ModerationTimeoutSeconds < ModerationTimeoutSecondsMin || s.ModerationTimeoutSeconds > ModerationTimeoutSecondsMax {
 		return ModerationTimeoutSecondsDefault * time.Second
 	}
 	return time.Duration(s.ModerationTimeoutSeconds) * time.Second
@@ -216,8 +217,8 @@ func (s *ChannelOtherSettings) ValidateModeration() error {
 	if v := s.ModerationMaxChars; v != 0 && (v < ModerationMaxCharsMin || v > ModerationMaxCharsMax) {
 		return fmt.Errorf("moderation_max_chars must be 0 or between %d and %d", ModerationMaxCharsMin, ModerationMaxCharsMax)
 	}
-	if v := s.ModerationTimeoutSeconds; v != 0 && (v < 1 || v > ModerationTimeoutSecondsMax) {
-		return fmt.Errorf("moderation_timeout_seconds must be 0 or between 1 and %d", ModerationTimeoutSecondsMax)
+	if v := s.ModerationTimeoutSeconds; v != 0 && (v < ModerationTimeoutSecondsMin || v > ModerationTimeoutSecondsMax) {
+		return fmt.Errorf("moderation_timeout_seconds must be 0 or between %d and %d", ModerationTimeoutSecondsMin, ModerationTimeoutSecondsMax)
 	}
 	for i, category := range s.ModerationCategories {
 		if !slices.Contains(ModerationCategoryNames, category) {

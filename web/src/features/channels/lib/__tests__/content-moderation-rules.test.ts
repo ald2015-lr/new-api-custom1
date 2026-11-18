@@ -30,9 +30,12 @@ import {
   MODERATION_RULE_NAME_MAX,
   MODERATION_RULE_PATTERN_MAX,
   MODERATION_RULES_MAX,
+  MODERATION_SETTINGS_KEYS,
   MODERATION_TIMEOUT_SECONDS_DEFAULT,
   MODERATION_TIMEOUT_SECONDS_MAX,
+  MODERATION_TIMEOUT_SECONDS_MIN,
 } from '../../constants'
+import type { ModerationRule } from '../../types'
 import {
   isValidModerationMaxChars,
   isValidModerationTimeout,
@@ -54,15 +57,25 @@ function rule(
   }
 }
 
-test('the moderation defaults and bounds of the form are the server’s', () => {
-  const source = readFileSync(
-    resolve(
-      import.meta.dirname,
-      '../../../../../..',
-      'relaykit/dto/channel_moderation.go'
-    ),
+// The server owns the moderation settings; the form mirrors them. These
+// read the server's source so the two cannot drift apart.
+function serverSource(path: string): string {
+  return readFileSync(
+    resolve(import.meta.dirname, '../../../../../..', path),
     'utf8'
   )
+}
+
+function goJsonTags(source: string, type: string): string[] {
+  const body =
+    source.match(
+      new RegExp(`type ${type} struct \\{([\\s\\S]*?)\\n\\}`)
+    )?.[1] ?? ''
+  return [...body.matchAll(/json:"([^",]+)/g)].map(([, tag]) => tag)
+}
+
+test('the moderation defaults and bounds of the form are the server’s', () => {
+  const source = serverSource('relaykit/dto/channel_moderation.go')
   const constants = Object.fromEntries(
     [...source.matchAll(/^\s*(Moderation\w+)\s*=\s*(\d+)/gm)].map(
       ([, name, value]) => [name, Number(value)]
@@ -73,12 +86,43 @@ test('the moderation defaults and bounds of the form are the server’s', () => 
     ModerationMaxCharsMin: MODERATION_MAX_CHARS_MIN,
     ModerationMaxCharsMax: MODERATION_MAX_CHARS_MAX,
     ModerationTimeoutSecondsDefault: MODERATION_TIMEOUT_SECONDS_DEFAULT,
+    ModerationTimeoutSecondsMin: MODERATION_TIMEOUT_SECONDS_MIN,
     ModerationTimeoutSecondsMax: MODERATION_TIMEOUT_SECONDS_MAX,
     ModerationRulesMax: MODERATION_RULES_MAX,
     ModerationRegexRulesMax: MODERATION_REGEX_RULES_MAX,
     ModerationRulePatternMax: MODERATION_RULE_PATTERN_MAX,
     ModerationRuleNameMax: MODERATION_RULE_NAME_MAX,
   })
+})
+
+test('the settings keys the form writes and strips are the server’s', () => {
+  const tags = goJsonTags(
+    serverSource('relaykit/dto/channel_settings.go'),
+    'ChannelOtherSettings'
+  )
+  const moderationTags = tags.filter((tag) => tag.startsWith('moderation_'))
+  expect([...moderationTags, 'send_safety_identifier'].sort()).toEqual(
+    [...MODERATION_SETTINGS_KEYS].sort()
+  )
+  expect(tags).toContain('send_safety_identifier')
+})
+
+test('a saved custom rule has the server’s fields and rule types', () => {
+  const source = serverSource('relaykit/dto/channel_moderation.go')
+  const saved = {
+    name: 'Leak',
+    type: 'regex',
+    pattern: 'cot',
+    case_sensitive: true,
+  } satisfies Required<ModerationRule>
+  expect(goJsonTags(source, 'ModerationRule').sort()).toEqual(
+    Object.keys(saved).sort()
+  )
+  const types = [
+    ...source.matchAll(/^\s*ModerationRuleType\w+\s*=\s*"([^"]*)"/gm),
+  ].map(([, value]) => value)
+  const formTypes = ['keyword', 'regex'] satisfies ModerationRule['type'][]
+  expect(types.sort()).toEqual(formTypes)
 })
 
 describe('isValidModerationMaxChars', () => {
@@ -239,6 +283,35 @@ describe('readModerationRuleServerError', () => {
       error:
         'moderation_rules[1].pattern is not a valid regular expression: error parsing regexp',
     })
+  })
+
+  test('every rule error the server sends is mapped onto its row and cell, and table errors are not', () => {
+    const source = serverSource('relaykit/dto/channel_moderation.go')
+    const formats = [
+      ...source.matchAll(/fmt\.Errorf\("(moderation_rules[^"]*)"/g),
+    ].map(([, format]) => format)
+    const rowFormats = formats.filter((format) =>
+      format.startsWith('moderation_rules[%d].')
+    )
+    expect(rowFormats.length).toBeGreaterThanOrEqual(10)
+    for (const format of formats) {
+      const message = format
+        .replaceAll('%d', '7')
+        .replaceAll('%q', '"x"')
+        .replaceAll('%s', 'x')
+      const error = new Error(`Invalid channel settings format: ${message}`, {
+        cause: {
+          success: false,
+          message: `Invalid channel settings format: ${message}`,
+          message_key: 'Invalid channel settings format: {{error}}',
+          message_params: { error: message },
+        },
+      })
+      const field = /^moderation_rules\[%d\]\.(\w+)/.exec(format)?.[1]
+      expect(readModerationRuleServerError(error), format).toEqual(
+        field ? { index: 7, field, error: message } : null
+      )
+    }
   })
 
   test('other settings errors are not about a rule', () => {

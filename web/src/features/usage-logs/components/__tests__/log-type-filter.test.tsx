@@ -16,6 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createMemoryHistory,
@@ -41,6 +44,7 @@ import { Route as UsageLogsRoute } from '@/routes/_authenticated/usage-logs/$sec
 import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
+import { LOG_TYPE_ENUM } from '../../constants'
 import { usageLogSchema } from '../../data/schema'
 import { CommonLogsFilterBar } from '../common-logs-filter-bar'
 import { UsageLogsProvider, useUsageLogsContext } from '../usage-logs-provider'
@@ -370,6 +374,19 @@ it.each([
     expect(router.state.location.search).toMatchObject({ type: ['100'] })
   }
 )
+
+it('Moderation filters on the type the server stores for a moderation rejection', () => {
+  const source = readFileSync(
+    resolve(
+      import.meta.dirname,
+      '../../../../../..',
+      'model/log_moderation.go'
+    ),
+    'utf8'
+  )
+  const value = /^const LogTypeModeration = (\d+)$/m.exec(source)?.[1]
+  expect(Number(value)).toBe(LOG_TYPE_ENUM.MODERATION)
+})
 
 it('a user viewing their own logs is offered Moderation', async () => {
   await renderFilter({ user: { id: 3, username: 'user', role: ROLE.USER } })

@@ -192,6 +192,13 @@ describe('content moderation audit and probe', () => {
     expect(goStringConstants(audit(), prefix).sort()).toEqual(keysOf(labels))
   })
 
+  test('the rule kinds the log details tell apart are the server’s', () => {
+    const kinds = ['custom', 'preset'] satisfies ModerationAuditRule['kind'][]
+    expect(goStringConstants(audit(), 'ModerationRuleKind').sort()).toEqual(
+      kinds
+    )
+  })
+
   test('the audit the log details read has the server’s fields', () => {
     expect(goJsonTags(audit(), 'ModerationAudit')).toEqual(keysOf(AUDIT))
     expect(goJsonTags(audit(), 'ModerationAuditRule')).toEqual(
@@ -210,6 +217,66 @@ describe('content moderation audit and probe', () => {
       .join('\n')
     expect(goJsonTags(source, 'ProbeResult')).toEqual(keysOf(PROBE))
   })
+
+  test('the probe the channel form posts to is the server’s route, with the channel test’s permission', () => {
+    const routes = serverSource('router/channel-router.go')
+    expect(routes).toMatch(
+      /\{method: http\.MethodPost, path: "\/:id\/moderation_test", permission: authz\.ChannelOperate, handler: controller\.TestChannelModeration\}/
+    )
+    expect(routes).toMatch(
+      /\{method: http\.MethodGet, path: "\/test\/:id", permission: authz\.ChannelOperate,/
+    )
+  })
+})
+
+describe('content moderation messages of the server', () => {
+  const localesDir = resolve(import.meta.dirname, '../../i18n/locales')
+  const locales = readdirSync(localesDir)
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => ({
+      file,
+      keys: new Set(
+        Object.keys(
+          (
+            JSON.parse(readFileSync(resolve(localesDir, file), 'utf8')) as {
+              translation: Record<string, string>
+            }
+          ).translation
+        )
+      ),
+    }))
+
+  test.each([
+    [
+      'the content of a moderation log row',
+      'relay/moderation/moderation.go',
+      /"(Rejected[^"]*)"/g,
+      4,
+    ],
+    [
+      'a refused moderation endpoint test',
+      'controller/channel_moderation.go',
+      /common\.ApiErrorT\(c, "([^"]+)"/g,
+      4,
+    ],
+  ])(
+    'every key of %s is translated in all seven locales',
+    (_what, path, pattern, count) => {
+      const keys = [
+        ...new Set(
+          [...serverSource(path).matchAll(pattern)].map(([, key]) => key)
+        ),
+      ]
+      expect(keys).toHaveLength(count)
+      expect(locales).toHaveLength(7)
+      for (const locale of locales) {
+        expect(
+          keys.filter((key) => !locale.keys.has(key)),
+          locale.file
+        ).toEqual([])
+      }
+    }
+  )
 })
 
 describe('moderationLabel', () => {
