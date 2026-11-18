@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Loader2, RefreshCw } from 'lucide-react'
-import { useId, type ReactNode } from 'react'
+import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -36,14 +36,35 @@ type RegisterCaptchaFieldProps = {
 export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
   const { t } = useTranslation()
   const inputId = useId()
+  const inputRef = useRef<HTMLInputElement>(null)
+  // Set when focusing the answer replaced an expired challenge.
+  const refocusAfterLoad = useRef(false)
   const challenge = props.captcha.challenge
+  const isLoading = props.captcha.isLoading
+
+  useEffect(() => {
+    if (isLoading || !refocusAfterLoad.current) return
+    refocusAfterLoad.current = false
+    // The field lost the focus while it was disabled; give it back unless
+    // the user moved on to another control meanwhile.
+    const active = document.activeElement
+    if (!active || active === document.body) inputRef.current?.focus()
+  }, [isLoading])
 
   let preview: ReactNode = (
     <span className='text-muted-foreground text-xs'>
       {t('Click to refresh')}
     </span>
   )
-  if (challenge) {
+  if (isLoading) {
+    preview = <Loader2 className='size-4 animate-spin' aria-hidden='true' />
+  } else if (challenge && props.captcha.expired) {
+    preview = (
+      <span className='text-muted-foreground flex flex-col text-xs leading-tight'>
+        <span>{t('Expired')}</span> <span>{t('Click to refresh')}</span>
+      </span>
+    )
+  } else if (challenge) {
     preview = (
       <img
         src={challenge.image}
@@ -53,8 +74,6 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
         className='h-10 w-[120px] object-contain'
       />
     )
-  } else if (props.captcha.isLoading) {
-    preview = <Loader2 className='size-4 animate-spin' aria-hidden='true' />
   }
 
   return (
@@ -62,6 +81,7 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
       <Label htmlFor={inputId}>{t('Captcha')}</Label>
       <div className='flex items-center gap-2'>
         <Input
+          ref={inputRef}
           id={inputId}
           inputMode='numeric'
           maxLength={3}
@@ -69,7 +89,13 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
           placeholder={t('Enter the result')}
           value={props.captcha.answer}
           onChange={(event) => props.captcha.setAnswer(event.target.value)}
-          disabled={props.disabled}
+          onFocus={() => {
+            if (props.captcha.refreshIfExpired()) {
+              refocusAfterLoad.current = true
+            }
+          }}
+          // Nothing typed while a new image loads can belong to it.
+          disabled={props.disabled || isLoading}
           className='h-10 min-w-0 flex-1'
         />
         <Button
@@ -92,7 +118,7 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
           disabled={props.disabled}
         >
           <RefreshCw
-            className={cn(props.captcha.isLoading && 'animate-spin')}
+            className={cn(isLoading && 'animate-spin')}
             aria-hidden='true'
           />
         </Button>

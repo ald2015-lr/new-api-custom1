@@ -204,6 +204,7 @@ export function SignUpForm({
 
     setIsLoading(true)
     let outcome: unknown
+    let registered = false
     try {
       const res = await register({
         username: data.username,
@@ -217,6 +218,7 @@ export function SignUpForm({
       outcome = res
 
       if (res?.success) {
+        registered = true
         toast.success(t('Account created! Please sign in'))
         redirectToLogin()
       } else {
@@ -230,7 +232,10 @@ export function SignUpForm({
     } finally {
       setIsLoading(false)
       resetTurnstile()
-      registerCaptcha.handleRequestSettled(outcome, Boolean(captchaParams))
+      // The page is left after a registration, so no new captcha is needed.
+      if (!registered) {
+        registerCaptcha.handleRequestSettled(outcome, Boolean(captchaParams))
+      }
     }
   }
 

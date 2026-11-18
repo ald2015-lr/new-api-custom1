@@ -6590,6 +6590,7 @@
     "The bound Store is the parent container for every Pancake product new-api creates from this admin — both the wallet top-up product and any subscription-plan products. One store is enough; pin a different one only if you genuinely run separate Pancake catalogs.": "Cửa hàng đã liên kết là vùng chứa cha cho mọi sản phẩm Pancake mà new-api tạo từ trang quản trị này — bao gồm sản phẩm nạp ví và mọi sản phẩm gói đăng ký. Một cửa hàng là đủ; chỉ ghim cửa hàng khác nếu bạn thực sự vận hành các catalog Pancake riêng.",
     "The button fills in this website and keeps any existing website addresses. Save changes on the settings page to apply.": "Nút này điền trang hiện tại và giữ các địa chỉ đã có. Lưu thay đổi trên trang cài đặt để áp dụng.",
     "The buyer is charged an amount that leaves your net payout equal to the listed price.": "Người mua bị tính một khoản sao cho khoản thanh toán ròng của bạn bằng giá niêm yết.",
+    "The captcha has expired. Please enter the result of the new one.": "Mã captcha đã hết hạn. Vui lòng nhập kết quả của mã mới.",
     "The change succeeded, but the notification email could not be sent.": "Thay đổi đã hoàn tất nhưng không thể gửi email thông báo.",
     "The changelog could not be fetched or parsed. Please try again.": "Không thể tải hoặc phân tích nhật ký thay đổi. Vui lòng thử lại.",
     "The check-in reward of paid users is multiplied by this value and rounded down; 1 = same as free users": "Thưởng điểm danh của người dùng trả phí được nhân với hệ số này và làm tròn xuống; 1 = như người dùng miễn phí",

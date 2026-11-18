@@ -6590,6 +6590,7 @@
     "The bound Store is the parent container for every Pancake product new-api creates from this admin — both the wallet top-up product and any subscription-plan products. One store is enough; pin a different one only if you genuinely run separate Pancake catalogs.": "已绑定店铺是 new-api 从此管理端创建的所有 Pancake 产品的父容器，包括钱包充值产品和订阅套餐产品。一个店铺通常足够；只有在确实运营多个 Pancake 目录时才需要绑定不同店铺。",
     "The button fills in this website and keeps any existing website addresses. Save changes on the settings page to apply.": "点击按钮会填入当前网站，并保留已有的网站地址。回到设置页保存后生效。",
     "The buyer is charged an amount that leaves your net payout equal to the listed price.": "向用户收取上浮后的金额，使扣除手续费后的净收入等于标价。",
+    "The captcha has expired. Please enter the result of the new one.": "图形验证码已过期，请输入新验证码的计算结果。",
     "The change succeeded, but the notification email could not be sent.": "变更已完成，但通知邮件发送失败。",
     "The changelog could not be fetched or parsed. Please try again.": "无法获取或解析更新日志，请重试。",
     "The check-in reward of paid users is multiplied by this value and rounded down; 1 = same as free users": "付费用户的签到奖励乘以此倍率后向下取整；1 表示与免费用户相同",

@@ -6590,6 +6590,7 @@
     "The bound Store is the parent container for every Pancake product new-api creates from this admin — both the wallet top-up product and any subscription-plan products. One store is enough; pin a different one only if you genuinely run separate Pancake catalogs.": "紐付け済みストアは、この管理画面から new-api が作成するすべての Pancake 商品の親コンテナです。ウォレットチャージ商品とサブスクリプションプラン商品が含まれます。通常は 1 つのストアで十分です。別々の Pancake カタログを本当に運用する場合のみ別のストアを固定してください。",
     "The button fills in this website and keeps any existing website addresses. Save changes on the settings page to apply.": "ボタンを押すと現在のサイトが入力され、既存のサイトアドレスは保持されます。設定ページで保存すると反映されます。",
     "The buyer is charged an amount that leaves your net payout equal to the listed price.": "手数料控除後の受取額が表示価格と一致するように、購入者へ上乗せした金額を請求します。",
+    "The captcha has expired. Please enter the result of the new one.": "画像認証の有効期限が切れました。新しい画像の計算結果を入力してください。",
     "The change succeeded, but the notification email could not be sent.": "変更は完了しましたが、通知メールを送信できませんでした。",
     "The changelog could not be fetched or parsed. Please try again.": "変更履歴を取得または解析できませんでした。もう一度お試しください。",
     "The check-in reward of paid users is multiplied by this value and rounded down; 1 = same as free users": "有料ユーザーのチェックイン報酬にこの倍率を掛け、端数を切り捨てます。1 は無料ユーザーと同じ",

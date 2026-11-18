@@ -47,8 +47,10 @@ function isCaptchaRejection(outcome: unknown): boolean {
  * The arithmetic image captcha of the sign-up page.
  *
  * A challenge is single use: the server deletes it on every check, right or
- * wrong, so a new one is fetched after each request that carried it, after a
- * captcha error and when the challenge expires.
+ * wrong, so a new one is fetched after each request that carried it. Nothing
+ * can be answered or sent while it loads. An expired challenge is only marked
+ * as expired; its successor is fetched when the user comes back to the field
+ * or submits, so an idle page does not use up the network's captcha budget.
  */
 export function useRegisterCaptcha() {
   const { status } = useStatus()
@@ -57,27 +59,36 @@ export function useRegisterCaptcha() {
   const [challenge, setChallenge] = useState<RegisterCaptcha | null>(null)
   const [answer, setAnswer] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [expired, setExpired] = useState(false)
   // Only the newest request may update the state; older answers are stale.
   const latestRequest = useRef(0)
+  // Wall-clock expiry, for a timer that fires late in a sleeping tab.
+  const expiresAt = useRef(Number.POSITIVE_INFINITY)
 
   const refresh = useCallback(async () => {
     const request = ++latestRequest.current
+    // The shown challenge is spent or stale: it must not be sent again, and
+    // an answer typed for its image must not go with the next one.
+    setChallenge(null)
     setAnswer('')
+    setExpired(false)
     setIsLoading(true)
     try {
       const res = await getRegisterCaptcha()
       if (request !== latestRequest.current) return
       if (res?.success && res.data) {
+        const seconds = res.data.expires_in
+        expiresAt.current =
+          seconds > 0 ? Date.now() + seconds * 1000 : Number.POSITIVE_INFINITY
         setChallenge(res.data)
+        setAnswer('')
         return
       }
-      setChallenge(null)
       handleServerError(
         createServerError(res, i18next.t('Failed to load the captcha'))
       )
     } catch (error) {
       if (request !== latestRequest.current) return
-      setChallenge(null)
       handleServerError(
         AuthOperationError.from(error, i18next.t('Failed to load the captcha'))
       )
@@ -98,35 +109,58 @@ export function useRegisterCaptcha() {
   useEffect(() => {
     const seconds = challenge?.expires_in ?? 0
     if (!enabled || !(seconds > 0)) return
-    const timer = window.setTimeout(() => void refresh(), seconds * 1000)
+    // Only mark it: fetching here would spend the budget of an idle tab.
+    const timer = window.setTimeout(() => setExpired(true), seconds * 1000)
     return () => window.clearTimeout(timer)
-  }, [enabled, challenge, refresh])
+  }, [enabled, challenge])
+
+  /** Loads a new challenge in place of an expired one; true when it did. */
+  const refreshIfExpired = (): boolean => {
+    if (!challenge || (!expired && Date.now() < expiresAt.current)) {
+      return false
+    }
+    void refresh()
+    return true
+  }
 
   const trimmedAnswer = answer.trim()
   const params: RegisterCaptchaParams | undefined =
-    enabled && challenge
+    enabled && challenge && !expired
       ? { captcha_id: challenge.captcha_id, captcha: trimmedAnswer }
       : undefined
 
-  /** True when the captcha is off or answered; toasts otherwise. */
+  /**
+   * True when the captcha is off or answered; toasts otherwise. An expired
+   * challenge is replaced instead of being sent.
+   */
   const validate = (): boolean => {
-    if (!enabled || (challenge && trimmedAnswer)) return true
+    if (!enabled) return true
+    if (refreshIfExpired()) {
+      toast.error(
+        i18next.t(
+          'The captcha has expired. Please enter the result of the new one.'
+        )
+      )
+      return false
+    }
+    if (challenge && trimmedAnswer) return true
     toast.error(i18next.t('Please complete the captcha.'))
     return false
   }
 
   /**
    * Call after every request that reached the server with its response or
-   * error, and whether it carried the captcha.
+   * error, and whether it carried the captcha. Not needed after a request
+   * that leaves the page.
    */
   const handleRequestSettled = (outcome: unknown, sentCaptcha: boolean) => {
-    const rejected = isCaptchaRejection(outcome)
-    if (rejected && !enabled) {
-      // The cached status predates the captcha being turned on.
+    if (isCaptchaRejection(outcome) && !sentCaptcha) {
+      // The server wants a captcha this page did not send: the cached status
+      // (captcha switch or email verification) predates a settings change.
       void queryClient.invalidateQueries({ queryKey: STATUS_QUERY_KEY })
-      return
     }
-    if (sentCaptcha || rejected) void refresh()
+    // The server spent the challenge it was sent, right or wrong.
+    if (sentCaptcha) void refresh()
   }
 
   return {
@@ -135,9 +169,12 @@ export function useRegisterCaptcha() {
     answer,
     setAnswer,
     isLoading,
+    expired,
+    // A loading challenge is null, so nothing is ready or sent meanwhile.
     ready: !enabled || Boolean(challenge && trimmedAnswer),
     params,
     refresh,
+    refreshIfExpired,
     validate,
     handleRequestSettled,
   }
