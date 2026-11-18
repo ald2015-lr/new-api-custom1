@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
 )
@@ -49,8 +50,9 @@ const (
 )
 
 // adminUserManageActions are the ManageUser actions that change a user's
-// status or role. Quota adjustments are not gated and deletion has its own scope.
-var adminUserManageActions = []string{"disable", "enable", "promote", "demote"}
+// status, role or admin kind (set_deputy / set_admin convert between full and
+// deputy admin). Quota adjustments are not gated and deletion has its own scope.
+var adminUserManageActions = []string{"disable", "enable", "promote", "demote", "set_deputy", "set_admin"}
 
 var (
 	ErrVerificationFailed         = errors.New("Verification failed. Please try again.")
@@ -99,8 +101,11 @@ type AdminUserBindingContext struct {
 	ProviderID  int    `json:"provider_id,omitempty"`
 }
 
+// AdminUserCreateContext binds the role of the created user, and for a deputy
+// admin also admin_role "deputy", so a proof for one kind cannot create the other.
 type AdminUserCreateContext struct {
-	Role int `json:"role"`
+	Role      int    `json:"role"`
+	AdminRole string `json:"admin_role,omitempty"`
 }
 
 // AccessTokenGenerateContext binds a creation proof to the exact grant. Scopes
@@ -222,7 +227,11 @@ func BindVerificationOperation(operation VerificationOperation) (VerificationBin
 		normalized = context
 	case VerificationScopeAdminUserCreate:
 		var context AdminUserCreateContext
-		if len(fields) != 1 || common.Unmarshal(fields["role"], &context.Role) != nil || context.Role < common.RoleAdminUser || !common.IsValidateRole(context.Role) {
+		if (len(fields) != 1 && len(fields) != 2) || fields["role"] == nil || common.Unmarshal(operation.Context, &context) != nil ||
+			context.Role < common.RoleAdminUser || !common.IsValidateRole(context.Role) {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		if len(fields) == 2 && (context.AdminRole != authz.BuiltInRoleDeputy || context.Role != common.RoleAdminUser) {
 			return VerificationBinding{}, ErrVerificationContextInvalid
 		}
 		normalized = context

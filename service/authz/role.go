@@ -3,6 +3,10 @@ package authz
 const (
 	BuiltInRoleRoot  = "root"
 	BuiltInRoleAdmin = "admin"
+	// BuiltInRoleDeputy is the deputy admin: a role-10 user assigned this role
+	// in casbin_rule (see deputy.go). It is never listed in DefaultRoles; its
+	// baseline is the admin baseline without recharge resources.
+	BuiltInRoleDeputy = "deputy"
 )
 
 // RoleSpec describes a role. A superuser role is allowed every permission
@@ -32,6 +36,14 @@ var builtInRoles = []RoleSpec{
 		BuiltIn:     true,
 		Superuser:   false,
 		Sort:        10,
+	},
+	{
+		Key:         BuiltInRoleDeputy,
+		Name:        "Deputy Admin",
+		Description: "Built-in deputy admin authorization role: the admin baseline without recharge permissions",
+		BuiltIn:     true,
+		Superuser:   false,
+		Sort:        20,
 	},
 }
 
@@ -64,6 +76,10 @@ func roleGrants(spec RoleSpec) PermissionsMap {
 	for _, resource := range registry {
 		actions := make(map[string]bool, len(resource.Actions))
 		for _, action := range resource.Actions {
+			if spec.Key == BuiltInRoleDeputy {
+				actions[action.Action] = !resource.Recharge && actionHasRole(action, BuiltInRoleAdmin)
+				continue
+			}
 			actions[action.Action] = spec.Superuser || actionHasRole(action, spec.Key)
 		}
 		grants[resource.Resource] = actions

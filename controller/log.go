@@ -8,13 +8,15 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 )
 
 // logFilterFromQuery reads the log search shared by the log list and the log
-// export. Username and channel are read only for administrators.
+// export. Username and channel are read only for administrators; an
+// administrator without billing:read never sees recharge rows.
 func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -32,6 +34,9 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	if admin {
 		filter.Username = c.Query("username")
 		filter.Channel, _ = strconv.Atoi(c.Query("channel"))
+		if !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.BillingRead) {
+			filter.ExcludeTypes = model.RechargeLogTypes
+		}
 	}
 	return filter
 }

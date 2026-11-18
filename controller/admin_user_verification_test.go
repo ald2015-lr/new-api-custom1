@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -386,4 +387,81 @@ func TestAdminUserVerificationPolicy(t *testing.T) {
 		require.NoError(t, model.DB.Model(&model.AuthFlow{}).Count(&flows).Error)
 		assert.Zero(t, flows)
 	})
+}
+
+// A proof to create a full admin cannot create a deputy admin and the other
+// way round, and the conversion actions need a proof for exactly that action.
+func TestAdminUserProofsBindTheAdminKind(t *testing.T) {
+	_, identity, target := setupAdminUserTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.CasbinRule{}, &model.AuthzRole{}))
+	previousMaster := common.IsMasterNode
+	common.IsMasterNode = true
+	t.Cleanup(func() { common.IsMasterNode = previousMaster })
+	require.NoError(t, authz.Init(model.DB))
+
+	for _, context := range []string{`{"role":10}`, `{"role":100}`, `{"role":10,"admin_role":"deputy"}`} {
+		_, err := service.BindVerificationOperation(service.VerificationOperation{Scope: service.VerificationScopeAdminUserCreate, Context: []byte(context)})
+		assert.NoError(t, err, context)
+	}
+	for _, context := range []string{
+		`{"role":100,"admin_role":"deputy"}`, `{"role":10,"admin_role":"admin"}`, `{"role":10,"admin_role":""}`,
+		`{"admin_role":"deputy"}`, `{"role":10,"admin_role":"deputy","extra":1}`, `{"role":10,"extra":"deputy"}`,
+	} {
+		_, err := service.BindVerificationOperation(service.VerificationOperation{Scope: service.VerificationScopeAdminUserCreate, Context: []byte(context)})
+		assert.ErrorIs(t, err, service.ErrVerificationContextInvalid, context)
+	}
+
+	createProof := func(context string) string {
+		return issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeAdminUserCreate, Context: []byte(context)}, service.VerificationMethodPassword)
+	}
+	const adminBody = `{"username":"proof-admin","password":"admin-password-1","role":10}`
+	const deputyBody = `{"username":"proof-deputy","password":"admin-password-1","role":10,"admin_role":"deputy"}`
+	for _, test := range []struct{ name, body, context string }{
+		{"admin proof for a deputy", deputyBody, `{"role":10}`},
+		{"deputy proof for an admin", adminBody, `{"role":10,"admin_role":"deputy"}`},
+	} {
+		response := adminUserRequest(http.MethodPost, "/api/user/", test.body, createProof(test.context), identity, common.RoleRootUser, nil, CreateUser)
+		assert.Equal(t, http.StatusForbidden, response.Code, test.name)
+		assert.Equal(t, "SECURITY_PROOF_CONTEXT_MISMATCH", decodeSecurityEnrollmentResponse(t, response).Code, test.name)
+	}
+	var count int64
+	require.NoError(t, model.DB.Model(&model.User{}).Where("username IN ?", []string{"proof-admin", "proof-deputy"}).Count(&count).Error)
+	assert.Zero(t, count)
+	response := adminUserRequest(http.MethodPost, "/api/user/", deputyBody, createProof(`{"role":10,"admin_role":"deputy"}`), identity, common.RoleRootUser, nil, CreateUser)
+	require.True(t, decodeSecurityEnrollmentResponse(t, response).Success, response.Body.String())
+	var deputy model.User
+	require.NoError(t, model.DB.Where("username = ?", "proof-deputy").First(&deputy).Error)
+	isDeputy, err := authz.IsDeputy(deputy.Id)
+	require.NoError(t, err)
+	assert.True(t, isDeputy)
+
+	manageProof := func(userID int, action string) string {
+		return issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":%q}`, userID, action))}, service.VerificationMethodPassword)
+	}
+	for _, test := range []struct {
+		name, action, provedAction string
+		userID                     int
+	}{
+		{"promote proof for set_deputy", "set_deputy", "promote", target.Id},
+		{"set_admin proof for set_deputy", "set_deputy", "set_admin", target.Id},
+		{"set_deputy proof for promote", "promote", "set_deputy", target.Id},
+		{"set_deputy proof for set_admin", "set_admin", "set_deputy", deputy.Id},
+	} {
+		response := adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":%q}`, test.userID, test.action), manageProof(test.userID, test.provedAction), identity, common.RoleRootUser, nil, ManageUser)
+		assert.Equal(t, http.StatusForbidden, response.Code, test.name)
+		assert.Equal(t, "SECURITY_PROOF_CONTEXT_MISMATCH", decodeSecurityEnrollmentResponse(t, response).Code, test.name)
+	}
+	stored, err := model.GetUserById(target.Id, false)
+	require.NoError(t, err)
+	assert.Equal(t, common.RoleCommonUser, stored.Role)
+	for userID, want := range map[int]bool{target.Id: false, deputy.Id: true} {
+		isDeputy, err := authz.IsDeputy(userID)
+		require.NoError(t, err)
+		assert.Equal(t, want, isDeputy)
+	}
+	response = adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, target.Id), manageProof(target.Id, "set_deputy"), identity, common.RoleRootUser, nil, ManageUser)
+	require.True(t, decodeSecurityEnrollmentResponse(t, response).Success, response.Body.String())
+	isDeputy, err = authz.IsDeputy(target.Id)
+	require.NoError(t, err)
+	assert.True(t, isDeputy)
 }

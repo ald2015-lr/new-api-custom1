@@ -14,6 +14,9 @@ import (
 var (
 	enforcerMu sync.RWMutex
 	enforcer   *casbin.SyncedEnforcer
+	// policyDB is the database Init loaded the policy from. Deputy assignments
+	// are read from it at decision time (deputy.go), not from the snapshot.
+	policyDB *gorm.DB
 )
 
 const modelText = `
@@ -31,6 +34,10 @@ m = r.sub == p.sub && r.obj == p.obj && r.act == p.act && p.eft == "allow"
 `
 
 func Init(db *gorm.DB) error {
+	enforcerMu.Lock()
+	policyDB = db
+	enforcerMu.Unlock()
+
 	if common.IsMasterNode {
 		if err := seedBuiltInRoles(db); err != nil {
 			return err

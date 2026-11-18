@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
 )
 
@@ -354,6 +355,9 @@ func GetAuditLogs(c *gin.Context) {
 		filter.UserId = c.GetInt("id")
 		filter.Username = ""
 		filter.SelfView = true
+	}
+	if c.FullPath() == "/api/audit" && !authz.Can(c.GetInt("id"), viewerRole, authz.BillingRead) {
+		filter.ExcludeRecharge = true
 	}
 	if !model.ValidAuditCategory(filter.Category) || !model.ValidTokenFingerprint(filter.TokenRef) || !model.ValidTokenFingerprint(filter.ExcludeTokenRef) {
 		common.ApiErrorMsg(c, "Invalid audit filters")

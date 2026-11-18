@@ -45,8 +45,27 @@ type AuditLog struct {
 	Other      AuditOther `json:"other" gorm:"type:json"`
 }
 
+// FailedUserQuotaAdjustmentContent is the content of the audit row of a failed
+// administrator quota adjustment.
+const FailedUserQuotaAdjustmentContent = "Failed user quota adjustment"
+
+// Audit rows about recharges, hidden from viewers without billing:read:
+// administrator quota adjustments and order completion, redemption code and
+// subscription management (by action, and by route for generic, empty-action
+// and access token rows), payment routes, and failed quota adjustments.
+var (
+	rechargeAuditActions        = []string{"user.quota_add", "user.quota_subtract", "user.quota_override", "user.topup_complete"}
+	rechargeAuditActionPrefixes = []string{"redemption.%", "subscription.%"}
+	rechargeAuditRoutePrefixes  = []string{"/api/redemption%", "/api/subscription/%", "/api/user/topup%"}
+	rechargeAuditRoutes         = []string{
+		"/api/user/pay", "/api/user/amount", "/api/user/stripe/pay", "/api/user/stripe/amount", "/api/user/creem/pay",
+		"/api/user/waffo/amount", "/api/user/waffo/pay", "/api/user/waffo-pancake/amount", "/api/user/waffo-pancake/pay",
+	}
+)
+
 type AuditLogFilter struct {
 	SelfView        bool // Server-selected metadata projection, independent of the viewer's actual role.
+	ExcludeRecharge bool // Server-selected: the viewer may not see recharge rows.
 	UserId          int
 	Username        string
 	Category        string
@@ -148,6 +167,12 @@ func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*Audit
 	}
 	if viewerRole < common.RoleRootUser {
 		query = query.Where("actor_role IN ?", []int{common.RoleCommonUser, common.RoleAdminUser})
+	}
+	if filter.ExcludeRecharge {
+		query = query.Where("NOT (action IN ? OR action LIKE ? OR action LIKE ? OR route LIKE ? OR route LIKE ? OR route LIKE ? OR route IN ? OR content = ?)",
+			rechargeAuditActions, rechargeAuditActionPrefixes[0], rechargeAuditActionPrefixes[1],
+			rechargeAuditRoutePrefixes[0], rechargeAuditRoutePrefixes[1], rechargeAuditRoutePrefixes[2],
+			rechargeAuditRoutes, FailedUserQuotaAdjustmentContent)
 	}
 	if filter.UserId > 0 {
 		query = query.Where("user_id = ?", filter.UserId)
