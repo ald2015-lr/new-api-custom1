@@ -135,6 +135,35 @@ func TestChannelValidateSettingsBoundsTheGeminiFreeKeySettings(t *testing.T) {
 	assert.NoError(t, (&Channel{Type: constant.ChannelTypeGemini, OtherSettings: string(defaults)}).ValidateSettings())
 }
 
+// Saving a channel rejects moderation settings that are malformed or of the
+// wrong JSON type, naming the field; a full valid example is accepted.
+func TestChannelValidateSettingsBoundsTheModerationSettings(t *testing.T) {
+	for settings, wantErr := range map[string]string{
+		`{}`:                                                        "",
+		`{"moderation_max_chars":0}`:                                "",
+		`{"moderation_max_chars":999}`:                              "moderation_max_chars must be 0 or between 1000 and 200000",
+		`{"moderation_max_chars":"10000"}`:                          "moderation_max_chars",
+		`{"moderation_timeout_seconds":61}`:                         "moderation_timeout_seconds must be 0 or between 1 and 60",
+		`{"moderation_rules":{}}`:                                   "moderation_rules",
+		`{"moderation_rule_presets":"x"}`:                           "moderation_rule_presets",
+		`{"moderation_rule_presets":[]}`:                            "",
+		`{"moderation_categories":["nsfw"]}`:                        `moderation_categories[0] "nsfw" is not an OpenAI moderation category`,
+		`{"moderation_rules":[{"type":"regex","pattern":"(?=a)"}]}`: "moderation_rules[0].pattern is not a valid regular expression",
+		`{"moderation_enabled":true,"moderation_fail_open":true,"moderation_categories":["sexual","violence"],"moderation_skip_images":true,"moderation_max_chars":20000,"moderation_timeout_seconds":5,"moderation_rule_presets":["en-reveal-cot","zh-reveal-cot"],"moderation_rules":[{"name":"cot","type":"keyword","pattern":"思维链"},{"type":"regex","pattern":"reveal\\s+your","case_sensitive":true}],"send_safety_identifier":true}`: "",
+	} {
+		t.Run(settings[:min(len(settings), 80)], func(t *testing.T) {
+			channel := &Channel{Type: constant.ChannelTypeOpenAI, OtherSettings: settings}
+			err := channel.ValidateSettings()
+			if wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), wantErr)
+		})
+	}
+}
+
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",
