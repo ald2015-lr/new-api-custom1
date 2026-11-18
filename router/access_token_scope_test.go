@@ -4,18 +4,24 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // accessTokenExemptRoutes are /api routes that never reach dashboard
@@ -76,8 +82,11 @@ var accessTokenExemptRoutes = []string{
 // accessTokenHelperRoutes are declared through handlePermissionRoute outside
 // channelPermissionRoutes.
 var accessTokenHelperRoutes = map[string]authz.Permission{
-	"GET /api/task_plugin_options": authz.TaskPluginBind,
-	"GET /api/audit":               authz.AuditRead,
+	"GET /api/task_plugin_options":       authz.TaskPluginBind,
+	"GET /api/audit":                     authz.AuditRead,
+	"GET /api/user/topup":                authz.BillingRead,
+	"POST /api/user/topup/complete":      authz.BillingWrite,
+	"GET /api/user/invite_abuse/preview": authz.BillingRead,
 }
 
 func newAccessTokenScopeTestEngine(t *testing.T) *gin.Engine {
@@ -132,6 +141,12 @@ func TestAccessTokenRouteRulesCoverEveryDashboardRoute(t *testing.T) {
 	permissionRoutes := map[string]authz.Permission{}
 	for _, route := range channelPermissionRoutes {
 		permissionRoutes[route.method+" "+joinPaths("/api/channel", route.path)] = route.permission
+	}
+	for _, route := range subscriptionAdminPermissionRoutes {
+		permissionRoutes[route.method+" "+joinPaths("/api/subscription/admin", route.path)] = route.permission
+	}
+	for _, route := range redemptionPermissionRoutes {
+		permissionRoutes[route.method+" "+joinPaths("/api/redemption", route.path)] = route.permission
 	}
 	for key, permission := range accessTokenHelperRoutes {
 		permissionRoutes[key] = permission
@@ -199,5 +214,116 @@ func TestAccessTokenVerificationScopesAreAllListed(t *testing.T) {
 	for _, scope := range scopes {
 		_, listed := service.AccessTokenVerificationScope(scope)
 		assert.True(t, listed, "verification scope %s has no access token rule", scope)
+	}
+}
+
+// setupRouterAuthzTest points the models at an empty SQLite database with the
+// dashboard authentication tables and initializes authz on it as the master.
+func setupRouterAuthzTest(t *testing.T) *gorm.DB {
+	t.Helper()
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	previousRedis, previousSecret, previousMaster := common.RedisEnabled, common.SessionSecret, common.IsMasterNode
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/router.db"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuditLog{}, &model.UserAccessToken{}, &model.Option{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	model.DB, model.LOG_DB = db, db
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	common.RedisEnabled = false
+	common.SessionSecret = "router-authz-test-secret"
+	common.IsMasterNode = true
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.SetDatabaseTypes(previousMain, previousLog)
+		common.RedisEnabled, common.SessionSecret, common.IsMasterNode = previousRedis, previousSecret, previousMaster
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
+	require.NoError(t, authz.Init(db))
+	return db
+}
+
+// createRouterTokenUser creates an enabled user of role and a never expiring
+// personal access token granting scopes.
+func createRouterTokenUser(t *testing.T, db *gorm.DB, name string, role int, scopes ...string) (int, string) {
+	t.Helper()
+	user := &model.User{Username: name, Password: "password-placeholder", Role: role, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "router-" + name}
+	require.NoError(t, db.Create(user).Error)
+	suffix, err := common.GenerateRandomCharsKey(43)
+	require.NoError(t, err)
+	raw := model.AccessTokenPrefix + suffix
+	token := &model.UserAccessToken{Name: "router token", TokenHash: model.AccessTokenFingerprint(raw), TokenHint: model.AccessTokenHint(raw)}
+	require.NoError(t, token.SetScopes(scopes))
+	require.NoError(t, model.CreateUserAccessToken(user.Id, token, service.AccessTokenMaxPerUser))
+	return user.Id, raw
+}
+
+func TestAccessTokenCatalogOmitsRechargeScopesForDeputyAdmins(t *testing.T) {
+	db := setupRouterAuthzTest(t)
+	const admin, deputy = 70, 71
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return authz.AssignDeputyInTx(tx, deputy) }))
+
+	catalogResources := func(userID int) map[string][]string {
+		resources := map[string][]string{}
+		for _, group := range service.AccessTokenCatalog(userID, common.RoleAdminUser) {
+			for _, resource := range group.Resources {
+				for _, action := range resource.Actions {
+					resources[resource.Resource] = append(resources[resource.Resource], action.Action)
+				}
+			}
+		}
+		return resources
+	}
+	adminResources := catalogResources(admin)
+	assert.Equal(t, []string{"read", "write"}, adminResources["billing"])
+	assert.Equal(t, []string{"read", "write"}, adminResources["redemption"])
+	deputyResources := catalogResources(deputy)
+	assert.NotContains(t, deputyResources, "billing")
+	assert.NotContains(t, deputyResources, "redemption")
+	assert.Equal(t, adminResources["channel"], deputyResources["channel"])
+	assert.Equal(t, adminResources["user"], deputyResources["user"])
+
+	_, err := service.NormalizeAccessTokenScopes(deputy, common.RoleAdminUser, []string{"user:read", "billing:read"})
+	assert.ErrorIs(t, err, service.ErrAccessTokenScopeForbidden)
+	scopes, err := service.NormalizeAccessTokenScopes(admin, common.RoleAdminUser, []string{"user:read", "billing:read"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"billing:read", "user:read"}, scopes)
+}
+
+// A deputy admin is refused every recharge route through the real router, also
+// with a token that still carries the recharge scopes; admin and root pass.
+func TestRechargeRoutesRefuseDeputyAdmins(t *testing.T) {
+	db := setupRouterAuthzTest(t)
+	scopes := []string{"billing:read", "billing:write", "redemption:read", "redemption:write"}
+	_, rootToken := createRouterTokenUser(t, db, "recharge-root", common.RoleRootUser, scopes...)
+	_, adminToken := createRouterTokenUser(t, db, "recharge-admin", common.RoleAdminUser, scopes...)
+	deputyID, deputyToken := createRouterTokenUser(t, db, "recharge-deputy", common.RoleAdminUser, scopes...)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return authz.AssignDeputyInTx(tx, deputyID) }))
+	engine := newAccessTokenScopeTestEngine(t)
+
+	for _, route := range rechargeRoutes {
+		for _, caller := range []struct {
+			name, token string
+			refused     bool
+		}{{"deputy", deputyToken, true}, {"admin", adminToken, false}, {"root", rootToken, false}} {
+			request := httptest.NewRequest(route.method, strings.ReplaceAll(route.path, ":id", "1"), strings.NewReader("{}"))
+			request.Header.Set("Authorization", "Bearer "+caller.token)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			name := caller.name + " " + route.method + " " + route.path
+			if caller.refused {
+				assert.Equal(t, http.StatusForbidden, response.Code, name)
+				assert.Contains(t, response.Body.String(), "Unauthorized, insufficient privileges", name)
+				assert.NotContains(t, response.Body.String(), "ACCESS_TOKEN_SCOPE_DENIED", name)
+				continue
+			}
+			// The handler ran: it answers 200, here with its own error about the
+			// empty test database.
+			assert.Equal(t, http.StatusOK, response.Code, name)
+			assert.NotContains(t, response.Body.String(), "insufficient privileges", name)
+		}
 	}
 }

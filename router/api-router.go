@@ -156,8 +156,8 @@ func SetApiRouter(router *gin.Engine) {
 			adminRoute.Use(middleware.AdminAuth())
 			{
 				adminRoute.GET("/", controller.GetAllUsers)
-				adminRoute.GET("/topup", controller.GetAllTopUps)
-				adminRoute.POST("/topup/complete", controller.AdminCompleteTopUp)
+				handlePermissionRoute(adminRoute, http.MethodGet, "/topup", authz.BillingRead, controller.GetAllTopUps)
+				handlePermissionRoute(adminRoute, http.MethodPost, "/topup/complete", authz.BillingWrite, controller.AdminCompleteTopUp)
 				adminRoute.GET("/search", controller.SearchUsers)
 				adminRoute.GET("/:id/oauth/bindings", controller.GetUserOAuthBindingsByAdmin)
 				adminRoute.DELETE("/:id/oauth/bindings/:provider_id", controller.UnbindCustomOAuthByAdmin)
@@ -173,8 +173,8 @@ func SetApiRouter(router *gin.Engine) {
 				adminRoute.GET("/2fa/stats", controller.Admin2FAStats)
 				adminRoute.DELETE("/:id/2fa", controller.AdminDisable2FA)
 
-				// Invite abuse rule preview
-				adminRoute.GET("/invite_abuse/preview", controller.GetInviteAbusePreview)
+				// Invite abuse rule preview: it reveals who recharged.
+				handlePermissionRoute(adminRoute, http.MethodGet, "/invite_abuse/preview", authz.BillingRead, controller.GetInviteAbusePreview)
 			}
 		}
 
@@ -193,20 +193,8 @@ func SetApiRouter(router *gin.Engine) {
 		}
 		subscriptionAdminRoute := apiRouter.Group("/subscription/admin")
 		subscriptionAdminRoute.Use(middleware.AdminAuth())
-		{
-			subscriptionAdminRoute.GET("/plans", controller.AdminListSubscriptionPlans)
-			subscriptionAdminRoute.POST("/plans", controller.AdminCreateSubscriptionPlan)
-			subscriptionAdminRoute.PUT("/plans/:id", controller.AdminUpdateSubscriptionPlan)
-			subscriptionAdminRoute.PATCH("/plans/:id", controller.AdminUpdateSubscriptionPlanStatus)
-			subscriptionAdminRoute.POST("/bind", controller.AdminBindSubscription)
-			subscriptionAdminRoute.POST("/plans/:id/subscriptions/reset", controller.AdminResetPlanSubscriptions)
-
-			// User subscription management (admin)
-			subscriptionAdminRoute.GET("/users/:id/subscriptions", controller.AdminListUserSubscriptions)
-			subscriptionAdminRoute.POST("/users/:id/subscriptions", controller.AdminCreateUserSubscription)
-			subscriptionAdminRoute.POST("/users/:id/subscriptions/reset", controller.AdminResetUserSubscriptionsByPlan)
-			subscriptionAdminRoute.POST("/user_subscriptions/:id/invalidate", controller.AdminInvalidateUserSubscription)
-			subscriptionAdminRoute.DELETE("/user_subscriptions/:id", controller.AdminDeleteUserSubscription)
+		for _, route := range subscriptionAdminPermissionRoutes {
+			handlePermissionRoute(subscriptionAdminRoute, route.method, route.path, route.permission, route.handler)
 		}
 
 		// Subscription payment callbacks (no auth)
@@ -316,15 +304,8 @@ func SetApiRouter(router *gin.Engine) {
 
 		redemptionRoute := apiRouter.Group("/redemption")
 		redemptionRoute.Use(middleware.AdminAuth())
-		{
-			redemptionRoute.GET("/", controller.GetAllRedemptions)
-			redemptionRoute.GET("/search", controller.SearchRedemptions)
-			redemptionRoute.GET("/:id", controller.GetRedemption)
-			redemptionRoute.POST("/", controller.AddRedemption)
-			redemptionRoute.POST("/batch", controller.DeleteRedemptionBatch)
-			redemptionRoute.PUT("/", controller.UpdateRedemption)
-			redemptionRoute.DELETE("/invalid", controller.DeleteInvalidRedemption)
-			redemptionRoute.DELETE("/:id", controller.DeleteRedemption)
+		for _, route := range redemptionPermissionRoutes {
+			handlePermissionRoute(redemptionRoute, route.method, route.path, route.permission, route.handler)
 		}
 		handlePermissionRoute(apiRouter.Group("", middleware.DisableCache(), middleware.AdminAuth()), http.MethodGet, "/audit", authz.AuditRead, controller.GetAuditLogs)
 		apiRouter.GET("/audit/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetAuditLogs)
@@ -447,4 +428,33 @@ func SetApiRouter(router *gin.Engine) {
 			deploymentsRoute.DELETE("/:id", controller.DeleteDeployment)
 		}
 	}
+}
+
+// subscriptionAdminPermissionRoutes manage plans and user subscriptions: plan
+// prices, gateway product ids, purchases and free grants are recharge data.
+var subscriptionAdminPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/plans", permission: authz.BillingRead, handler: controller.AdminListSubscriptionPlans},
+	{method: http.MethodPost, path: "/plans", permission: authz.BillingWrite, handler: controller.AdminCreateSubscriptionPlan},
+	{method: http.MethodPut, path: "/plans/:id", permission: authz.BillingWrite, handler: controller.AdminUpdateSubscriptionPlan},
+	{method: http.MethodPatch, path: "/plans/:id", permission: authz.BillingWrite, handler: controller.AdminUpdateSubscriptionPlanStatus},
+	{method: http.MethodPost, path: "/bind", permission: authz.BillingWrite, handler: controller.AdminBindSubscription},
+	{method: http.MethodPost, path: "/plans/:id/subscriptions/reset", permission: authz.BillingWrite, handler: controller.AdminResetPlanSubscriptions},
+	{method: http.MethodGet, path: "/users/:id/subscriptions", permission: authz.BillingRead, handler: controller.AdminListUserSubscriptions},
+	{method: http.MethodPost, path: "/users/:id/subscriptions", permission: authz.BillingWrite, handler: controller.AdminCreateUserSubscription},
+	{method: http.MethodPost, path: "/users/:id/subscriptions/reset", permission: authz.BillingWrite, handler: controller.AdminResetUserSubscriptionsByPlan},
+	{method: http.MethodPost, path: "/user_subscriptions/:id/invalidate", permission: authz.BillingWrite, handler: controller.AdminInvalidateUserSubscription},
+	{method: http.MethodDelete, path: "/user_subscriptions/:id", permission: authz.BillingWrite, handler: controller.AdminDeleteUserSubscription},
+}
+
+// redemptionPermissionRoutes manage redemption codes, which are spendable
+// recharge secrets.
+var redemptionPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/", permission: authz.RedemptionRead, handler: controller.GetAllRedemptions},
+	{method: http.MethodGet, path: "/search", permission: authz.RedemptionRead, handler: controller.SearchRedemptions},
+	{method: http.MethodGet, path: "/:id", permission: authz.RedemptionRead, handler: controller.GetRedemption},
+	{method: http.MethodPost, path: "/", permission: authz.RedemptionWrite, handler: controller.AddRedemption},
+	{method: http.MethodPost, path: "/batch", permission: authz.RedemptionWrite, handler: controller.DeleteRedemptionBatch},
+	{method: http.MethodPut, path: "/", permission: authz.RedemptionWrite, handler: controller.UpdateRedemption},
+	{method: http.MethodDelete, path: "/invalid", permission: authz.RedemptionWrite, handler: controller.DeleteInvalidRedemption},
+	{method: http.MethodDelete, path: "/:id", permission: authz.RedemptionWrite, handler: controller.DeleteRedemption},
 }

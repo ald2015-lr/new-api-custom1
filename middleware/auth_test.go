@@ -459,6 +459,26 @@ func TestUserAuthAppliesAccessTokenRouteRules(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, response.Code)
 	assert.NotContains(t, response.Body.String(), "ACCESS_TOKEN_SCOPE_DENIED")
 
+	// A deputy admin's token minted while still a full admin keeps the
+	// billing:read scope, but the permission check refuses it; the same token
+	// of a full admin passes. The deputy's legacy token, which skips scopes, is
+	// refused too.
+	DeclareAccessTokenPermissionRoute(http.MethodGet, "/api/user/topup", authz.BillingRead)
+	router.GET("/api/user/topup", AdminAuth(), RequirePermission(authz.BillingRead), ok)
+	adminBilling, _ := createMiddlewareScopedToken(t, admin.Id, 0, "billing:read")
+	deputyLegacy := "middleware-deputy-legacy-token"
+	deputy := createMiddlewarePATUser(t, "route-rule-deputy", deputyLegacy)
+	require.NoError(t, model.DB.Model(deputy).Update("role", common.RoleAdminUser).Error)
+	deputyBilling, _ := createMiddlewareScopedToken(t, deputy.Id, 0, "billing:read")
+	require.NoError(t, model.DB.Transaction(func(tx *gorm.DB) error { return authz.AssignDeputyInTx(tx, deputy.Id) }))
+	assert.Equal(t, http.StatusOK, middlewareBearerRequest(router, "/api/user/topup", adminBilling).Code)
+	for _, token := range []string{deputyBilling, deputyLegacy} {
+		response = middlewareBearerRequest(router, "/api/user/topup", token)
+		assert.Equal(t, http.StatusForbidden, response.Code)
+		assert.Contains(t, response.Body.String(), "Unauthorized, insufficient privileges")
+		assert.NotContains(t, response.Body.String(), "ACCESS_TOKEN_SCOPE_DENIED")
+	}
+
 	require.NoError(t, model.DB.Model(admin).Update("status", common.UserStatusDisabled).Error)
 	response = middlewareBearerRequest(router, "/api/user/self", profile)
 	assert.Equal(t, http.StatusUnauthorized, response.Code)
