@@ -1,6 +1,7 @@
 package common
 
 import (
+	"crypto/subtle"
 	"strings"
 	"sync"
 	"time"
@@ -9,14 +10,19 @@ import (
 )
 
 type verificationValue struct {
-	code string
-	time time.Time
+	code     string
+	time     time.Time
+	failures int
 }
 
 const (
 	EmailVerificationPurpose = "v"
 	PasswordResetPurpose     = "r"
 )
+
+// verificationMaxFailures is the number of wrong guesses that deletes a stored
+// registration code, after which a new one must be requested.
+const verificationMaxFailures = 5
 
 var verificationMutex sync.Mutex
 var verificationMap map[string]verificationValue
@@ -44,15 +50,37 @@ func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
 	}
 }
 
+// VerifyCodeWithKey reports whether code is the unexpired code stored for
+// key. A correct guess leaves the code as it is; callers delete a code once it
+// has served its purpose.
+//
+// Wrong guesses at a registration code are counted, and the
+// verificationMaxFailures-th one deletes the code: it has only 6 hexadecimal
+// characters. Password reset tokens have 32 random hexadecimal characters, so
+// counting guesses at them would only let anyone who knows an address cancel
+// its reset link.
 func VerifyCodeWithKey(key string, code string, purpose string) bool {
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
-	value, okay := verificationMap[purpose+key]
+	mapKey := purpose + key
+	value, okay := verificationMap[mapKey]
 	now := time.Now()
 	if !okay || int(now.Sub(value.time).Seconds()) >= VerificationValidMinutes*60 {
 		return false
 	}
-	return code == value.code
+	if subtle.ConstantTimeCompare([]byte(code), []byte(value.code)) == 1 {
+		return true
+	}
+	if purpose != EmailVerificationPurpose {
+		return false
+	}
+	value.failures++
+	if value.failures >= verificationMaxFailures {
+		delete(verificationMap, mapKey)
+		return false
+	}
+	verificationMap[mapKey] = value
+	return false
 }
 
 func DeleteKey(key string, purpose string) {

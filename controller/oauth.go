@@ -11,6 +11,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
@@ -318,11 +319,13 @@ func handleOAuthLogin(c *gin.Context, provider oauth.Provider, oauthUser *oauth.
 			common.ApiErrorT(c, "Email address is already in use")
 			return
 		}
-		switch err.(type) {
+		switch typed := err.(type) {
 		case *OAuthUserDeletedError:
 			common.ApiErrorT(c, "User has been deleted")
 		case *OAuthRegistrationDisabledError:
 			common.ApiErrorT(c, "New user registration has been disabled by administrator")
+		case *OAuthRegistrationRateLimitedError:
+			middleware.RejectRegisterAttempt(c, typed.RetryAfter)
 		case *OAuthEmailAlreadyTakenError:
 			common.ApiErrorT(c, "Email address is already in use")
 		case *OAuthLegacyBindingNotConfirmedError:
@@ -479,6 +482,11 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 	if !common.RegisterEnabled {
 		return nil, nil, &OAuthRegistrationDisabledError{}
 	}
+	// A sign-up counts toward the per-network registration limit like a
+	// registration submission; logins of existing accounts never do.
+	if retryAfter := middleware.TakeRegisterAttempt(c); retryAfter > 0 {
+		return nil, nil, &OAuthRegistrationRateLimitedError{RetryAfter: retryAfter}
+	}
 
 	// Set up new user
 	user.Username = provider.GetProviderPrefix() + strconv.Itoa(model.GetMaxUserId()+1)
@@ -499,13 +507,25 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 	} else {
 		user.DisplayName = provider.GetName() + " User"
 	}
+	// The provider email is stored only when the provider vouches for it and it
+	// meets the site's email policy. Otherwise the account starts without an
+	// email, which the user can bind later through the coded binding flow; the
+	// sign-up itself goes on.
 	if oauthUser.Email != "" {
-		user.Email = model.NormalizeEmail(oauthUser.Email)
-		if err := model.EnsureEmailAvailable(user.Email, 0); err != nil {
-			if errors.Is(err, model.ErrEmailAlreadyTaken) {
-				return nil, nil, &OAuthEmailAlreadyTakenError{}
+		email, err := service.ValidateAccountEmail(oauthUser.Email)
+		switch {
+		case !oauthUser.EmailVerified:
+			logger.LogInfo(c.Request.Context(), common.LogText("[OAuth] %s sign-up: provider email not stored because the provider has not verified it", provider.GetName()))
+		case err != nil:
+			logger.LogInfo(c.Request.Context(), common.LogText("[OAuth] %s sign-up: provider email not stored: %s", provider.GetName(), err.Error()))
+		default:
+			user.Email = email
+			if err := model.EnsureEmailAvailable(user.Email, 0); err != nil {
+				if errors.Is(err, model.ErrEmailAlreadyTaken) {
+					return nil, nil, &OAuthEmailAlreadyTakenError{}
+				}
+				return nil, nil, err
 			}
-			return nil, nil, err
 		}
 	}
 	user.Role = common.RoleCommonUser
@@ -576,6 +596,7 @@ func findOrCreateOAuthUser(c *gin.Context, provider oauth.Provider, oauthUser *o
 		user.FinalizeOAuthUserCreation(inviterId)
 	}
 
+	recordRegisterAudit(c, user, loginMethodFromContext(c))
 	return user, nil, nil
 }
 
@@ -606,6 +627,16 @@ type OAuthEmailAlreadyTakenError struct{}
 
 func (e *OAuthEmailAlreadyTakenError) Error() string {
 	return "email is already in use"
+}
+
+// OAuthRegistrationRateLimitedError reports a sign-up refused by the
+// per-network registration limit. RetryAfter is in seconds.
+type OAuthRegistrationRateLimitedError struct {
+	RetryAfter int64
+}
+
+func (e *OAuthRegistrationRateLimitedError) Error() string {
+	return "too many registration attempts from this network"
 }
 
 // OAuthLegacyBindingNotConfirmedError reports a legacy GitHub binding match that

@@ -236,3 +236,59 @@ func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 	assert.Equal(t, "1.5", exported["checkin_setting.paid_multiplier"])
 	assert.Equal(t, "true", exported["checkin_setting.expire_only_when_unused"])
 }
+
+// The registration anti-abuse options are plain options: they are validated
+// before they are saved and take effect as soon as they are applied.
+func TestRegisterProtectionOptionsValidateAndApply(t *testing.T) {
+	invalid := map[string][]string{
+		"RegisterIPRateLimitNum":     {"", "0", "-1", "1001", "1.5", "five"},
+		"RegisterIPRateLimitMinutes": {"", "0", "1441", "15m"},
+		"RegisterIPRateLimitEnabled": {"", "yes"},
+		"RegisterCaptchaEnabled":     {"1"},
+		"EmailQQNumericOnlyEnabled":  {"TRUE"},
+	}
+	for key, values := range invalid {
+		for _, value := range values {
+			assert.Error(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+	assert.EqualError(t, validateOptionValue("RegisterIPRateLimitNum", "0"), "Registration rate limit count must be an integer between 1 and 1000")
+	assert.EqualError(t, validateOptionValue("RegisterIPRateLimitMinutes", "1441"), "Registration rate limit window must be an integer between 1 and 1440 minutes")
+	valid := map[string][]string{
+		"RegisterIPRateLimitNum":     {"1", "5", "1000"},
+		"RegisterIPRateLimitMinutes": {"1", "15", "1440"},
+		"RegisterIPRateLimitEnabled": {"true", "false"},
+		"RegisterCaptchaEnabled":     {"true", "false"},
+		"EmailQQNumericOnlyEnabled":  {"true", "false"},
+	}
+	for key, values := range valid {
+		for _, value := range values {
+			assert.NoError(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+
+	captcha, qq, limitEnabled := common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled, common.RegisterIPRateLimitEnabled
+	limitNum, limitMinutes := common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	t.Cleanup(func() {
+		common.OptionMap = originalMap
+		common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled, common.RegisterIPRateLimitEnabled = captcha, qq, limitEnabled
+		common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = limitNum, limitMinutes
+	})
+	for key, value := range map[string]string{
+		"RegisterCaptchaEnabled":     "false",
+		"EmailQQNumericOnlyEnabled":  "false",
+		"RegisterIPRateLimitEnabled": "false",
+		"RegisterIPRateLimitNum":     "8",
+		"RegisterIPRateLimitMinutes": "30",
+	} {
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	assert.False(t, common.RegisterCaptchaEnabled)
+	assert.False(t, common.EmailQQNumericOnlyEnabled)
+	assert.False(t, common.RegisterIPRateLimitEnabled)
+	assert.Equal(t, 8, common.RegisterIPRateLimitNum)
+	assert.Equal(t, 30, common.RegisterIPRateLimitMinutes)
+	assert.Equal(t, "30", common.OptionMap["RegisterIPRateLimitMinutes"])
+}

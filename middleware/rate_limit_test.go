@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -354,4 +355,150 @@ func TestGlobalWebRateLimitCountsFrontendFilesInStaticBucket(t *testing.T) {
 func emptyFrontendFS(t *testing.T) static.ServeFileSystem {
 	t.Helper()
 	return static.LocalFile(t.TempDir(), false)
+}
+
+// useRegisterRateLimit sets the per-network registration limit for one test.
+func useRegisterRateLimit(t *testing.T, enabled bool, maxRequests int, minutes int) {
+	t.Helper()
+	previousEnabled, previousNum, previousMinutes := common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes
+	common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = enabled, maxRequests, minutes
+	t.Cleanup(func() {
+		common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = previousEnabled, previousNum, previousMinutes
+	})
+}
+
+// useFreshRegisterRateLimiter gives the test an empty in-memory store for the
+// registration limits, so repeated runs in one process do not share counters.
+func useFreshRegisterRateLimiter(t *testing.T) {
+	t.Helper()
+	previousLimiter := registerRateLimiter
+	registerRateLimiter = new(common.InMemoryRateLimiter)
+	t.Cleanup(func() { registerRateLimiter = previousLimiter })
+}
+
+func useMemoryRateLimitBackend(t *testing.T) {
+	t.Helper()
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+	useFreshRegisterRateLimiter(t)
+}
+
+func newRegisterLimitRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	accepted := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	router.POST("/api/user/register", RegisterAttemptRateLimit(), accepted)
+	router.GET("/api/verification", RegisterCodeRateLimit(), accepted)
+	router.GET("/api/captcha", CaptchaRateLimit(), accepted)
+	return router
+}
+
+func performRegisterLimitRequest(router http.Handler, method string, path string, remoteAddr string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, path, nil)
+	request.RemoteAddr = remoteAddr
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestRegisterRateLimitsCountSubmissionsAndCodesSeparately(t *testing.T) {
+	for _, backend := range []struct{ name, clientIP string }{{"redis", "192.0.2.90"}, {"memory", "192.0.2.91"}} {
+		t.Run(backend.name, func(t *testing.T) {
+			var redisServer *miniredis.Miniredis
+			if backend.name == "redis" {
+				redisServer, _ = useRateLimitMiniRedis(t)
+			} else {
+				useMemoryRateLimitBackend(t)
+			}
+			useRegisterRateLimit(t, true, 2, 3)
+			router := newRegisterLimitRouter(t)
+			remoteAddr := backend.clientIP + ":4321"
+
+			for range 2 {
+				assert.Equal(t, http.StatusNoContent, performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", remoteAddr).Code)
+			}
+			limited := performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", remoteAddr)
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.JSONEq(t, `{"success":false,"code":"REGISTER_RATE_LIMITED","message":"Too many registration attempts from your network. Please try again in 3 minutes.","message_key":"Too many registration attempts from your network. Please try again in {{minutes}} minutes.","message_params":{"minutes":3}}`, limited.Body.String())
+			retryAfter, err := strconv.Atoi(limited.Header().Get("Retry-After"))
+			require.NoError(t, err)
+			assert.InDelta(t, 180, retryAfter, 1)
+			assert.Equal(t, "no-store", limited.Header().Get("Cache-Control"))
+
+			// Email code requests have their own counter, and other networks are not affected.
+			for range 2 {
+				assert.Equal(t, http.StatusNoContent, performRegisterLimitRequest(router, http.MethodGet, "/api/verification", remoteAddr).Code)
+			}
+			limited = performRegisterLimitRequest(router, http.MethodGet, "/api/verification", remoteAddr)
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.JSONEq(t, `{"success":false,"code":"REGISTER_CODE_RATE_LIMITED","message":"Too many verification code requests from your network. Please try again in 3 minutes.","message_key":"Too many verification code requests from your network. Please try again in {{minutes}} minutes.","message_params":{"minutes":3}}`, limited.Body.String())
+			assert.Equal(t, http.StatusNoContent, performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", "198.51.100.90:4321").Code)
+
+			if redisServer != nil {
+				key := redisIPRateLimitKey(RegisterAttemptRateLimitMark, backend.clientIP)
+				count, err := redisServer.Get(key)
+				require.NoError(t, err)
+				assert.Equal(t, "3", count, "refused attempts count too")
+				assert.Equal(t, 3*time.Minute, redisServer.TTL(key))
+				assert.True(t, redisServer.Exists(redisIPRateLimitKey(RegisterCodeRateLimitMark, backend.clientIP)))
+			}
+		})
+	}
+}
+
+func TestRegisterRateLimitGroupsIPv6ByPrefixAndFollowsSettings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	useMemoryRateLimitBackend(t)
+	useRegisterRateLimit(t, true, 1, 15)
+	router := newRegisterLimitRouter(t)
+	register := func(remoteAddr string) int {
+		return performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", remoteAddr).Code
+	}
+
+	assert.Equal(t, http.StatusNoContent, register("[2001:db8:7:1::10]:4321"))
+	assert.Equal(t, http.StatusTooManyRequests, register("[2001:db8:7:1:ffff::2]:4321"), "one /64 is one network")
+	assert.Equal(t, http.StatusNoContent, register("[2001:db8:7:2::10]:4321"))
+	assert.Equal(t, http.StatusNoContent, register("[::ffff:192.0.2.92]:4321"))
+	assert.Equal(t, http.StatusTooManyRequests, register("192.0.2.92:4321"), "an IPv4-mapped address is its IPv4 address")
+
+	// The settings are read on every request.
+	common.RegisterIPRateLimitNum = 2
+	assert.Equal(t, http.StatusNoContent, register("192.0.2.92:4321"))
+	assert.Equal(t, http.StatusTooManyRequests, register("192.0.2.92:4321"))
+	common.RegisterIPRateLimitEnabled = false
+	assert.Equal(t, http.StatusNoContent, register("192.0.2.92:4321"))
+}
+
+func TestRegisterRateLimitFallsBackToMemoryWhenRedisFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, redisClient := useRateLimitMiniRedis(t)
+	require.NoError(t, redisClient.Close())
+	useFreshRegisterRateLimiter(t)
+	useRegisterRateLimit(t, true, 1, 15)
+	router := newRegisterLimitRouter(t)
+
+	assert.Equal(t, http.StatusNoContent, performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", "192.0.2.93:4321").Code)
+	limited := performRegisterLimitRequest(router, http.MethodPost, "/api/user/register", "192.0.2.93:4321")
+	assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+	assert.Contains(t, limited.Body.String(), `"code":"REGISTER_RATE_LIMITED"`)
+	assert.Contains(t, limited.Body.String(), `"message_params":{"minutes":15}`)
+}
+
+func TestCaptchaRateLimitAllowsThirtyImagesPerQuarterHour(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redisServer, _ := useRateLimitMiniRedis(t)
+	useRegisterRateLimit(t, false, 1, 1)
+	router := newRegisterLimitRouter(t)
+
+	for range CaptchaRateLimitNum {
+		require.Equal(t, http.StatusNoContent, performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", "192.0.2.94:4321").Code)
+	}
+	limited := performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", "192.0.2.94:4321")
+	assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+	assert.JSONEq(t, `{"success":false,"message":"Too many captcha requests. Please try again later.","message_key":"Too many captcha requests. Please try again later."}`, limited.Body.String())
+	assert.Equal(t, "900", limited.Header().Get("Retry-After"))
+	assert.Equal(t, 15*time.Minute, redisServer.TTL(redisIPRateLimitKey(CaptchaRateLimitMark, "192.0.2.94")))
 }

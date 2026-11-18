@@ -48,6 +48,12 @@ func InitOptionMap() {
 	common.OptionMap["WeChatAuthEnabled"] = strconv.FormatBool(common.WeChatAuthEnabled)
 	common.OptionMap["TurnstileCheckEnabled"] = strconv.FormatBool(common.TurnstileCheckEnabled)
 	common.OptionMap["RegisterEnabled"] = strconv.FormatBool(common.RegisterEnabled)
+	// Registration anti-abuse settings.
+	common.OptionMap["RegisterCaptchaEnabled"] = strconv.FormatBool(common.RegisterCaptchaEnabled)
+	common.OptionMap["EmailQQNumericOnlyEnabled"] = strconv.FormatBool(common.EmailQQNumericOnlyEnabled)
+	common.OptionMap["RegisterIPRateLimitEnabled"] = strconv.FormatBool(common.RegisterIPRateLimitEnabled)
+	common.OptionMap["RegisterIPRateLimitNum"] = strconv.Itoa(common.RegisterIPRateLimitNum)
+	common.OptionMap["RegisterIPRateLimitMinutes"] = strconv.Itoa(common.RegisterIPRateLimitMinutes)
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
@@ -249,6 +255,9 @@ func validateOptionValue(key string, value string) error {
 	if err := operation_setting.ValidateBonusOption(key, value); err != nil {
 		return err
 	}
+	if err := operation_setting.ValidateRegisterProtectionOption(key, value); err != nil {
+		return err
+	}
 	if key == "EmailProvider" || key == "ResendApiKey" || key == "ResendFrom" {
 		if key == "EmailProvider" && value != "smtp" && value != "resend" {
 			return common.NewMessage("Email sending method must be SMTP or Resend")
@@ -444,6 +453,12 @@ func updateOptionMap(key string, value string) (err error) {
 			common.TurnstileCheckEnabled = boolValue
 		case "RegisterEnabled":
 			common.RegisterEnabled = boolValue
+		case "RegisterCaptchaEnabled":
+			common.RegisterCaptchaEnabled = boolValue
+		case "EmailQQNumericOnlyEnabled":
+			common.EmailQQNumericOnlyEnabled = boolValue
+		case "RegisterIPRateLimitEnabled":
+			common.RegisterIPRateLimitEnabled = boolValue
 		case "EmailDomainRestrictionEnabled":
 			common.EmailDomainRestrictionEnabled = boolValue
 		case "EmailAliasRestrictionEnabled":
@@ -666,6 +681,10 @@ func updateOptionMap(key string, value string) (err error) {
 		common.TurnstileSiteKey = value
 	case "TurnstileSecretKey":
 		common.TurnstileSecretKey = value
+	case "RegisterIPRateLimitNum":
+		common.RegisterIPRateLimitNum, _ = strconv.Atoi(value)
+	case "RegisterIPRateLimitMinutes":
+		common.RegisterIPRateLimitMinutes, _ = strconv.Atoi(value)
 	case "QuotaForNewUser":
 		common.QuotaForNewUser, _ = strconv.Atoi(value)
 	case "QuotaForInviter":
