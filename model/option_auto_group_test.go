@@ -175,6 +175,10 @@ func TestValidateOptionValueBonusSettings(t *testing.T) {
 		"InviteRewardExpireDays":                  {"-1", "x"},
 		"checkin_setting.expire_only_when_unused": {"yes", "1", ""},
 		"InviteRewardExpireOnlyWhenUnused":        {"TRUE"},
+		"InviteAbuseBanEnabled":                   {"yes", "1", ""},
+		"InviteAbuseBanThreshold":                 {"", "0", "100001", "1.5", "five"},
+		"InviteAbuseBanMinRedeemQuota":            {"", "-1", "1.5", fmt.Sprint(int64(common.MaxWalletQuota) + 1)},
+		"InviteAbuseBanExemptPaidInviter":         {"yes", "1", "", "TRUE"},
 	}
 	for key, values := range invalid {
 		for _, value := range values {
@@ -189,24 +193,35 @@ func TestValidateOptionValueBonusSettings(t *testing.T) {
 		"InviteRewardExpireDays":                  {"0", "3650"},
 		"checkin_setting.expire_only_when_unused": {"true", "false"},
 		"InviteRewardExpireOnlyWhenUnused":        {"true", "false"},
+		"InviteAbuseBanEnabled":                   {"true", "false"},
+		"InviteAbuseBanThreshold":                 {"1", "5", "100000"},
+		"InviteAbuseBanMinRedeemQuota":            {"0", "500000", fmt.Sprint(int64(common.MaxWalletQuota))},
+		"InviteAbuseBanExemptPaidInviter":         {"true", "false"},
 	}
 	for key, values := range valid {
 		for _, value := range values {
 			assert.NoError(t, validateOptionValue(key, value), "%s=%q", key, value)
 		}
 	}
+	assert.EqualError(t, validateOptionValue("InviteAbuseBanThreshold", "0"), "Invite count threshold must be an integer between 1 and 100000")
+	assert.EqualError(t, validateOptionValue("InviteAbuseBanMinRedeemQuota", "-1"), "Minimum redeemed quota must be a non-negative integer")
+	assert.EqualError(t, validateOptionValue("InviteAbuseBanExemptPaidInviter", "yes"), "Value must be true or false")
 }
 
 // The invite reward options are plain options and the check-in fields are
 // read through the config manager, so a saved value takes effect at once.
 func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 	threshold, days, sliding := common.InviteRechargeThresholdQuota, common.InviteRewardExpireDays, common.InviteRewardExpireOnlyWhenUnused
+	abuseEnabled, abuseThreshold, abuseMinRedeem := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
+	abuseExemptPaid := common.InviteAbuseBanExemptPaidInviter
 	checkin := *operation_setting.GetCheckinSetting()
 	originalMap := common.OptionMap
 	common.OptionMap = map[string]string{}
 	t.Cleanup(func() {
 		common.OptionMap = originalMap
 		common.InviteRechargeThresholdQuota, common.InviteRewardExpireDays, common.InviteRewardExpireOnlyWhenUnused = threshold, days, sliding
+		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = abuseEnabled, abuseThreshold, abuseMinRedeem
+		common.InviteAbuseBanExemptPaidInviter = abuseExemptPaid
 		*operation_setting.GetCheckinSetting() = checkin
 	})
 
@@ -218,6 +233,10 @@ func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 		"checkin_setting.paid_threshold_quota":    "0",
 		"checkin_setting.paid_expire_days":        "14",
 		"checkin_setting.expire_only_when_unused": "true",
+		"InviteAbuseBanEnabled":                   "true",
+		"InviteAbuseBanThreshold":                 "8",
+		"InviteAbuseBanMinRedeemQuota":            "250000",
+		"InviteAbuseBanExemptPaidInviter":         "false",
 	} {
 		require.NoError(t, updateOptionMap(key, value))
 	}
@@ -225,6 +244,8 @@ func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 	assert.Equal(t, 500000, common.InviteRechargeThresholdQuota)
 	assert.Equal(t, 7, common.InviteRewardExpireDays)
 	assert.True(t, common.InviteRewardExpireOnlyWhenUnused)
+	assert.True(t, common.InviteAbuseBanEnabled)
+	assert.Equal(t, InviteAbuseSettings{Threshold: 8, MinRedeemQuota: 250000, ExemptPaidInviter: false}, CurrentInviteAbuseSettings())
 	setting := operation_setting.GetCheckinSetting()
 	assert.Equal(t, 1.5, setting.PaidMultiplier)
 	assert.Zero(t, setting.PaidThresholdQuota)
@@ -235,4 +256,61 @@ func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 	exported := config.GlobalConfig.ExportAllConfigs()
 	assert.Equal(t, "1.5", exported["checkin_setting.paid_multiplier"])
 	assert.Equal(t, "true", exported["checkin_setting.expire_only_when_unused"])
+}
+
+// The registration anti-abuse options are plain options: they are validated
+// before they are saved and take effect as soon as they are applied.
+func TestRegisterProtectionOptionsValidateAndApply(t *testing.T) {
+	assert.False(t, common.RegisterIPRateLimitEnabled, "the per-network limit stays off until an administrator turns it on")
+	invalid := map[string][]string{
+		"RegisterIPRateLimitNum":     {"", "0", "-1", "1001", "1.5", "five"},
+		"RegisterIPRateLimitMinutes": {"", "0", "1441", "15m"},
+		"RegisterIPRateLimitEnabled": {"", "yes"},
+		"RegisterCaptchaEnabled":     {"1"},
+		"EmailQQNumericOnlyEnabled":  {"TRUE"},
+	}
+	for key, values := range invalid {
+		for _, value := range values {
+			assert.Error(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+	assert.EqualError(t, validateOptionValue("RegisterIPRateLimitNum", "0"), "Registration rate limit count must be an integer between 1 and 1000")
+	assert.EqualError(t, validateOptionValue("RegisterIPRateLimitMinutes", "1441"), "Registration rate limit window must be an integer between 1 and 1440 minutes")
+	valid := map[string][]string{
+		"RegisterIPRateLimitNum":     {"1", "5", "1000"},
+		"RegisterIPRateLimitMinutes": {"1", "15", "1440"},
+		"RegisterIPRateLimitEnabled": {"true", "false"},
+		"RegisterCaptchaEnabled":     {"true", "false"},
+		"EmailQQNumericOnlyEnabled":  {"true", "false"},
+	}
+	for key, values := range valid {
+		for _, value := range values {
+			assert.NoError(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+
+	captcha, qq, limitEnabled := common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled, common.RegisterIPRateLimitEnabled
+	limitNum, limitMinutes := common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	t.Cleanup(func() {
+		common.OptionMap = originalMap
+		common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled, common.RegisterIPRateLimitEnabled = captcha, qq, limitEnabled
+		common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = limitNum, limitMinutes
+	})
+	for key, value := range map[string]string{
+		"RegisterCaptchaEnabled":     "false",
+		"EmailQQNumericOnlyEnabled":  "false",
+		"RegisterIPRateLimitEnabled": "true",
+		"RegisterIPRateLimitNum":     "8",
+		"RegisterIPRateLimitMinutes": "30",
+	} {
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	assert.False(t, common.RegisterCaptchaEnabled)
+	assert.False(t, common.EmailQQNumericOnlyEnabled)
+	assert.True(t, common.RegisterIPRateLimitEnabled)
+	assert.Equal(t, 8, common.RegisterIPRateLimitNum)
+	assert.Equal(t, 30, common.RegisterIPRateLimitMinutes)
+	assert.Equal(t, "30", common.OptionMap["RegisterIPRateLimitMinutes"])
 }

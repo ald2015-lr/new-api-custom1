@@ -473,6 +473,11 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   'user.email_binding_resend': 'Email confirmation code resend',
 
   login: 'Logged in successfully via {{method}}',
+  // Sign-up through any method; one with an inviter has its own wording below.
+  'user.register': 'Registered via {{method}}',
+  // Disabled by the invite abuse rule as the inviter; see the invitee wording below.
+  'user.invite_abuse_ban':
+    'Disabled automatically for invite abuse: {{invite_count}} invited users and none of them has recharged',
   // User management
   'user.create': 'Created user {{username}} (role {{role}})',
   'user.update': 'Updated user {{username}} (ID: {{id}})',
@@ -624,7 +629,16 @@ export function renderAuditContent(
     }
     return t('Batch deleted redemption codes (count not recorded)')
   }
-  const template = AUDIT_TEMPLATES[op.action]
+  let template = AUDIT_TEMPLATES[op.action]
+  if (op.action === 'user.register' && Number(op.params?.inviter_id) > 0) {
+    template = 'Registered via {{method}}, invited by user ID {{inviter_id}}'
+  } else if (
+    op.action === 'user.invite_abuse_ban' &&
+    op.params?.kind === 'invitee'
+  ) {
+    template =
+      'Disabled automatically for invite abuse: the {{invite_count}} users invited by user ID {{inviter_id}} have not recharged'
+  }
   if (!template) return null
   const quotaOperation = buildQuotaAuditOperation(
     op.action,

@@ -7,7 +7,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 )
 
-// Option keys of the check-in and invite reward settings that need validation.
+// Option keys of the check-in, invite reward and invite abuse settings that
+// need validation.
 const (
 	CheckinPaidThresholdQuotaOptionKey   = "checkin_setting.paid_threshold_quota"
 	CheckinPaidMultiplierOptionKey       = "checkin_setting.paid_multiplier"
@@ -17,15 +18,25 @@ const (
 	InviteRechargeThresholdQuotaKey      = "InviteRechargeThresholdQuota"
 	InviteRewardExpireDaysKey            = "InviteRewardExpireDays"
 	InviteRewardExpireOnlyWhenUnusedKey  = "InviteRewardExpireOnlyWhenUnused"
+	InviteAbuseBanEnabledKey             = "InviteAbuseBanEnabled"
+	InviteAbuseBanThresholdKey           = "InviteAbuseBanThreshold"
+	InviteAbuseBanMinRedeemQuotaKey      = "InviteAbuseBanMinRedeemQuota"
+	InviteAbuseBanExemptPaidInviterKey   = "InviteAbuseBanExemptPaidInviter"
 )
+
+// InviteAbuseBanOptionKeys are the invite abuse rule's options.
+var InviteAbuseBanOptionKeys = []string{
+	InviteAbuseBanEnabledKey, InviteAbuseBanThresholdKey, InviteAbuseBanMinRedeemQuotaKey, InviteAbuseBanExemptPaidInviterKey,
+}
 
 const (
-	bonusMaxExpireDays     = 3650
-	bonusMaxPaidMultiplier = 100
+	bonusMaxExpireDays         = 3650
+	bonusMaxPaidMultiplier     = 100
+	inviteAbuseBanMaxThreshold = 100000
 )
 
-// ValidateBonusOption checks a check-in or invite reward option before it is
-// saved. Keys it does not know are accepted.
+// ValidateBonusOption checks a check-in, invite reward or invite abuse option
+// before it is saved. Keys it does not know are accepted.
 func ValidateBonusOption(key string, value string) error {
 	switch key {
 	case CheckinPaidThresholdQuotaOptionKey, InviteRechargeThresholdQuotaKey:
@@ -46,9 +57,19 @@ func ValidateBonusOption(key string, value string) error {
 		if err != nil || days < 0 || days > bonusMaxExpireDays {
 			return common.NewMessage("Expiry days must be an integer between 0 and 3650")
 		}
-	case CheckinExpireOnlyWhenUnusedOptionKey, InviteRewardExpireOnlyWhenUnusedKey:
+	case CheckinExpireOnlyWhenUnusedOptionKey, InviteRewardExpireOnlyWhenUnusedKey, InviteAbuseBanEnabledKey, InviteAbuseBanExemptPaidInviterKey:
 		if value != "true" && value != "false" {
 			return common.NewMessage("Value must be true or false")
+		}
+	case InviteAbuseBanThresholdKey:
+		threshold, err := strconv.Atoi(value)
+		if err != nil || threshold < 1 || threshold > inviteAbuseBanMaxThreshold {
+			return common.NewMessage("Invite count threshold must be an integer between 1 and 100000")
+		}
+	case InviteAbuseBanMinRedeemQuotaKey:
+		quota, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || quota < 0 || quota > common.MaxWalletQuota {
+			return common.NewMessage("Minimum redeemed quota must be a non-negative integer")
 		}
 	}
 	return nil

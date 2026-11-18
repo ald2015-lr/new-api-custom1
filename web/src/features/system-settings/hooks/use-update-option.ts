@@ -23,7 +23,11 @@ import { toast } from 'sonner'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
-import { updatePasskeyDomains, updateSystemOption } from '../api'
+import {
+  updateInviteAbuseOptions,
+  updatePasskeyDomains,
+  updateSystemOption,
+} from '../api'
 import type { UpdateOptionRequest, UpdatePasskeyDomainsRequest } from '../types'
 
 // Configuration keys that require status refresh
@@ -49,6 +53,8 @@ const STATUS_RELATED_KEYS = new Set([
   'passkey.origins',
   'QuotaRemindEnabled',
   'QuotaRemindThreshold',
+  'RegisterCaptchaEnabled',
+  'EmailQQNumericOnlyEnabled',
 ])
 
 export function useUpdateOption() {
@@ -80,6 +86,21 @@ export function useUpdateOption() {
     onError: (error: Error) => {
       handleServerError(error, i18next.t('Failed to update setting'))
     },
+  })
+}
+
+/** Saves the invite abuse rule's changed options together, all or none. */
+export function useUpdateInviteAbuseOptions() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (options: Record<string, UpdateOptionRequest['value']>) =>
+      requireServerSuccess(await updateInviteAbuseOptions(options)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['system-options'] })
+      toast.success(i18next.t('Setting updated successfully'))
+    },
+    onError: (error: Error) =>
+      handleServerError(error, i18next.t('Failed to update setting')),
   })
 }
 

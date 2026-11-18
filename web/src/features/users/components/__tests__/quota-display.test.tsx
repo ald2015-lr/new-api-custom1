@@ -254,7 +254,10 @@ function UsersPage() {
   )
 }
 
-async function renderUsersList(emptyInvitation = false) {
+async function renderUsersList(
+  emptyInvitation = false,
+  overrides: Partial<User> = {}
+) {
   useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 100 })
   const usersResponse = {
     data: {
@@ -273,9 +276,13 @@ async function renderUsersList(emptyInvitation = false) {
             created_at: Math.floor(Date.now() / 1000) - 86400,
             last_login_at: Math.floor(Date.now() / 1000) - 20,
             group: 'default',
-            aff_count: emptyInvitation ? 0 : 2,
+            // aff_count only counts rewarded invitations; the list shows
+            // invite_count, the users this user invited.
+            aff_count: emptyInvitation ? 0 : 9,
+            invite_count: emptyInvitation ? 0 : 2,
             aff_history_quota: emptyInvitation ? 0 : 500000,
             inviter_id: emptyInvitation ? 0 : 42,
+            ...overrides,
           },
         ],
         total: 1,
@@ -333,8 +340,65 @@ it('sends balance sorting to the server and keeps invitation details on two line
   expect(
     screen.queryByRole('button', { name: 'Total Used' })
   ).not.toBeInTheDocument()
-  expect(screen.getByText('Inviter ID: 42')).toBeInTheDocument()
-  expect(screen.getByText(/Invited 2 users · Earnings:/)).toBeInTheDocument()
+  const invited = screen.getByRole('button', { name: 'Invited 2 users' })
+  const inviter = screen.getByRole('button', { name: 'Inviter ID: 42' })
+  expect(invited.parentElement).toHaveTextContent(
+    /^Invited 2 users · Earnings: /
+  )
+  expect(invited.parentElement).not.toContainElement(inviter)
+})
+
+it('sends invite count sorting to the server in both directions', async () => {
+  const user = userEvent.setup()
+  const get = await renderUsersList()
+
+  await user.click(screen.getByRole('button', { name: 'Invite Info' }))
+  await user.click(screen.getByRole('menuitem', { name: 'Desc' }))
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/user/', {
+      params: expect.objectContaining({
+        sort_by: 'invite_count',
+        sort_order: 'desc',
+      }),
+    })
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Invite Info' }))
+  await user.click(screen.getByRole('menuitem', { name: 'Asc' }))
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/user/', {
+      params: expect.objectContaining({
+        sort_by: 'invite_count',
+        sort_order: 'asc',
+      }),
+    })
+  )
+})
+
+it.each([
+  ['inviter', /none of the users this account invited has recharged/],
+  ['invitee', /users invited by the same inviter have not recharged/],
+] as const)(
+  'marks a user banned for invite abuse as %s next to the status',
+  async (kind, reason) => {
+    const user = userEvent.setup()
+    await renderUsersList(false, { status: 2, invite_abuse_ban: kind })
+    const row = screen.getByRole('row', {
+      name: /long-user-name-for-table-layout/,
+    })
+
+    const badge = within(row).getByText('Invite abuse')
+    expect(within(row).getByText('Disabled')).toBeInTheDocument()
+
+    await user.hover(badge)
+    expect(await screen.findByText(reason)).toBeInTheDocument()
+  }
+)
+
+it('shows no invite abuse badge for other users', async () => {
+  await renderUsersList()
+
+  expect(screen.queryByText('Invite abuse')).not.toBeInTheDocument()
 })
 
 it('shows balance above usage on mobile cards in Chinese', async () => {

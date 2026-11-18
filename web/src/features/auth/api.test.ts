@@ -17,13 +17,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { act, renderHook } from '@testing-library/react'
+import type { AxiosAdapter } from 'axios'
 import { toast } from 'sonner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { api, type RefreshOutcome } from '@/lib/api'
 import type { AuthBundle } from '@/stores/auth-store'
 
-import { executeLogout } from './api'
+import {
+  executeLogout,
+  getRegisterCaptcha,
+  register,
+  sendEmailVerification,
+} from './api'
 import { useOAuthLogin } from './hooks/use-oauth-login'
 import { consumeOAuthLoginRedirect } from './lib/oauth-callback-mode'
 
@@ -177,5 +183,111 @@ describe('logout coordination', () => {
         refresh: async () => transient,
       })
     ).rejects.toBe(originalError)
+  })
+})
+
+describe('registration requests', () => {
+  const account = {
+    username: 'new-user',
+    password: 'password123',
+    aff_code: 'INVITE',
+  }
+
+  test('sends Turnstile and the captcha as query parameters, not in the body', async () => {
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true, message: '' } })
+
+    await register({
+      ...account,
+      turnstile: 'turnstile-token',
+      captcha_id: 'captcha-id',
+      captcha: '12',
+    })
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/user/register',
+      { ...account, turnstile: 'turnstile-token' },
+      {
+        params: {
+          turnstile: 'turnstile-token',
+          captcha_id: 'captcha-id',
+          captcha: '12',
+        },
+      }
+    )
+  })
+
+  test('registers without captcha parameters when none was answered', async () => {
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true, message: '' } })
+
+    await register(account)
+
+    const config = post.mock.calls[0][2]
+    expect(config?.params).toStrictEqual({
+      turnstile: '',
+      captcha_id: undefined,
+      captcha: undefined,
+    })
+  })
+
+  test('sends the email code request with Turnstile and the captcha', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValue({ data: { success: true, message: '' } })
+
+    await sendEmailVerification('123456789@qq.com', 'turnstile-token', {
+      captcha_id: 'captcha-id',
+      captcha: '7',
+    })
+
+    expect(get).toHaveBeenCalledWith('/api/verification', {
+      params: {
+        email: '123456789@qq.com',
+        turnstile: 'turnstile-token',
+        captcha_id: 'captcha-id',
+        captcha: '7',
+      },
+    })
+  })
+
+  test('fetches a separate captcha for each concurrent refresh', async () => {
+    let issued = 0
+    const adapter = vi.fn<AxiosAdapter>(async (config) => {
+      issued += 1
+      return {
+        data: {
+          success: true,
+          data: {
+            captcha_id: `captcha-${issued}`,
+            image: 'data:image/png;base64,AA==',
+            expires_in: 300,
+          },
+        },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    })
+    const originalAdapter = api.defaults.adapter
+    api.defaults.adapter = adapter
+    try {
+      const [first, second] = await Promise.all([
+        getRegisterCaptcha(),
+        getRegisterCaptcha(),
+      ])
+
+      expect(adapter).toHaveBeenCalledTimes(2)
+      expect(adapter.mock.calls[0][0].url).toBe('/api/captcha')
+      expect([first.data?.captcha_id, second.data?.captcha_id]).toEqual([
+        'captcha-1',
+        'captcha-2',
+      ])
+    } finally {
+      api.defaults.adapter = originalAdapter
+    }
   })
 })

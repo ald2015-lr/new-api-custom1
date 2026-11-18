@@ -82,6 +82,11 @@ func WeChatAuth(c *gin.Context) {
 		}
 	} else {
 		if common.RegisterEnabled {
+			// A sign-up counts toward the per-network registration limit.
+			if retryAfter := middleware.TakeRegisterAttempt(c); retryAfter > 0 {
+				middleware.RejectRegisterAttempt(c, retryAfter)
+				return
+			}
 			user.Username = "wechat_" + strconv.Itoa(model.GetMaxUserId()+1)
 			user.DisplayName = "WeChat User"
 			user.Role = common.RoleCommonUser
@@ -91,6 +96,7 @@ func WeChatAuth(c *gin.Context) {
 				common.ApiError(c, err)
 				return
 			}
+			recordRegisterAudit(c, &user, loginMethodFromContext(c))
 		} else {
 			common.ApiErrorT(c, "New user registration has been disabled by administrator")
 			return

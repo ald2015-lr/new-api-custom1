@@ -75,6 +75,22 @@ var TelegramOAuthEnabled = false
 var TurnstileCheckEnabled = false
 var RegisterEnabled = true
 
+// Registration anti-abuse settings, stored under option keys of the same names.
+// RegisterCaptchaEnabled asks for the arithmetic image captcha before a
+// registration email code is sent (and before registration itself while email
+// verification is off). EmailQQNumericOnlyEnabled accepts only the QQ number
+// as the local part of qq.com addresses. RegisterIPRateLimit* allow each
+// client network RegisterIPRateLimitNum registration submissions and,
+// separately, as many email code requests per RegisterIPRateLimitMinutes.
+// The per-network limit is off until an administrator turns it on: behind a
+// reverse proxy the server does not trust, every visitor has the proxy's
+// address and the limit would close registration for the whole site.
+var RegisterCaptchaEnabled = true
+var EmailQQNumericOnlyEnabled = true
+var RegisterIPRateLimitEnabled = false
+var RegisterIPRateLimitNum = 5
+var RegisterIPRateLimitMinutes = 15
+
 var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
 var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
 var EmailDomainWhitelist = []string{
@@ -148,6 +164,24 @@ var InviteRewardExpireDays = 30
 // InviteRewardExpireOnlyWhenUnused makes invite rewards expire only after
 // InviteRewardExpireDays without any use; every use restarts the period.
 var InviteRewardExpireOnlyWhenUnused = false
+
+// InviteAbuseBanEnabled turns on the invite abuse rule: an inviter with at
+// least InviteAbuseBanThreshold invited users, none of whom has recharged, is
+// disabled together with those users (see model/invite_abuse.go).
+var InviteAbuseBanEnabled = false
+
+// InviteAbuseBanThreshold is the number of invited users (deleted ones
+// included) from which the invite abuse rule checks an inviter.
+var InviteAbuseBanThreshold = 5
+
+// InviteAbuseBanMinRedeemQuota is the redeemed quota from which an invited
+// user's redemption codes count as a recharge for the invite abuse rule.
+var InviteAbuseBanMinRedeemQuota = int(QuotaPerUnit)
+
+// InviteAbuseBanExemptPaidInviter spares from the invite abuse rule an
+// inviter who has recharged, by the same definition as for invited users.
+var InviteAbuseBanExemptPaidInviter = true
+
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false

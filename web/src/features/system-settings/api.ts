@@ -17,10 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type {
+  ClientIpDiagnostics,
   ConfirmPaymentComplianceResponse,
   FetchUpstreamRatiosRequest,
+  InviteAbusePreviewParams,
+  InviteAbusePreviewResponse,
   LogCleanupTask,
   SystemOptionsResponse,
   SystemTaskListResponse,
@@ -44,6 +48,19 @@ export async function updateSystemOption(request: UpdateOptionRequest) {
   return res.data
 }
 
+/**
+ * Save the invite abuse rule's changed options in one request; the server
+ * saves all of them or none.
+ */
+export async function updateInviteAbuseOptions(
+  options: Record<string, UpdateOptionRequest['value']>
+) {
+  const res = await api.put<UpdateOptionResponse>('/api/option/invite_abuse', {
+    options,
+  })
+  return res.data
+}
+
 export async function updatePasskeyDomains(
   request: UpdatePasskeyDomainsRequest
 ) {
@@ -54,6 +71,35 @@ export async function updatePasskeyDomains(
       validateStatus: (status) =>
         (status >= 200 && status < 300) || status === 409,
     }
+  )
+  return res.data
+}
+
+/**
+ * The address the server resolves for the current admin, used to check the
+ * reverse proxy setup before turning on the registration IP limit.
+ */
+export async function getClientIpDiagnostics(): Promise<ClientIpDiagnostics> {
+  const res = await api.get('/api/option/client_ip')
+  const body = requireServerSuccess(res.data) as Record<string, unknown>
+  // Read the usual { success, data } envelope and a bare object alike.
+  const payload =
+    body.data && typeof body.data === 'object'
+      ? (body.data as Record<string, unknown>)
+      : body
+  return {
+    ip: typeof payload.ip === 'string' ? payload.ip : '',
+    trusted_proxies_configured: payload.trusted_proxies_configured === true,
+    // Older servers leave it out.
+    trusted_proxies_catch_all: payload.trusted_proxies_catch_all === true,
+  }
+}
+
+/** Count who the invite abuse rule would disable with these unsaved values. */
+export async function previewInviteAbuseBan(params: InviteAbusePreviewParams) {
+  const res = await api.get<InviteAbusePreviewResponse>(
+    '/api/user/invite_abuse/preview',
+    { params, disableDuplicate: true }
   )
   return res.data
 }

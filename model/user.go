@@ -28,6 +28,10 @@ var userSortColumns = map[string]string{
 	"last_login_at": "last_login_at",
 }
 
+// UserSortByInviteCount sorts users by how many users they invited (users
+// whose inviter_id is the user, deleted ones included; see countedInvitees).
+const UserSortByInviteCount = "invite_count"
+
 type UserSortOptions struct {
 	SortBy    string
 	SortOrder string
@@ -36,7 +40,7 @@ type UserSortOptions struct {
 func NewUserSortOptions(sortBy string, sortOrder string) UserSortOptions {
 	normalizedSortBy := strings.ToLower(strings.TrimSpace(sortBy))
 	normalizedSortOrder := strings.ToLower(strings.TrimSpace(sortOrder))
-	if _, ok := userSortColumns[normalizedSortBy]; !ok {
+	if _, ok := userSortColumns[normalizedSortBy]; !ok && normalizedSortBy != UserSortByInviteCount {
 		normalizedSortBy = "id"
 		normalizedSortOrder = "desc"
 	} else if normalizedSortOrder != "asc" {
@@ -50,6 +54,29 @@ func NewUserSortOptions(sortBy string, sortOrder string) UserSortOptions {
 }
 
 func (options UserSortOptions) Apply(query *gorm.DB) *gorm.DB {
+	if options.SortBy == UserSortByInviteCount {
+		// One grouped scan of the inviter_id index joined to the page query.
+		// Users who invited nobody have no row there; COALESCE turns them into
+		// 0 so NULL ordering, which differs between databases, never applies.
+		// The id tie-breaker shares the expression: a later Order call would
+		// replace an expression ORDER BY. The derived columns have their own
+		// names so the page query's unqualified conditions stay unambiguous.
+		userId := clause.Column{Table: clause.CurrentTable, Name: "id"}
+		inviteCounts := countedInvitees(query.Session(&gorm.Session{NewDB: true})).
+			Select("inviter_id AS invite_user_id, COUNT(*) AS invite_count").
+			Group("inviter_id")
+		direction := "DESC"
+		if options.SortOrder == "asc" {
+			direction = "ASC"
+		}
+		return query.
+			Joins("LEFT JOIN (?) AS user_invite_counts ON user_invite_counts.invite_user_id = ?", inviteCounts, userId).
+			Order(clause.OrderBy{Expression: clause.Expr{
+				SQL:                "COALESCE(user_invite_counts.invite_count, 0) " + direction + ", ? DESC",
+				Vars:               []any{userId},
+				WithoutParentheses: true,
+			}})
+	}
 	columnName, ok := userSortColumns[options.SortBy]
 	if !ok {
 		columnName = "id"
@@ -118,6 +145,8 @@ type User struct {
 	BonusSettledFrom     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_from"` // start of the last settlement's window (the settlement before it)
 	BonusSettledPaid     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_paid"` // paid part of the last settlement not yet matched by a refund
 	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
+	InviteCount          int64                      `json:"invite_count,omitempty" gorm:"-:all"`     // admin list only: invited users, deleted ones included
+	InviteAbuseBan       string                     `json:"invite_abuse_ban,omitempty" gorm:"-:all"` // admin list only: kind of the active invite abuse ban
 }
 
 func (user *User) ToBaseUser() *UserBase {
@@ -432,6 +461,10 @@ func GetAllUsers(pageInfo *common.PageInfo, sortOptions ...UserSortOptions) (use
 		tx.Rollback()
 		return nil, 0, err
 	}
+	if err = fillUserInviteInfo(tx, users); err != nil {
+		tx.Rollback()
+		return nil, 0, err
+	}
 
 	// Commit transaction
 	if err = tx.Commit().Error; err != nil {
@@ -441,7 +474,43 @@ func GetAllUsers(pageInfo *common.PageInfo, sortOptions ...UserSortOptions) (use
 	return users, total, nil
 }
 
-func SearchUsers(keyword string, group string, role *int, status *int, startIdx int, num int, sortOptions ...UserSortOptions) ([]*User, int64, error) {
+// fillUserInviteInfo sets InviteCount and InviteAbuseBan on a listed page with
+// one grouped query each; the page holds at most 100 users.
+func fillUserInviteInfo(tx *gorm.DB, users []*User) error {
+	if len(users) == 0 {
+		return nil
+	}
+	ids := make([]int, 0, len(users))
+	for _, user := range users {
+		ids = append(ids, user.Id)
+	}
+	var counts []struct {
+		InviterId   int
+		InviteCount int64
+	}
+	if err := countedInvitees(tx).Select("inviter_id, COUNT(*) AS invite_count").
+		Where("inviter_id IN ?", ids).Group("inviter_id").Scan(&counts).Error; err != nil {
+		return err
+	}
+	var bans []InviteAbuseBan
+	if err := tx.Select("user_id", "kind").Where("user_id IN ? AND released_at = ?", ids, 0).Find(&bans).Error; err != nil {
+		return err
+	}
+	inviteCounts := make(map[int]int64, len(counts))
+	for _, count := range counts {
+		inviteCounts[count.InviterId] = count.InviteCount
+	}
+	banKinds := make(map[int]string, len(bans))
+	for _, ban := range bans {
+		banKinds[ban.UserId] = ban.Kind
+	}
+	for _, user := range users {
+		user.InviteCount, user.InviteAbuseBan = inviteCounts[user.Id], banKinds[user.Id]
+	}
+	return nil
+}
+
+func SearchUsers(keyword string, group string, role *int, status *int, inviterId *int, startIdx int, num int, sortOptions ...UserSortOptions) ([]*User, int64, error) {
 	var users []*User
 	var total int64
 	var err error
@@ -459,6 +528,10 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 
 	// 构建基础查询
 	query := tx.Unscoped().Model(&User{})
+	if inviterId != nil {
+		// Exactly the users the inviter's invite_count counts.
+		query = countedInvitees(tx).Where("inviter_id = ?", *inviterId)
+	}
 
 	// 构建搜索条件
 	likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
@@ -498,6 +571,10 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 	order := resolveUserSortOptions(sortOptions)
 	err = order.Apply(query.Omit("password", "access_token")).Limit(num).Offset(startIdx).Find(&users).Error
 	if err != nil {
+		tx.Rollback()
+		return nil, 0, err
+	}
+	if err = fillUserInviteInfo(tx, users); err != nil {
 		tx.Rollback()
 		return nil, 0, err
 	}
@@ -546,12 +623,16 @@ func GetSelfUserById(id int) (*User, error) {
 	return &profile.User, err
 }
 
+// GetUserIdByAffCode resolves the invite code a sign-up carries to the
+// inviter's id. Only an enabled account that is not deleted can invite: the
+// code of a disabled or deleted user is not found, so the new account gets
+// no inviter, no invite reward and no invite abuse check.
 func GetUserIdByAffCode(affCode string) (int, error) {
 	if affCode == "" {
 		return 0, errors.New("affiliate code is empty")
 	}
 	var user User
-	err := DB.Select("id").First(&user, "aff_code = ?", affCode).Error
+	err := DB.Select("id").Where("status = ?", common.UserStatusEnabled).First(&user, "aff_code = ?", affCode).Error
 	return user.Id, err
 }
 
@@ -734,9 +815,14 @@ func (user *User) finishInsert(inviterId int) {
 		if defaultSidebarConfig != "" {
 			currentSetting := createdUser.GetSetting()
 			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
-			common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			// Only the setting column (and a cached copy of the user): writing
+			// the snapshot back whole would enable again a new user an invite
+			// abuse check disabled after the read, and bump its auth version.
+			if err := UpdateUserSetting(createdUser.Id, currentSetting); err != nil {
+				common.SysError(common.LogText("failed to initialize the sidebar config for new user %s: %v", createdUser.Username, err))
+			} else {
+				common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			}
 		}
 	}
 
@@ -746,6 +832,7 @@ func (user *User) finishInsert(inviterId int) {
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
 		HandleInviteRegistration(user.Id, inviterId)
 	}
+	user.applyInviteAbuseRuleAfterSignUp(inviterId)
 }
 
 func (user *User) FinishInsert(inviterId int) {
@@ -783,9 +870,12 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 		if defaultSidebarConfig != "" {
 			currentSetting := createdUser.GetSetting()
 			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
-			common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			// Only the setting column, as in finishInsert.
+			if err := UpdateUserSetting(createdUser.Id, currentSetting); err != nil {
+				common.SysError(common.LogText("failed to initialize the sidebar config for new user %s: %v", createdUser.Username, err))
+			} else {
+				common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			}
 		}
 	}
 
@@ -795,6 +885,7 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 	if inviterId != 0 && operation_setting.IsPaymentComplianceConfirmed() {
 		HandleInviteRegistration(user.Id, inviterId)
 	}
+	user.applyInviteAbuseRuleAfterSignUp(inviterId)
 }
 
 func (user *User) Update(updatePassword bool) error {
@@ -815,6 +906,47 @@ func (user *User) Update(updatePassword bool) error {
 		return err
 	}
 	return nil
+}
+
+// DisableUserBySystem disables an enabled account that is not an
+// administrator for an automatic rule and ends its access the way an
+// administrator's "disable" does: the authentication version moves on, the
+// cached user is republished, browser sessions are revoked with reason and
+// cached API tokens are dropped. conditions are the rule's own exemptions;
+// they belong to the same conditional update, so an exemption granted after
+// the rule loaded the account still holds. It reports whether this call
+// disabled the account; a disabled, deleted, administrator or exempt account
+// is left alone, so repeated or concurrent runs are harmless. Failures after
+// the commit are logged: the disabled status already refuses the account
+// everywhere.
+func DisableUserBySystem(userId int, reason string, conditions ...clause.Expression) (bool, error) {
+	disabled := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&User{}).Where("id = ? AND status = ? AND role < ?", userId, common.UserStatusEnabled, common.RoleAdminUser)
+		for _, condition := range conditions {
+			query = query.Where(condition)
+		}
+		result := query.Update("status", common.UserStatusDisabled)
+		if result.Error != nil || result.RowsAffected != 1 {
+			return result.Error
+		}
+		disabled = true
+		_, err := IncrementUserAuthVersionWithTx(tx, userId)
+		return err
+	})
+	if err != nil || !disabled {
+		return false, err
+	}
+	if err := PublishUserAuthCache(userId); err != nil {
+		common.SysError(common.LogText("failed to publish the auth cache of user %d: %v", userId, err))
+	}
+	if _, err := RevokeAllUserSessions(userId, reason); err != nil {
+		common.SysError(common.LogText("failed to revoke the sessions of user %d: %v", userId, err))
+	}
+	if err := InvalidateUserTokensCache(userId); err != nil {
+		common.SysError(common.LogText("failed to invalidate tokens cache for user %d: %s", userId, err.Error()))
+	}
+	return true, nil
 }
 
 func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
@@ -1182,24 +1314,29 @@ func GetUniqueUserByEmail(email string) (*User, error) {
 	}
 }
 
+// The Is*IdAlreadyTaken lookups include deleted accounts: signing in with the
+// provider ID of a deleted account must report the deleted account rather
+// than sign up a new one, and the ID cannot be bound to another account. An
+// ID that several accounts hold (a deleted and a live one) is taken as well.
+
 func IsWeChatIdAlreadyTaken(wechatId string) bool {
-	return DB.Unscoped().Where("wechat_id = ?", wechatId).Find(&User{}).RowsAffected == 1
+	return DB.Unscoped().Where("wechat_id = ?", wechatId).Find(&User{}).RowsAffected > 0
 }
 
 func IsGitHubIdAlreadyTaken(githubId string) bool {
-	return DB.Unscoped().Where("github_id = ?", githubId).Find(&User{}).RowsAffected == 1
+	return DB.Unscoped().Where("github_id = ?", githubId).Find(&User{}).RowsAffected > 0
 }
 
 func IsDiscordIdAlreadyTaken(discordId string) bool {
-	return DB.Unscoped().Where("discord_id = ?", discordId).Find(&User{}).RowsAffected == 1
+	return DB.Unscoped().Where("discord_id = ?", discordId).Find(&User{}).RowsAffected > 0
 }
 
 func IsOidcIdAlreadyTaken(oidcId string) bool {
-	return DB.Where("oidc_id = ?", oidcId).Find(&User{}).RowsAffected == 1
+	return DB.Unscoped().Where("oidc_id = ?", oidcId).Find(&User{}).RowsAffected > 0
 }
 
 func IsTelegramIdAlreadyTaken(telegramId string) bool {
-	return DB.Unscoped().Where("telegram_id = ?", telegramId).Find(&User{}).RowsAffected == 1
+	return DB.Unscoped().Where("telegram_id = ?", telegramId).Find(&User{}).RowsAffected > 0
 }
 
 func ResetUserPasswordByEmail(email string, password string) error {

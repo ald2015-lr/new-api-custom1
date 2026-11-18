@@ -26,6 +26,7 @@ import { GroupBadge } from '@/components/group-badge'
 import { LongText } from '@/components/long-text'
 import { StatusBadge } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
+import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   Tooltip,
@@ -37,6 +38,7 @@ import { formatQuota } from '@/lib/format'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import {
+  INVITER_FILTER_ID,
   USER_STATUS,
   USER_STATUSES,
   USER_ROLES,
@@ -155,7 +157,7 @@ export function useUsersColumns(): ColumnDef<User>[] {
             return null
           }
 
-          return (
+          const statusBadge = (
             <Tooltip>
               <TooltipTrigger render={<div className='-ml-1.5 cursor-help' />}>
                 <StatusBadge
@@ -173,6 +175,37 @@ export function useUsersColumns(): ColumnDef<User>[] {
                 </p>
               </TooltipContent>
             </Tooltip>
+          )
+          if (!user.invite_abuse_ban) return statusBadge
+
+          return (
+            <div className='flex flex-wrap items-center gap-1.5'>
+              {statusBadge}
+              <Tooltip>
+                <TooltipTrigger render={<div className='cursor-help' />}>
+                  <StatusBadge
+                    label={t('Invite abuse')}
+                    variant='danger'
+                    copyable={false}
+                    className='font-normal'
+                  />
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p className='max-w-64 text-xs'>
+                    {user.invite_abuse_ban === 'inviter'
+                      ? t(
+                          'Disabled automatically: none of the users this account invited has recharged.'
+                        )
+                      : t(
+                          'Disabled automatically: the users invited by the same inviter have not recharged.'
+                        )}{' '}
+                    {t(
+                      'Enabling the account again exempts it from automatic invite bans.'
+                    )}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
           )
         },
         filterFn: (row, id, value) => {
@@ -236,42 +269,74 @@ export function useUsersColumns(): ColumnDef<User>[] {
         meta: { mobileOrder: 20 },
       },
       {
-        id: 'invite_info',
+        // Sorting by this column orders users by how many users they invited.
+        id: 'invite_count',
+        accessorFn: (user) => user.invite_count ?? 0,
         header: t('Invite Info'),
-        cell: ({ row }) => {
+        cell: ({ row, table }) => {
           const user = row.original
-          const affCount = user.aff_count || 0
+          const inviteCount = user.invite_count ?? 0
           const affHistoryQuota = user.aff_history_quota || 0
           const inviterId = user.inviter_id || 0
 
-          if (affCount === 0 && affHistoryQuota === 0 && inviterId === 0) {
+          if (inviteCount === 0 && affHistoryQuota === 0 && inviterId === 0) {
             return <span className='text-muted-foreground text-sm'>—</span>
           }
+
+          // Show exactly the users invited by `id`, dropping other filters.
+          const filterByInviter = (id: number) => {
+            table.setGlobalFilter('')
+            table.setColumnFilters([
+              { id: INVITER_FILTER_ID, value: String(id) },
+            ])
+          }
+          const invitedText = t('Invited {{count}} users', {
+            count: inviteCount,
+          })
 
           return (
             <div
               data-table-text='secondary'
               className='min-w-0 space-y-1 text-xs font-normal'
             >
-              {(affCount > 0 || affHistoryQuota !== 0) && (
+              {(inviteCount > 0 || affHistoryQuota !== 0) && (
                 <LongText>
-                  {t('Invited {{count}} users', { count: affCount })} ·{' '}
-                  {t('Earnings')}:{' '}
+                  {inviteCount > 0 ? (
+                    <Button
+                      type='button'
+                      variant='link'
+                      className='h-auto p-0 text-xs font-normal'
+                      title={t('Show the users this user invited')}
+                      onClick={() => filterByInviter(user.id)}
+                    >
+                      {invitedText}
+                    </Button>
+                  ) : (
+                    invitedText
+                  )}{' '}
+                  · {t('Earnings')}:{' '}
                   <span className='tabular-nums'>
                     {formatQuota(affHistoryQuota)}
                   </span>
                 </LongText>
               )}
               {inviterId > 0 && (
-                <LongText className='text-muted-foreground'>
-                  {t('Inviter ID: {{id}}', { id: inviterId })}
+                <LongText>
+                  <Button
+                    type='button'
+                    variant='link'
+                    className='text-muted-foreground h-auto p-0 text-xs font-normal'
+                    title={t('Show the users this inviter invited')}
+                    onClick={() => filterByInviter(inviterId)}
+                  >
+                    {t('Inviter ID: {{id}}', { id: inviterId })}
+                  </Button>
                 </LongText>
               )}
             </div>
           )
         },
         size: 240,
-        enableSorting: false,
         meta: { mobileHidden: true },
       },
       {

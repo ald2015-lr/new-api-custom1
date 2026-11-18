@@ -48,6 +48,12 @@ func InitOptionMap() {
 	common.OptionMap["WeChatAuthEnabled"] = strconv.FormatBool(common.WeChatAuthEnabled)
 	common.OptionMap["TurnstileCheckEnabled"] = strconv.FormatBool(common.TurnstileCheckEnabled)
 	common.OptionMap["RegisterEnabled"] = strconv.FormatBool(common.RegisterEnabled)
+	// Registration anti-abuse settings.
+	common.OptionMap["RegisterCaptchaEnabled"] = strconv.FormatBool(common.RegisterCaptchaEnabled)
+	common.OptionMap["EmailQQNumericOnlyEnabled"] = strconv.FormatBool(common.EmailQQNumericOnlyEnabled)
+	common.OptionMap["RegisterIPRateLimitEnabled"] = strconv.FormatBool(common.RegisterIPRateLimitEnabled)
+	common.OptionMap["RegisterIPRateLimitNum"] = strconv.Itoa(common.RegisterIPRateLimitNum)
+	common.OptionMap["RegisterIPRateLimitMinutes"] = strconv.Itoa(common.RegisterIPRateLimitMinutes)
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
@@ -153,6 +159,10 @@ func InitOptionMap() {
 	common.OptionMap["InviteRechargeThresholdQuota"] = strconv.Itoa(common.InviteRechargeThresholdQuota)
 	common.OptionMap["InviteRewardExpireDays"] = strconv.Itoa(common.InviteRewardExpireDays)
 	common.OptionMap["InviteRewardExpireOnlyWhenUnused"] = strconv.FormatBool(common.InviteRewardExpireOnlyWhenUnused)
+	common.OptionMap["InviteAbuseBanEnabled"] = strconv.FormatBool(common.InviteAbuseBanEnabled)
+	common.OptionMap["InviteAbuseBanThreshold"] = strconv.Itoa(common.InviteAbuseBanThreshold)
+	common.OptionMap["InviteAbuseBanMinRedeemQuota"] = strconv.Itoa(common.InviteAbuseBanMinRedeemQuota)
+	common.OptionMap["InviteAbuseBanExemptPaidInviter"] = strconv.FormatBool(common.InviteAbuseBanExemptPaidInviter)
 	common.OptionMap["QuotaRemindEnabled"] = strconv.FormatBool(common.QuotaRemindEnabled)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
@@ -247,6 +257,9 @@ func validateOptionValue(key string, value string) error {
 		return err
 	}
 	if err := operation_setting.ValidateBonusOption(key, value); err != nil {
+		return err
+	}
+	if err := operation_setting.ValidateRegisterProtectionOption(key, value); err != nil {
 		return err
 	}
 	if key == "EmailProvider" || key == "ResendApiKey" || key == "ResendFrom" {
@@ -444,6 +457,12 @@ func updateOptionMap(key string, value string) (err error) {
 			common.TurnstileCheckEnabled = boolValue
 		case "RegisterEnabled":
 			common.RegisterEnabled = boolValue
+		case "RegisterCaptchaEnabled":
+			common.RegisterCaptchaEnabled = boolValue
+		case "EmailQQNumericOnlyEnabled":
+			common.EmailQQNumericOnlyEnabled = boolValue
+		case "RegisterIPRateLimitEnabled":
+			common.RegisterIPRateLimitEnabled = boolValue
 		case "EmailDomainRestrictionEnabled":
 			common.EmailDomainRestrictionEnabled = boolValue
 		case "EmailAliasRestrictionEnabled":
@@ -666,6 +685,10 @@ func updateOptionMap(key string, value string) (err error) {
 		common.TurnstileSiteKey = value
 	case "TurnstileSecretKey":
 		common.TurnstileSecretKey = value
+	case "RegisterIPRateLimitNum":
+		common.RegisterIPRateLimitNum, _ = strconv.Atoi(value)
+	case "RegisterIPRateLimitMinutes":
+		common.RegisterIPRateLimitMinutes, _ = strconv.Atoi(value)
 	case "QuotaForNewUser":
 		common.QuotaForNewUser, _ = strconv.Atoi(value)
 	case "QuotaForInviter":
@@ -678,6 +701,9 @@ func updateOptionMap(key string, value string) (err error) {
 		common.InviteRewardExpireDays, _ = strconv.Atoi(value)
 	case "InviteRewardExpireOnlyWhenUnused":
 		common.InviteRewardExpireOnlyWhenUnused = value == "true"
+	case operation_setting.InviteAbuseBanEnabledKey, operation_setting.InviteAbuseBanThresholdKey,
+		operation_setting.InviteAbuseBanMinRedeemQuotaKey, operation_setting.InviteAbuseBanExemptPaidInviterKey:
+		applyInviteAbuseOption(key, value)
 	case "QuotaRemindThreshold":
 		common.QuotaRemindThreshold, _ = strconv.Atoi(value)
 	case "PreConsumedQuota":

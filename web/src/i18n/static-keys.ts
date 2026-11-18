@@ -970,4 +970,22 @@ export const STATIC_I18N_KEYS = [
   'Enter a whole number from -1 to 1000000000',
   'Keep at least one model, or restore the defaults',
   'At most 300 models',
+  // Registration anti-abuse: server messages (message_key), option range
+  // messages shared with the settings forms, and audit templates.
+  'Please complete the captcha.',
+  'Captcha is incorrect or has expired. Please try a new one.',
+  'Too many captcha requests. Please try again later.',
+  'Too many registration attempts from your network. Please try again in {{minutes}} minutes.',
+  'Too many verification code requests from your network. Please try again in {{minutes}} minutes.',
+  'QQ mail addresses must use the QQ number, for example 123456789@qq.com.',
+  'Registration rate limit count must be an integer between 1 and 1000',
+  'Registration rate limit window must be an integer between 1 and 1440 minutes',
+  'Invite count threshold must be an integer between 1 and 100000',
+  'Minimum redeemed quota must be a non-negative integer',
+  'Account disabled automatically: {{count}} invited users and none of them has recharged.',
+  "Account disabled automatically: your inviter's {{count}} invited users have no recharge.",
+  'Registered via {{method}}',
+  'Registered via {{method}}, invited by user ID {{inviter_id}}',
+  'Disabled automatically for invite abuse: {{invite_count}} invited users and none of them has recharged',
+  'Disabled automatically for invite abuse: the {{invite_count}} users invited by user ID {{inviter_id}} have not recharged',
 ] as const

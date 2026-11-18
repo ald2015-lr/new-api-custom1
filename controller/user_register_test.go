@@ -1,0 +1,429 @@
+package controller
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+type registerTestResponse struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	MessageKey string `json:"message_key"`
+	Code       string `json:"code"`
+}
+
+// setupRegisterTest opens the database TEST_MANAGE_USER_DIALECT selects and
+// sets the sign-up settings of one test: registration open, QQ number rule
+// on, no domain or alias restriction, and the per-network limit off (the API
+// router test covers it).
+func setupRegisterTest(t *testing.T, emailVerification bool, captcha bool) *gorm.DB {
+	t.Helper()
+	db := setupManageUserTestDB(t)
+	previousRegister, previousPassword, previousTurnstile := common.RegisterEnabled, common.PasswordRegisterEnabled, common.TurnstileCheckEnabled
+	previousVerification, previousCaptcha, previousQQ := common.EmailVerificationEnabled, common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled
+	previousDomain, previousWhitelist, previousAlias := common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist, common.EmailAliasRestrictionEnabled
+	previousLimit := common.RegisterIPRateLimitEnabled
+	common.RegisterEnabled, common.PasswordRegisterEnabled, common.TurnstileCheckEnabled = true, true, false
+	common.EmailVerificationEnabled, common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled = emailVerification, captcha, true
+	common.EmailDomainRestrictionEnabled, common.EmailAliasRestrictionEnabled = false, false
+	common.RegisterIPRateLimitEnabled = false
+	t.Cleanup(func() {
+		common.RegisterEnabled, common.PasswordRegisterEnabled, common.TurnstileCheckEnabled = previousRegister, previousPassword, previousTurnstile
+		common.EmailVerificationEnabled, common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled = previousVerification, previousCaptcha, previousQQ
+		common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist, common.EmailAliasRestrictionEnabled = previousDomain, previousWhitelist, previousAlias
+		common.RegisterIPRateLimitEnabled = previousLimit
+	})
+	return db
+}
+
+// newRegisterTestRouter mounts the registration endpoints behind the captcha
+// check the API router puts in front of them.
+func newRegisterTestRouter() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/api/user/register", middleware.RegisterCaptchaCheck(true), Register)
+	router.GET("/api/verification", middleware.RegisterCaptchaCheck(false), SendEmailVerification)
+	router.GET("/api/captcha", GetRegisterCaptcha)
+	return router
+}
+
+func performRegisterTestRequest(t *testing.T, router http.Handler, method string, target string, body string) registerTestResponse {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "register-test-agent")
+	request.RemoteAddr = "203.0.113.7:4321"
+	router.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var response registerTestResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response), recorder.Body.String())
+	return response
+}
+
+func registerTestBody(username string, email string, code string, affCode string) string {
+	return fmt.Sprintf(`{"username":%q,"password":"register-password","email":%q,"verification_code":%q,"aff_code":%q}`, username, email, code, affCode)
+}
+
+func captchaQuery(id string, answer int) string {
+	return "captcha_id=" + id + "&captcha=" + strconv.Itoa(answer)
+}
+
+func countUsersNamed(t *testing.T, db *gorm.DB, username string) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).Where("username = ?", username).Count(&count).Error)
+	return count
+}
+
+// registrationMailCode reads the code of the last registration mail sent to
+// receiver. Registration codes are hexadecimal.
+func registrationMailCode(t *testing.T, mailbox *securityMailbox, receiver string) string {
+	t.Helper()
+	mailbox.mutex.Lock()
+	defer mailbox.mutex.Unlock()
+	messages := mailbox.mail[receiver]
+	require.NotEmpty(t, messages, "no verification email delivered to %s", receiver)
+	match := regexp.MustCompile(`<strong>([0-9a-f]{6})</strong>`).FindStringSubmatch(messages[len(messages)-1])
+	require.Len(t, match, 2)
+	return match[1]
+}
+
+func assertRegisterAudit(t *testing.T, user model.User, method string) {
+	t.Helper()
+	var audits []model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ? AND user_id = ?", "user.register", user.Id).Find(&audits).Error)
+	require.Len(t, audits, 1)
+	audit := audits[0]
+	assert.Equal(t, user.Username, audit.Username)
+	assert.Equal(t, model.AuditCategoryLogin, audit.Category)
+	assert.Equal(t, common.RoleCommonUser, audit.ActorRole)
+	assert.Equal(t, "203.0.113.7", audit.Ip)
+	assert.Equal(t, "register-test-agent", audit.UserAgent)
+	assert.True(t, audit.Success)
+	assert.Equal(t, "Registered a new account via "+method, audit.Content)
+	require.NotNil(t, audit.Other.Op)
+	params, err := common.Marshal(audit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf(`{"method":%q,"inviter_id":%d}`, method, user.InviterId), string(params))
+}
+
+func TestRegisterAsksForTheCaptchaWhileEmailVerificationIsOff(t *testing.T) {
+	db := setupRegisterTest(t, false, true)
+	router := newRegisterTestRouter()
+	inviter := model.User{Username: "register-inviter", Password: "inviter-password", AffCode: "reg-inviter", Status: common.UserStatusEnabled}
+	require.NoError(t, db.Create(&inviter).Error)
+
+	response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-captcha", "", "", "reg-inviter"))
+	assert.False(t, response.Success)
+	assert.Equal(t, "CAPTCHA_REQUIRED", response.Code)
+	assert.Equal(t, "Please complete the captcha.", response.MessageKey)
+
+	id := service.IssueCaptchaForTest(5)
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register?"+captchaQuery(id, 6), registerTestBody("reg-captcha", "", "", "reg-inviter"))
+	assert.Equal(t, "CAPTCHA_INVALID", response.Code)
+	assert.Equal(t, "Captcha is incorrect or has expired. Please try a new one.", response.MessageKey)
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register?"+captchaQuery(id, 5), registerTestBody("reg-captcha", "", "", "reg-inviter"))
+	assert.Equal(t, "CAPTCHA_INVALID", response.Code, "a checked captcha is used up")
+	assert.Zero(t, countUsersNamed(t, db, "reg-captcha"))
+
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register?"+captchaQuery(service.IssueCaptchaForTest(5), 5), registerTestBody("reg-captcha", "", "", "reg-inviter"))
+	require.True(t, response.Success, response.Message)
+	var created model.User
+	require.NoError(t, db.Where("username = ?", "reg-captcha").First(&created).Error)
+	assert.Empty(t, created.Email)
+	assert.Equal(t, inviter.Id, created.InviterId)
+	assertRegisterAudit(t, created, "password")
+
+	common.RegisterCaptchaEnabled = false
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-no-captcha", "", "", ""))
+	require.True(t, response.Success, response.Message)
+	assert.EqualValues(t, 1, countUsersNamed(t, db, "reg-no-captcha"))
+}
+
+func TestRegisterWithEmailVerificationAsksForTheCaptchaBeforeTheCode(t *testing.T) {
+	db := setupRegisterTest(t, true, true)
+	mailbox := newSecurityMailbox(t)
+	router := newRegisterTestRouter()
+
+	response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10001@qq.com", "")
+	assert.Equal(t, "CAPTCHA_REQUIRED", response.Code)
+	mailbox.mutex.Lock()
+	assert.Empty(t, mailbox.mail["10001@qq.com"], "no code is mailed without a solved captcha")
+	mailbox.mutex.Unlock()
+
+	response = performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10001@qq.com&"+captchaQuery(service.IssueCaptchaForTest(9), 9), "")
+	require.True(t, response.Success, response.Message)
+	code := registrationMailCode(t, mailbox, "10001@qq.com")
+
+	// The submit is not captcha-gated: its email code was issued behind one.
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-email", "10001@QQ.com", code, ""))
+	require.True(t, response.Success, response.Message)
+	var created model.User
+	require.NoError(t, db.Where("username = ?", "reg-email").First(&created).Error)
+	assert.Equal(t, "10001@qq.com", created.Email)
+	assertRegisterAudit(t, created, "password")
+	assert.False(t, common.VerifyCodeWithKey("10001@qq.com", code, common.EmailVerificationPurpose), "a registration code is single use")
+
+	common.RegisterCaptchaEnabled = false
+	response = performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10002@qq.com", "")
+	require.True(t, response.Success, response.Message)
+	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10002@qq.com"))
+}
+
+// A registration code only serves password registration with email
+// verification: while registration or password registration is closed, the
+// request is refused with Register's message, while email verification is
+// off with the unavailable verification method, and nothing is mailed.
+func TestSendEmailVerificationIsRefusedWhileRegistrationTakesNoCode(t *testing.T) {
+	setupRegisterTest(t, true, false)
+	mailbox := newSecurityMailbox(t)
+	router := newRegisterTestRouter()
+	for _, tc := range []struct {
+		name                             string
+		register, password, verification bool
+		key                              string
+	}{
+		{"registration closed", false, true, true, "New user registration has been disabled by administrator"},
+		{"password registration closed", true, false, true, "Password registration has been disabled by administrator, please use third-party account verification"},
+		{"email verification off", true, true, false, "This verification method is currently unavailable."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			common.RegisterEnabled, common.PasswordRegisterEnabled, common.EmailVerificationEnabled = tc.register, tc.password, tc.verification
+			response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
+			assert.False(t, response.Success)
+			assert.Equal(t, tc.key, response.MessageKey)
+		})
+	}
+	mailbox.mutex.Lock()
+	assert.Empty(t, mailbox.mail)
+	mailbox.mutex.Unlock()
+
+	common.RegisterEnabled, common.PasswordRegisterEnabled, common.EmailVerificationEnabled = true, true, true
+	response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
+	require.True(t, response.Success, response.Message)
+	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10007@qq.com"))
+}
+
+// The client IP diagnostic answers with the address the server derives for
+// the caller under TRUSTED_PROXIES, says whether TRUSTED_PROXIES is set (to a
+// list or to none) instead of left to the built-in defaults and whether it
+// trusts every IPv4 or IPv6 address, through one range or several (then any
+// client, the public peers here, chooses its address with X-Forwarded-For),
+// and is never cached.
+func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name, trustedProxies, remoteAddr, ip string
+		configured, catchAll                 bool
+	}{
+		{"defaults trust a private proxy", "", "172.20.0.2:4321", "203.0.113.10", false, false},
+		{"defaults ignore the header of a public peer", " ", "198.51.100.10:4321", "198.51.100.10", false, false},
+		{"explicit proxy list", "192.0.2.0/24", "192.0.2.10:4321", "203.0.113.10", true, false},
+		{"the outer proxy is not in the list", "192.0.2.0/24", "172.20.0.2:4321", "172.20.0.2", true, false},
+		{"no proxy trusted", "none", "172.20.0.2:4321", "172.20.0.2", true, false},
+		{"every IPv4 address", "0.0.0.0/0", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv6 address next to a proxy", "192.0.2.10, ::/0", "[2001:db8::10]:4321", "203.0.113.10", true, true},
+		{"every IPv4 address written with another address", "10.1.2.3/0", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv4 address as IPv4-mapped IPv6", "::ffff:0:0/96", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv4 address in two halves next to a private range", "0.0.0.0/1,10.0.0.0/8,128.0.0.0/1", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"every IPv6 address in two halves", "::/1, 8000::/1", "[2001:db8::10]:4321", "203.0.113.10", true, true},
+		{"every IPv4 address in two IPv4-mapped halves", "::ffff:0:0/97,::ffff:128.0.0.0/97", "198.51.100.10:4321", "203.0.113.10", true, true},
+		{"the first and the last IPv4 addresses without those between", "0.0.0.0/8,255.0.0.0/8", "198.51.100.10:4321", "198.51.100.10", true, false},
+		{"IPv4-compatible IPv6 addresses", "::/96", "198.51.100.10:4321", "198.51.100.10", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TRUSTED_PROXIES", tc.trustedProxies)
+			router := gin.New()
+			require.NoError(t, middleware.ConfigureTrustedProxies(router))
+			router.GET("/api/option/client_ip", middleware.DisableCache(), GetClientIP)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/api/option/client_ip", nil)
+			request.RemoteAddr = tc.remoteAddr
+			request.Header.Set("X-Forwarded-For", "203.0.113.10")
+			router.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.JSONEq(t, fmt.Sprintf(`{"success":true,"message":"","data":{"ip":%q,"trusted_proxies_configured":%t,"trusted_proxies_catch_all":%t}}`, tc.ip, tc.configured, tc.catchAll), recorder.Body.String())
+			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
+		})
+	}
+}
+
+// A registration code allows four wrong guesses; the fifth deletes it. Spaces
+// around the code and capital letters do not matter, and input that cannot be
+// a code (another length, not hexadecimal) is refused without spending a
+// guess.
+func TestRegisterEmailCodeIsDeletedAfterFiveWrongGuesses(t *testing.T) {
+	db := setupRegisterTest(t, true, false)
+	router := newRegisterTestRouter()
+
+	common.RegisterVerificationCodeWithKey("10003@qq.com", "a1b2c3", common.EmailVerificationPurpose)
+	for _, input := range []string{"ffffff", "ffffff", "ffffff", "ffffff", "a1b2c", "a1b2c3d", "a1b2cg", "a1 b2c3", "１２３４５６", "   "} {
+		response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", input, ""))
+		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, input)
+	}
+	response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", " A1B2C3\n", ""))
+	require.True(t, response.Success, "four wrong guesses and any number of inputs that cannot be a code leave the code usable: %s", response.Message)
+
+	// Wrong guesses count after the same normalisation.
+	common.RegisterVerificationCodeWithKey("10004@qq.com", "d4e5f6", common.EmailVerificationPurpose)
+	for _, guess := range []string{"ffffff", " FFFFFF", "000000\n", "D4E5F7", "abcdef"} {
+		response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", guess, ""))
+		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, guess)
+	}
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", "d4e5f6", ""))
+	assert.False(t, response.Success)
+	assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, "the fifth wrong guess deletes the code")
+	assert.Zero(t, countUsersNamed(t, db, "reg-locked"))
+
+	// A password reset token is too long to guess, and wrong guesses must not
+	// let others cancel the owner's reset link.
+	common.RegisterVerificationCodeWithKey("10004@qq.com", "0123456789abcdef0123456789abcdef", common.PasswordResetPurpose)
+	for range 5 {
+		assert.False(t, common.VerifyCodeWithKey("10004@qq.com", "ffffffffffffffffffffffffffffffff", common.PasswordResetPurpose))
+	}
+	assert.True(t, common.VerifyCodeWithKey("10004@qq.com", "0123456789abcdef0123456789abcdef", common.PasswordResetPurpose))
+	common.DeleteKey("10004@qq.com", common.PasswordResetPurpose)
+}
+
+func TestRegistrationEmailPolicyAppliesWhenTheCodeIsSentAndWhenItIsUsed(t *testing.T) {
+	db := setupRegisterTest(t, true, false)
+	mailbox := newSecurityMailbox(t)
+	router := newRegisterTestRouter()
+	const qqNumberKey = "QQ mail addresses must use the QQ number, for example 123456789@qq.com."
+
+	response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=owner.alias@qq.com", "")
+	assert.Equal(t, "EMAIL_ADDRESS_REJECTED", response.Code)
+	assert.Equal(t, qqNumberKey, response.MessageKey)
+	response = performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email="+url.QueryEscape("１０００６@qq.com"), "")
+	assert.Equal(t, "EMAIL_ADDRESS_REJECTED", response.Code)
+	assert.Equal(t, "Please enter a valid email address", response.MessageKey)
+	mailbox.mutex.Lock()
+	assert.Empty(t, mailbox.mail)
+	mailbox.mutex.Unlock()
+
+	// A code issued before the rule changed no longer registers the address.
+	common.RegisterVerificationCodeWithKey("owneralias@qq.com", "a1b2c3", common.EmailVerificationPurpose)
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-alias", "owneralias@qq.com", "a1b2c3", ""))
+	assert.Equal(t, "EMAIL_ADDRESS_REJECTED", response.Code)
+	assert.Equal(t, qqNumberKey, response.MessageKey)
+	common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist = true, []string{"qq.com"}
+	common.RegisterVerificationCodeWithKey("10005@163.com", "d4e5f6", common.EmailVerificationPurpose)
+	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-domain", "10005@163.com", "d4e5f6", ""))
+	assert.Equal(t, "EMAIL_ADDRESS_REJECTED", response.Code)
+	assert.Equal(t, "This email address is not allowed by the administrator's email policy.", response.MessageKey)
+	assert.True(t, common.VerifyCodeWithKey("10005@163.com", "d4e5f6", common.EmailVerificationPurpose), "a refused address does not spend a guess")
+	assert.Zero(t, countUsersNamed(t, db, "reg-alias")+countUsersNamed(t, db, "reg-domain"))
+
+	common.EmailQQNumericOnlyEnabled = false
+	response = performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=owneralias@qq.com", "")
+	require.True(t, response.Success, response.Message)
+	assert.NotEmpty(t, registrationMailCode(t, mailbox, "owneralias@qq.com"))
+}
+
+func TestValidateAccountEmailRejectsAddressVariantsAndQQAliases(t *testing.T) {
+	previousDomain, previousWhitelist := common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist
+	previousAlias, previousQQ := common.EmailAliasRestrictionEnabled, common.EmailQQNumericOnlyEnabled
+	t.Cleanup(func() {
+		common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist = previousDomain, previousWhitelist
+		common.EmailAliasRestrictionEnabled, common.EmailQQNumericOnlyEnabled = previousAlias, previousQQ
+	})
+	for _, tc := range []struct {
+		email     string
+		qqRule    bool
+		alias     bool
+		whitelist []string
+		want      string
+		err       error
+	}{
+		{email: " 10001@QQ.com ", qqRule: true, want: "10001@qq.com"},
+		{email: "\u00a010001@QQ.com\u3000", qqRule: true, want: "10001@qq.com"},
+		{email: "12345678901@qq.com", qqRule: true, want: "12345678901@qq.com"},
+		{email: "123456789012@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
+		{email: "1234@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
+		{email: "01234@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
+		{email: "owner@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
+		{email: "owner.name@qq.com", qqRule: true, alias: true, err: service.ErrAccountEmailQQNumberRequired},
+		{email: "owner@qq.com", want: "owner@qq.com"},
+		{email: "owner@foxmail.com", qqRule: true, want: "owner@foxmail.com"},
+		{email: "owner@vip.qq.com", qqRule: true, want: "owner@vip.qq.com"},
+		{email: "first.last+tag@example.com", qqRule: true, want: "first.last+tag@example.com"},
+		{email: "first.last@example.com", qqRule: true, alias: true, err: service.ErrAccountEmailRestricted},
+		{email: "owner@163.com", qqRule: true, whitelist: []string{"qq.com"}, err: service.ErrAccountEmailRestricted},
+		{email: "owner@qq.com", qqRule: true, whitelist: []string{"gmail.com"}, err: service.ErrAccountEmailRestricted},
+		{email: "１２３４５@qq.com", qqRule: true, err: service.ErrAccountEmailInvalid},
+		{email: "１２３４５@qq.com", err: service.ErrAccountEmailInvalid},
+		{email: "1234​5@qq.com", err: service.ErrAccountEmailInvalid},
+		{email: "ｑｑ@example.com", err: service.ErrAccountEmailInvalid},
+		{email: `"12345"@qq.com`, err: service.ErrAccountEmailInvalid},
+		{email: `"1\2345"@qq.com`, err: service.ErrAccountEmailInvalid},
+		{email: `"a;b"@example.com`, err: service.ErrAccountEmailInvalid},
+		{email: "12345@ｑｑ.com", err: service.ErrAccountEmailInvalid},
+		// strings.ToLower would turn these into the ASCII kate@ and info.com.
+		{email: "\u212Aate@example.com", err: service.ErrAccountEmailInvalid},
+		{email: "owner@\u0130nfo.com", err: service.ErrAccountEmailInvalid},
+		{email: "12345@qq.com.", err: service.ErrAccountEmailInvalid},
+		{email: "12345@-qq.com", err: service.ErrAccountEmailInvalid},
+		{email: "not-an-email", err: service.ErrAccountEmailInvalid},
+	} {
+		t.Run(tc.email, func(t *testing.T) {
+			common.EmailQQNumericOnlyEnabled, common.EmailAliasRestrictionEnabled = tc.qqRule, tc.alias
+			common.EmailDomainRestrictionEnabled, common.EmailDomainWhitelist = tc.whitelist != nil, tc.whitelist
+			email, err := service.ValidateAccountEmail(tc.email)
+			if tc.err != nil {
+				assert.ErrorIs(t, err, tc.err)
+				assert.Empty(t, email)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, email)
+		})
+	}
+}
+
+func TestRegisterCaptchaAndStatusFlags(t *testing.T) {
+	setupRegisterTest(t, false, false)
+	common.EmailQQNumericOnlyEnabled = false
+	router := newRegisterTestRouter()
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/captcha", nil))
+	var captcha struct {
+		Success bool            `json:"success"`
+		Data    service.Captcha `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &captcha))
+	require.True(t, captcha.Success, "a captcha is served while the option is off")
+	assert.Regexp(t, `^[0-9a-f]{32}$`, captcha.Data.ID)
+	assert.True(t, strings.HasPrefix(captcha.Data.Image, "data:image/png;base64,"))
+	assert.Equal(t, 300, captcha.Data.ExpiresIn)
+
+	for _, enabled := range []bool{false, true} {
+		common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled = enabled, enabled
+		recorder = httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		GetStatus(context)
+		var status struct {
+			Data map[string]any `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &status))
+		assert.Equal(t, enabled, status.Data["register_captcha"])
+		assert.Equal(t, enabled, status.Data["email_qq_numeric_only"])
+	}
+}

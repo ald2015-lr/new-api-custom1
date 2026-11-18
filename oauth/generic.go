@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -274,11 +275,25 @@ func (p *GenericOAuthProvider) GetUserInfo(ctx context.Context, token *OAuthToke
 		}
 	}
 
+	// Only the conventional root-level email_verified claim vouches for an
+	// address, and only for the root email claim it describes: an address
+	// mapped from another field counts as verified only when it is that same
+	// address. Both must be ASCII, where strings.EqualFold ignores nothing but
+	// ASCII case: Unicode case folding would let a verified root address with
+	// ſ or the Kelvin sign vouch for another mailbox's ASCII address. A
+	// provider without the claim signs users up without an email.
+	rootEmail := strings.TrimSpace(gjson.Get(bodyStr, "email").String())
+	mappedEmail := strings.TrimSpace(email)
+	emailVerified := isTrueClaim([]byte(gjson.Get(bodyStr, "email_verified").Raw)) && rootEmail != "" &&
+		!strings.ContainsFunc(rootEmail+mappedEmail, func(r rune) bool { return r > unicode.MaxASCII }) &&
+		strings.EqualFold(rootEmail, mappedEmail)
+
 	return &OAuthUser{
 		ProviderUserID: userId,
 		Username:       username,
 		DisplayName:    displayName,
 		Email:          email,
+		EmailVerified:  emailVerified,
 		Extra: map[string]any{
 			"provider": p.config.Slug,
 		},

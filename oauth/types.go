@@ -1,6 +1,10 @@
 package oauth
 
-import "github.com/QuantumNous/new-api/common"
+import (
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+)
 
 // OAuthToken represents the token received from OAuth provider
 type OAuthToken struct {
@@ -23,8 +27,24 @@ type OAuthUser struct {
 	DisplayName string
 	// Email is the email from the OAuth provider
 	Email string
+	// EmailVerified reports that the provider asserts the user controls Email.
+	// A sign-up stores Email only when this is true.
+	EmailVerified bool
 	// Extra contains any additional provider-specific data
 	Extra map[string]any
+}
+
+// isTrueClaim reports whether the raw JSON value of a claim is true. Some
+// providers send boolean claims such as email_verified as the string "true",
+// which counts too (in any letter case); anything else, a missing claim
+// included, is false.
+func isTrueClaim(raw []byte) bool {
+	var flag bool
+	if common.Unmarshal(raw, &flag) == nil {
+		return flag
+	}
+	var text string
+	return common.Unmarshal(raw, &text) == nil && strings.EqualFold(text, "true")
 }
 
 // Texts of OAuthError that the web console translates.

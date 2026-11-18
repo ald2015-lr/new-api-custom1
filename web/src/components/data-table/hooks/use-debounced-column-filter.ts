@@ -41,12 +41,16 @@ export function useDebouncedColumnFilter({
   const [inputValue, setInputValue] = React.useState(value)
   const [pendingValue, setPendingValue] = React.useState(value)
   const isComposingRef = React.useRef(false)
+  // Only text typed here is committed; a filter changed elsewhere (a reset, a
+  // link, the URL) must not be overwritten by the stale debounced value.
+  const editedRef = React.useRef(false)
   const debouncedValue = useDebounce(pendingValue, delay)
   const onColumnFiltersChangeRef = React.useRef(onColumnFiltersChange)
   onColumnFiltersChangeRef.current = onColumnFiltersChange
 
   React.useEffect(() => {
     // Keep the input aligned when URL state changes outside the local field.
+    editedRef.current = false
     if (!isComposingRef.current) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setInputValue(value)
@@ -56,7 +60,7 @@ export function useDebouncedColumnFilter({
   }, [value])
 
   React.useEffect(() => {
-    if (debouncedValue === value) return
+    if (!editedRef.current || debouncedValue === value) return
 
     onColumnFiltersChangeRef.current((previous) => {
       const filters = previous.filter((filter) => filter.id !== columnId)
@@ -70,6 +74,7 @@ export function useDebouncedColumnFilter({
     setInputValue(nextValue)
 
     if (!isComposingRef.current) {
+      editedRef.current = true
       setPendingValue(nextValue)
     }
   }, [])
@@ -88,6 +93,7 @@ export function useDebouncedColumnFilter({
   const handleCompositionEnd = React.useCallback(
     (event: React.CompositionEvent<HTMLInputElement>) => {
       isComposingRef.current = false
+      editedRef.current = true
       const nextValue = event.currentTarget.value
       setInputValue(nextValue)
       setPendingValue(nextValue)
@@ -97,6 +103,7 @@ export function useDebouncedColumnFilter({
 
   const resetInput = React.useCallback(() => {
     isComposingRef.current = false
+    editedRef.current = true
     setInputValue('')
     setPendingValue('')
   }, [])

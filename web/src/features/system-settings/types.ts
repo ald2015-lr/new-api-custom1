@@ -163,6 +163,7 @@ export type AuthSettings = {
   RegisterEnabled: boolean
   EmailDomainRestrictionEnabled: boolean
   EmailAliasRestrictionEnabled: boolean
+  EmailQQNumericOnlyEnabled: boolean
   EmailDomainWhitelist: string
   ServerAddress: string
   GitHubOAuthEnabled: boolean
@@ -195,6 +196,15 @@ export type AuthSettings = {
   TurnstileCheckEnabled: boolean
   TurnstileSiteKey: string
   TurnstileSecretKey: string
+  RegisterCaptchaEnabled: boolean
+  RegisterIPRateLimitEnabled: boolean
+  RegisterIPRateLimitNum: number
+  RegisterIPRateLimitMinutes: number
+  InviteAbuseBanEnabled: boolean
+  InviteAbuseBanThreshold: number
+  /** Raw quota of used redemption codes that counts as a recharge */
+  InviteAbuseBanMinRedeemQuota: number
+  InviteAbuseBanExemptPaidInviter: boolean
   'passkey.enabled': boolean
   'passkey.rp_display_name': string
   'passkey.rp_id': string
@@ -203,6 +213,51 @@ export type AuthSettings = {
   'passkey.allow_insecure_origin': boolean
   'passkey.user_verification': 'required' | 'preferred' | 'discouraged'
   'passkey.attachment_preference': '' | 'platform' | 'cross-platform'
+}
+
+/** GET /api/option/client_ip: how the server resolves the admin's address */
+export type ClientIpDiagnostics = {
+  ip: string
+  trusted_proxies_configured: boolean
+  /** TRUSTED_PROXIES trusts any address (such as 0.0.0.0/0), so clients can forge theirs */
+  trusted_proxies_catch_all: boolean
+}
+
+export type InviteAbusePreviewParams = {
+  threshold: number
+  min_redeem_quota: number
+  /** Whether inviters with a qualifying recharge of their own are exempt */
+  exempt_paid_inviter: boolean
+}
+
+/** An inviter the invite abuse rule would disable */
+export type InviteAbusePreviewItem = {
+  id: number
+  username: string
+  display_name: string
+  status: number
+  invite_count: number
+  invitees_to_disable: number
+}
+
+/** GET /api/user/invite_abuse/preview */
+export type InviteAbusePreview = {
+  threshold: number
+  min_redeem_quota: number
+  /** The exemption the preview applied; older servers leave it out */
+  exempt_paid_inviter?: boolean
+  abusive_inviters: number
+  inviters_to_disable: number
+  invitees_to_disable: number
+  /** The most invites first, at most 100 */
+  items: InviteAbusePreviewItem[]
+  truncated: boolean
+}
+
+export type InviteAbusePreviewResponse = {
+  success: boolean
+  message: string
+  data?: InviteAbusePreview
 }
 
 export type ContentSettings = {
