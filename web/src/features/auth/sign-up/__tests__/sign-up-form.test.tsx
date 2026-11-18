@@ -34,7 +34,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
 
-import type { RegisterCaptchaParams, SystemStatus } from '../../types'
+import type { SystemStatus } from '../../types'
 import { SignUpForm } from '../components/sign-up-form'
 
 type ApiReply = { data: Record<string, unknown> }
@@ -47,6 +47,29 @@ let captchaGate: Promise<void> | null = null
 
 function captchaImage(index: number) {
   return `data:image/png;base64,captcha-${index}`
+}
+
+/**
+ * A 429 from the per-network registration limit, as axios rejects it. A new
+ * object each time: an error that was already reported is not shown again.
+ */
+function registrationLimitError() {
+  return {
+    isAxiosError: true,
+    message: 'Request failed with status code 429',
+    response: {
+      status: 429,
+      data: {
+        success: false,
+        code: 'REGISTER_RATE_LIMITED',
+        message:
+          'Too many registration attempts from your network. Please try again in 15 minutes.',
+        message_key:
+          'Too many registration attempts from your network. Please try again in {{minutes}} minutes.',
+        message_params: { minutes: 15 },
+      },
+    },
+  }
 }
 
 /** Holds back every /api/captcha answer until the returned call. */
@@ -88,6 +111,27 @@ function mockGet(routes: Record<string, () => Promise<ApiReply>> = {}) {
     if (route) return route()
     throw new Error(`Unexpected GET ${url}`)
   })
+}
+
+/** The query parameters of every email code request so far. */
+function emailCodeRequests(get: ReturnType<typeof mockGet>) {
+  return get.mock.calls
+    .filter(([url]) => url === '/api/verification')
+    .map(([, config]) => config?.params as Record<string, unknown>)
+}
+
+/**
+ * Stands in for the Cloudflare Turnstile script: every widget it renders
+ * hands its token callback to the test.
+ */
+function mockTurnstile() {
+  const widgets: ((token: string) => void)[] = []
+  window.turnstile = {
+    render: (_element, options) => {
+      widgets.push(options.callback as (token: string) => void)
+    },
+  }
+  return widgets
 }
 
 async function renderSignUp(...statuses: Partial<SystemStatus>[]) {
@@ -148,6 +192,7 @@ afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
   localStorage.clear()
   vi.useRealTimers()
+  delete window.turnstile
 })
 
 it('shows no captcha and fetches none when the registration captcha is off', async () => {
@@ -405,15 +450,11 @@ it('keeps Send code disabled until the captcha after a rejected one is shown', a
   await findCaptchaImage(2)
   await user.type(answer, '8')
   await user.click(send)
-  const sentCaptchas = () =>
-    get.mock.calls
-      .filter(([url]) => url === '/api/verification')
-      .map(([, config]) => {
-        const params = config?.params as RegisterCaptchaParams | undefined
-        return params?.captcha_id
-      })
-  await waitFor(() => expect(sentCaptchas()).toHaveLength(2))
-  expect(sentCaptchas()).toEqual(['captcha-1', 'captcha-2'])
+  await waitFor(() => expect(emailCodeRequests(get)).toHaveLength(2))
+  expect(emailCodeRequests(get).map((params) => params.captcha_id)).toEqual([
+    'captcha-1',
+    'captcha-2',
+  ])
 })
 
 it('drops an answer typed for the old image when the new captcha arrives', async () => {
@@ -570,22 +611,7 @@ it('fetches no new captcha after a registration that leaves the page', async () 
 it('shows the translated network limit message from a 429 registration reply', async () => {
   const user = userEvent.setup()
   mockGet()
-  vi.spyOn(api, 'post').mockRejectedValue({
-    isAxiosError: true,
-    message: 'Request failed with status code 429',
-    response: {
-      status: 429,
-      data: {
-        success: false,
-        code: 'REGISTER_RATE_LIMITED',
-        message:
-          'Too many registration attempts from your network. Please try again in 15 minutes.',
-        message_key:
-          'Too many registration attempts from your network. Please try again in {{minutes}} minutes.',
-        message_params: { minutes: 15 },
-      },
-    },
-  })
+  vi.spyOn(api, 'post').mockRejectedValue(registrationLimitError())
   const error = vi.spyOn(toast, 'error')
   await renderSignUp({ register_captcha: false, email_verification: false })
   await fillAccount(user)
@@ -608,6 +634,150 @@ it('shows the translated network limit message from a 429 registration reply', a
   } finally {
     await act(() => i18next.changeLanguage('en'))
   }
+})
+
+it('shows the network limit message when the server refuses a WeChat sign-up', async () => {
+  const user = userEvent.setup()
+  mockGet({
+    '/api/oauth/wechat': async () => {
+      throw registrationLimitError()
+    },
+  })
+  const error = vi.spyOn(toast, 'error')
+  await renderSignUp({
+    register_captcha: false,
+    email_verification: false,
+    wechat_login: true,
+  })
+
+  await user.click(
+    await screen.findByRole('button', { name: /Continue with WeChat/ })
+  )
+  await user.type(await screen.findByLabelText('Verification code'), 'wx-code')
+  await user.click(screen.getByRole('button', { name: 'Confirm' }))
+
+  await waitFor(() =>
+    expect(error).toHaveBeenCalledWith(
+      i18next.t(
+        'Too many registration attempts from your network. Please try again in {{minutes}} minutes.',
+        { minutes: 15 }
+      )
+    )
+  )
+  expect(error.mock.calls[0][0]).toContain('15')
+})
+
+it('sends the email code without the spaces around it from a field keyboards leave as typed', async () => {
+  const user = userEvent.setup()
+  mockGet()
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: { success: true, message: '' },
+  })
+  await renderSignUp({ register_captcha: false, email_verification: true })
+  await fillAccount(user)
+  await user.type(
+    screen.getByLabelText('Email (required for verification)'),
+    '123456789@qq.com'
+  )
+  const code = screen.getByPlaceholderText('Verification code')
+  expect(code).toHaveAttribute('autocomplete', 'one-time-code')
+  expect(code).toHaveAttribute('autocapitalize', 'off')
+  expect(code).toHaveAttribute('autocorrect', 'off')
+  expect(code).toHaveAttribute('spellcheck', 'false')
+
+  await user.type(code, ' a3f9c1 ')
+  await user.click(screen.getByRole('button', { name: 'Create account' }))
+
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+  expect(post.mock.calls[0][1]).toHaveProperty('verification_code', 'a3f9c1')
+})
+
+it('renders a new Turnstile widget after a failed registration and sends its token next time', async () => {
+  const user = userEvent.setup()
+  const widgets = mockTurnstile()
+  mockGet()
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: { success: false, message: 'Username already exists' },
+  })
+  await renderSignUp({
+    register_captcha: true,
+    email_verification: false,
+    turnstile_check: true,
+    turnstile_site_key: 'site-key',
+  })
+  await findCaptchaImage(1)
+  await waitFor(() => expect(widgets).toHaveLength(1))
+  await fillAccount(user)
+  const answer = screen.getByRole('textbox', { name: 'Captcha' })
+  const submit = screen.getByRole('button', { name: 'Create account' })
+  act(() => widgets[0]('token-1'))
+  await user.type(answer, '12')
+  await user.click(submit)
+
+  // The server spent the token: a new widget replaces it and nothing is
+  // sent before that widget answers.
+  await findCaptchaImage(2)
+  await waitFor(() => expect(widgets).toHaveLength(2))
+  await user.type(answer, '34')
+  expect(submit).toBeDisabled()
+  act(() => widgets[1]('token-2'))
+  await user.click(submit)
+
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(2))
+  expect(post.mock.calls.map((call) => call[2]?.params)).toEqual([
+    { turnstile: 'token-1', captcha_id: 'captcha-1', captcha: '12' },
+    { turnstile: 'token-2', captcha_id: 'captcha-2', captcha: '34' },
+  ])
+})
+
+it('renders a new Turnstile widget after a failed email code request and sends its token next time', async () => {
+  const user = userEvent.setup()
+  const widgets = mockTurnstile()
+  const get = mockGet({
+    '/api/verification': async () => ({
+      data: { success: false, message: 'Failed to send the email' },
+    }),
+  })
+  await renderSignUp({
+    register_captcha: true,
+    email_verification: true,
+    turnstile_check: true,
+    turnstile_site_key: 'site-key',
+  })
+  await findCaptchaImage(1)
+  await waitFor(() => expect(widgets).toHaveLength(1))
+  await user.type(
+    screen.getByLabelText('Email (required for verification)'),
+    '123456789@qq.com'
+  )
+  const answer = screen.getByRole('textbox', { name: 'Captcha' })
+  const send = screen.getByRole('button', { name: 'Send code' })
+  act(() => widgets[0]('token-1'))
+  await user.type(answer, '7')
+  await user.click(send)
+
+  await findCaptchaImage(2)
+  await waitFor(() => expect(widgets).toHaveLength(2))
+  await user.type(answer, '8')
+  expect(send).toBeDisabled()
+  act(() => widgets[1]('token-2'))
+  await user.click(send)
+
+  await waitFor(() => expect(emailCodeRequests(get)).toHaveLength(2))
+  expect(emailCodeRequests(get)).toEqual([
+    {
+      email: '123456789@qq.com',
+      turnstile: 'token-1',
+      captcha_id: 'captcha-1',
+      captcha: '7',
+    },
+    {
+      email: '123456789@qq.com',
+      turnstile: 'token-2',
+      captcha_id: 'captcha-2',
+      captcha: '8',
+    },
+  ])
 })
 
 it('flags a QQ English alias under the email field and keeps the code unsent', async () => {

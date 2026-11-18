@@ -188,7 +188,7 @@ export function SignUpForm({
         toast.error(t('Please enter your email'))
         return
       }
-      if (!verificationCode) {
+      if (!verificationCode.trim()) {
         toast.error(t('Please enter the verification code'))
         return
       }
@@ -210,7 +210,8 @@ export function SignUpForm({
         username: data.username,
         password: data.password,
         email: data.email || undefined,
-        verification_code: verificationCode || undefined,
+        // A code pasted from the mail often carries spaces around it.
+        verification_code: verificationCode.trim() || undefined,
         aff_code: getAffiliateCode(),
         turnstile: turnstileToken,
         ...captchaParams,
@@ -280,9 +281,8 @@ export function SignUpForm({
         handleServerError(createServerError(res, t('Login failed')))
       }
     } catch (error: unknown) {
-      handleServerError(
-        new AuthOperationError(t('Login failed'), undefined, { cause: error })
-      )
+      // Keeps the reason of a refusal such as the registration IP limit.
+      handleServerError(AuthOperationError.from(error, t('Login failed')))
     } finally {
       setIsWeChatSubmitting(false)
     }
@@ -396,6 +396,10 @@ export function SignUpForm({
                   placeholder={t('Verification code')}
                   value={verificationCode}
                   onChange={(e) => setVerificationCode(e.target.value)}
+                  autoComplete='one-time-code'
+                  autoCapitalize='off'
+                  autoCorrect='off'
+                  spellCheck={false}
                 />
               </div>
               <Button
