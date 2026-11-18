@@ -1336,7 +1336,7 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorT(c, "Regular administrators cannot promote other users to administrator")
 			return
 		}
-		if user.Role == common.RoleRootUser {
+		if req.Action == "set_deputy" && user.Role == common.RoleRootUser {
 			common.ApiErrorT(c, "Cannot demote super administrator user")
 			return
 		}

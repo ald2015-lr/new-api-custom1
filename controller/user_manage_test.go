@@ -403,6 +403,7 @@ func TestManageUserConvertsBetweenFullAndDeputyAdmin(t *testing.T) {
 		{"admin caller", "set_deputy", "Regular administrators cannot promote other users to administrator", staleMarker, common.RoleAdminUser},
 		{"admin caller to admin", "set_admin", "Regular administrators cannot promote other users to administrator", staleMarker, common.RoleAdminUser},
 		{"root target", "set_deputy", "Cannot demote super administrator user", root, common.RoleRootUser},
+		{"root target to admin", "set_admin", "This user is not a deputy admin", root, common.RoleRootUser},
 		{"already deputy", "set_deputy", "This user is already a deputy admin", member, common.RoleRootUser},
 		{"full admin", "set_admin", "This user is not a deputy admin", admin, common.RoleRootUser},
 		{"common user with a stale assignment", "set_admin", "This user is not a deputy admin", staleMarker, common.RoleRootUser},
