@@ -24,6 +24,11 @@ const (
 	InviteAbuseBanExemptPaidInviterKey   = "InviteAbuseBanExemptPaidInviter"
 )
 
+// InviteAbuseBanOptionKeys are the invite abuse rule's options.
+var InviteAbuseBanOptionKeys = []string{
+	InviteAbuseBanEnabledKey, InviteAbuseBanThresholdKey, InviteAbuseBanMinRedeemQuotaKey, InviteAbuseBanExemptPaidInviterKey,
+}
+
 const (
 	bonusMaxExpireDays         = 3650
 	bonusMaxPaidMultiplier     = 100

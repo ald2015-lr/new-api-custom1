@@ -49,10 +49,13 @@ var (
 	// inviter again while it disables the inviter's accounts.
 	inviteAbuseRecheckInterval = time.Second
 	// inviteAbuseSettleDelay is how long the rule must stay the same after a
-	// change before anything is disabled under it. An administrator's save
-	// reaches the server one option per request, a browser round trip apart;
-	// with only some of them applied the rule would disable accounts that
-	// neither the old nor the new settings call abusive.
+	// change before anything is disabled under it: with only some options of
+	// a save applied, the rule would disable accounts that neither the old
+	// nor the new settings call abusive. The settings form saves the options
+	// it changed in one request, all or none (PUT /api/option/invite_abuse),
+	// but they are applied one at a time, here and by the option sync of the
+	// other nodes, and a client of PUT /api/option/ saves one option per
+	// request, a round trip apart.
 	inviteAbuseSettleDelay = 5 * time.Second
 )
 
@@ -96,12 +99,6 @@ type inviteAbuseOptions struct {
 	threshold         int
 	minRedeemQuota    int
 	exemptPaidInviter bool
-}
-
-// inviteAbuseOptionKeys are the keys of the rule's options.
-var inviteAbuseOptionKeys = []string{
-	operation_setting.InviteAbuseBanEnabledKey, operation_setting.InviteAbuseBanThresholdKey,
-	operation_setting.InviteAbuseBanMinRedeemQuotaKey, operation_setting.InviteAbuseBanExemptPaidInviterKey,
 }
 
 var (
@@ -389,7 +386,7 @@ func inviteAbuseRuleApplies(settings InviteAbuseSettings) bool {
 func inviteAbuseRuleSaved(settings InviteAbuseSettings) (bool, error) {
 	var saved []Option
 	// A map condition lets GORM quote the key column for each database.
-	if err := DB.Where(map[string]any{"key": inviteAbuseOptionKeys}).Find(&saved).Error; err != nil {
+	if err := DB.Where(map[string]any{"key": operation_setting.InviteAbuseBanOptionKeys}).Find(&saved).Error; err != nil {
 		return false, err
 	}
 	options := loadedInviteAbuseOptions()

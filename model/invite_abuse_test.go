@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -188,6 +189,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
 			t.Run("sweep task", testInviteAbuseSweepTask)
 			t.Run("settings saved one option at a time", testInviteAbuseSettingsSavedOneAtATime)
+			t.Run("settings saved together", testInviteAbuseSettingsSavedTogether)
 			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
 			t.Run("change saved on another node", testInviteAbuseChangeSavedOnAnotherNode)
 			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
@@ -776,12 +778,12 @@ func testInviteAbuseSweepTask(t *testing.T) {
 	assert.Eventually(t, disabled(second), 10*time.Second, 5*time.Millisecond, "turning the rule off and on between two ticks sweeps again")
 }
 
-// An administrator's save reaches the server one option per request, a
-// browser round trip apart, and the wake-up that follows the first one comes
-// at once. Neither a pass nor a sign-up check disables anybody until the rule
-// has stayed the same for inviteAbuseSettleDelay: nobody is disabled with
-// only some of the options applied, whether the rule stays on or the same
-// save turns it off (the switch is saved last).
+// A client of PUT /api/option/ saves the rule's options one per request, a
+// round trip apart, and the wake-up that follows the first one comes at once.
+// Neither a pass nor a sign-up check disables anybody until the rule has
+// stayed the same for inviteAbuseSettleDelay: nobody is disabled with only
+// some of the options applied, whether the rule stays on or the same save
+// turns it off (the switch is saved last).
 func testInviteAbuseSettingsSavedOneAtATime(t *testing.T) {
 	t.Run("threshold and minimum lowered", func(t *testing.T) {
 		resetInviteAbuseTables(t)
@@ -828,6 +830,72 @@ func testInviteAbuseSettingsSavedOneAtATime(t *testing.T) {
 		assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
 		assert.Empty(t, disabledInviteAbuseTestUsers(t), "the rule ends up off")
 	})
+}
+
+// The settings form saves the options it changed in one request, all of them
+// or none (UpdateOptionsBulk). A save that fails while it writes them leaves
+// the saved options and this node's rule as they were: nothing is disabled
+// under a rule with some of the new values and some of the old ones, not
+// after the option sync and not by the next periodic pass. Saved again, the
+// options apply together.
+func testInviteAbuseSettingsSavedTogether(t *testing.T) {
+	resetInviteAbuseTables(t)
+	useInviteAbuseSettings(t, true, 5, 500_000)
+	saved := map[string]string{
+		"InviteAbuseBanEnabled": "true", "InviteAbuseBanThreshold": "5",
+		"InviteAbuseBanMinRedeemQuota": "500000", "InviteAbuseBanExemptPaidInviter": "true",
+	}
+	for key, value := range saved {
+		require.NoError(t, DB.Save(&Option{Key: key, Value: value}).Error)
+	}
+	storedOptions := func() map[string]string {
+		var options []Option
+		require.NoError(t, DB.Find(&options).Error)
+		values := make(map[string]string, len(options))
+		for _, option := range options {
+			values[option.Key] = option.Value
+		}
+		return values
+	}
+	// Abusive with the new threshold and the old minimum only: one of the
+	// invited users redeemed 0.5 USD.
+	half, halfInvitees := createInviteAbuseTestInviter(t, "half", common.RoleCommonUser, 3)
+	seedUsedRedemption(t, halfInvitees[0].Id, 250_000)
+	// Abusive with the new settings.
+	farm, farmInvitees := createInviteAbuseTestInviter(t, "farm", common.RoleCommonUser, 3)
+	runInviteAbuseSweepIfDue(time.Now())
+	require.Empty(t, disabledInviteAbuseTestUsers(t), "nobody is abusive with the old settings")
+
+	// The second option written fails, whichever of the two it is.
+	writes, failing := 0, true
+	const name = "test:fail-second-option-write"
+	require.NoError(t, DB.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+		if failing && tx.Statement.Schema != nil && tx.Statement.Schema.Name == "Option" {
+			if writes++; writes == 2 {
+				tx.AddError(errors.New("connection lost"))
+			}
+		}
+	}))
+	t.Cleanup(func() { assert.NoError(t, DB.Callback().Update().Remove(name)) })
+	change := map[string]string{"InviteAbuseBanThreshold": "3", "InviteAbuseBanMinRedeemQuota": "100000"}
+	require.Error(t, UpdateOptionsBulk(change))
+	require.Equal(t, 2, writes)
+	failing = false
+	assert.Equal(t, saved, storedOptions(), "the option written first is rolled back")
+	assert.Equal(t, InviteAbuseSettings{Threshold: 5, MinRedeemQuota: 500_000, ExemptPaidInviter: true}, CurrentInviteAbuseSettings())
+	for key, value := range storedOptions() { // the option sync
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(InviteAbuseSweepInterval)))
+	assert.Empty(t, disabledInviteAbuseTestUsers(t), "the periodic pass runs with the old settings")
+
+	require.NoError(t, UpdateOptionsBulk(change))
+	assert.Equal(t, InviteAbuseSettings{Threshold: 3, MinRedeemQuota: 100_000, ExemptPaidInviter: true}, CurrentInviteAbuseSettings())
+	assert.Positive(t, runInviteAbuseSweepIfDue(time.Now()), "the change settles first")
+	assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
+	assert.Equal(t, inviteAbuseTestUserIds(append([]User{farm}, farmInvitees...)...), disabledInviteAbuseTestUsers(t),
+		"the pass disables what the saved settings call abusive")
+	assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, half.Id).Status)
 }
 
 // Saving an option of the rule, or the periodic option sync applying one,

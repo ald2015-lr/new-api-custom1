@@ -57,7 +57,7 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
-import { useUpdateOption } from '../hooks/use-update-option'
+import { useUpdateInviteAbuseOptions } from '../hooks/use-update-option'
 import type { InviteAbusePreviewParams } from '../types'
 import { integerRangeSchema } from '../utils/numeric-field'
 import { InviteAbusePreviewDialog } from './invite-abuse-preview-dialog'
@@ -93,7 +93,7 @@ function numberInputValue(event: ChangeEvent<HTMLInputElement>): number | '' {
 export function InviteAbuseSection(props: InviteAbuseSectionProps) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
-  const updateOption = useUpdateOption()
+  const updateOptions = useUpdateInviteAbuseOptions()
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
 
@@ -106,19 +106,14 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       >,
       defaultValues: props.defaultValues,
       onSubmit: async (_data, changedFields) => {
-        // Turning the ban on scans every user at once, so the values it
-        // scans with are saved before the switch.
-        const entries = Object.entries(changedFields).sort(
-          ([a], [b]) =>
-            Number(a === 'InviteAbuseBanEnabled') -
-            Number(b === 'InviteAbuseBanEnabled')
+        // One request saves every changed option, the switch included, or
+        // none of them. Saved one per request, a save that stopped half-way
+        // left the rule with some new values and some old ones, and the rule
+        // then disabled accounts that neither the old nor the new settings
+        // call abusive.
+        await updateOptions.mutateAsync(
+          changedFields as Record<string, string | number | boolean>
         )
-        for (const [key, value] of entries) {
-          await updateOption.mutateAsync({
-            key,
-            value: value as string | number | boolean,
-          })
-        }
       },
     })
 
@@ -151,6 +146,16 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
     })
   }
 
+  const save = async () => {
+    try {
+      await handleSubmit()
+    } catch (error) {
+      // Nothing was saved and the form keeps the unsaved values; a failed
+      // request was already shown.
+      handleServerError(error, t('Failed to update setting'))
+    }
+  }
+
   const requestSave = async (event?: FormEvent) => {
     event?.preventDefault()
     const enabling =
@@ -160,12 +165,12 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       setConfirmOpen(true)
       return
     }
-    await handleSubmit()
+    await save()
   }
 
   const confirmEnable = async () => {
     setConfirmOpen(false)
-    await handleSubmit()
+    await save()
   }
 
   return (
@@ -175,7 +180,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
         <SettingsForm onSubmit={requestSave}>
           <SettingsPageFormActions
             onSave={() => void requestSave()}
-            isSaving={updateOption.isPending || isSubmitting}
+            isSaving={updateOptions.isPending || isSubmitting}
           />
           <FormDirtyIndicator isDirty={isDirty} />
 
