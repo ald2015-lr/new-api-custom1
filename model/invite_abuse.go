@@ -261,15 +261,24 @@ func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings
 	if err != nil || len(paid) > 0 {
 		return 0, err
 	}
-	disabled, _, err := disableAbusiveInviter(inviter, inviteCount, deadline)
+	disabled, _, err := disableAbusiveInviter(inviter, inviteCount, settings, deadline)
 	return disabled, err
+}
+
+// inviteAbuseRuleApplies reports whether the rule is still on with settings.
+// A sweep pass and a sign-up check stop as soon as an administrator turns the
+// rule off or changes its settings, so nothing more is disabled under
+// settings that no longer apply.
+func inviteAbuseRuleApplies(settings InviteAbuseSettings) bool {
+	return common.InviteAbuseBanEnabled && CurrentInviteAbuseSettings() == settings
 }
 
 // disableAbusiveInviter disables an abusive inviter and then its invited
 // users that are not deleted, enabled, not administrators and not exempt,
-// newest first, until the deadline. It returns how many accounts it disabled
-// and whether it got through all of them.
-func disableAbusiveInviter(inviter User, inviteCount int64, deadline time.Time) (int, bool, error) {
+// newest first, until the deadline or until the rule no longer applies with
+// settings. It returns how many accounts it disabled and whether it got
+// through all of them.
+func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuseSettings, deadline time.Time) (int, bool, error) {
 	var invitees []User
 	if err := DB.Select("id", "username").
 		Where("inviter_id = ? AND status = ? AND role < ?", inviter.Id, common.UserStatusEnabled, common.RoleAdminUser).
@@ -292,7 +301,7 @@ func disableAbusiveInviter(inviter User, inviteCount int64, deadline time.Time) 
 	disabled, finished := 0, true
 	var err error
 	for _, target := range accounts {
-		if time.Now().After(deadline) {
+		if time.Now().After(deadline) || !inviteAbuseRuleApplies(settings) {
 			finished = false
 			break
 		}
@@ -447,7 +456,9 @@ var (
 // after the rule is turned on, after the threshold, the minimum redeemed
 // quota or the paid-inviter exemption changed, and otherwise every
 // InviteAbuseSweepInterval. A pass stops at its time budget and continues on
-// the next tick. Several masters are safe: every ban is a conditional update.
+// the next tick; it also stops when the rule is turned off or its settings
+// change, and the next tick then starts over with the new settings. Several
+// masters are safe: every ban is a conditional update.
 func RunInviteAbuseSweepIfDue(now time.Time) {
 	if !inviteAbuseSweepRunning.CompareAndSwap(false, true) {
 		return
@@ -465,20 +476,23 @@ func RunInviteAbuseSweepIfDue(now time.Time) {
 		return
 	}
 	cursor, complete, err := sweepInviteAbuse(settings, inviteAbuseSweep.cursor, time.Now().Add(inviteAbuseSweepBudget))
-	if err != nil {
-		common.SysError(common.LogText("invite abuse sweep failed: %v", err))
-	}
 	inviteAbuseSweep.cursor = cursor
-	if complete {
+	switch {
+	case err != nil:
+		common.SysError(common.LogText("invite abuse sweep failed: %v", err))
+	case complete:
 		inviteAbuseSweep.cursor, inviteAbuseSweep.finishedAt = 0, now
-	} else if err == nil {
+	case !inviteAbuseRuleApplies(settings):
+		common.SysLog(common.LogText("invite abuse sweep stopped after inviter %d: the rule was turned off or its settings changed", cursor))
+	default:
 		common.SysLog(common.LogText("invite abuse sweep reached its time budget, continuing after inviter %d on the next tick", cursor))
 	}
 }
 
 // sweepInviteAbuse applies the rule to the candidates after afterInviterId
-// until the deadline. It returns the inviter id the pass continues after and
-// whether the pass reached the end.
+// until the deadline or until the rule no longer applies with settings. It
+// returns the inviter id the pass continues after and whether the pass
+// reached the end.
 func sweepInviteAbuse(settings InviteAbuseSettings, afterInviterId int, deadline time.Time) (int, bool, error) {
 	for {
 		candidates, err := listInviteAbuseCandidates(settings, afterInviterId, inviteAbuseBatchSize)
@@ -493,10 +507,10 @@ func sweepInviteAbuse(settings InviteAbuseSettings, afterInviterId int, deadline
 			inviter, applies := inviters[candidate.InviterId]
 			// A disabled inviter whose invited users are all disabled is done.
 			if applies && (inviter.Status == common.UserStatusEnabled || candidate.InviteesToDisable > 0) {
-				if time.Now().After(deadline) {
+				if time.Now().After(deadline) || !inviteAbuseRuleApplies(settings) {
 					return afterInviterId, false, nil
 				}
-				_, finished, err := disableAbusiveInviter(inviter, candidate.InviteCount, deadline)
+				_, finished, err := disableAbusiveInviter(inviter, candidate.InviteCount, settings, deadline)
 				if err != nil || !finished {
 					return afterInviterId, false, err
 				}

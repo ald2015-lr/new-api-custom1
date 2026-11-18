@@ -692,6 +692,7 @@
   "invite abuse check of inviter %d failed: %v": "邀请防滥用：检查邀请人 %d 失败: %v",
   "invite abuse sweep failed: %v": "邀请防滥用：扫描失败: %v",
   "invite abuse sweep reached its time budget, continuing after inviter %d on the next tick": "邀请防滥用：本轮扫描已用完时间预算，下次从邀请人 %d 之后继续",
+  "invite abuse sweep stopped after inviter %d: the rule was turned off or its settings changed": "邀请防滥用：规则已关闭或设置已更改，本轮扫描在邀请人 %d 之后停止",
   "invite abuse: inviter %d has %d invited users without a recharge, disabled %d accounts": "邀请防滥用：邀请人 %d 邀请的 %d 个用户均无充值，已封禁 %d 个账号",
   "json decode failed from %s: %s": "解析 %s 返回的 JSON 失败: %s",
   "json marshal failed: %s": "JSON 序列化失败: %s",

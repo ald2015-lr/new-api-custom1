@@ -157,6 +157,20 @@ func inviteAbuseTestUserIds(users ...User) []int {
 	return ids
 }
 
+// onInviteAbuseBan calls fn each time the rule has disabled an account and
+// recorded its ban, so a test can change something in the middle of a pass.
+func onInviteAbuseBan(t *testing.T, fn func(ban InviteAbuseBan)) {
+	t.Helper()
+	const name = "test:on-invite-abuse-ban"
+	require.NoError(t, DB.Callback().Create().After("gorm:commit_or_rollback_transaction").Register(name, func(tx *gorm.DB) {
+		// Records a test creates for released users are not bans.
+		if ban, ok := tx.Statement.Dest.(*InviteAbuseBan); ok && tx.Error == nil && tx.RowsAffected == 1 && ban.ReleasedAt == 0 {
+			fn(*ban)
+		}
+	}))
+	t.Cleanup(func() { assert.NoError(t, DB.Callback().Create().Remove(name)) })
+}
+
 func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {
@@ -170,6 +184,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("release", testInviteAbuseRelease)
 			t.Run("sign-up", testInviteAbuseSignUp)
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
+			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
 			t.Run("sweep batches and budget", testInviteAbuseSweepBatches)
 			t.Run("preview", testInviteAbusePreview)
 			t.Run("preview truncation", testInviteAbusePreviewTruncation)
@@ -642,6 +657,40 @@ func testInviteAbuseSweepSchedule(t *testing.T) {
 	assert.Equal(t, common.UserStatusDisabled, status(patron), "no longer exempting paid inviters sweeps at once")
 }
 
+// An administrator who turns the rule off or raises the threshold while a
+// pass runs stops it at once: nothing more is disabled under the old
+// settings, and the next tick does nothing while the rule is off or starts a
+// new pass with the new settings.
+func testInviteAbuseSettingsChangeStopsPass(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{name: "rule turned off", key: "InviteAbuseBanEnabled", value: "false"},
+		{name: "threshold raised", key: "InviteAbuseBanThreshold", value: "100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 1, 500_000)
+			first, _ := createInviteAbuseTestInviter(t, "farm0", common.RoleCommonUser, 1)
+			for i := 1; i < 5; i++ {
+				createInviteAbuseTestInviter(t, fmt.Sprintf("farm%d", i), common.RoleCommonUser, 1)
+			}
+			changed := false
+			onInviteAbuseBan(t, func(InviteAbuseBan) {
+				if !changed {
+					changed = true
+					require.NoError(t, updateOptionMap(tc.key, tc.value)) // what saving the option does
+				}
+			})
+
+			start := time.Now()
+			RunInviteAbuseSweepIfDue(start)
+			require.True(t, changed)
+			assert.Equal(t, inviteAbuseTestUserIds(first), disabledInviteAbuseTestUsers(t), "only the ban made before the change")
+			RunInviteAbuseSweepIfDue(start.Add(time.Minute))
+			assert.Equal(t, inviteAbuseTestUserIds(first), disabledInviteAbuseTestUsers(t), "the next tick does not finish the old pass")
+		})
+	}
+}
+
 // A pass reads the candidates in batches and stops at its time budget without
 // losing its place.
 func testInviteAbuseSweepBatches(t *testing.T) {
@@ -728,7 +777,8 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Empty(t, stricter.Items)
 	assert.NotNil(t, stricter.Items, "an empty list, not null")
 
-	// The preview counts exactly what a sweep disables.
+	// The preview counts exactly what a sweep disables once the rule is on.
+	common.InviteAbuseBanEnabled = true
 	before := len(disabledInviteAbuseTestUsers(t))
 	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
 	require.NoError(t, err)
