@@ -106,6 +106,11 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
+		// On an OpenAI channel the Gemini request became a chat body.
+		jsonData, err = relaycommon.ApplyGatewaySafetyIdentifier(jsonData, info)
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
 
 		// apply param override
 		if len(info.ParamOverride) > 0 {

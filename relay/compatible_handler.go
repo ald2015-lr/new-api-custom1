@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,6 +119,26 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			}
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
+		if info.RelayMode == relayconstant.RelayModeChatCompletions && info.ChannelOtherSettings.SendSafetyIdentifier {
+			// Only the client's safety_identifier is replaced; every other
+			// byte is the client's.
+			raw, err := storage.Bytes()
+			if err != nil {
+				return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			}
+			identified, err := relaycommon.ApplyGatewaySafetyIdentifier(raw, info)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			if !bytes.Equal(identified, raw) {
+				body, closer, err := relaycommon.NewOutboundJSONBody(identified)
+				if err != nil {
+					return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+				}
+				defer closer.Close()
+				requestBody = body
+			}
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
 		if err != nil {
@@ -138,6 +159,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		if info.RelayMode == relayconstant.RelayModeChatCompletions {
+			jsonData, err = relaycommon.ApplyGatewaySafetyIdentifier(jsonData, info)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
 		}
 
 		// apply param override

@@ -779,6 +779,7 @@
   "scanner goroutine panic: %v": "scanner goroutine 发生 panic: %v",
   "send final Gemini stream response failed: %s": "发送 Gemini 流式响应的最后一段失败: %s",
   "send final response failed: %s": "发送最后一段响应失败: %s",
+  "send_safety_identifier is on for channel #%d but neither CRYPTO_SECRET nor SESSION_SECRET is set; the identifier sent to OpenAI changes at every restart": "渠道 #%d 开启了向 OpenAI 发送用户安全标识，但未设置 CRYPTO_SECRET 或 SESSION_SECRET，发送给 OpenAI 的标识每次重启都会改变",
   "send_stream_response_failed: %s": "发送流式响应失败: %s",
   "server exited": "服务已退出",
   "server forced to shutdown: %v": "服务未能正常关闭，已强制退出: %v",
