@@ -698,22 +698,77 @@ func testInviteAbuseSweepSchedule(t *testing.T) {
 	RunInviteAbuseSweepIfDue(start.Add(5*time.Minute + InviteAbuseSweepInterval))
 	assert.Equal(t, common.UserStatusDisabled, status(fourth), "the next periodic sweep")
 
+	// The periodic option sync applies the saved values again: no change.
 	later := start.Add(5*time.Minute + InviteAbuseSweepInterval)
+	for key, value := range map[string]string{
+		"InviteAbuseBanEnabled": "true", "InviteAbuseBanThreshold": "1",
+		"InviteAbuseBanMinRedeemQuota": "1000", "InviteAbuseBanExemptPaidInviter": "true",
+	} {
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	synced, _ := createInviteAbuseTestInviter(t, "synced", common.RoleCommonUser, 1)
+	RunInviteAbuseSweepIfDue(later.Add(time.Minute))
+	assert.Equal(t, common.UserStatusEnabled, status(synced), "applying the same settings again does not sweep")
+
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
 	fifth, _ := createInviteAbuseTestInviter(t, "fifth", common.RoleCommonUser, 1)
-	RunInviteAbuseSweepIfDue(later.Add(time.Minute))
+	RunInviteAbuseSweepIfDue(later.Add(2 * time.Minute))
 	assert.Equal(t, common.UserStatusEnabled, status(fifth))
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
-	RunInviteAbuseSweepIfDue(later.Add(2 * time.Minute))
+	RunInviteAbuseSweepIfDue(later.Add(3 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(fifth), "turning the rule on again sweeps at once")
+
+	// Off and on again between two ticks: no tick saw the rule off, and a
+	// farm that reached the threshold meanwhile (no sign-up check ran) is
+	// swept by the next tick all the same.
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
+	sixth, _ := createInviteAbuseTestInviter(t, "sixth", common.RoleCommonUser, 1)
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
+	RunInviteAbuseSweepIfDue(later.Add(4 * time.Minute))
+	assert.Equal(t, common.UserStatusDisabled, status(sixth), "turning the rule off and on between two ticks sweeps at once")
 
 	patron, _ := createInviteAbuseTestInviter(t, "patron", common.RoleCommonUser, 1)
 	seedTestTopUp(t, TopUp{UserId: patron.Id, Amount: 1, Money: 7, PaymentProvider: PaymentProviderEpay})
-	RunInviteAbuseSweepIfDue(later.Add(3 * time.Minute))
+	RunInviteAbuseSweepIfDue(later.Add(5 * time.Minute))
 	assert.Equal(t, common.UserStatusEnabled, status(patron))
 	require.NoError(t, updateOptionMap("InviteAbuseBanExemptPaidInviter", "false"))
-	RunInviteAbuseSweepIfDue(later.Add(4 * time.Minute))
+	RunInviteAbuseSweepIfDue(later.Add(6 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(patron), "no longer exempting paid inviters sweeps at once")
+}
+
+// Saving an option of the rule, or the periodic option sync applying one,
+// wakes the master node's sweep only for a real change that calls for a new
+// pass: the rule turned on, or one of its settings changed while it is on.
+func TestInviteAbuseRuleChangesWakeTheSweep(t *testing.T) {
+	useInviteAbuseSettings(t, false, 5, 500_000)
+	woken := func() bool {
+		select {
+		case <-InviteAbuseSweepWake():
+			return true
+		default:
+			return false
+		}
+	}
+	woken() // a wake-up an earlier test left behind
+	for _, step := range []struct {
+		name, key, value string
+		wakes            bool
+	}{
+		{"threshold changed while off", "InviteAbuseBanThreshold", "6", false},
+		{"still off", "InviteAbuseBanEnabled", "false", false},
+		{"turned on", "InviteAbuseBanEnabled", "true", true},
+		{"still on", "InviteAbuseBanEnabled", "true", false},
+		{"same threshold", "InviteAbuseBanThreshold", "6", false},
+		{"new threshold", "InviteAbuseBanThreshold", "7", true},
+		{"same minimum", "InviteAbuseBanMinRedeemQuota", "500000", false},
+		{"new minimum", "InviteAbuseBanMinRedeemQuota", "1000", true},
+		{"same exemption", "InviteAbuseBanExemptPaidInviter", "true", false},
+		{"no exemption", "InviteAbuseBanExemptPaidInviter", "false", true},
+		{"turned off", "InviteAbuseBanEnabled", "false", false},
+	} {
+		require.NoError(t, updateOptionMap(step.key, step.value))
+		assert.Equal(t, step.wakes, woken(), step.name)
+	}
 }
 
 // An administrator who turns the rule off or raises the threshold while a

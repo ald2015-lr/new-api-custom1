@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -467,6 +469,7 @@ func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, erro
 // caller holding inviteAbuseSweepRunning reads or writes it.
 type inviteAbuseSweepState struct {
 	settings   InviteAbuseSettings // the settings of the current pass
+	generation int64               // the rule generation the current pass started at
 	cursor     int                 // > 0: the current pass continues after this inviter id
 	finishedAt time.Time           // when the last complete pass with settings ended
 }
@@ -474,28 +477,73 @@ type inviteAbuseSweepState struct {
 var (
 	inviteAbuseSweepRunning atomic.Bool
 	inviteAbuseSweep        inviteAbuseSweepState
+
+	// inviteAbuseRuleGeneration moves on with every change of the rule that
+	// calls for a new pass at once, so the tick cannot miss one, however
+	// quickly the rule is turned off and on again.
+	inviteAbuseRuleGeneration atomic.Int64
+	inviteAbuseSweepWake      = make(chan struct{}, 1)
 )
 
-// RunInviteAbuseSweepIfDue is the master node's minute tick of the rule.
-// While the rule is enabled it sweeps every inviter right after startup,
-// after the rule is turned on, after the threshold, the minimum redeemed
-// quota or the paid-inviter exemption changed, and otherwise every
-// InviteAbuseSweepInterval. A pass stops at its time budget and continues on
-// the next tick; it also stops when the rule is turned off or its settings
-// change, and the next tick then starts over with the new settings. Several
-// masters are safe: every ban is a conditional update.
+// InviteAbuseSweepWake delivers a value after the rule was turned on or one
+// of its settings changed while it is on, so the master node's task loop can
+// sweep at once instead of on its next tick.
+func InviteAbuseSweepWake() <-chan struct{} {
+	return inviteAbuseSweepWake
+}
+
+// applyInviteAbuseOption applies one of the rule's options. A real change
+// that calls for a new pass — the rule turned on, or the threshold, the
+// minimum redeemed quota or the paid-inviter exemption changed while it is
+// on — moves the rule generation on and wakes the master node's task loop.
+// Applying a value that did not change, as the periodic option sync does,
+// changes nothing.
+func applyInviteAbuseOption(key string, value string) {
+	wasEnabled, previous := common.InviteAbuseBanEnabled, CurrentInviteAbuseSettings()
+	switch key {
+	case operation_setting.InviteAbuseBanEnabledKey:
+		common.InviteAbuseBanEnabled = value == "true"
+	case operation_setting.InviteAbuseBanThresholdKey:
+		common.InviteAbuseBanThreshold, _ = strconv.Atoi(value)
+	case operation_setting.InviteAbuseBanMinRedeemQuotaKey:
+		common.InviteAbuseBanMinRedeemQuota, _ = strconv.Atoi(value)
+	case operation_setting.InviteAbuseBanExemptPaidInviterKey:
+		common.InviteAbuseBanExemptPaidInviter = value == "true"
+	}
+	if !common.InviteAbuseBanEnabled || (wasEnabled && CurrentInviteAbuseSettings() == previous) {
+		return
+	}
+	inviteAbuseRuleGeneration.Add(1)
+	select {
+	case inviteAbuseSweepWake <- struct{}{}:
+	default: // a wake-up is pending already
+	}
+}
+
+// RunInviteAbuseSweepIfDue is the master node's tick of the rule, run every
+// minute and on InviteAbuseSweepWake. While the rule is enabled it sweeps
+// every inviter right after startup, after the rule is turned on, after the
+// threshold, the minimum redeemed quota or the paid-inviter exemption
+// changed, and otherwise every InviteAbuseSweepInterval. A pass stops at its
+// time budget and continues on the next tick; it also stops when the rule is
+// turned off or its settings change, and the next tick then starts over with
+// the new settings. Several masters are safe: every ban is a conditional
+// update.
 func RunInviteAbuseSweepIfDue(now time.Time) {
 	if !inviteAbuseSweepRunning.CompareAndSwap(false, true) {
 		return
 	}
 	defer inviteAbuseSweepRunning.Store(false)
 	if !common.InviteAbuseBanEnabled {
-		inviteAbuseSweep = inviteAbuseSweepState{} // turning the rule on sweeps at once
+		inviteAbuseSweep = inviteAbuseSweepState{}
 		return
 	}
+	// The generation first: a change after this read starts another pass on
+	// the next call.
+	generation := inviteAbuseRuleGeneration.Load()
 	settings := CurrentInviteAbuseSettings()
-	if settings != inviteAbuseSweep.settings {
-		inviteAbuseSweep = inviteAbuseSweepState{settings: settings}
+	if settings != inviteAbuseSweep.settings || generation != inviteAbuseSweep.generation {
+		inviteAbuseSweep = inviteAbuseSweepState{settings: settings, generation: generation}
 	}
 	if inviteAbuseSweep.cursor == 0 && !inviteAbuseSweep.finishedAt.IsZero() && now.Sub(inviteAbuseSweep.finishedAt) < InviteAbuseSweepInterval {
 		return
