@@ -72,6 +72,8 @@ async function renderUsers(initialEntry = '/users/') {
               used_quota: 0,
               request_count: 0,
               group: 'premium',
+              inviter_id: 42,
+              invite_count: 3,
             },
           ],
           total: 1,
@@ -151,4 +153,88 @@ it('restores the user group filter from the page URL on load', async () => {
   expect(get).toHaveBeenCalledWith(premiumSearchUrl)
   expect(get).not.toHaveBeenCalledWith('/api/user/', expect.anything())
   expect(getGroupFilterTrigger()).toHaveTextContent('premium')
+})
+
+const inviterSearchUrl = (inviterId: number) =>
+  `/api/user/search?keyword=&group=&inviter_id=${inviterId}&p=1&page_size=20`
+
+it.each([
+  ['a link', '/users/?inviter=%2242%22'],
+  ['a hand-written URL', '/users/?inviter=42'],
+])('restores the inviter filter from %s on load', async (_source, entry) => {
+  const { get } = await renderUsers(entry)
+
+  expect(get).toHaveBeenCalledWith(inviterSearchUrl(42))
+  expect(get).not.toHaveBeenCalledWith('/api/user/', expect.anything())
+  expect(
+    screen.getByRole('textbox', { name: 'Filter by inviter ID...' })
+  ).toHaveValue('42')
+})
+
+it('searches by a typed inviter ID and lists all users again after it is cleared', async () => {
+  const user = userEvent.setup()
+  const { get, router } = await renderUsers()
+  const input = screen.getByRole('textbox', { name: 'Filter by inviter ID...' })
+
+  await user.type(input, '4a2')
+
+  expect(input).toHaveValue('42')
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith(inviterSearchUrl(42))
+  )
+  expect(router.state.location.search).toMatchObject({ inviter: '42' })
+
+  await user.clear(input)
+
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/user/', {
+      params: { p: 1, page_size: 20 },
+    })
+  )
+  expect(router.state.location.search).not.toHaveProperty('inviter')
+})
+
+it.each([
+  ['Inviter ID: 42', 42],
+  ['Invited 3 users', 2],
+])(
+  'clicking %s lists the users invited by user %i',
+  async (linkName, inviterId) => {
+    const user = userEvent.setup()
+    const { get, router } = await renderUsers('/users/?filter=premium')
+
+    await user.click(screen.getByRole('button', { name: linkName }))
+
+    await waitFor(() =>
+      expect(get).toHaveBeenLastCalledWith(inviterSearchUrl(inviterId))
+    )
+    expect(router.state.location.search).toMatchObject({
+      inviter: String(inviterId),
+    })
+    expect(router.state.location.search).not.toHaveProperty('filter')
+    expect(
+      screen.getByRole('textbox', { name: 'Filter by inviter ID...' })
+    ).toHaveValue(String(inviterId))
+  }
+)
+
+it('reset clears an inviter filter set from the table', async () => {
+  const user = userEvent.setup()
+  const { get, router } = await renderUsers()
+  await user.click(screen.getByRole('button', { name: 'Inviter ID: 42' }))
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith(inviterSearchUrl(42))
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Reset' }))
+
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/user/', {
+      params: { p: 1, page_size: 20 },
+    })
+  )
+  expect(router.state.location.search).not.toHaveProperty('inviter')
+  expect(
+    screen.getByRole('textbox', { name: 'Filter by inviter ID...' })
+  ).toHaveValue('')
 })

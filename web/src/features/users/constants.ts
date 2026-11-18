@@ -97,6 +97,13 @@ export const getUserRoleOptions = (t: (key: string) => string) => [
 ]
 
 // ============================================================================
+// Inviter Filter
+// ============================================================================
+
+/** Table filter holding an inviter user ID; its URL search key is `inviter`. */
+export const INVITER_FILTER_ID = '_inviterSearch'
+
+// ============================================================================
 // Default Values
 // ============================================================================
 

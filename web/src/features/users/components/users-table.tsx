@@ -27,7 +27,9 @@ import {
   DISABLED_ROW_MOBILE,
   DataTablePage,
   useDataTable,
+  useDebouncedColumnFilter,
 } from '@/components/data-table'
+import { Input } from '@/components/ui/input'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import {
@@ -37,6 +39,7 @@ import {
 
 import { getGroups, getUsers, searchUsers } from '../api'
 import {
+  INVITER_FILTER_ID,
   USER_STATUS,
   getUserStatusOptions,
   getUserRoleOptions,
@@ -56,6 +59,7 @@ const USER_SORTABLE_COLUMNS = new Set<UserSortBy>([
   'group',
   'created_at',
   'last_login_at',
+  'invite_count',
 ])
 
 function isDisabledUserRow(user: User) {
@@ -86,6 +90,7 @@ export function UsersTable() {
       { columnId: 'status', searchKey: 'status', type: 'array' },
       { columnId: 'role', searchKey: 'role', type: 'array' },
       { columnId: 'group', searchKey: 'group', type: 'array' },
+      { columnId: INVITER_FILTER_ID, searchKey: 'inviter', type: 'string' },
     ],
   })
   const statusFilter =
@@ -100,6 +105,17 @@ export function UsersTable() {
     (columnFilters.find((filter) => filter.id === 'group')?.value as
       | string[]
       | undefined) ?? []
+  const {
+    value: inviterValue,
+    inputValue: inviterInput,
+    setInputValue: setInviterInput,
+  } = useDebouncedColumnFilter({
+    columnFilters,
+    columnId: INVITER_FILTER_ID,
+    onColumnFiltersChange,
+  })
+  // Only a positive user ID filters; anything else lists every user.
+  const inviterFilter = /^[1-9]\d*$/.test(inviterValue) ? inviterValue : ''
 
   const { data: groupsData } = useQuery({
     queryKey: ['groups'],
@@ -139,6 +155,7 @@ export function UsersTable() {
       statusFilter,
       roleFilter,
       groupFilter,
+      inviterFilter,
       sortParams,
       refreshTrigger,
     ],
@@ -147,7 +164,8 @@ export function UsersTable() {
       const hasColumnFilter =
         statusFilter.length > 0 ||
         roleFilter.length > 0 ||
-        groupFilter.length > 0
+        groupFilter.length > 0 ||
+        inviterFilter !== ''
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
@@ -162,6 +180,7 @@ export function UsersTable() {
               status: statusFilter[0] ?? '',
               role: roleFilter[0] ?? '',
               group: groupFilter[0] ?? '',
+              inviter_id: inviterFilter,
             })
           : await getUsers(params)
 
@@ -229,6 +248,18 @@ export function UsersTable() {
       toolbarProps={{
         searchPlaceholder: t('Filter by username, name or email...'),
         searchDebounceMs: 500,
+        additionalSearch: (
+          <Input
+            inputMode='numeric'
+            placeholder={t('Filter by inviter ID...')}
+            aria-label={t('Filter by inviter ID...')}
+            value={inviterInput}
+            onChange={(event) =>
+              setInviterInput(event.target.value.replaceAll(/\D/g, ''))
+            }
+            className='w-full sm:w-40'
+          />
+        ),
         filters: [
           {
             columnId: 'status',
