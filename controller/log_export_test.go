@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/alicebob/miniredis/v2"
@@ -146,6 +147,54 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			assert.Equal(t, "primary", all[2]["channel_name"])
 			assert.Contains(t, all[2]["other"], "admin_info")
 			assert.Equal(t, true, all[3]["success"])
+
+			// Recharge rows (types 1 and 3) never reach an administrator
+			// without billing:read: not in the count, the page, a search by
+			// type or the export. Full admins and root see them.
+			require.NoError(t, mainDB.AutoMigrate(&model.CasbinRule{}, &model.AuthzRole{}))
+			require.NoError(t, authz.Init(mainDB))
+			const admin, deputy, root = 3, 4, 5
+			require.NoError(t, mainDB.Transaction(func(tx *gorm.DB) error { return authz.AssignDeputyInTx(tx, deputy) }))
+			// The top-up belongs to the deputy: their own logs stay unfiltered.
+			for i, logType := range []int{model.LogTypeTopup, model.LogTypeManage, model.LogTypeSystem} {
+				owner := 2
+				if logType == model.LogTypeTopup {
+					owner = deputy
+				}
+				require.NoError(t, model.LOG_DB.Create(&model.Log{UserId: owner, Username: fmt.Sprint(owner), CreatedAt: now - int64(10+i), Type: logType, RequestId: fmt.Sprintf("type-%d", logType)}).Error)
+			}
+			everything := []any{"type-1", "type-3", "type-4", "a-2", "b-1", "a-1"}
+			withoutRecharge := []any{"type-4", "a-2", "b-1", "a-1"}
+			for _, viewer := range []struct {
+				name     string
+				id, role int
+				want     []any
+			}{
+				{"deputy", deputy, common.RoleAdminUser, withoutRecharge},
+				{"admin", admin, common.RoleAdminUser, everything},
+				{"root", root, common.RoleRootUser, everything},
+			} {
+				listed := callLogHandler(t, GetAllLogs, viewer.id, viewer.role, query)[0]
+				require.Equal(t, true, listed["success"], viewer.name)
+				assert.EqualValues(t, len(viewer.want), listed["data"].(map[string]any)["total"], viewer.name)
+				assert.Len(t, listed["data"].(map[string]any)["items"], len(viewer.want), viewer.name)
+				exported := callLogHandler(t, ExportAllLogs, viewer.id, viewer.role, query)
+				assert.Equal(t, viewer.want, exportedRequestIds(exported), viewer.name)
+				for _, logType := range []int{model.LogTypeTopup, model.LogTypeManage} {
+					typed := callLogHandler(t, GetAllLogs, viewer.id, viewer.role, fmt.Sprintf("%s&type=%d", query, logType))[0]
+					want := 1
+					if viewer.name == "deputy" {
+						want = 0
+					}
+					assert.EqualValues(t, want, typed["data"].(map[string]any)["total"], "%s type %d", viewer.name, logType)
+					typedExport := callLogHandler(t, ExportAllLogs, viewer.id, viewer.role, fmt.Sprintf("%s&type=%d", query, logType))
+					assert.Len(t, typedExport, want+1, "%s type %d", viewer.name, logType)
+				}
+			}
+			ownTopups := callLogHandler(t, GetUserLogs, deputy, common.RoleAdminUser, query+"&type=1")[0]
+			assert.EqualValues(t, 1, ownTopups["data"].(map[string]any)["total"])
+			ownExport := callLogHandler(t, ExportUserLogs, deputy, common.RoleAdminUser, query)
+			assert.Equal(t, []any{"type-1"}, exportedRequestIds(ownExport))
 		})
 	}
 }
