@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/oauth"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
@@ -723,4 +724,225 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 			assert.Equal(t, tc.want, user.GetSetting())
 		})
 	}
+}
+
+// Invite abuse rule and the admin users list.
+
+// setupInviteAbuseControllerTest is setupManageUserTestDB with the tables and
+// the options of the invite abuse rule: threshold 2, minimum redeemed quota
+// 500000, rule off.
+func setupInviteAbuseControllerTest(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.TopUp{}, &model.Redemption{}, &model.InviteAbuseBan{}))
+	enabled, threshold, minRedeem := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
+	registerEnabled, newUserQuota := common.RegisterEnabled, common.QuotaForNewUser
+	t.Cleanup(func() {
+		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = enabled, threshold, minRedeem
+		common.RegisterEnabled, common.QuotaForNewUser = registerEnabled, newUserQuota
+	})
+	common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = false, 2, 500000
+	common.RegisterEnabled, common.QuotaForNewUser = true, 0
+	return db
+}
+
+func createInviteAbuseControllerUser(t *testing.T, db *gorm.DB, name string, inviterId int) model.User {
+	t.Helper()
+	user := model.User{
+		Username: name, DisplayName: name, Role: common.RoleCommonUser, Status: common.UserStatusEnabled,
+		Group: "default", AffCode: name, InviterId: inviterId, AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+	return user
+}
+
+func inviteAbuseControllerStatus(t *testing.T, db *gorm.DB, id int) int {
+	t.Helper()
+	var user model.User
+	require.NoError(t, db.Select("status").Where("id = ?", id).Take(&user).Error)
+	return user.Status
+}
+
+func performInviteAbuseGet(t *testing.T, path string) string {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/api/user/invite_abuse/preview", GetInviteAbusePreview)
+	router.GET("/api/user/", GetAllUsers)
+	router.GET("/api/user/search", SearchUsers)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	return recorder.Body.String()
+}
+
+func TestInviteAbusePreviewEndpoint(t *testing.T) {
+	db := setupInviteAbuseControllerTest(t)
+	farmer := createInviteAbuseControllerUser(t, db, "farmer", 0)
+	for _, name := range []string{"farmer-1", "farmer-2", "farmer-3"} {
+		createInviteAbuseControllerUser(t, db, name, farmer.Id)
+	}
+	redeemer := createInviteAbuseControllerUser(t, db, "redeemer", 0)
+	createInviteAbuseControllerUser(t, db, "redeemer-1", redeemer.Id)
+	redeemed := createInviteAbuseControllerUser(t, db, "redeemer-2", redeemer.Id)
+	require.NoError(t, db.Create(&model.Redemption{Key: "invite-abuse-preview-code-000001", Name: "preview", Status: common.RedemptionCodeStatusUsed, Quota: 100, UsedUserId: redeemed.Id}).Error)
+
+	item := func(user model.User, invites int) string {
+		return fmt.Sprintf(`{"id":%d,"username":%q,"display_name":%q,"status":1,"invite_count":%d,"invitees_to_disable":%d}`, user.Id, user.Username, user.DisplayName, invites, invites)
+	}
+	for _, tc := range []struct{ name, query, want string }{
+		{"saved settings, rule off", "",
+			`{"threshold":2,"min_redeem_quota":500000,"abusive_inviters":2,"inviters_to_disable":2,"invitees_to_disable":5,"items":[` + item(farmer, 3) + `,` + item(redeemer, 2) + `],"truncated":false}`},
+		{"unsaved minimum redeemed quota", "?min_redeem_quota=100",
+			`{"threshold":2,"min_redeem_quota":100,"abusive_inviters":1,"inviters_to_disable":1,"invitees_to_disable":3,"items":[` + item(farmer, 3) + `],"truncated":false}`},
+		{"unsaved threshold", "?threshold=4&min_redeem_quota=0",
+			`{"threshold":4,"min_redeem_quota":0,"abusive_inviters":0,"inviters_to_disable":0,"invitees_to_disable":0,"items":[],"truncated":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var response securityEnrollmentResponse
+			require.NoError(t, common.UnmarshalJsonStr(performInviteAbuseGet(t, "/api/user/invite_abuse/preview"+tc.query), &response))
+			assert.True(t, response.Success)
+			assert.JSONEq(t, tc.want, string(response.Data))
+		})
+	}
+	for _, tc := range []struct{ query, key string }{
+		{"?threshold=0", "Invite count threshold must be an integer between 1 and 100000"},
+		{"?threshold=100001", "Invite count threshold must be an integer between 1 and 100000"},
+		{"?threshold=two", "Invite count threshold must be an integer between 1 and 100000"},
+		{"?min_redeem_quota=-1", "Minimum redeemed quota must be a non-negative integer"},
+	} {
+		body := performInviteAbuseGet(t, "/api/user/invite_abuse/preview"+tc.query)
+		assert.Contains(t, body, `"success":false`, tc.query)
+		assert.Contains(t, body, fmt.Sprintf(`"message_key":%q`, tc.key), tc.query)
+	}
+	var disabled int64
+	require.NoError(t, db.Model(&model.User{}).Where("status <> ?", common.UserStatusEnabled).Count(&disabled).Error)
+	assert.Zero(t, disabled, "a preview changes nothing")
+}
+
+// Enabling an account the rule disabled exempts it: the next sign-up with its
+// invite code no longer disables anybody.
+func TestManageUserEnableExemptsInviteAbuseBan(t *testing.T) {
+	db := setupInviteAbuseControllerTest(t)
+	common.InviteAbuseBanEnabled = true
+	farmer := createInviteAbuseControllerUser(t, db, "farmer", 0)
+	first := createInviteAbuseControllerUser(t, db, "farmer-1", farmer.Id)
+	second := model.User{Username: "farmer-2", DisplayName: "farmer-2", Role: common.RoleCommonUser, InviterId: farmer.Id}
+	require.NoError(t, second.Insert(farmer.Id))
+	for _, user := range []model.User{farmer, first, second} {
+		assert.Equal(t, common.UserStatusDisabled, inviteAbuseControllerStatus(t, db, user.Id), user.Username)
+	}
+
+	identity, proof := manageUserProof(t, db, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"enable"}`, farmer.Id))})
+	recorder := performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"enable"}`, farmer.Id), identity, proof)
+	assert.Contains(t, recorder.Body.String(), `"success":true`)
+	assert.Equal(t, common.UserStatusEnabled, inviteAbuseControllerStatus(t, db, farmer.Id))
+	var ban model.InviteAbuseBan
+	require.NoError(t, db.Where("user_id = ?", farmer.Id).Take(&ban).Error)
+	assert.Positive(t, ban.ReleasedAt)
+	assert.Equal(t, identity.UserID, ban.ReleasedBy)
+
+	third := model.User{Username: "farmer-3", DisplayName: "farmer-3", Role: common.RoleCommonUser, InviterId: farmer.Id}
+	require.NoError(t, third.Insert(farmer.Id))
+	assert.Equal(t, common.UserStatusEnabled, inviteAbuseControllerStatus(t, db, third.Id))
+	assert.Equal(t, common.UserStatusEnabled, inviteAbuseControllerStatus(t, db, farmer.Id))
+}
+
+// An OAuth sign-up that makes its inviter abusive is refused at once instead
+// of being signed in; a sign-up below the threshold signs in as before.
+func TestOAuthSignUpRefusedWhenInviteAbuseDisablesTheNewUser(t *testing.T) {
+	db := setupInviteAbuseControllerTest(t)
+	common.InviteAbuseBanEnabled = true
+	farmer := createInviteAbuseControllerUser(t, db, "farmer", 0)
+	createInviteAbuseControllerUser(t, db, "farmer-1", farmer.Id)
+	fresh := createInviteAbuseControllerUser(t, db, "fresh", 0)
+	for _, tc := range []struct {
+		name, affiliate, providerUserID string
+		success                         bool
+	}{
+		{"second invited user of the farmer", farmer.AffCode, "abuse-oauth-farmer", false},
+		{"first invited user of a new inviter", fresh.AffCode, "abuse-oauth-fresh", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/github", nil)
+			flow := &model.AuthFlow{Payload: fmt.Sprintf(`{"affiliate_code":%q}`, tc.affiliate)}
+			handleOAuthLogin(c, &oauth.GitHubProvider{}, &oauth.OAuthUser{ProviderUserID: tc.providerUserID, Username: tc.providerUserID}, &oauth.OAuthToken{}, flow)
+
+			var created model.User
+			require.NoError(t, db.Where("github_id = ?", tc.providerUserID).Take(&created).Error)
+			if tc.success {
+				assert.Contains(t, recorder.Body.String(), `"success":true`)
+				assert.Contains(t, recorder.Body.String(), `"access_token"`)
+				assert.Equal(t, common.UserStatusEnabled, created.Status)
+				return
+			}
+			assert.Contains(t, recorder.Body.String(), `"success":false`)
+			assert.Contains(t, recorder.Body.String(), `"message":"User has been banned"`)
+			assert.Equal(t, common.UserStatusDisabled, created.Status)
+			assert.Equal(t, common.UserStatusDisabled, inviteAbuseControllerStatus(t, db, farmer.Id))
+			sessions, err := model.CountActiveUserSessions(created.Id, time.Now().Unix())
+			require.NoError(t, err)
+			assert.Zero(t, sessions)
+		})
+	}
+}
+
+// The admin list carries invite_count and invite_abuse_ban only where they
+// apply, sorts by invite_count, and GET /api/user/ with inviter_id lists the
+// users the inviter invited.
+func TestAdminUserListInviteFields(t *testing.T) {
+	db := setupInviteAbuseControllerTest(t)
+	farmer := createInviteAbuseControllerUser(t, db, "farmer", 0)
+	first := createInviteAbuseControllerUser(t, db, "farmer-1", farmer.Id)
+	second := createInviteAbuseControllerUser(t, db, "farmer-2", farmer.Id)
+	quiet := createInviteAbuseControllerUser(t, db, "quiet", 0)
+	require.NoError(t, db.Create(&model.InviteAbuseBan{UserId: farmer.Id, InviterId: farmer.Id, Kind: model.InviteAbuseKindInviter, InviteCount: 2, CreatedAt: 1}).Error)
+
+	type listed struct {
+		Id             int     `json:"id"`
+		InviteCount    *int64  `json:"invite_count"`
+		InviteAbuseBan *string `json:"invite_abuse_ban"`
+	}
+	list := func(path string) (int, []listed) {
+		var response struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Total int      `json:"total"`
+				Items []listed `json:"items"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.UnmarshalJsonStr(performInviteAbuseGet(t, path), &response))
+		require.True(t, response.Success, path)
+		return response.Data.Total, response.Data.Items
+	}
+	ids := func(items []listed) []int {
+		result := make([]int, 0, len(items))
+		for _, item := range items {
+			result = append(result, item.Id)
+		}
+		return result
+	}
+
+	total, items := list("/api/user/?sort_by=invite_count&sort_order=desc&p=1&page_size=10")
+	assert.Equal(t, 4, total)
+	assert.Equal(t, []int{farmer.Id, quiet.Id, second.Id, first.Id}, ids(items))
+	require.NotNil(t, items[0].InviteCount)
+	assert.EqualValues(t, 2, *items[0].InviteCount)
+	require.NotNil(t, items[0].InviteAbuseBan)
+	assert.Equal(t, model.InviteAbuseKindInviter, *items[0].InviteAbuseBan)
+	assert.Nil(t, items[1].InviteCount, "omitted for users who invited nobody")
+	assert.Nil(t, items[1].InviteAbuseBan, "omitted without an active ban")
+
+	for _, path := range []string{
+		fmt.Sprintf("/api/user/?inviter_id=%d&p=1&page_size=10", farmer.Id),
+		fmt.Sprintf("/api/user/search?keyword=&inviter_id=%d&p=1&page_size=10", farmer.Id),
+	} {
+		total, items = list(path)
+		assert.Equal(t, 2, total, path)
+		assert.Equal(t, []int{second.Id, first.Id}, ids(items), path)
+	}
+	total, _ = list("/api/user/?inviter_id=abc&p=1&page_size=10")
+	assert.Equal(t, 4, total, "an invalid inviter id filters nothing")
 }

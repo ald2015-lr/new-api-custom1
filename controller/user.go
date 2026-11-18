@@ -336,6 +336,11 @@ func Register(c *gin.Context) {
 }
 
 func GetAllUsers(c *gin.Context) {
+	// The inviter filter belongs to the search query.
+	if c.Query("inviter_id") != "" {
+		SearchUsers(c)
+		return
+	}
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
 	users, total, err := model.GetAllUsers(pageInfo, sortOptions)
@@ -366,9 +371,15 @@ func SearchUsers(c *gin.Context) {
 			status = &parsed
 		}
 	}
+	var inviterId *int
+	if inviterStr := c.Query("inviter_id"); inviterStr != "" {
+		if parsed, err := strconv.Atoi(inviterStr); err == nil && parsed > 0 {
+			inviterId = &parsed
+		}
+	}
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
-	users, total, err := model.SearchUsers(keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
+	users, total, err := model.SearchUsers(keyword, group, role, status, inviterId, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1183,6 +1194,14 @@ func ManageUser(c *gin.Context) {
 	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserManage, service.AdminUserManageContext{UserID: user.Id, Action: req.Action})
 	if authorization == nil {
 		return
+	}
+	if req.Action == "enable" {
+		// Released before the status changes, so no sweep in between disables
+		// the account again: it is exempt from the invite abuse rule from now on.
+		if _, err := model.ReleaseInviteAbuseBan(user.Id, c.GetInt("id")); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	if req.Action == "demote" {
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
