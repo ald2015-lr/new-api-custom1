@@ -173,9 +173,17 @@ type captchaStore interface {
 	take(id string) (answer int, found bool, err error)
 }
 
+// captchaStoreForTest, when set, replaces the store chosen from the Redis
+// settings. Tests use it instead of changing common.RedisEnabled and
+// common.RDB, which background goroutines of other code read.
+var captchaStoreForTest captchaStore
+
 func currentCaptchaStore() captchaStore {
+	if captchaStoreForTest != nil {
+		return captchaStoreForTest
+	}
 	if common.RedisEnabled && common.RDB != nil {
-		return redisCaptchaStore{}
+		return redisCaptchaStore{client: common.RDB}
 	}
 	return memoryCaptchas
 }
@@ -191,18 +199,20 @@ return value
 `
 
 // redisCaptchaStore shares answers between nodes.
-type redisCaptchaStore struct{}
-
-func (redisCaptchaStore) put(id string, answer int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), captchaRedisTimeout)
-	defer cancel()
-	return common.RDB.Set(ctx, captchaRedisKeyPrefix+id, strconv.Itoa(answer), CaptchaTTL).Err()
+type redisCaptchaStore struct {
+	client *redis.Client
 }
 
-func (redisCaptchaStore) take(id string) (int, bool, error) {
+func (s redisCaptchaStore) put(id string, answer int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), captchaRedisTimeout)
 	defer cancel()
-	value, err := common.RDB.Eval(ctx, captchaTakeScript, []string{captchaRedisKeyPrefix + id}).Text()
+	return s.client.Set(ctx, captchaRedisKeyPrefix+id, strconv.Itoa(answer), CaptchaTTL).Err()
+}
+
+func (s redisCaptchaStore) take(id string) (int, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), captchaRedisTimeout)
+	defer cancel()
+	value, err := s.client.Eval(ctx, captchaTakeScript, []string{captchaRedisKeyPrefix + id}).Text()
 	if errors.Is(err, redis.Nil) {
 		return 0, false, nil
 	}

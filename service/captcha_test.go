@@ -21,15 +21,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// useCaptchaStore makes the captcha code use store until the test ends. It
+// leaves common.RedisEnabled and common.RDB alone: background goroutines that
+// earlier tests started (asynchronous quota cache updates) read them.
+func useCaptchaStore(t *testing.T, store captchaStore) {
+	t.Helper()
+	previous := captchaStoreForTest
+	captchaStoreForTest = store
+	t.Cleanup(func() { captchaStoreForTest = previous })
+}
+
 // useMemoryCaptchaStore swaps in an empty in-memory store whose clock the
-// returned pointer controls, with Redis disabled.
+// returned pointer controls.
 func useMemoryCaptchaStore(t *testing.T, limit int) *time.Time {
 	t.Helper()
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	previousStore, previousRedisEnabled := memoryCaptchas, common.RedisEnabled
-	memoryCaptchas = newMemoryCaptchaStore(limit, func() time.Time { return now })
-	common.RedisEnabled = false
-	t.Cleanup(func() { memoryCaptchas, common.RedisEnabled = previousStore, previousRedisEnabled })
+	useCaptchaStore(t, newMemoryCaptchaStore(limit, func() time.Time { return now }))
 	return &now
 }
 
@@ -38,12 +45,8 @@ func useRedisCaptchaStore(t *testing.T) *miniredis.Miniredis {
 	t.Helper()
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
-	previousClient, previousRedisEnabled := common.RDB, common.RedisEnabled
-	common.RDB, common.RedisEnabled = client, true
-	t.Cleanup(func() {
-		_ = client.Close()
-		common.RDB, common.RedisEnabled = previousClient, previousRedisEnabled
-	})
+	t.Cleanup(func() { _ = client.Close() })
+	useCaptchaStore(t, redisCaptchaStore{client: client})
 	return server
 }
 
