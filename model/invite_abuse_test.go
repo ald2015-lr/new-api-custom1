@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -70,7 +71,7 @@ func useInviteTestDatabase(t *testing.T, dialect string, prefix string, models .
 	return db
 }
 
-var inviteAbuseTestModels = []any{&User{}, &UserSession{}, &TopUp{}, &Redemption{}, &SubscriptionOrder{}, &InviteReward{}, &InviteAbuseBan{}}
+var inviteAbuseTestModels = []any{&User{}, &UserSession{}, &TopUp{}, &Redemption{}, &SubscriptionOrder{}, &InviteReward{}, &InviteAbuseBan{}, &Option{}}
 
 func resetInviteAbuseTables(t *testing.T) {
 	t.Helper()
@@ -83,7 +84,8 @@ func resetInviteAbuseTables(t *testing.T) {
 
 // useInviteAbuseSettings pins the rule's options (paid inviters exempt, the
 // default), the settings a sign-up reads and the sweep's schedule state, and
-// restores them afterwards.
+// restores them afterwards. The rule counts as unchanged for a long time, so
+// nothing waits for a change to settle.
 func useInviteAbuseSettings(t *testing.T, enabled bool, threshold int, minRedeemQuota int) {
 	t.Helper()
 	payment := operation_setting.GetPaymentSetting()
@@ -96,13 +98,13 @@ func useInviteAbuseSettings(t *testing.T, enabled bool, threshold int, minRedeem
 		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = savedEnabled, savedThreshold, savedMin
 		common.InviteAbuseBanExemptPaidInviter = savedExemptPaid
 		common.QuotaForNewUser, common.OptionMap = savedNewUser, savedOptions
-		inviteAbuseSweep = inviteAbuseSweepState{}
+		inviteAbuseSweep, inviteAbuseRuleChangedAt = inviteAbuseSweepState{}, time.Time{}
 	})
 	payment.ComplianceConfirmed = false
 	common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = enabled, threshold, minRedeemQuota
 	common.InviteAbuseBanExemptPaidInviter = true
 	common.QuotaForNewUser, common.OptionMap = 0, map[string]string{}
-	inviteAbuseSweep = inviteAbuseSweepState{}
+	inviteAbuseSweep, inviteAbuseRuleChangedAt = inviteAbuseSweepState{}, time.Time{}
 }
 
 func createInviteAbuseTestUser(t *testing.T, name string, inviterId int, role int) User {
@@ -157,6 +159,20 @@ func inviteAbuseTestUserIds(users ...User) []int {
 	return ids
 }
 
+// onInviteAbuseBan calls fn each time the rule has disabled an account and
+// recorded its ban, so a test can change something in the middle of a pass.
+func onInviteAbuseBan(t *testing.T, fn func(ban InviteAbuseBan)) {
+	t.Helper()
+	const name = "test:on-invite-abuse-ban"
+	require.NoError(t, DB.Callback().Create().After("gorm:commit_or_rollback_transaction").Register(name, func(tx *gorm.DB) {
+		// Records a test creates for released users are not bans.
+		if ban, ok := tx.Statement.Dest.(*InviteAbuseBan); ok && tx.Error == nil && tx.RowsAffected == 1 && ban.ReleasedAt == 0 {
+			fn(*ban)
+		}
+	}))
+	t.Cleanup(func() { assert.NoError(t, DB.Callback().Create().Remove(name)) })
+}
+
 func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {
@@ -169,9 +185,17 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("ban effects and idempotency", testInviteAbuseBanEffects)
 			t.Run("release", testInviteAbuseRelease)
 			t.Run("sign-up", testInviteAbuseSignUp)
+			t.Run("sign-up keeps a concurrent ban", testInviteAbuseSignUpKeepsConcurrentBan)
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
+			t.Run("sweep task", testInviteAbuseSweepTask)
+			t.Run("settings saved one option at a time", testInviteAbuseSettingsSavedOneAtATime)
+			t.Run("settings saved together", testInviteAbuseSettingsSavedTogether)
+			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
+			t.Run("change saved on another node", testInviteAbuseChangeSavedOnAnotherNode)
+			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
 			t.Run("sweep batches and budget", testInviteAbuseSweepBatches)
 			t.Run("preview", testInviteAbusePreview)
+			t.Run("preview of an invite chain", testInviteAbusePreviewChain)
 			t.Run("preview truncation", testInviteAbusePreviewTruncation)
 		})
 	}
@@ -251,8 +275,9 @@ func testInviteAbuseQualifyingRecharge(t *testing.T) {
 
 			preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
 			require.NoError(t, err)
-			disabled, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 			require.NoError(t, err)
+			assert.True(t, finished)
 			if !tc.abusive {
 				assert.Zero(t, preview.AbusiveInviters)
 				assert.Zero(t, disabled)
@@ -350,7 +375,9 @@ func testInviteAbuseThreshold(t *testing.T) {
 	}{
 		{name: "one short of the threshold", threshold: 3, invitees: 2, minRedeem: 500_000},
 		{name: "exactly the threshold", threshold: 3, invitees: 3, minRedeem: 500_000, abusive: true},
-		{name: "deleted invited users are not counted", threshold: 3, invitees: 3, deleted: 1, minRedeem: 500_000},
+		// A farm cannot stay under the threshold by deleting its invited
+		// accounts; the deleted ones are counted but cannot be disabled.
+		{name: "deleted invited users are counted", threshold: 3, invitees: 3, deleted: 1, minRedeem: 500_000, abusive: true},
 		{name: "threshold of one", threshold: 1, invitees: 1, minRedeem: 500_000, abusive: true},
 		{name: "redeemed exactly the minimum", threshold: 2, invitees: 2, minRedeem: 500_000, redeemed: 500_000},
 		{name: "minimum of zero takes any redemption", threshold: 2, invitees: 2, minRedeem: 0, redeemed: 1},
@@ -368,14 +395,17 @@ func testInviteAbuseThreshold(t *testing.T) {
 
 			preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
 			require.NoError(t, err)
-			disabled, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 			require.NoError(t, err)
+			assert.True(t, finished)
 			if !tc.abusive {
 				assert.Zero(t, preview.AbusiveInviters)
 				assert.Zero(t, disabled)
 				return
 			}
 			assert.Equal(t, 1, preview.AbusiveInviters)
+			require.Len(t, preview.Items, 1)
+			assert.EqualValues(t, tc.invitees, preview.Items[0].InviteCount)
 			assert.Equal(t, 1+tc.invitees-tc.deleted, disabled)
 		})
 	}
@@ -393,8 +423,9 @@ func testInviteAbuseAdministratorsAndExemptUsers(t *testing.T) {
 	releaseInviteAbuseTestUser(t, invitees[0])
 
 	for _, skipped := range []User{admin, root, exempt} {
-		disabled, err := enforceInviteAbuseRuleOnInviter(skipped.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+		disabled, finished, err := enforceInviteAbuseRuleOnInviter(skipped.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 		require.NoError(t, err)
+		assert.True(t, finished)
 		assert.Zero(t, disabled, skipped.Username)
 	}
 	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
@@ -420,8 +451,9 @@ func testInviteAbuseBanEffects(t *testing.T) {
 	}).Error)
 	banned := append([]User{inviter}, invitees...)
 
-	disabled, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+	disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 	require.NoError(t, err)
+	assert.True(t, finished)
 	assert.Equal(t, 3, disabled)
 	for _, user := range banned {
 		state := inviteAbuseUserState(t, user.Id)
@@ -472,8 +504,9 @@ func testInviteAbuseBanEffects(t *testing.T) {
 	}
 
 	// Running the rule again, by a sign-up or a sweep, changes nothing.
-	again, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+	again, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 	require.NoError(t, err)
+	assert.True(t, finished)
 	assert.Zero(t, again)
 	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
 	require.NoError(t, err)
@@ -523,8 +556,9 @@ func testInviteAbuseRelease(t *testing.T) {
 
 	other, otherInvitees := createInviteAbuseTestInviter(t, "other", common.RoleCommonUser, 1)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", invitees[0].Id).Update("inviter_id", other.Id).Error)
-	disabled, err := enforceInviteAbuseRuleOnInviter(other.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+	disabled, finished, err := enforceInviteAbuseRuleOnInviter(other.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
 	require.NoError(t, err)
+	assert.True(t, finished)
 	assert.Equal(t, 2, disabled, "the inviter and its invited user that is not exempt")
 	assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, invitees[0].Id).Status)
 	assert.Equal(t, common.UserStatusDisabled, inviteAbuseUserState(t, otherInvitees[0].Id).Status)
@@ -583,6 +617,56 @@ func testInviteAbuseSignUp(t *testing.T) {
 	}
 }
 
+// Another sign-up's check or a sweep may disable a new user right after the
+// sign-up read it to write its sidebar config. That write touches only the
+// setting column: the account stays disabled, only the ban moved its
+// authentication version, and a cached copy gets the new setting with the
+// disabled status.
+func testInviteAbuseSignUpKeepsConcurrentBan(t *testing.T) {
+	for _, oauth := range []bool{false, true} {
+		t.Run(fmt.Sprintf("OAuth sign-up: %v", oauth), func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, false, 2, 500_000)
+			useUserCacheMiniRedis(t)
+			newcomer := User{Username: "newcomer", DisplayName: "newcomer", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}
+			require.NoError(t, DB.Transaction(func(tx *gorm.DB) error { return newcomer.InsertWithTx(tx, 0) }))
+			_, err := GetUserCache(newcomer.Id)
+			require.NoError(t, err)
+			banned := false
+			const name = "test:ban-during-sign-up"
+			require.NoError(t, DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+				// The first read of a user is the sign-up's read of the new user.
+				if banned || tx.Statement.Schema == nil || tx.Statement.Schema.Name != "User" {
+					return
+				}
+				banned = true
+				changed, err := DisableUserBySystem(newcomer.Id, inviteAbuseRevokeReason)
+				require.NoError(t, err)
+				require.True(t, changed)
+			}))
+			t.Cleanup(func() { assert.NoError(t, DB.Callback().Query().Remove(name)) })
+
+			if oauth {
+				newcomer.FinalizeOAuthUserCreation(0)
+			} else {
+				newcomer.FinishInsert(0)
+			}
+			require.True(t, banned)
+			stored := inviteAbuseUserState(t, newcomer.Id)
+			assert.Equal(t, common.UserStatusDisabled, stored.Status, "the ban is kept")
+			assert.EqualValues(t, 2, stored.AuthVersion, "only the ban moved the authentication version")
+			var setting User
+			require.NoError(t, DB.Select("setting").Where("id = ?", newcomer.Id).Take(&setting).Error)
+			assert.NotEmpty(t, setting.GetSetting().SidebarModules, "the sidebar config is written")
+			cached, err := GetUserCache(newcomer.Id)
+			require.NoError(t, err)
+			assert.Equal(t, common.UserStatusDisabled, cached.Status)
+			assert.EqualValues(t, 2, cached.AuthVersion)
+			assert.NotEmpty(t, cached.GetSetting().SidebarModules)
+		})
+	}
+}
+
 // The master node's tick sweeps right after the rule is turned on and after a
 // setting changed, and otherwise once per InviteAbuseSweepInterval.
 func testInviteAbuseSweepSchedule(t *testing.T) {
@@ -592,54 +676,499 @@ func testInviteAbuseSweepSchedule(t *testing.T) {
 	start := time.Now()
 
 	first, _ := createInviteAbuseTestInviter(t, "first", common.RoleCommonUser, 2)
-	RunInviteAbuseSweepIfDue(start)
+	runInviteAbuseSweepIfDue(start)
 	assert.Equal(t, common.UserStatusEnabled, status(first), "the rule is off")
 
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
-	RunInviteAbuseSweepIfDue(start.Add(time.Minute))
+	runInviteAbuseSweepIfDue(start.Add(time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(first), "turning the rule on sweeps at once")
 
 	second, _ := createInviteAbuseTestInviter(t, "second", common.RoleCommonUser, 2)
-	RunInviteAbuseSweepIfDue(start.Add(2 * time.Minute))
+	runInviteAbuseSweepIfDue(start.Add(2 * time.Minute))
 	assert.Equal(t, common.UserStatusEnabled, status(second), "no sweep within the interval")
 
 	require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "1"))
-	RunInviteAbuseSweepIfDue(start.Add(3 * time.Minute))
+	runInviteAbuseSweepIfDue(start.Add(3 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(second), "a new threshold sweeps at once")
 
 	third, _ := createInviteAbuseTestInviter(t, "third", common.RoleCommonUser, 1)
-	RunInviteAbuseSweepIfDue(start.Add(4 * time.Minute))
+	runInviteAbuseSweepIfDue(start.Add(4 * time.Minute))
 	assert.Equal(t, common.UserStatusEnabled, status(third))
 	require.NoError(t, updateOptionMap("InviteAbuseBanMinRedeemQuota", "1000"))
-	RunInviteAbuseSweepIfDue(start.Add(5 * time.Minute))
+	runInviteAbuseSweepIfDue(start.Add(5 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(third), "a new minimum redeemed quota sweeps at once")
 
 	fourth, _ := createInviteAbuseTestInviter(t, "fourth", common.RoleCommonUser, 1)
-	RunInviteAbuseSweepIfDue(start.Add(5*time.Minute + InviteAbuseSweepInterval - time.Second))
+	runInviteAbuseSweepIfDue(start.Add(5*time.Minute + InviteAbuseSweepInterval - time.Second))
 	assert.Equal(t, common.UserStatusEnabled, status(fourth))
-	RunInviteAbuseSweepIfDue(start.Add(5*time.Minute + InviteAbuseSweepInterval))
+	runInviteAbuseSweepIfDue(start.Add(5*time.Minute + InviteAbuseSweepInterval))
 	assert.Equal(t, common.UserStatusDisabled, status(fourth), "the next periodic sweep")
 
+	// The periodic option sync applies the saved values again: no change.
 	later := start.Add(5*time.Minute + InviteAbuseSweepInterval)
+	for key, value := range map[string]string{
+		"InviteAbuseBanEnabled": "true", "InviteAbuseBanThreshold": "1",
+		"InviteAbuseBanMinRedeemQuota": "1000", "InviteAbuseBanExemptPaidInviter": "true",
+	} {
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	synced, _ := createInviteAbuseTestInviter(t, "synced", common.RoleCommonUser, 1)
+	runInviteAbuseSweepIfDue(later.Add(time.Minute))
+	assert.Equal(t, common.UserStatusEnabled, status(synced), "applying the same settings again does not sweep")
+
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
 	fifth, _ := createInviteAbuseTestInviter(t, "fifth", common.RoleCommonUser, 1)
-	RunInviteAbuseSweepIfDue(later.Add(time.Minute))
+	runInviteAbuseSweepIfDue(later.Add(2 * time.Minute))
 	assert.Equal(t, common.UserStatusEnabled, status(fifth))
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
-	RunInviteAbuseSweepIfDue(later.Add(2 * time.Minute))
+	runInviteAbuseSweepIfDue(later.Add(3 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(fifth), "turning the rule on again sweeps at once")
+
+	// Off and on again between two ticks: no tick saw the rule off, and a
+	// farm that reached the threshold meanwhile (no sign-up check ran) is
+	// swept by the next tick all the same.
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
+	sixth, _ := createInviteAbuseTestInviter(t, "sixth", common.RoleCommonUser, 1)
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
+	runInviteAbuseSweepIfDue(later.Add(4 * time.Minute))
+	assert.Equal(t, common.UserStatusDisabled, status(sixth), "turning the rule off and on between two ticks sweeps at once")
 
 	patron, _ := createInviteAbuseTestInviter(t, "patron", common.RoleCommonUser, 1)
 	seedTestTopUp(t, TopUp{UserId: patron.Id, Amount: 1, Money: 7, PaymentProvider: PaymentProviderEpay})
-	RunInviteAbuseSweepIfDue(later.Add(3 * time.Minute))
+	runInviteAbuseSweepIfDue(later.Add(5 * time.Minute))
 	assert.Equal(t, common.UserStatusEnabled, status(patron))
 	require.NoError(t, updateOptionMap("InviteAbuseBanExemptPaidInviter", "false"))
-	RunInviteAbuseSweepIfDue(later.Add(4 * time.Minute))
+	runInviteAbuseSweepIfDue(later.Add(6 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(patron), "no longer exempting paid inviters sweeps at once")
 }
 
-// A pass reads the candidates in batches and stops at its time budget without
-// losing its place.
+// The master node's task sweeps when the rule changes, as soon as the change
+// has settled and without waiting for its tick: after the rule is turned on,
+// and again after it is turned off and on between two ticks.
+func testInviteAbuseSweepTask(t *testing.T) {
+	resetInviteAbuseTables(t)
+	useInviteAbuseSettings(t, false, 2, 500_000)
+	savedDelay := inviteAbuseSettleDelay
+	inviteAbuseSettleDelay = 50 * time.Millisecond
+	t.Cleanup(func() { inviteAbuseSettleDelay = savedDelay })
+	tick, stop, done := make(chan time.Time), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		RunInviteAbuseSweepTask(tick, stop)
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-done
+	})
+	disabled := func(user User) func() bool {
+		return func() bool {
+			var stored User
+			err := DB.Select("status").Where("id = ?", user.Id).Take(&stored).Error
+			return err == nil && stored.Status == common.UserStatusDisabled
+		}
+	}
+
+	first, _ := createInviteAbuseTestInviter(t, "first", common.RoleCommonUser, 2)
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
+	assert.Eventually(t, disabled(first), 10*time.Second, 5*time.Millisecond, "turning the rule on sweeps without a tick")
+
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
+	second, _ := createInviteAbuseTestInviter(t, "second", common.RoleCommonUser, 2)
+	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
+	assert.Eventually(t, disabled(second), 10*time.Second, 5*time.Millisecond, "turning the rule off and on between two ticks sweeps again")
+}
+
+// A client of PUT /api/option/ saves the rule's options one per request, a
+// round trip apart, and the wake-up that follows the first one comes at once.
+// Neither a pass nor a sign-up check disables anybody until the rule has
+// stayed the same for inviteAbuseSettleDelay: nobody is disabled with only
+// some of the options applied, whether the rule stays on or the same save
+// turns it off (the switch is saved last).
+func testInviteAbuseSettingsSavedOneAtATime(t *testing.T) {
+	t.Run("threshold and minimum lowered", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 5, 500_000)
+		// Abusive with the new threshold and the old minimum only: one of the
+		// invited users redeemed 0.5 USD.
+		half, halfInvitees := createInviteAbuseTestInviter(t, "half", common.RoleCommonUser, 3)
+		seedUsedRedemption(t, halfInvitees[0].Id, 250_000)
+		late, lateInvitees := createInviteAbuseTestInviter(t, "late", common.RoleCommonUser, 2)
+		seedUsedRedemption(t, lateInvitees[0].Id, 250_000)
+		// Abusive with the new settings.
+		farm, farmInvitees := createInviteAbuseTestInviter(t, "farm", common.RoleCommonUser, 3)
+		runInviteAbuseSweepIfDue(time.Now())
+		require.Empty(t, disabledInviteAbuseTestUsers(t), "nobody is abusive with the old settings")
+
+		require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "3"))
+		assert.Positive(t, runInviteAbuseSweepIfDue(time.Now()), "the wake-up right after the first option waits")
+		newcomer := User{Username: "late-3", DisplayName: "late-3", Role: common.RoleCommonUser, InviterId: late.Id}
+		require.NoError(t, newcomer.Insert(late.Id)) // a sign-up between the two requests
+		assert.Empty(t, disabledInviteAbuseTestUsers(t))
+		beforeSecond := time.Now()
+		require.NoError(t, updateOptionMap("InviteAbuseBanMinRedeemQuota", "100000"))
+		assert.Positive(t, runInviteAbuseSweepIfDue(beforeSecond.Add(inviteAbuseSettleDelay)), "the second option starts the wait again")
+		assert.Empty(t, disabledInviteAbuseTestUsers(t))
+
+		assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
+		assert.Equal(t, inviteAbuseTestUserIds(append([]User{farm}, farmInvitees...)...), disabledInviteAbuseTestUsers(t),
+			"once settled, the pass disables what the saved settings call abusive")
+		for _, user := range []User{half, late, newcomer} {
+			assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, user.Id).Status, user.Username)
+		}
+	})
+
+	t.Run("threshold lowered and rule turned off", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 5, 500_000)
+		createInviteAbuseTestInviter(t, "farm", common.RoleCommonUser, 3)
+		runInviteAbuseSweepIfDue(time.Now())
+		require.Empty(t, disabledInviteAbuseTestUsers(t))
+
+		require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "3"))
+		assert.Positive(t, runInviteAbuseSweepIfDue(time.Now()))
+		require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
+		assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
+		assert.Empty(t, disabledInviteAbuseTestUsers(t), "the rule ends up off")
+	})
+}
+
+// The settings form saves the options it changed in one request, all of them
+// or none (UpdateOptionsBulk). A save that fails while it writes them leaves
+// the saved options and this node's rule as they were: nothing is disabled
+// under a rule with some of the new values and some of the old ones, not
+// after the option sync and not by the next periodic pass. Saved again, the
+// options apply together.
+func testInviteAbuseSettingsSavedTogether(t *testing.T) {
+	resetInviteAbuseTables(t)
+	useInviteAbuseSettings(t, true, 5, 500_000)
+	saved := map[string]string{
+		"InviteAbuseBanEnabled": "true", "InviteAbuseBanThreshold": "5",
+		"InviteAbuseBanMinRedeemQuota": "500000", "InviteAbuseBanExemptPaidInviter": "true",
+	}
+	for key, value := range saved {
+		require.NoError(t, DB.Save(&Option{Key: key, Value: value}).Error)
+	}
+	storedOptions := func() map[string]string {
+		var options []Option
+		require.NoError(t, DB.Find(&options).Error)
+		values := make(map[string]string, len(options))
+		for _, option := range options {
+			values[option.Key] = option.Value
+		}
+		return values
+	}
+	// Abusive with the new threshold and the old minimum only: one of the
+	// invited users redeemed 0.5 USD.
+	half, halfInvitees := createInviteAbuseTestInviter(t, "half", common.RoleCommonUser, 3)
+	seedUsedRedemption(t, halfInvitees[0].Id, 250_000)
+	// Abusive with the new settings.
+	farm, farmInvitees := createInviteAbuseTestInviter(t, "farm", common.RoleCommonUser, 3)
+	runInviteAbuseSweepIfDue(time.Now())
+	require.Empty(t, disabledInviteAbuseTestUsers(t), "nobody is abusive with the old settings")
+
+	// The second option written fails, whichever of the two it is.
+	writes, failing := 0, true
+	const name = "test:fail-second-option-write"
+	require.NoError(t, DB.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+		if failing && tx.Statement.Schema != nil && tx.Statement.Schema.Name == "Option" {
+			if writes++; writes == 2 {
+				tx.AddError(errors.New("connection lost"))
+			}
+		}
+	}))
+	t.Cleanup(func() { assert.NoError(t, DB.Callback().Update().Remove(name)) })
+	change := map[string]string{"InviteAbuseBanThreshold": "3", "InviteAbuseBanMinRedeemQuota": "100000"}
+	require.Error(t, UpdateOptionsBulk(change))
+	require.Equal(t, 2, writes)
+	failing = false
+	assert.Equal(t, saved, storedOptions(), "the option written first is rolled back")
+	assert.Equal(t, InviteAbuseSettings{Threshold: 5, MinRedeemQuota: 500_000, ExemptPaidInviter: true}, CurrentInviteAbuseSettings())
+	for key, value := range storedOptions() { // the option sync
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(InviteAbuseSweepInterval)))
+	assert.Empty(t, disabledInviteAbuseTestUsers(t), "the periodic pass runs with the old settings")
+
+	require.NoError(t, UpdateOptionsBulk(change))
+	assert.Equal(t, InviteAbuseSettings{Threshold: 3, MinRedeemQuota: 100_000, ExemptPaidInviter: true}, CurrentInviteAbuseSettings())
+	assert.Positive(t, runInviteAbuseSweepIfDue(time.Now()), "the change settles first")
+	assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
+	assert.Equal(t, inviteAbuseTestUserIds(append([]User{farm}, farmInvitees...)...), disabledInviteAbuseTestUsers(t),
+		"the pass disables what the saved settings call abusive")
+	assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, half.Id).Status)
+}
+
+// Saving an option of the rule, or the periodic option sync applying one,
+// wakes the master node's sweep only for a real change that calls for a new
+// pass: the rule turned on, or one of its settings changed while it is on.
+func TestInviteAbuseRuleChangesWakeTheSweep(t *testing.T) {
+	useInviteAbuseSettings(t, false, 5, 500_000)
+	woken := func() bool {
+		select {
+		case <-inviteAbuseSweepWake:
+			return true
+		default:
+			return false
+		}
+	}
+	woken() // a wake-up an earlier test left behind
+	for _, step := range []struct {
+		name, key, value string
+		wakes            bool
+	}{
+		{"threshold changed while off", "InviteAbuseBanThreshold", "6", false},
+		{"still off", "InviteAbuseBanEnabled", "false", false},
+		{"turned on", "InviteAbuseBanEnabled", "true", true},
+		{"still on", "InviteAbuseBanEnabled", "true", false},
+		{"same threshold", "InviteAbuseBanThreshold", "6", false},
+		{"new threshold", "InviteAbuseBanThreshold", "7", true},
+		{"same minimum", "InviteAbuseBanMinRedeemQuota", "500000", false},
+		{"new minimum", "InviteAbuseBanMinRedeemQuota", "1000", true},
+		{"same exemption", "InviteAbuseBanExemptPaidInviter", "true", false},
+		{"no exemption", "InviteAbuseBanExemptPaidInviter", "false", true},
+		{"turned off", "InviteAbuseBanEnabled", "false", false},
+	} {
+		require.NoError(t, updateOptionMap(step.key, step.value))
+		assert.Equal(t, step.wakes, woken(), step.name)
+	}
+}
+
+// An administrator who turns the rule off or raises the threshold while a
+// pass runs stops it at once: nothing more is disabled under the old
+// settings, and the next tick does nothing while the rule is off or starts a
+// new pass with the new settings.
+func testInviteAbuseSettingsChangeStopsPass(t *testing.T) {
+	for _, tc := range []struct{ name, key, value string }{
+		{name: "rule turned off", key: "InviteAbuseBanEnabled", value: "false"},
+		{name: "threshold raised", key: "InviteAbuseBanThreshold", value: "100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 1, 500_000)
+			first, _ := createInviteAbuseTestInviter(t, "farm0", common.RoleCommonUser, 1)
+			for i := 1; i < 5; i++ {
+				createInviteAbuseTestInviter(t, fmt.Sprintf("farm%d", i), common.RoleCommonUser, 1)
+			}
+			changed := false
+			onInviteAbuseBan(t, func(InviteAbuseBan) {
+				if !changed {
+					changed = true
+					require.NoError(t, updateOptionMap(tc.key, tc.value)) // what saving the option does
+				}
+			})
+
+			start := time.Now()
+			runInviteAbuseSweepIfDue(start)
+			require.True(t, changed)
+			assert.Equal(t, inviteAbuseTestUserIds(first), disabledInviteAbuseTestUsers(t), "only the ban made before the change")
+			runInviteAbuseSweepIfDue(start.Add(time.Minute))
+			assert.Equal(t, inviteAbuseTestUserIds(first), disabledInviteAbuseTestUsers(t), "the next tick does not finish the old pass")
+		})
+	}
+
+	// A pass that stops after it got through an inviter does not go on from
+	// there with the new settings: the next tick starts over, so an inviter
+	// before the stop is checked with them too.
+	t.Run("threshold lowered after the first inviter", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 2, 500_000)
+		small, smallInvitees := createInviteAbuseTestInviter(t, "small", common.RoleCommonUser, 1)
+		farm0, farm0Invitees := createInviteAbuseTestInviter(t, "farm0", common.RoleCommonUser, 2)
+		farm1, farm1Invitees := createInviteAbuseTestInviter(t, "farm1", common.RoleCommonUser, 2)
+		onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+			if ban.UserId == farm1.Id {
+				require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "1"))
+			}
+		})
+
+		start := time.Now()
+		runInviteAbuseSweepIfDue(start)
+		stopped := append(append([]User{farm0}, farm0Invitees...), farm1)
+		assert.Equal(t, inviteAbuseTestUserIds(stopped...), disabledInviteAbuseTestUsers(t), "the pass stops in the second inviter")
+		runInviteAbuseSweepIfDue(start.Add(time.Minute))
+		all := append(append(append([]User{small}, smallInvitees...), stopped...), farm1Invitees...)
+		assert.Equal(t, inviteAbuseTestUserIds(all...), disabledInviteAbuseTestUsers(t), "the inviter before the stop is disabled with the new threshold")
+	})
+}
+
+// An administrator who turns the rule off or changes a setting through
+// another node saves the option there; this node's copy changes only with its
+// next option sync. A pass and a sign-up check here stop all the same as soon
+// as they confirm the saved options: before an inviter's first account, and
+// within an inviter's accounts at most inviteAbuseRecheckInterval later.
+// Saved options equal to this node's change nothing.
+func testInviteAbuseChangeSavedOnAnotherNode(t *testing.T) {
+	for _, tc := range []struct{ name, key, saved, changed string }{
+		{name: "rule turned off", key: "InviteAbuseBanEnabled", saved: "true", changed: "false"},
+		{name: "threshold raised", key: "InviteAbuseBanThreshold", saved: "1", changed: "100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 1, 500_000)
+			for key, value := range map[string]string{
+				"InviteAbuseBanEnabled": "true", "InviteAbuseBanThreshold": "1",
+				"InviteAbuseBanMinRedeemQuota": "500000", "InviteAbuseBanExemptPaidInviter": "true",
+			} {
+				require.NoError(t, DB.Save(&Option{Key: key, Value: value}).Error)
+			}
+			farm0, farm0Invitees := createInviteAbuseTestInviter(t, "farm0", common.RoleCommonUser, 2)
+			farm1, _ := createInviteAbuseTestInviter(t, "farm1", common.RoleCommonUser, 2)
+			createInviteAbuseTestInviter(t, "farm2", common.RoleCommonUser, 2)
+			onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+				// farm0's oldest invited user is its last account, farm1 the
+				// first of its own.
+				if ban.UserId == farm0Invitees[0].Id || ban.UserId == farm1.Id {
+					require.NoError(t, DB.Save(&Option{Key: tc.key, Value: tc.changed}).Error) // UpdateOption on the other node
+				}
+			})
+
+			start := time.Now()
+			runInviteAbuseSweepIfDue(start)
+			farm0Accounts := inviteAbuseTestUserIds(append([]User{farm0}, farm0Invitees...)...)
+			assert.Equal(t, farm0Accounts, disabledInviteAbuseTestUsers(t), "the next inviter is not touched")
+			runInviteAbuseSweepIfDue(start.Add(time.Minute))
+			assert.Equal(t, farm0Accounts, disabledInviteAbuseTestUsers(t), "nor by the next tick before the option sync")
+
+			require.NoError(t, DB.Save(&Option{Key: tc.key, Value: tc.saved}).Error)
+			savedInterval := inviteAbuseRecheckInterval
+			inviteAbuseRecheckInterval = 0 // confirmed before every account
+			t.Cleanup(func() { inviteAbuseRecheckInterval = savedInterval })
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(farm1.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			require.NoError(t, err)
+			assert.False(t, finished)
+			assert.Equal(t, 1, disabled, "farm1's invited users are not touched once the change is saved")
+
+			// A sign-up that brings a new inviter to the threshold.
+			inviter := createInviteAbuseTestUser(t, "inviter", 0, common.RoleCommonUser)
+			newcomer := User{Username: "newcomer", DisplayName: "newcomer", Role: common.RoleCommonUser, InviterId: inviter.Id}
+			require.NoError(t, newcomer.Insert(inviter.Id))
+			assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, inviter.Id).Status)
+			assert.Equal(t, common.UserStatusEnabled, newcomer.Status)
+
+			// This node's option sync applies the change: nothing is disabled
+			// with the old settings from then on.
+			require.NoError(t, updateOptionMap(tc.key, tc.changed))
+			runInviteAbuseSweepIfDue(start.Add(2 * time.Minute))
+			assert.Equal(t, append(farm0Accounts, farm1.Id), disabledInviteAbuseTestUsers(t))
+		})
+	}
+}
+
+// A sweep's candidate batch only pre-selects inviters. A recharge that comes
+// in while the pass is busy with an earlier inviter of the batch — by an
+// invited user, or by the inviter while paid inviters are exempt — clears
+// the later farm, and an account an administrator released after the pass
+// loaded the invited users is not disabled again. While one inviter's
+// accounts are disabled, a recharge clears it when the verdict is taken
+// again and a release of the inviter keeps its remaining accounts enabled.
+func testInviteAbuseVerdictAtDisableTime(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		payer func(inviter User, invitees []User) User
+	}{
+		{name: "an invited user", payer: func(_ User, invitees []User) User { return invitees[0] }},
+		{name: "the inviter", payer: func(inviter User, _ []User) User { return inviter }},
+	} {
+		t.Run(tc.name+" pays while the inviter's accounts are disabled", func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 3, 500_000)
+			savedInterval := inviteAbuseRecheckInterval
+			inviteAbuseRecheckInterval = 0 // the verdict is taken again before every account
+			t.Cleanup(func() { inviteAbuseRecheckInterval = savedInterval })
+			inviter, invitees := createInviteAbuseTestInviter(t, "farmer", common.RoleCommonUser, 3)
+			payer := tc.payer(inviter, invitees)
+			paid := false
+			onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+				if !paid && ban.UserId == inviter.Id {
+					paid = true // the inviter is disabled; its invited users are next
+					seedTestTopUp(t, TopUp{UserId: payer.Id, Amount: 2, Money: 14, PaymentProvider: PaymentProviderEpay})
+				}
+			})
+
+			disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+			require.NoError(t, err)
+			require.True(t, paid)
+			assert.True(t, finished, "the inviter is no longer abusive")
+			assert.Equal(t, 1, disabled)
+			assert.Equal(t, inviteAbuseTestUserIds(inviter), disabledInviteAbuseTestUsers(t), "its invited users stay enabled")
+		})
+
+		t.Run(tc.name+" pays during the pass", func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, true, 2, 500_000)
+			first, firstInvitees := createInviteAbuseTestInviter(t, "first", common.RoleCommonUser, 2)
+			second, secondInvitees := createInviteAbuseTestInviter(t, "second", common.RoleCommonUser, 2)
+			payer := tc.payer(second, secondInvitees)
+			paid := false
+			onInviteAbuseBan(t, func(InviteAbuseBan) {
+				if !paid {
+					paid = true // the pass has just disabled the first inviter
+					seedTestTopUp(t, TopUp{UserId: payer.Id, Amount: 2, Money: 14, PaymentProvider: PaymentProviderEpay})
+				}
+			})
+
+			_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
+			require.NoError(t, err)
+			require.True(t, complete)
+			require.True(t, paid)
+			assert.Equal(t, inviteAbuseTestUserIds(append([]User{first}, firstInvitees...)...), disabledInviteAbuseTestUsers(t),
+				"the second inviter and its invited users stay enabled")
+		})
+	}
+
+	t.Run("an administrator releases an invited user during the pass", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 2, 500_000)
+		inviter, invitees := createInviteAbuseTestInviter(t, "farmer", common.RoleCommonUser, 3)
+		released := false
+		onInviteAbuseBan(t, func(InviteAbuseBan) {
+			if !released {
+				// The inviter is disabled and its invited users are loaded;
+				// the oldest one, disabled last, is enabled again meanwhile.
+				released = true
+				releaseInviteAbuseTestUser(t, invitees[0])
+			}
+		})
+
+		disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+		require.NoError(t, err)
+		assert.True(t, finished)
+		require.True(t, released)
+		assert.Equal(t, 3, disabled)
+		assert.Equal(t, inviteAbuseTestUserIds(inviter, invitees[1], invitees[2]), disabledInviteAbuseTestUsers(t))
+		assert.Zero(t, countSystemLogs(t, invitees[0].Id, "invited users have no recharge."))
+	})
+
+	t.Run("an administrator releases the inviter while its invited users are disabled", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 3, 500_000)
+		inviter, invitees := createInviteAbuseTestInviter(t, "farmer", common.RoleCommonUser, 3)
+		released := false
+		onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+			if !released && ban.UserId == inviter.Id {
+				released = true // what ManageUser "enable" does: release the record, enable the account
+				ok, err := ReleaseInviteAbuseBan(inviter.Id, 1)
+				require.NoError(t, err)
+				require.True(t, ok)
+				require.NoError(t, DB.Model(&User{}).Where("id = ?", inviter.Id).Update("status", common.UserStatusEnabled).Error)
+			}
+		})
+
+		disabled, finished, err := enforceInviteAbuseRuleOnInviter(inviter.Id, CurrentInviteAbuseSettings(), time.Now().Add(time.Minute))
+		require.NoError(t, err)
+		require.True(t, released)
+		assert.True(t, finished)
+		assert.Equal(t, 1, disabled, "only the inviter, before its release")
+		assert.Empty(t, disabledInviteAbuseTestUsers(t), "the invited users of an exempt inviter stay enabled")
+		for _, invitee := range invitees {
+			assert.Zero(t, countSystemLogs(t, invitee.Id, "invited users have no recharge."), invitee.Username)
+		}
+	})
+}
+
+// A pass reads the candidates in batches and stops at its time budget, or in
+// the middle of an inviter, without losing its place: it continues with the
+// inviter it did not finish.
 func testInviteAbuseSweepBatches(t *testing.T) {
 	resetInviteAbuseTables(t)
 	useInviteAbuseSettings(t, true, 1, 500_000)
@@ -659,6 +1188,19 @@ func testInviteAbuseSweepBatches(t *testing.T) {
 	assert.Zero(t, cursor)
 	assert.Empty(t, disabledInviteAbuseTestUsers(t), "the budget was spent before the first inviter")
 
+	// The third inviter's pass stops right after the inviter itself.
+	onInviteAbuseBan(t, func(ban InviteAbuseBan) {
+		if ban.UserId == all[4].Id {
+			common.InviteAbuseBanThreshold = 2
+		}
+	})
+	cursor, complete, err = sweepInviteAbuse(settings, cursor, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	assert.False(t, complete)
+	assert.Equal(t, all[2].Id, cursor, "the pass continues with the third inviter")
+	assert.Equal(t, inviteAbuseTestUserIds(all[:5]...), disabledInviteAbuseTestUsers(t))
+
+	common.InviteAbuseBanThreshold = 1
 	cursor, complete, err = sweepInviteAbuse(settings, cursor, time.Now().Add(time.Minute))
 	require.NoError(t, err)
 	assert.True(t, complete)
@@ -674,7 +1216,8 @@ func testInviteAbuseSweepBatches(t *testing.T) {
 func testInviteAbusePreview(t *testing.T) {
 	resetInviteAbuseTables(t)
 	useInviteAbuseSettings(t, false, 2, 500_000)
-	// a: enabled, invited one user of each kind plus a deleted one.
+	// a: enabled, invited one user of each kind plus a deleted one, who is
+	// counted but cannot be disabled.
 	a, aInvitees := createInviteAbuseTestInviter(t, "a", common.RoleCommonUser, 2)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", aInvitees[1].Id).Update("status", common.UserStatusDisabled).Error)
 	createInviteAbuseTestUser(t, "a-admin", a.Id, common.RoleAdminUser)
@@ -701,7 +1244,7 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Equal(t, &InviteAbusePreview{
 		Threshold: 2, MinRedeemQuota: 500_000, ExemptPaidInviter: true, AbusiveInviters: 2, InvitersToDisable: 1, InviteesToDisable: 3,
 		Items: []InviteAbusePreviewItem{
-			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 4, InviteesToDisable: 1},
+			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 5, InviteesToDisable: 1},
 			{Id: b.Id, Username: "b", DisplayName: "b", Status: common.UserStatusDisabled, InviteCount: 2, InviteesToDisable: 2},
 		},
 	}, preview)
@@ -711,19 +1254,20 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Equal(t, &InviteAbusePreview{
 		Threshold: 2, MinRedeemQuota: 500_000, AbusiveInviters: 3, InvitersToDisable: 2, InviteesToDisable: 5,
 		Items: []InviteAbusePreviewItem{
-			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 4, InviteesToDisable: 1},
+			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 5, InviteesToDisable: 1},
 			{Id: patron.Id, Username: "patron", DisplayName: "patron", Status: common.UserStatusEnabled, InviteCount: 2, InviteesToDisable: 2},
 			{Id: b.Id, Username: "b", DisplayName: "b", Status: common.UserStatusDisabled, InviteCount: 2, InviteesToDisable: 2},
 		},
 	}, unexempted, "without the exemption the inviter who paid is abusive like the others")
 
-	stricter, err := PreviewInviteAbuse(InviteAbuseSettings{Threshold: 5, MinRedeemQuota: 500_000})
+	stricter, err := PreviewInviteAbuse(InviteAbuseSettings{Threshold: 6, MinRedeemQuota: 500_000})
 	require.NoError(t, err)
 	assert.Zero(t, stricter.AbusiveInviters)
 	assert.Empty(t, stricter.Items)
 	assert.NotNil(t, stricter.Items, "an empty list, not null")
 
-	// The preview counts exactly what a sweep disables.
+	// The preview counts exactly what a sweep disables once the rule is on.
+	common.InviteAbuseBanEnabled = true
 	before := len(disabledInviteAbuseTestUsers(t))
 	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
 	require.NoError(t, err)
@@ -734,6 +1278,35 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Equal(t, 2, after.AbusiveInviters)
 	assert.Zero(t, after.InvitersToDisable)
 	assert.Zero(t, after.InviteesToDisable)
+}
+
+// a invites b and c, and b, an abusive inviter itself, invites d and e. The
+// totals count b once, as an inviter, so they add up to what a sweep
+// disables; each item keeps its own inviter's numbers.
+func testInviteAbusePreviewChain(t *testing.T) {
+	resetInviteAbuseTables(t)
+	useInviteAbuseSettings(t, true, 2, 500_000)
+	a := createInviteAbuseTestUser(t, "a", 0, common.RoleCommonUser)
+	b := createInviteAbuseTestUser(t, "b", a.Id, common.RoleCommonUser)
+	createInviteAbuseTestUser(t, "c", a.Id, common.RoleCommonUser)
+	createInviteAbuseTestUser(t, "d", b.Id, common.RoleCommonUser)
+	createInviteAbuseTestUser(t, "e", b.Id, common.RoleCommonUser)
+
+	preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
+	require.NoError(t, err)
+	assert.Equal(t, 2, preview.AbusiveInviters)
+	assert.Equal(t, 2, preview.InvitersToDisable)
+	assert.EqualValues(t, 3, preview.InviteesToDisable)
+	require.Len(t, preview.Items, 2)
+	for _, item := range preview.Items {
+		assert.EqualValues(t, 2, item.InviteesToDisable, item.Username)
+	}
+
+	_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.True(t, complete)
+	assert.Len(t, disabledInviteAbuseTestUsers(t), 5)
+	assert.Len(t, disabledInviteAbuseTestUsers(t), preview.InvitersToDisable+int(preview.InviteesToDisable))
 }
 
 func testInviteAbusePreviewTruncation(t *testing.T) {

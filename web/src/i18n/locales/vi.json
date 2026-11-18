@@ -3507,7 +3507,7 @@
     "Invited by user ID": "Được mời bởi ID người dùng",
     "Invited Users": "Người dùng được mời",
     "Invited users to disable": "Người được mời sẽ bị vô hiệu hóa",
-    "Invited users, deleted ones excluded, from which an inviter is checked": "Số người được mời (không tính người đã xóa) để bắt đầu kiểm tra người mời",
+    "Invited users, deleted ones included, from which an inviter is checked": "Số người được mời (kể cả người đã xóa) để bắt đầu kiểm tra người mời",
     "Invitee": "Người được mời",
     "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.": "Thưởng người được mời: mọi chi tiêu từ ví đều tính là sử dụng. Thưởng người mời: chuyển số dư mời sang ví tính là sử dụng; số đã chuyển không bao giờ hết hạn.",
     "Invitee Reward": "Referral reward",

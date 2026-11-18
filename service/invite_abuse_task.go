@@ -12,16 +12,15 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 )
 
-// inviteAbuseBanTickInterval is how quickly the master node notices that the
-// invite abuse rule was turned on or its settings changed; the full sweep
+// inviteAbuseBanTickInterval is how often the master node checks whether a
+// sweep is due and continues a pass that ran out of time; the full sweep
 // itself runs every model.InviteAbuseSweepInterval.
 const inviteAbuseBanTickInterval = 1 * time.Minute
 
 var inviteAbuseBanOnce sync.Once
 
-// StartInviteAbuseBanTask runs the invite abuse rule's sweep on the master
-// node: at startup and then on a one-minute tick that sweeps when one is due
-// (see model.RunInviteAbuseSweepIfDue).
+// StartInviteAbuseBanTask runs the invite abuse rule's task on the master
+// node with a one-minute tick (see model.RunInviteAbuseSweepTask).
 func StartInviteAbuseBanTask() {
 	inviteAbuseBanOnce.Do(func() {
 		if !common.IsMasterNode {
@@ -31,11 +30,7 @@ func StartInviteAbuseBanTask() {
 			logger.LogInfo(context.Background(), common.LogText("invite abuse ban task started: tick=%s", inviteAbuseBanTickInterval))
 			ticker := time.NewTicker(inviteAbuseBanTickInterval)
 			defer ticker.Stop()
-
-			model.RunInviteAbuseSweepIfDue(time.Now())
-			for now := range ticker.C {
-				model.RunInviteAbuseSweepIfDue(now)
-			}
+			model.RunInviteAbuseSweepTask(ticker.C, nil)
 		})
 	})
 }

@@ -75,6 +75,14 @@ function savedOptions() {
     .mock.calls.map(([, body]) => body as UpdateOptionRequest)
 }
 
+/** The rule options each invite abuse save sent, one entry per request. */
+function savedRules() {
+  return vi.mocked(api.put).mock.calls.map(([url, body]) => {
+    expect(url).toBe('/api/option/invite_abuse')
+    return (body as { options: Record<string, unknown> }).options
+  })
+}
+
 const inviteAbuseDefaults = {
   InviteAbuseBanEnabled: false,
   InviteAbuseBanThreshold: 5,
@@ -324,7 +332,7 @@ describe('Invite abuse protection settings', () => {
     expect(get).not.toHaveBeenCalled()
   })
 
-  it('shows what turning the ban on disables before it can be confirmed, then saves the new threshold first', async () => {
+  it('shows what turning the ban on disables before it can be confirmed, then saves it with the new threshold in one request', async () => {
     const user = userEvent.setup()
     let releasePreview = () => {}
     const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
@@ -366,11 +374,61 @@ describe('Invite abuse protection settings', () => {
 
     await user.click(turnOn)
 
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
+    expect(api.put).toHaveBeenCalledWith('/api/option/invite_abuse', {
+      options: { InviteAbuseBanThreshold: 10, InviteAbuseBanEnabled: true },
+    })
+  })
+
+  it('saves none of the changes when the save fails and keeps them in the form', async () => {
+    const user = userEvent.setup()
+    mockPreview(preview)
+    vi.mocked(api.put).mockResolvedValue({
+      data: { success: false, message: 'Save rejected' },
+    })
+    await renderSection(
+      <InviteAbuseSection
+        defaultValues={{ ...inviteAbuseDefaults, InviteAbuseBanEnabled: true }}
+      />
+    )
+
+    const threshold = await replaceNumber(user, 'Invite count threshold', '3')
+    const minimum = await replaceNumber(
+      user,
+      'Minimum redeemed quota',
+      '100000'
+    )
+    // The rule is on, so each save is confirmed first.
+    const saveAndConfirm = async () => {
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+      const confirm = await screen.findByRole('alertdialog', {
+        name: 'Save the changed invite abuse rule?',
+      })
+      await waitFor(() => expect(totalsIn(confirm)).toEqual(previewTotals))
+      await user.click(within(confirm).getByRole('button', { name: 'Save' }))
+    }
+    await saveAndConfirm()
+
+    const request = {
+      options: {
+        InviteAbuseBanThreshold: 3,
+        InviteAbuseBanMinRedeemQuota: 100000,
+      },
+    }
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
+    expect(api.put).toHaveBeenCalledWith('/api/option/invite_abuse', request)
+    expect(threshold).toHaveValue(3)
+    expect(minimum).toHaveValue(100000)
+
+    // Both changes are still unsaved, so saving again sends both again.
     await waitFor(() =>
-      expect(savedOptions()).toEqual([
-        { key: 'InviteAbuseBanThreshold', value: 10 },
-        { key: 'InviteAbuseBanEnabled', value: true },
-      ])
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    )
+    await saveAndConfirm()
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(2))
+    expect(api.put).toHaveBeenLastCalledWith(
+      '/api/option/invite_abuse',
+      request
     )
   })
 
@@ -401,15 +459,15 @@ describe('Invite abuse protection settings', () => {
     )
     await replaceNumber(user, 'Invite count threshold', '8')
     await user.click(screen.getByRole('button', { name: 'Save Changes' }))
-    await waitFor(() => expect(savedOptions()).toHaveLength(1))
+    await waitFor(() => expect(savedRules()).toHaveLength(1))
 
     await replaceNumber(user, 'Invite count threshold', '9')
     await user.click(screen.getByRole('button', { name: 'Save Changes' }))
 
     await waitFor(() =>
-      expect(savedOptions()).toEqual([
-        { key: 'InviteAbuseBanThreshold', value: 8 },
-        { key: 'InviteAbuseBanThreshold', value: 9 },
+      expect(savedRules()).toEqual([
+        { InviteAbuseBanThreshold: 8 },
+        { InviteAbuseBanThreshold: 9 },
       ])
     )
   })
@@ -448,14 +506,14 @@ describe('Invite abuse protection settings', () => {
       edit: (user: ReturnType<typeof userEvent.setup>) =>
         replaceNumber(user, 'Invite count threshold', '3'),
       params: { threshold: 3 },
-      saved: { key: 'InviteAbuseBanThreshold', value: 3 },
+      saved: { InviteAbuseBanThreshold: 3 },
     },
     {
       change: 'a higher minimum redeemed quota',
       edit: (user: ReturnType<typeof userEvent.setup>) =>
         replaceNumber(user, 'Minimum redeemed quota', '2000000'),
       params: { min_redeem_quota: 2000000 },
-      saved: { key: 'InviteAbuseBanMinRedeemQuota', value: 2000000 },
+      saved: { InviteAbuseBanMinRedeemQuota: 2000000 },
     },
     {
       change: 'the paid inviter exemption turned off',
@@ -464,7 +522,7 @@ describe('Invite abuse protection settings', () => {
           screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
         ),
       params: { exempt_paid_inviter: false },
-      saved: { key: 'InviteAbuseBanExemptPaidInviter', value: false },
+      saved: { InviteAbuseBanExemptPaidInviter: false },
     },
   ])(
     'asks before saving $change while the ban is on and shows what the save disables',
@@ -500,7 +558,7 @@ describe('Invite abuse protection settings', () => {
 
       await user.click(within(confirm).getByRole('button', { name: 'Save' }))
 
-      await waitFor(() => expect(savedOptions()).toEqual([saved]))
+      await waitFor(() => expect(savedRules()).toEqual([saved]))
     }
   )
 
@@ -529,13 +587,11 @@ describe('Invite abuse protection settings', () => {
     await user.click(within(confirm).getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
-      expect(savedOptions()).toEqual([
-        { key: 'InviteAbuseBanThreshold', value: 3 },
-      ])
+      expect(savedRules()).toEqual([{ InviteAbuseBanThreshold: 3 }])
     )
   })
 
-  it('turns the ban off before saving a lower threshold in the same save', async () => {
+  it('saves turning the ban off and a lower threshold in one request without asking', async () => {
     const user = userEvent.setup()
     await renderSection(
       <InviteAbuseSection
@@ -554,9 +610,8 @@ describe('Invite abuse protection settings', () => {
     await user.click(screen.getByRole('button', { name: 'Save Changes' }))
 
     await waitFor(() =>
-      expect(savedOptions()).toEqual([
-        { key: 'InviteAbuseBanEnabled', value: false },
-        { key: 'InviteAbuseBanThreshold', value: 5 },
+      expect(savedRules()).toEqual([
+        { InviteAbuseBanEnabled: false, InviteAbuseBanThreshold: 5 },
       ])
     )
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
@@ -575,10 +630,10 @@ describe('Invite abuse protection settings', () => {
           screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
         )
       },
-      saved: [
-        { key: 'InviteAbuseBanExemptPaidInviter', value: true },
-        { key: 'InviteAbuseBanThreshold', value: 5 },
-      ],
+      saved: {
+        InviteAbuseBanThreshold: 5,
+        InviteAbuseBanExemptPaidInviter: true,
+      },
     },
     {
       change: 'a lower minimum redeemed quota and a lower threshold',
@@ -590,10 +645,10 @@ describe('Invite abuse protection settings', () => {
         await replaceNumber(user, 'Minimum redeemed quota', '100000')
         await replaceNumber(user, 'Invite count threshold', '5')
       },
-      saved: [
-        { key: 'InviteAbuseBanMinRedeemQuota', value: 100000 },
-        { key: 'InviteAbuseBanThreshold', value: 5 },
-      ],
+      saved: {
+        InviteAbuseBanThreshold: 5,
+        InviteAbuseBanMinRedeemQuota: 100000,
+      },
     },
     {
       change:
@@ -605,19 +660,17 @@ describe('Invite abuse protection settings', () => {
           screen.getByRole('switch', { name: 'Exempt inviters who recharged' })
         )
       },
-      saved: [
-        { key: 'InviteAbuseBanExemptPaidInviter', value: true },
-        { key: 'InviteAbuseBanMinRedeemQuota', value: 2000000 },
-      ],
+      saved: {
+        InviteAbuseBanMinRedeemQuota: 2000000,
+        InviteAbuseBanExemptPaidInviter: true,
+      },
     },
   ])(
-    'saves the looser part of $change first while the ban stays on, so a failed second save leaves the rule looser',
+    'sends $change in one request while the ban stays on, so a failed save changes nothing',
     async ({ defaults, edit, saved }) => {
       const user = userEvent.setup()
       mockPreview(preview)
-      vi.mocked(api.put)
-        .mockResolvedValueOnce({ data: { success: true, message: '' } })
-        .mockRejectedValueOnce(new Error('Network Error'))
+      vi.mocked(api.put).mockRejectedValueOnce(new Error('Network Error'))
       const error = vi.spyOn(toast, 'error')
       await renderSection(
         <InviteAbuseSection
@@ -637,9 +690,9 @@ describe('Invite abuse protection settings', () => {
       await waitFor(() => expect(totalsIn(confirm)).toEqual(previewTotals))
       await user.click(within(confirm).getByRole('button', { name: 'Save' }))
 
-      // Only the first, looser value reached the server.
+      // Both values went in the one request the server refused as a whole.
       await waitFor(() => expect(error).toHaveBeenCalledWith('Network Error'))
-      expect(savedOptions()).toEqual(saved)
+      expect(savedRules()).toEqual([saved])
     }
   )
 
@@ -665,7 +718,7 @@ describe('Invite abuse protection settings', () => {
     try {
       await user.dblClick(turnOn)
       releaseSaves()
-      await waitFor(() => expect(savedOptions()).toHaveLength(2))
+      await waitFor(() => expect(savedRules()).toHaveLength(1))
     } finally {
       finishExitAnimations()
     }
@@ -673,9 +726,8 @@ describe('Invite abuse protection settings', () => {
     await waitFor(() =>
       expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     )
-    expect(savedOptions()).toEqual([
-      { key: 'InviteAbuseBanThreshold', value: 10 },
-      { key: 'InviteAbuseBanEnabled', value: true },
+    expect(savedRules()).toEqual([
+      { InviteAbuseBanThreshold: 10, InviteAbuseBanEnabled: true },
     ])
   })
 
@@ -698,11 +750,9 @@ describe('Invite abuse protection settings', () => {
     expect(get).toHaveBeenCalledTimes(1)
   })
 
-  it('shows the error of a failed second save once and leaves no unhandled rejection', async () => {
+  it('shows the error of a failed save once and leaves no unhandled rejection', async () => {
     const user = userEvent.setup()
-    vi.mocked(api.put)
-      .mockResolvedValueOnce({ data: { success: true, message: '' } })
-      .mockRejectedValueOnce(new Error('Network Error'))
+    vi.mocked(api.put).mockRejectedValueOnce(new Error('Network Error'))
     const error = vi.spyOn(toast, 'error')
     const unhandled = vi.fn()
     process.on('unhandledRejection', unhandled)
@@ -728,9 +778,8 @@ describe('Invite abuse protection settings', () => {
       await new Promise((resolve) => setImmediate(resolve))
       expect(unhandled).not.toHaveBeenCalled()
       expect(error).toHaveBeenCalledTimes(1)
-      expect(savedOptions()).toEqual([
-        { key: 'InviteAbuseBanEnabled', value: false },
-        { key: 'InviteAbuseBanThreshold', value: 5 },
+      expect(savedRules()).toEqual([
+        { InviteAbuseBanEnabled: false, InviteAbuseBanThreshold: 5 },
       ])
     } finally {
       process.off('unhandledRejection', unhandled)

@@ -63,7 +63,7 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
-import { useUpdateOption } from '../hooks/use-update-option'
+import { useUpdateInviteAbuseOptions } from '../hooks/use-update-option'
 import type { InviteAbusePreviewParams } from '../types'
 import { integerRangeSchema } from '../utils/numeric-field'
 import {
@@ -99,32 +99,10 @@ function numberInputValue(event: ChangeEvent<HTMLInputElement>): number | '' {
   return Number.isNaN(value) ? '' : value
 }
 
-/**
- * Whether saving a changed rule value makes the rule disable fewer accounts
- * than the saved value does: a higher threshold, a lower minimum redeemed
- * quota, or inviters who recharged becoming exempt.
- */
-function loosensRule(
-  key: string,
-  value: unknown,
-  saved: Readonly<Partial<InviteAbuseFormValues>> | undefined
-): boolean {
-  switch (key) {
-    case 'InviteAbuseBanThreshold':
-      return Number(value) > Number(saved?.InviteAbuseBanThreshold)
-    case 'InviteAbuseBanMinRedeemQuota':
-      return Number(value) < Number(saved?.InviteAbuseBanMinRedeemQuota)
-    case 'InviteAbuseBanExemptPaidInviter':
-      return value === true
-    default:
-      return false
-  }
-}
-
 export function InviteAbuseSection(props: InviteAbuseSectionProps) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
-  const updateOption = useUpdateOption()
+  const updateOptions = useUpdateInviteAbuseOptions()
   const [confirmOpen, setConfirmOpen] = useState(false)
   // Whether the save waiting for confirmation turns the rule on.
   const [confirmTurnsOn, setConfirmTurnsOn] = useState(false)
@@ -142,26 +120,14 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       >,
       defaultValues: props.defaultValues,
       onSubmit: async (_data, changedFields) => {
-        // Every saved key can start a sweep with the values saved so far, and
-        // a later save can fail, so no point of this save may be stricter
-        // than the rule that was confirmed: turning the rule off goes first,
-        // changes that loosen it go before those that tighten it, and turning
-        // it on goes last, after the values it scans with.
-        const { InviteAbuseBanEnabled: enabled, ...ruleValues } = changedFields
-        const saved = form.formState.defaultValues
-        const changes = Object.entries(ruleValues)
-        const updates = [
-          ...changes.filter(([key, value]) => loosensRule(key, value, saved)),
-          ...changes.filter(([key, value]) => !loosensRule(key, value, saved)),
-        ]
-        if (enabled === false) updates.unshift(['InviteAbuseBanEnabled', false])
-        if (enabled === true) updates.push(['InviteAbuseBanEnabled', true])
-        for (const [key, value] of updates) {
-          await updateOption.mutateAsync({
-            key,
-            value: value as string | number | boolean,
-          })
-        }
+        // One request saves every changed option, the switch included, or
+        // none of them. Saved one per request, a save that stopped half-way
+        // left the rule with some new values and some old ones, and the rule
+        // then disabled accounts that neither the old nor the new settings
+        // call abusive.
+        await updateOptions.mutateAsync(
+          changedFields as Record<string, string | number | boolean>
+        )
       },
     })
 
@@ -209,8 +175,9 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
     try {
       await handleSubmit()
     } catch (error) {
-      // A failed request was already shown by useUpdateOption; this only
-      // reports anything else and keeps the rejection from going unhandled.
+      // Nothing was saved and the form keeps the unsaved values. A failed
+      // request was already shown; this only reports anything else and keeps
+      // the rejection from going unhandled.
       handleServerError(error, t('Failed to update setting'))
     } finally {
       savePending.current = false
@@ -277,7 +244,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
         <SettingsForm onSubmit={requestSave}>
           <SettingsPageFormActions
             onSave={() => void requestSave()}
-            isSaving={updateOption.isPending || isSubmitting}
+            isSaving={updateOptions.isPending || isSubmitting}
           />
           <FormDirtyIndicator isDirty={isDirty} />
 
@@ -353,7 +320,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'Invited users, deleted ones excluded, from which an inviter is checked'
+                    'Invited users, deleted ones included, from which an inviter is checked'
                   )}
                 </FormDescription>
                 <FormMessage />

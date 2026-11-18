@@ -731,11 +731,12 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 
 // setupInviteAbuseControllerTest is setupManageUserTestDB with the tables and
 // the options of the invite abuse rule: threshold 2, minimum redeemed quota
-// 500000, paid inviters exempt, rule off.
+// 500000, paid inviters exempt, rule off. None of the options is saved, so
+// the rule's check of the saved options finds this node's values.
 func setupInviteAbuseControllerTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupManageUserTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.TopUp{}, &model.Redemption{}, &model.InviteAbuseBan{}))
+	require.NoError(t, db.AutoMigrate(&model.TopUp{}, &model.Redemption{}, &model.InviteAbuseBan{}, &model.Option{}))
 	enabled, threshold, minRedeem := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
 	exemptPaid := common.InviteAbuseBanExemptPaidInviter
 	registerEnabled, newUserQuota := common.RegisterEnabled, common.QuotaForNewUser
@@ -839,6 +840,81 @@ func TestInviteAbusePreviewEndpoint(t *testing.T) {
 	var disabled int64
 	require.NoError(t, db.Model(&model.User{}).Where("status <> ?", common.UserStatusEnabled).Count(&disabled).Error)
 	assert.Zero(t, disabled, "a preview changes nothing")
+}
+
+// The settings form saves the invite abuse rule's options it changed in one
+// request, all of them or none: a value the server refuses saves none of the
+// others, and only the rule's options are accepted, so the checks PUT
+// /api/option/ makes for other options cannot be skipped. Each saved option
+// is audited by name, as PUT /api/option/ does. The rule stays off, so no
+// save here holds back the sign-up checks of later tests.
+func TestUpdateInviteAbuseOptionsSavesAllOrNothing(t *testing.T) {
+	db := setupInviteAbuseControllerTest(t)
+	previousOptions := common.OptionMap
+	t.Cleanup(func() { common.OptionMap = previousOptions })
+	common.OptionMap = map[string]string{}
+	put := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/option/invite_abuse", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("id", 9999)
+		c.Set("role", common.RoleRootUser)
+		c.Set("username", "root-operator")
+		UpdateInviteAbuseOptions(c)
+		return recorder
+	}
+	stored := func() map[string]string {
+		var options []model.Option
+		require.NoError(t, db.Find(&options).Error)
+		values := make(map[string]string, len(options))
+		for _, option := range options {
+			values[option.Key] = option.Value
+		}
+		return values
+	}
+
+	recorder := put(`{"options":{"InviteAbuseBanEnabled":false,"InviteAbuseBanThreshold":3,"InviteAbuseBanMinRedeemQuota":1000000,"InviteAbuseBanExemptPaidInviter":false}}`)
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	saved := map[string]string{
+		"InviteAbuseBanEnabled": "false", "InviteAbuseBanThreshold": "3",
+		"InviteAbuseBanMinRedeemQuota": "1000000", "InviteAbuseBanExemptPaidInviter": "false",
+	}
+	assert.Equal(t, saved, stored())
+	assert.Equal(t, model.InviteAbuseSettings{Threshold: 3, MinRedeemQuota: 1_000_000}, model.CurrentInviteAbuseSettings())
+	var audits []model.AuditLog
+	require.NoError(t, model.LOG_DB.Order("id").Find(&audits).Error)
+	params := make([]string, 0, len(audits))
+	for _, audit := range audits {
+		assert.Equal(t, "option.update", audit.Action)
+		assert.Equal(t, 9999, audit.UserId)
+		require.NotNil(t, audit.Other.Op)
+		encoded, err := common.Marshal(audit.Other.Op.Params)
+		require.NoError(t, err)
+		params = append(params, string(encoded))
+	}
+	assert.Equal(t, []string{
+		`{"key":"InviteAbuseBanEnabled"}`, `{"key":"InviteAbuseBanExemptPaidInviter"}`,
+		`{"key":"InviteAbuseBanMinRedeemQuota"}`, `{"key":"InviteAbuseBanThreshold"}`,
+	}, params)
+
+	for _, tc := range []struct {
+		name, body, message string
+		status              int
+	}{
+		{"a value the server refuses", `{"options":{"InviteAbuseBanExemptPaidInviter":true,"InviteAbuseBanMinRedeemQuota":-1,"InviteAbuseBanThreshold":4}}`, "Minimum redeemed quota must be a non-negative integer", http.StatusOK},
+		{"an option that is not the rule's", `{"options":{"InviteAbuseBanThreshold":4,"QuotaForInviter":1000}}`, "Invalid parameters", http.StatusBadRequest},
+		{"no option", `{"options":{}}`, "Invalid parameters", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := put(tc.body)
+			assert.Equal(t, tc.status, recorder.Code)
+			assert.Contains(t, recorder.Body.String(), `"success":false`)
+			assert.Contains(t, recorder.Body.String(), fmt.Sprintf(`"message_key":%q`, tc.message))
+			assert.Equal(t, saved, stored(), "nothing is saved")
+			assert.Equal(t, 3, model.CurrentInviteAbuseSettings().Threshold)
+		})
+	}
 }
 
 // Enabling an account the rule disabled exempts it: the next sign-up with its

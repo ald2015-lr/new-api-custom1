@@ -51,7 +51,7 @@ export const userSchema = z.object({
   aff_quota: z.number().optional(),
   aff_history_quota: z.number().optional(),
   inviter_id: z.number().optional(),
-  /** Users this user invited that are not deleted (admin list only) */
+  /** Users this user invited, deleted ones included (admin list only) */
   invite_count: z.number().optional(),
   /** Set while an automatic invite abuse ban is active */
   invite_abuse_ban: z.enum(['inviter', 'invitee']).optional(),

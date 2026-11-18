@@ -48,6 +48,19 @@ export async function updateSystemOption(request: UpdateOptionRequest) {
   return res.data
 }
 
+/**
+ * Save the invite abuse rule's changed options in one request; the server
+ * saves all of them or none.
+ */
+export async function updateInviteAbuseOptions(
+  options: Record<string, UpdateOptionRequest['value']>
+) {
+  const res = await api.put<UpdateOptionResponse>('/api/option/invite_abuse', {
+    options,
+  })
+  return res.data
+}
+
 export async function updatePasskeyDomains(
   request: UpdatePasskeyDomainsRequest
 ) {

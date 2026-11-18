@@ -170,8 +170,8 @@ var InviteRewardExpireOnlyWhenUnused = false
 // disabled together with those users (see model/invite_abuse.go).
 var InviteAbuseBanEnabled = false
 
-// InviteAbuseBanThreshold is the number of invited users (not deleted) from
-// which the invite abuse rule checks an inviter.
+// InviteAbuseBanThreshold is the number of invited users (deleted ones
+// included) from which the invite abuse rule checks an inviter.
 var InviteAbuseBanThreshold = 5
 
 // InviteAbuseBanMinRedeemQuota is the redeemed quota from which an invited
