@@ -20,8 +20,12 @@ const (
 	RegisterAttemptRateLimitMark = "RG"
 	RegisterCodeRateLimitMark    = "RV"
 	CaptchaRateLimitMark         = "CP"
-	CaptchaRateLimitNum          = 30
-	CaptchaRateLimitDuration     = 15 * 60 // seconds
+
+	// While the registration limit is on, a network may load
+	// max(CaptchaRateLimitMinNum, CaptchaRateLimitPerRegistration ×
+	// RegisterIPRateLimitNum) captcha images per registration window.
+	CaptchaRateLimitMinNum          = 30
+	CaptchaRateLimitPerRegistration = 6
 
 	// registerRateLimitKeyExpiration keeps an idle key in the in-memory
 	// fallback for the longest registration window an administrator can set.
@@ -53,18 +57,26 @@ var (
 	}
 )
 
+// registerLimitWindow returns the administrator's per-network registration
+// limit: the requests a network may make per window and the window in
+// seconds. The settings are read on every request, so a change applies
+// without a restart. Saved values are validated; a hand-edited row is clamped
+// into range.
+func registerLimitWindow() (int, int64) {
+	maxRequests := min(max(common.RegisterIPRateLimitNum, 1), operation_setting.RegisterIPRateLimitMaxNum)
+	minutes := min(max(common.RegisterIPRateLimitMinutes, 1), operation_setting.RegisterIPRateLimitMaxMinutes)
+	return maxRequests, int64(minutes) * 60
+}
+
 // take counts one request of the client network while the registration limit
 // is on. It returns 0 when the request is allowed, otherwise the seconds until
-// the network may try again. The settings are read on every request, so a
-// change applies without a restart.
+// the network may try again.
 func (limit registerLimit) take(c *gin.Context) int64 {
 	if !common.RegisterIPRateLimitEnabled {
 		return 0
 	}
-	// Saved values are validated; a hand-edited row is clamped into range.
-	maxRequests := min(max(common.RegisterIPRateLimitNum, 1), operation_setting.RegisterIPRateLimitMaxNum)
-	minutes := min(max(common.RegisterIPRateLimitMinutes, 1), operation_setting.RegisterIPRateLimitMaxMinutes)
-	allowed, retryAfter := takeClientNetworkLimit(c, limit.mark, maxRequests, int64(minutes)*60)
+	maxRequests, window := registerLimitWindow()
+	allowed, retryAfter := takeClientNetworkLimit(c, limit.mark, maxRequests, window)
 	if allowed {
 		return 0
 	}
@@ -115,11 +127,22 @@ func RejectRegisterAttempt(c *gin.Context, retryAfter int64) {
 	registerAttemptLimit.reject(c, retryAfter)
 }
 
-// CaptchaRateLimit limits captcha images per client network (CP), whatever
-// the registration settings are.
+// CaptchaRateLimit limits captcha images per client network (CP) while the
+// per-network registration limit is on, in the registration window: at least
+// CaptchaRateLimitMinNum images, and CaptchaRateLimitPerRegistration for each
+// registration the network may submit. While that limit is off (the default,
+// see common.RegisterIPRateLimitEnabled) captcha images are not limited, so
+// this limit alone cannot close registration for every visitor behind a
+// proxy the server does not trust.
 func CaptchaRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		allowed, retryAfter := takeClientNetworkLimit(c, CaptchaRateLimitMark, CaptchaRateLimitNum, CaptchaRateLimitDuration)
+		if !common.RegisterIPRateLimitEnabled {
+			c.Next()
+			return
+		}
+		maxRequests, window := registerLimitWindow()
+		maxImages := max(CaptchaRateLimitMinNum, CaptchaRateLimitPerRegistration*maxRequests)
+		allowed, retryAfter := takeClientNetworkLimit(c, CaptchaRateLimitMark, maxImages, window)
 		if !allowed {
 			writeClientNetworkRateLimited(c, retryAfter, common.NewMessage("Too many captcha requests. Please try again later."))
 			return

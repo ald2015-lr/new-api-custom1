@@ -487,18 +487,69 @@ func TestRegisterRateLimitFallsBackToMemoryWhenRedisFails(t *testing.T) {
 	assert.Contains(t, limited.Body.String(), `"message_params":{"minutes":15}`)
 }
 
-func TestCaptchaRateLimitAllowsThirtyImagesPerQuarterHour(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	redisServer, _ := useRateLimitMiniRedis(t)
-	useRegisterRateLimit(t, false, 1, 1)
-	router := newRegisterLimitRouter(t)
+// The captcha image limit (CP) follows the per-network registration limit:
+// nothing is limited or counted while that is off, otherwise a network gets
+// max(30, 6 × RegisterIPRateLimitNum) images per RegisterIPRateLimitMinutes.
+// The settings are read on every request.
+func TestCaptchaRateLimitFollowsTheRegistrationLimit(t *testing.T) {
+	for _, backend := range []struct{ name, network, other string }{
+		{"redis", "192.0.2.94", "198.51.100.94"}, {"memory", "192.0.2.95", "198.51.100.95"},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			var redisServer *miniredis.Miniredis
+			if backend.name == "redis" {
+				redisServer, _ = useRateLimitMiniRedis(t)
+			} else {
+				useMemoryRateLimitBackend(t)
+			}
+			useRegisterRateLimit(t, false, 1, 1)
+			router := newRegisterLimitRouter(t)
+			captcha := func(network string) *httptest.ResponseRecorder {
+				return performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", network+":4321")
+			}
+			const limitedJSON = `{"success":false,"message":"Too many captcha requests. Please try again later.","message_key":"Too many captcha requests. Please try again later."}`
 
-	for range CaptchaRateLimitNum {
-		require.Equal(t, http.StatusNoContent, performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", "192.0.2.94:4321").Code)
+			for range 2 * CaptchaRateLimitMinNum {
+				require.Equal(t, http.StatusNoContent, captcha(backend.network).Code, "no limit while the registration limit is off")
+			}
+			if redisServer != nil {
+				assert.False(t, redisServer.Exists(redisIPRateLimitKey(CaptchaRateLimitMark, backend.network)))
+			}
+
+			// 5 registrations per 15 minutes: the floor of 30 images applies,
+			// and the images loaded while the limit was off do not count.
+			common.RegisterIPRateLimitEnabled, common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = true, 5, 15
+			for range CaptchaRateLimitMinNum {
+				require.Equal(t, http.StatusNoContent, captcha(backend.network).Code)
+			}
+			limited := captcha(backend.network)
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.JSONEq(t, limitedJSON, limited.Body.String())
+			retryAfter, err := strconv.Atoi(limited.Header().Get("Retry-After"))
+			require.NoError(t, err)
+			assert.InDelta(t, 900, retryAfter, 1)
+			assert.Equal(t, "no-store", limited.Header().Get("Cache-Control"))
+			if redisServer != nil {
+				assert.Equal(t, 15*time.Minute, redisServer.TTL(redisIPRateLimitKey(CaptchaRateLimitMark, backend.network)))
+			}
+
+			// 10 registrations per hour: 6 images per registration.
+			common.RegisterIPRateLimitNum, common.RegisterIPRateLimitMinutes = 10, 60
+			for range 60 {
+				require.Equal(t, http.StatusNoContent, captcha(backend.other).Code)
+			}
+			limited = captcha(backend.other)
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.JSONEq(t, limitedJSON, limited.Body.String())
+			retryAfter, err = strconv.Atoi(limited.Header().Get("Retry-After"))
+			require.NoError(t, err)
+			assert.InDelta(t, 3600, retryAfter, 1)
+			if redisServer != nil {
+				assert.Equal(t, time.Hour, redisServer.TTL(redisIPRateLimitKey(CaptchaRateLimitMark, backend.other)))
+			}
+
+			common.RegisterIPRateLimitEnabled = false
+			assert.Equal(t, http.StatusNoContent, captcha(backend.network).Code, "turning the registration limit off lifts the captcha limit at once")
+		})
 	}
-	limited := performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", "192.0.2.94:4321")
-	assert.Equal(t, http.StatusTooManyRequests, limited.Code)
-	assert.JSONEq(t, `{"success":false,"message":"Too many captcha requests. Please try again later.","message_key":"Too many captcha requests. Please try again later."}`, limited.Body.String())
-	assert.Equal(t, "900", limited.Header().Get("Retry-After"))
-	assert.Equal(t, 15*time.Minute, redisServer.TTL(redisIPRateLimitKey(CaptchaRateLimitMark, "192.0.2.94")))
 }

@@ -162,6 +162,7 @@ func InitOptionMap() {
 	common.OptionMap["InviteAbuseBanEnabled"] = strconv.FormatBool(common.InviteAbuseBanEnabled)
 	common.OptionMap["InviteAbuseBanThreshold"] = strconv.Itoa(common.InviteAbuseBanThreshold)
 	common.OptionMap["InviteAbuseBanMinRedeemQuota"] = strconv.Itoa(common.InviteAbuseBanMinRedeemQuota)
+	common.OptionMap["InviteAbuseBanExemptPaidInviter"] = strconv.FormatBool(common.InviteAbuseBanExemptPaidInviter)
 	common.OptionMap["QuotaRemindEnabled"] = strconv.FormatBool(common.QuotaRemindEnabled)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
@@ -706,6 +707,8 @@ func updateOptionMap(key string, value string) (err error) {
 		common.InviteAbuseBanThreshold, _ = strconv.Atoi(value)
 	case "InviteAbuseBanMinRedeemQuota":
 		common.InviteAbuseBanMinRedeemQuota, _ = strconv.Atoi(value)
+	case "InviteAbuseBanExemptPaidInviter":
+		common.InviteAbuseBanExemptPaidInviter = value == "true"
 	case "QuotaRemindThreshold":
 		common.QuotaRemindThreshold, _ = strconv.Atoi(value)
 	case "PreConsumedQuota":

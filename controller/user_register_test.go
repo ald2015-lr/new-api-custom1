@@ -186,6 +186,71 @@ func TestRegisterWithEmailVerificationAsksForTheCaptchaBeforeTheCode(t *testing.
 	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10002@qq.com"))
 }
 
+// A registration code only serves password registration: while registration
+// or password registration is closed, the request is refused with Register's
+// message and nothing is mailed.
+func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
+	setupRegisterTest(t, true, false)
+	mailbox := newSecurityMailbox(t)
+	router := newRegisterTestRouter()
+	for _, tc := range []struct {
+		name               string
+		register, password bool
+		key                string
+	}{
+		{"registration closed", false, true, "New user registration has been disabled by administrator"},
+		{"password registration closed", true, false, "Password registration has been disabled by administrator, please use third-party account verification"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			common.RegisterEnabled, common.PasswordRegisterEnabled = tc.register, tc.password
+			response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
+			assert.False(t, response.Success)
+			assert.Equal(t, tc.key, response.MessageKey)
+		})
+	}
+	mailbox.mutex.Lock()
+	assert.Empty(t, mailbox.mail)
+	mailbox.mutex.Unlock()
+
+	common.RegisterEnabled, common.PasswordRegisterEnabled = true, true
+	response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
+	require.True(t, response.Success, response.Message)
+	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10007@qq.com"))
+}
+
+// The client IP diagnostic answers with the address the server derives for
+// the caller under TRUSTED_PROXIES, says whether TRUSTED_PROXIES is set (to a
+// list or to none) instead of left to the built-in defaults, and is never
+// cached.
+func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name, trustedProxies, remoteAddr, ip string
+		configured                           bool
+	}{
+		{"defaults trust a private proxy", "", "172.20.0.2:4321", "203.0.113.10", false},
+		{"defaults ignore the header of a public peer", " ", "198.51.100.10:4321", "198.51.100.10", false},
+		{"explicit proxy list", "192.0.2.0/24", "192.0.2.10:4321", "203.0.113.10", true},
+		{"the outer proxy is not in the list", "192.0.2.0/24", "172.20.0.2:4321", "172.20.0.2", true},
+		{"no proxy trusted", "none", "172.20.0.2:4321", "172.20.0.2", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TRUSTED_PROXIES", tc.trustedProxies)
+			router := gin.New()
+			require.NoError(t, middleware.ConfigureTrustedProxies(router))
+			router.GET("/api/option/client_ip", middleware.DisableCache(), GetClientIP)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/api/option/client_ip", nil)
+			request.RemoteAddr = tc.remoteAddr
+			request.Header.Set("X-Forwarded-For", "203.0.113.10")
+			router.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.JSONEq(t, fmt.Sprintf(`{"success":true,"message":"","data":{"ip":%q,"trusted_proxies_configured":%t}}`, tc.ip, tc.configured), recorder.Body.String())
+			assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
+		})
+	}
+}
+
 func TestRegisterEmailCodeIsDeletedAfterFiveWrongGuesses(t *testing.T) {
 	db := setupRegisterTest(t, true, false)
 	router := newRegisterTestRouter()
@@ -269,8 +334,8 @@ func TestValidateAccountEmailRejectsAddressVariantsAndQQAliases(t *testing.T) {
 		err       error
 	}{
 		{email: " 10001@QQ.com ", qqRule: true, want: "10001@qq.com"},
-		{email: "123456789012@qq.com", qqRule: true, want: "123456789012@qq.com"},
-		{email: "1234567890123@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
+		{email: "12345678901@qq.com", qqRule: true, want: "12345678901@qq.com"},
+		{email: "123456789012@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
 		{email: "1234@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
 		{email: "01234@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},
 		{email: "owner@qq.com", qqRule: true, err: service.ErrAccountEmailQQNumberRequired},

@@ -231,7 +231,18 @@ func GetRegisterCaptcha(c *gin.Context) {
 	common.ApiSuccess(c, captcha)
 }
 
+// SendEmailVerification mails a registration code. The code only serves
+// password registration, so it is refused with Register's messages while
+// that is closed.
 func SendEmailVerification(c *gin.Context) {
+	if !common.RegisterEnabled {
+		common.ApiErrorT(c, "New user registration has been disabled by administrator")
+		return
+	}
+	if !common.PasswordRegisterEnabled {
+		common.ApiErrorT(c, "Password registration has been disabled by administrator, please use third-party account verification")
+		return
+	}
 	email, err := service.ValidateAccountEmail(c.Query("email"))
 	if err != nil {
 		writeSecurityOperationError(c, err)

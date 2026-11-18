@@ -31,8 +31,9 @@ var (
 	accountEmailLocalPattern = regexp.MustCompile("^[a-z0-9!#$%&'*+/=?^_`{|}~.-]+$")
 	// accountEmailDomainPattern accepts ASCII letter-digit-hyphen labels only.
 	accountEmailDomainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
-	// qqNumberPattern is a QQ number: 5 to 12 ASCII digits without a leading 0.
-	qqNumberPattern = regexp.MustCompile(`^[1-9][0-9]{4,11}$`)
+	// qqNumberPattern is a QQ number: 5 to 11 ASCII digits without a leading 0
+	// (the sign-up page checks the same pattern).
+	qqNumberPattern = regexp.MustCompile(`^[1-9][0-9]{4,10}$`)
 	// qqNumericMailDomains are the QQ Mail domains whose addresses must use
 	// the QQ number while EmailQQNumericOnlyEnabled is on. The alias-only
 	// domains foxmail.com and vip.qq.com are left out: their addresses are

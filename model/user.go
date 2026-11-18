@@ -624,12 +624,16 @@ func GetSelfUserById(id int) (*User, error) {
 	return &profile.User, err
 }
 
+// GetUserIdByAffCode resolves the invite code a sign-up carries to the
+// inviter's id. Only an enabled account that is not deleted can invite: the
+// code of a disabled or deleted user is not found, so the new account gets
+// no inviter, no invite reward and no invite abuse check.
 func GetUserIdByAffCode(affCode string) (int, error) {
 	if affCode == "" {
 		return 0, errors.New("affiliate code is empty")
 	}
 	var user User
-	err := DB.Select("id").First(&user, "aff_code = ?", affCode).Error
+	err := DB.Select("id").Where("status = ?", common.UserStatusEnabled).First(&user, "aff_code = ?", affCode).Error
 	return user.Id, err
 }
 

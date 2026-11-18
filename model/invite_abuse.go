@@ -15,9 +15,10 @@ import (
 )
 
 // The invite abuse rule: an inviter (not deleted, not an administrator, not
-// exempt) with at least the threshold of invited users that are not deleted,
-// none of whom — deleted ones included — has a qualifying recharge, is
-// disabled together with its invited users that are enabled, not
+// exempt and, while paid inviters are exempt, without a qualifying recharge
+// of its own) with at least the threshold of invited users that are not
+// deleted, none of whom — deleted ones included — has a qualifying recharge,
+// is disabled together with its invited users that are enabled, not
 // administrators and not exempt. Invited users are the users whose
 // inviter_id is the inviter; aff_count is not a reliable count.
 const (
@@ -60,16 +61,20 @@ type InviteAbuseSettings struct {
 	// Threshold is the number of invited users (not deleted) from which an
 	// inviter is checked.
 	Threshold int
-	// MinRedeemQuota is the redeemed quota from which an invited user's used
+	// MinRedeemQuota is the redeemed quota from which a user's used
 	// redemption codes count as a recharge.
 	MinRedeemQuota int64
+	// ExemptPaidInviter spares the inviters who have a qualifying recharge
+	// themselves.
+	ExemptPaidInviter bool
 }
 
 // CurrentInviteAbuseSettings returns the saved settings of the rule.
 func CurrentInviteAbuseSettings() InviteAbuseSettings {
 	return InviteAbuseSettings{
-		Threshold:      max(common.InviteAbuseBanThreshold, 1),
-		MinRedeemQuota: max(int64(common.InviteAbuseBanMinRedeemQuota), 0),
+		Threshold:         max(common.InviteAbuseBanThreshold, 1),
+		MinRedeemQuota:    max(int64(common.InviteAbuseBanMinRedeemQuota), 0),
+		ExemptPaidInviter: common.InviteAbuseBanExemptPaidInviter,
 	}
 }
 
@@ -77,6 +82,7 @@ func CurrentInviteAbuseSettings() InviteAbuseSettings {
 type InviteAbusePreview struct {
 	Threshold         int                      `json:"threshold"`
 	MinRedeemQuota    int64                    `json:"min_redeem_quota"`
+	ExemptPaidInviter bool                     `json:"exempt_paid_inviter"`
 	AbusiveInviters   int                      `json:"abusive_inviters"`
 	InvitersToDisable int                      `json:"inviters_to_disable"`
 	InviteesToDisable int64                    `json:"invitees_to_disable"`
@@ -121,6 +127,30 @@ func qualifyingRedemptions(minQuota int64) *gorm.DB {
 		Group("used_user_id").Having("SUM(quota) >= ?", minQuota)
 }
 
+// rechargedUserIds returns the users among userIds (a list of ids or a
+// subquery selecting them) who have a qualifying recharge: a qualifying
+// top-up, or used redemption codes worth at least minRedeemQuota. A limit
+// above 0 stops after that many users of each kind, which is enough to tell
+// whether any of them recharged. An id may be returned twice.
+func rechargedUserIds(userIds any, minRedeemQuota int64, limit int) ([]int, error) {
+	var paid, redeemed []int
+	topUps := qualifyingTopUps().Distinct("user_id").Where("user_id IN (?)", userIds)
+	redemptions := qualifyingRedemptions(minRedeemQuota).Where("used_user_id IN (?)", userIds)
+	if limit > 0 {
+		topUps, redemptions = topUps.Limit(limit), redemptions.Limit(limit)
+	}
+	if err := topUps.Pluck("user_id", &paid).Error; err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(paid) >= limit {
+		return paid, nil
+	}
+	if err := redemptions.Pluck("used_user_id", &redeemed).Error; err != nil {
+		return nil, err
+	}
+	return append(paid, redeemed...), nil
+}
+
 // inviteAbuseExemptUsers selects the users an administrator enabled again
 // after the rule disabled them.
 func inviteAbuseExemptUsers() *gorm.DB {
@@ -151,8 +181,9 @@ func listInviteAbuseCandidates(settings InviteAbuseSettings, afterInviterId int,
 }
 
 // loadInviteAbuseInviters returns, by id, the candidates' inviters the rule
-// applies to: not deleted, not administrators and not exempt.
-func loadInviteAbuseInviters(candidates []inviteAbuseCandidate) (map[int]User, error) {
+// applies to: not deleted, not administrators, not exempt and, while paid
+// inviters are exempt, without a qualifying recharge.
+func loadInviteAbuseInviters(candidates []inviteAbuseCandidate, settings InviteAbuseSettings) (map[int]User, error) {
 	inviters := make(map[int]User, len(candidates))
 	if len(candidates) == 0 {
 		return inviters, nil
@@ -170,6 +201,16 @@ func loadInviteAbuseInviters(candidates []inviteAbuseCandidate) (map[int]User, e
 	}
 	for _, user := range users {
 		inviters[user.Id] = user
+	}
+	if !settings.ExemptPaidInviter || len(inviters) == 0 {
+		return inviters, nil
+	}
+	paid, err := rechargedUserIds(ids, settings.MinRedeemQuota, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range paid {
+		delete(inviters, id)
 	}
 	return inviters, nil
 }
@@ -195,20 +236,18 @@ func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings
 	if inviteCount < int64(settings.Threshold) {
 		return 0, nil
 	}
-	// Deleted invited users are included: one who paid before being deleted
-	// still clears the inviter.
-	invitees := DB.Unscoped().Model(&User{}).Select("id").Where("inviter_id = ?", inviterId)
-	var paid []int
-	if err := qualifyingTopUps().Where("user_id IN (?)", invitees).Limit(1).Pluck("user_id", &paid).Error; err != nil {
-		return 0, err
-	}
-	if len(paid) == 0 {
-		if err := qualifyingRedemptions(settings.MinRedeemQuota).Where("used_user_id IN (?)", invitees).Limit(1).Pluck("used_user_id", &paid).Error; err != nil {
+	if settings.ExemptPaidInviter {
+		paid, err := rechargedUserIds([]int{inviterId}, settings.MinRedeemQuota, 1)
+		if err != nil || len(paid) > 0 {
 			return 0, err
 		}
 	}
-	if len(paid) > 0 {
-		return 0, nil
+	// Deleted invited users are included: one who paid before being deleted
+	// still clears the inviter.
+	invitees := DB.Unscoped().Model(&User{}).Select("id").Where("inviter_id = ?", inviterId)
+	paid, err := rechargedUserIds(invitees, settings.MinRedeemQuota, 1)
+	if err != nil || len(paid) > 0 {
+		return 0, err
 	}
 	disabled, _, err := disableAbusiveInviter(inviter, inviteCount, deadline)
 	return disabled, err
@@ -329,7 +368,7 @@ func ReleaseInviteAbuseBan(userId int, adminId int) (bool, error) {
 // whether or not the rule is enabled: totals and the abusive inviters with
 // the most invited users first.
 func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, error) {
-	preview := &InviteAbusePreview{Threshold: settings.Threshold, MinRedeemQuota: settings.MinRedeemQuota}
+	preview := &InviteAbusePreview{Threshold: settings.Threshold, MinRedeemQuota: settings.MinRedeemQuota, ExemptPaidInviter: settings.ExemptPaidInviter}
 	items := make([]InviteAbusePreviewItem, 0)
 	afterInviterId := 0
 	for {
@@ -337,7 +376,7 @@ func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, erro
 		if err != nil {
 			return nil, err
 		}
-		inviters, err := loadInviteAbuseInviters(candidates)
+		inviters, err := loadInviteAbuseInviters(candidates, settings)
 		if err != nil {
 			return nil, err
 		}
@@ -393,10 +432,10 @@ var (
 
 // RunInviteAbuseSweepIfDue is the master node's minute tick of the rule.
 // While the rule is enabled it sweeps every inviter right after startup,
-// after the rule is turned on, after the threshold or the minimum redeemed
-// quota changed, and otherwise every InviteAbuseSweepInterval. A pass stops
-// at its time budget and continues on the next tick. Several masters are
-// safe: every ban is a conditional update.
+// after the rule is turned on, after the threshold, the minimum redeemed
+// quota or the paid-inviter exemption changed, and otherwise every
+// InviteAbuseSweepInterval. A pass stops at its time budget and continues on
+// the next tick. Several masters are safe: every ban is a conditional update.
 func RunInviteAbuseSweepIfDue(now time.Time) {
 	if !inviteAbuseSweepRunning.CompareAndSwap(false, true) {
 		return
@@ -434,7 +473,7 @@ func sweepInviteAbuse(settings InviteAbuseSettings, afterInviterId int, deadline
 		if err != nil {
 			return afterInviterId, false, err
 		}
-		inviters, err := loadInviteAbuseInviters(candidates)
+		inviters, err := loadInviteAbuseInviters(candidates, settings)
 		if err != nil {
 			return afterInviterId, false, err
 		}

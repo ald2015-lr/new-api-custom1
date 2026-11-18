@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -130,6 +131,20 @@ func GetOptions(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    options,
+	})
+}
+
+// GetClientIP shows the root administrator the client IP the server derives
+// for their own request, and whether TRUSTED_PROXIES is set (to a list or to
+// none) rather than left to the built-in private-network defaults. An
+// administrator compares the IP with their real public address before turning
+// on the per-network registration limit: behind a proxy the server does not
+// trust, every visitor has the proxy's address.
+func GetClientIP(c *gin.Context) {
+	_, usedDefaults, _ := common.ResolveTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	common.ApiSuccess(c, gin.H{
+		"ip":                         c.ClientIP(),
+		"trusted_proxies_configured": !usedDefaults,
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1298,7 +1299,8 @@ func TestOAuthSignUpCountsTowardTheRegistrationLimit(t *testing.T) {
 	require.NoError(t, model.LOG_DB.Where("action = ?", "user.register").Find(&audits).Error)
 	require.Len(t, audits, 1, "an OAuth sign-up is audited like a registration")
 	assert.Equal(t, model.AuditCategoryLogin, audits[0].Category)
-	assert.Equal(t, strings.Trim(strings.TrimSuffix(remoteAddr, ":4321"), "[]"), audits[0].Ip)
+	// The audit holds the canonical address: no leading zeros in a group.
+	assert.Equal(t, net.ParseIP(strings.Trim(strings.TrimSuffix(remoteAddr, ":4321"), "[]")).String(), audits[0].Ip)
 	params, err := common.Marshal(audits[0].Other.Op.Params)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"method":"oauth:auth-flow-test","inviter_id":0}`, string(params))

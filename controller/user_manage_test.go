@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-redis/redis/v8"
 
@@ -730,18 +731,21 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 
 // setupInviteAbuseControllerTest is setupManageUserTestDB with the tables and
 // the options of the invite abuse rule: threshold 2, minimum redeemed quota
-// 500000, rule off.
+// 500000, paid inviters exempt, rule off.
 func setupInviteAbuseControllerTest(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupManageUserTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.TopUp{}, &model.Redemption{}, &model.InviteAbuseBan{}))
 	enabled, threshold, minRedeem := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
+	exemptPaid := common.InviteAbuseBanExemptPaidInviter
 	registerEnabled, newUserQuota := common.RegisterEnabled, common.QuotaForNewUser
 	t.Cleanup(func() {
 		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = enabled, threshold, minRedeem
+		common.InviteAbuseBanExemptPaidInviter = exemptPaid
 		common.RegisterEnabled, common.QuotaForNewUser = registerEnabled, newUserQuota
 	})
 	common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = false, 2, 500000
+	common.InviteAbuseBanExemptPaidInviter = true
 	common.RegisterEnabled, common.QuotaForNewUser = true, 0
 	return db
 }
@@ -786,19 +790,35 @@ func TestInviteAbusePreviewEndpoint(t *testing.T) {
 	createInviteAbuseControllerUser(t, db, "redeemer-1", redeemer.Id)
 	redeemed := createInviteAbuseControllerUser(t, db, "redeemer-2", redeemer.Id)
 	require.NoError(t, db.Create(&model.Redemption{Key: "invite-abuse-preview-code-000001", Name: "preview", Status: common.RedemptionCodeStatusUsed, Quota: 100, UsedUserId: redeemed.Id}).Error)
+	// The patron recharged itself: abusive only while paid inviters are not exempt.
+	patron := createInviteAbuseControllerUser(t, db, "patron", 0)
+	createInviteAbuseControllerUser(t, db, "patron-1", patron.Id)
+	createInviteAbuseControllerUser(t, db, "patron-2", patron.Id)
+	require.NoError(t, db.Create(&model.TopUp{UserId: patron.Id, Amount: 1, Money: 7, TradeNo: "invite-abuse-preview-patron", Status: common.TopUpStatusSuccess}).Error)
 
 	item := func(user model.User, invites int) string {
 		return fmt.Sprintf(`{"id":%d,"username":%q,"display_name":%q,"status":1,"invite_count":%d,"invitees_to_disable":%d}`, user.Id, user.Username, user.DisplayName, invites, invites)
 	}
-	for _, tc := range []struct{ name, query, want string }{
-		{"saved settings, rule off", "",
-			`{"threshold":2,"min_redeem_quota":500000,"abusive_inviters":2,"inviters_to_disable":2,"invitees_to_disable":5,"items":[` + item(farmer, 3) + `,` + item(redeemer, 2) + `],"truncated":false}`},
-		{"unsaved minimum redeemed quota", "?min_redeem_quota=100",
-			`{"threshold":2,"min_redeem_quota":100,"abusive_inviters":1,"inviters_to_disable":1,"invitees_to_disable":3,"items":[` + item(farmer, 3) + `],"truncated":false}`},
-		{"unsaved threshold", "?threshold=4&min_redeem_quota=0",
-			`{"threshold":4,"min_redeem_quota":0,"abusive_inviters":0,"inviters_to_disable":0,"invitees_to_disable":0,"items":[],"truncated":false}`},
+	exempted := `{"threshold":2,"min_redeem_quota":500000,"exempt_paid_inviter":true,"abusive_inviters":2,"inviters_to_disable":2,"invitees_to_disable":5,"items":[` +
+		item(farmer, 3) + `,` + item(redeemer, 2) + `],"truncated":false}`
+	notExempted := `{"threshold":2,"min_redeem_quota":500000,"exempt_paid_inviter":false,"abusive_inviters":3,"inviters_to_disable":3,"invitees_to_disable":7,"items":[` +
+		item(farmer, 3) + `,` + item(patron, 2) + `,` + item(redeemer, 2) + `],"truncated":false}`
+	for _, tc := range []struct {
+		name        string
+		savedExempt bool
+		query, want string
+	}{
+		{"saved settings, rule off", true, "", exempted},
+		{"saved settings without the paid-inviter exemption", false, "", notExempted},
+		{"unsaved paid-inviter exemption", false, "?exempt_paid_inviter=true", exempted},
+		{"unsaved paid-inviter exemption turned off", true, "?exempt_paid_inviter=false", notExempted},
+		{"unsaved minimum redeemed quota", true, "?min_redeem_quota=100",
+			`{"threshold":2,"min_redeem_quota":100,"exempt_paid_inviter":true,"abusive_inviters":1,"inviters_to_disable":1,"invitees_to_disable":3,"items":[` + item(farmer, 3) + `],"truncated":false}`},
+		{"unsaved threshold", true, "?threshold=4&min_redeem_quota=0",
+			`{"threshold":4,"min_redeem_quota":0,"exempt_paid_inviter":true,"abusive_inviters":0,"inviters_to_disable":0,"invitees_to_disable":0,"items":[],"truncated":false}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			common.InviteAbuseBanExemptPaidInviter = tc.savedExempt
 			var response securityEnrollmentResponse
 			require.NoError(t, common.UnmarshalJsonStr(performInviteAbuseGet(t, "/api/user/invite_abuse/preview"+tc.query), &response))
 			assert.True(t, response.Success)
@@ -810,6 +830,7 @@ func TestInviteAbusePreviewEndpoint(t *testing.T) {
 		{"?threshold=100001", "Invite count threshold must be an integer between 1 and 100000"},
 		{"?threshold=two", "Invite count threshold must be an integer between 1 and 100000"},
 		{"?min_redeem_quota=-1", "Minimum redeemed quota must be a non-negative integer"},
+		{"?exempt_paid_inviter=yes", "Value must be true or false"},
 	} {
 		body := performInviteAbuseGet(t, "/api/user/invite_abuse/preview"+tc.query)
 		assert.Contains(t, body, `"success":false`, tc.query)
@@ -886,6 +907,89 @@ func TestOAuthSignUpRefusedWhenInviteAbuseDisablesTheNewUser(t *testing.T) {
 			require.NoError(t, err)
 			assert.Zero(t, sessions)
 		})
+	}
+}
+
+// The invite code of a disabled or deleted account links nobody: a password
+// registration or an OAuth sign-up that carries it succeeds without an
+// inviter, an invite reward or an invite abuse check. Under the same settings
+// an enabled inviter's code does all three.
+func TestSignUpIgnoresInviteCodesOfDisabledOrDeletedInviters(t *testing.T) {
+	db := setupInviteAbuseControllerTest(t)
+	require.NoError(t, db.AutoMigrate(&model.InviteReward{}))
+	payment := operation_setting.GetPaymentSetting()
+	previousConfirmed, previousTerms := payment.ComplianceConfirmed, payment.ComplianceTermsVersion
+	previousPassword, previousVerification, previousLimit := common.PasswordRegisterEnabled, common.EmailVerificationEnabled, common.RegisterIPRateLimitEnabled
+	previousInviter, previousInvitee, previousRecharge := common.QuotaForInviter, common.QuotaForInvitee, common.InviteRechargeThresholdQuota
+	t.Cleanup(func() {
+		payment.ComplianceConfirmed, payment.ComplianceTermsVersion = previousConfirmed, previousTerms
+		common.PasswordRegisterEnabled, common.EmailVerificationEnabled, common.RegisterIPRateLimitEnabled = previousPassword, previousVerification, previousLimit
+		common.QuotaForInviter, common.QuotaForInvitee, common.InviteRechargeThresholdQuota = previousInviter, previousInvitee, previousRecharge
+	})
+	// A linked sign-up records invite rewards (pending until a recharge) and,
+	// as the inviter's second invited user without a recharge, makes the
+	// inviter abusive.
+	payment.ComplianceConfirmed, payment.ComplianceTermsVersion = true, operation_setting.CurrentComplianceTermsVersion
+	common.PasswordRegisterEnabled, common.EmailVerificationEnabled, common.RegisterIPRateLimitEnabled = true, false, false
+	common.QuotaForInviter, common.QuotaForInvitee, common.InviteRechargeThresholdQuota = 1000, 1000, 1
+	common.InviteAbuseBanEnabled = true
+
+	signUp := map[string]func(username string, affCode string) string{
+		"password": func(username string, affCode string) string {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/user/register", strings.NewReader(registerTestBody(username, "", "", affCode)))
+			c.Request.Header.Set("Content-Type", "application/json")
+			Register(c)
+			return recorder.Body.String()
+		},
+		"oauth": func(username string, affCode string) string {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/github", nil)
+			flow := &model.AuthFlow{Payload: fmt.Sprintf(`{"affiliate_code":%q}`, affCode)}
+			handleOAuthLogin(c, &oauth.GitHubProvider{}, &oauth.OAuthUser{ProviderUserID: username, Username: username}, &oauth.OAuthToken{}, flow)
+			return recorder.Body.String()
+		},
+	}
+	for _, method := range []string{"password", "oauth"} {
+		for _, state := range []string{"enabled", "disabled", "deleted"} {
+			t.Run(method+" sign-up, "+state+" inviter", func(t *testing.T) {
+				name := method + "-" + state
+				inviter := createInviteAbuseControllerUser(t, db, name, 0)
+				invited := createInviteAbuseControllerUser(t, db, name+"-1", inviter.Id)
+				switch state {
+				case "disabled":
+					require.NoError(t, db.Model(&model.User{}).Where("id = ?", inviter.Id).Update("status", common.UserStatusDisabled).Error)
+				case "deleted":
+					require.NoError(t, db.Delete(&inviter).Error)
+				}
+
+				body := signUp[method](name+"-2", inviter.AffCode)
+				var newcomer model.User
+				require.NoError(t, db.Where("username = ?", name+"-2").Take(&newcomer).Error, body)
+				var rewards, bans int64
+				require.NoError(t, db.Model(&model.InviteReward{}).Where("invitee_id = ?", newcomer.Id).Count(&rewards).Error)
+				require.NoError(t, db.Model(&model.InviteAbuseBan{}).Where("inviter_id = ?", inviter.Id).Count(&bans).Error)
+				var stored model.User
+				require.NoError(t, db.Unscoped().Select("aff_count").Where("id = ?", inviter.Id).Take(&stored).Error)
+				if state == "enabled" {
+					assert.Equal(t, inviter.Id, newcomer.InviterId)
+					assert.EqualValues(t, 1, rewards)
+					assert.Equal(t, 1, stored.AffCount)
+					assert.EqualValues(t, 3, bans, "the inviter and both invited users")
+					assert.Equal(t, common.UserStatusDisabled, newcomer.Status)
+					return
+				}
+				assert.Contains(t, body, `"success":true`, "the sign-up itself goes on")
+				assert.Zero(t, newcomer.InviterId)
+				assert.Equal(t, common.UserStatusEnabled, newcomer.Status)
+				assert.Zero(t, rewards, "no invite reward")
+				assert.Zero(t, stored.AffCount)
+				assert.Zero(t, bans, "no invite abuse check")
+				assert.Equal(t, common.UserStatusEnabled, inviteAbuseControllerStatus(t, db, invited.Id))
+			})
+		}
 	}
 }
 

@@ -1196,3 +1196,14 @@ func TestRegistrationRoutesCountNetworkLimitsFirst(t *testing.T) {
 	assert.Contains(t, response.Body.String(), `"captcha_id":"`)
 	assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
 }
+
+// The client IP diagnostic of the registration limit is a root-only option
+// route: an anonymous request is refused before the handler runs.
+func TestClientIPDiagnosticRefusesAnonymousRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	outer := gin.New()
+	SetApiRouter(outer)
+	response := performPluginRequest(outer, http.MethodGet, "/api/option/client_ip")
+	assert.Equal(t, http.StatusUnauthorized, response.Code)
+	assert.NotContains(t, response.Body.String(), "trusted_proxies_configured")
+}

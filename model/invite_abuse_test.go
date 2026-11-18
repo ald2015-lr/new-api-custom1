@@ -81,22 +81,26 @@ func resetInviteAbuseTables(t *testing.T) {
 	require.NoError(t, LOG_DB.Exec("DELETE FROM audit_logs").Error)
 }
 
-// useInviteAbuseSettings pins the rule's options, the settings a sign-up
-// reads and the sweep's schedule state, and restores them afterwards.
+// useInviteAbuseSettings pins the rule's options (paid inviters exempt, the
+// default), the settings a sign-up reads and the sweep's schedule state, and
+// restores them afterwards.
 func useInviteAbuseSettings(t *testing.T, enabled bool, threshold int, minRedeemQuota int) {
 	t.Helper()
 	payment := operation_setting.GetPaymentSetting()
 	savedConfirmed := payment.ComplianceConfirmed
 	savedEnabled, savedThreshold, savedMin := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
+	savedExemptPaid := common.InviteAbuseBanExemptPaidInviter
 	savedNewUser, savedOptions := common.QuotaForNewUser, common.OptionMap
 	t.Cleanup(func() {
 		payment.ComplianceConfirmed = savedConfirmed
 		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = savedEnabled, savedThreshold, savedMin
+		common.InviteAbuseBanExemptPaidInviter = savedExemptPaid
 		common.QuotaForNewUser, common.OptionMap = savedNewUser, savedOptions
 		inviteAbuseSweep = inviteAbuseSweepState{}
 	})
 	payment.ComplianceConfirmed = false
 	common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = enabled, threshold, minRedeemQuota
+	common.InviteAbuseBanExemptPaidInviter = true
 	common.QuotaForNewUser, common.OptionMap = 0, map[string]string{}
 	inviteAbuseSweep = inviteAbuseSweepState{}
 }
@@ -159,6 +163,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			useInviteTestDatabase(t, dialect, "invite_abuse_test_", inviteAbuseTestModels...)
 			t.Run("migration", testInviteAbuseMigration)
 			t.Run("qualifying recharge", testInviteAbuseQualifyingRecharge)
+			t.Run("paid inviter", testInviteAbusePaidInviter)
 			t.Run("threshold", testInviteAbuseThreshold)
 			t.Run("administrators and exempt users", testInviteAbuseAdministratorsAndExemptUsers)
 			t.Run("ban effects and idempotency", testInviteAbuseBanEffects)
@@ -258,6 +263,78 @@ func testInviteAbuseQualifyingRecharge(t *testing.T) {
 			assert.Equal(t, 5, disabled)
 			assert.Equal(t, inviteAbuseTestUserIds(append([]User{inviter}, invitees...)...), disabledInviteAbuseTestUsers(t))
 		})
+	}
+}
+
+// An inviter who recharged itself, by the same definition as for invited
+// users, is not abusive while paid inviters are exempt: the preview, the
+// sweep and the sign-up check agree. Without the exemption it is.
+func testInviteAbusePaidInviter(t *testing.T) {
+	const minRedeem = 500_000
+	for _, tc := range []struct {
+		name     string
+		paid     bool
+		recharge func(t *testing.T, inviter User)
+	}{
+		{name: "no recharge", recharge: func(*testing.T, User) {}},
+		{name: "online top-up", paid: true, recharge: func(t *testing.T, inviter User) {
+			seedTestTopUp(t, TopUp{UserId: inviter.Id, Amount: 2, Money: 14, PaymentMethod: "alipay", PaymentProvider: PaymentProviderEpay})
+		}},
+		{name: "pending top-up", recharge: func(t *testing.T, inviter User) {
+			seedTestTopUp(t, TopUp{UserId: inviter.Id, Amount: 2, Money: 14, PaymentProvider: PaymentProviderEpay, Status: common.TopUpStatusPending})
+		}},
+		{name: "subscription paid through a gateway", paid: true, recharge: func(t *testing.T, inviter User) {
+			seedTestTopUp(t, TopUp{UserId: inviter.Id, Amount: 0, Money: 9.9, PaymentMethod: PaymentMethodStripe})
+		}},
+		{name: "redeemed less than the minimum", recharge: func(t *testing.T, inviter User) {
+			seedUsedRedemption(t, inviter.Id, minRedeem-1)
+		}},
+		{name: "redeemed the minimum with a code deleted after use", paid: true, recharge: func(t *testing.T, inviter User) {
+			seedUsedRedemption(t, inviter.Id, minRedeem-100)
+			deleted := seedUsedRedemption(t, inviter.Id, 100)
+			require.NoError(t, DB.Delete(&deleted).Error)
+		}},
+	} {
+		for _, exempt := range []bool{true, false} {
+			if !exempt && !tc.paid {
+				continue // the qualifying recharge test covers inviters who did not pay
+			}
+			t.Run(fmt.Sprintf("%s, paid inviters exempt: %v", tc.name, exempt), func(t *testing.T) {
+				resetInviteAbuseTables(t)
+				useInviteAbuseSettings(t, true, 2, minRedeem)
+				common.InviteAbuseBanExemptPaidInviter = exempt
+				spared := exempt && tc.paid
+
+				swept, sweptInvitees := createInviteAbuseTestInviter(t, "swept", common.RoleCommonUser, 2)
+				tc.recharge(t, swept)
+				preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
+				require.NoError(t, err)
+				assert.Equal(t, exempt, preview.ExemptPaidInviter)
+				_, complete, err := sweepInviteAbuse(CurrentInviteAbuseSettings(), 0, time.Now().Add(time.Minute))
+				require.NoError(t, err)
+				require.True(t, complete)
+				if spared {
+					assert.Zero(t, preview.AbusiveInviters)
+					assert.Empty(t, disabledInviteAbuseTestUsers(t))
+				} else {
+					assert.Equal(t, 1, preview.AbusiveInviters)
+					assert.Equal(t, inviteAbuseTestUserIds(append([]User{swept}, sweptInvitees...)...), disabledInviteAbuseTestUsers(t))
+				}
+
+				// A sign-up that brings the inviter to the threshold.
+				inviter, invitees := createInviteAbuseTestInviter(t, "signup", common.RoleCommonUser, 1)
+				tc.recharge(t, inviter)
+				newcomer := User{Username: "signup-2", DisplayName: "signup-2", Role: common.RoleCommonUser, InviterId: inviter.Id}
+				require.NoError(t, newcomer.Insert(inviter.Id))
+				want := common.UserStatusDisabled
+				if spared {
+					want = common.UserStatusEnabled
+				}
+				for _, user := range []User{inviter, invitees[0], newcomer} {
+					assert.Equal(t, want, inviteAbuseUserState(t, user.Id).Status, user.Username)
+				}
+			})
+		}
 	}
 }
 
@@ -551,6 +628,14 @@ func testInviteAbuseSweepSchedule(t *testing.T) {
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
 	RunInviteAbuseSweepIfDue(later.Add(2 * time.Minute))
 	assert.Equal(t, common.UserStatusDisabled, status(fifth), "turning the rule on again sweeps at once")
+
+	patron, _ := createInviteAbuseTestInviter(t, "patron", common.RoleCommonUser, 1)
+	seedTestTopUp(t, TopUp{UserId: patron.Id, Amount: 1, Money: 7, PaymentProvider: PaymentProviderEpay})
+	RunInviteAbuseSweepIfDue(later.Add(3 * time.Minute))
+	assert.Equal(t, common.UserStatusEnabled, status(patron))
+	require.NoError(t, updateOptionMap("InviteAbuseBanExemptPaidInviter", "false"))
+	RunInviteAbuseSweepIfDue(later.Add(4 * time.Minute))
+	assert.Equal(t, common.UserStatusDisabled, status(patron), "no longer exempting paid inviters sweeps at once")
 }
 
 // A pass reads the candidates in batches and stops at its time budget without
@@ -602,6 +687,8 @@ func testInviteAbusePreview(t *testing.T) {
 	// Not abusive or not checked.
 	_, paid := createInviteAbuseTestInviter(t, "paid", common.RoleCommonUser, 3)
 	seedTestTopUp(t, TopUp{UserId: paid[2].Id, Amount: 1, Money: 7, PaymentProvider: PaymentProviderEpay})
+	patron, _ := createInviteAbuseTestInviter(t, "patron", common.RoleCommonUser, 2)
+	seedTestTopUp(t, TopUp{UserId: patron.Id, Amount: 1, Money: 7, PaymentProvider: PaymentProviderEpay})
 	createInviteAbuseTestInviter(t, "admin", common.RoleAdminUser, 2)
 	exempt, _ := createInviteAbuseTestInviter(t, "exempt", common.RoleCommonUser, 2)
 	releaseInviteAbuseTestUser(t, exempt)
@@ -612,12 +699,23 @@ func testInviteAbusePreview(t *testing.T) {
 	preview, err := PreviewInviteAbuse(CurrentInviteAbuseSettings())
 	require.NoError(t, err)
 	assert.Equal(t, &InviteAbusePreview{
-		Threshold: 2, MinRedeemQuota: 500_000, AbusiveInviters: 2, InvitersToDisable: 1, InviteesToDisable: 3,
+		Threshold: 2, MinRedeemQuota: 500_000, ExemptPaidInviter: true, AbusiveInviters: 2, InvitersToDisable: 1, InviteesToDisable: 3,
 		Items: []InviteAbusePreviewItem{
 			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 4, InviteesToDisable: 1},
 			{Id: b.Id, Username: "b", DisplayName: "b", Status: common.UserStatusDisabled, InviteCount: 2, InviteesToDisable: 2},
 		},
 	}, preview)
+
+	unexempted, err := PreviewInviteAbuse(InviteAbuseSettings{Threshold: 2, MinRedeemQuota: 500_000})
+	require.NoError(t, err)
+	assert.Equal(t, &InviteAbusePreview{
+		Threshold: 2, MinRedeemQuota: 500_000, AbusiveInviters: 3, InvitersToDisable: 2, InviteesToDisable: 5,
+		Items: []InviteAbusePreviewItem{
+			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 4, InviteesToDisable: 1},
+			{Id: patron.Id, Username: "patron", DisplayName: "patron", Status: common.UserStatusEnabled, InviteCount: 2, InviteesToDisable: 2},
+			{Id: b.Id, Username: "b", DisplayName: "b", Status: common.UserStatusDisabled, InviteCount: 2, InviteesToDisable: 2},
+		},
+	}, unexempted, "without the exemption the inviter who paid is abusive like the others")
 
 	stricter, err := PreviewInviteAbuse(InviteAbuseSettings{Threshold: 5, MinRedeemQuota: 500_000})
 	require.NoError(t, err)

@@ -21,6 +21,7 @@ const (
 	InviteAbuseBanEnabledKey             = "InviteAbuseBanEnabled"
 	InviteAbuseBanThresholdKey           = "InviteAbuseBanThreshold"
 	InviteAbuseBanMinRedeemQuotaKey      = "InviteAbuseBanMinRedeemQuota"
+	InviteAbuseBanExemptPaidInviterKey   = "InviteAbuseBanExemptPaidInviter"
 )
 
 const (
@@ -51,7 +52,7 @@ func ValidateBonusOption(key string, value string) error {
 		if err != nil || days < 0 || days > bonusMaxExpireDays {
 			return common.NewMessage("Expiry days must be an integer between 0 and 3650")
 		}
-	case CheckinExpireOnlyWhenUnusedOptionKey, InviteRewardExpireOnlyWhenUnusedKey, InviteAbuseBanEnabledKey:
+	case CheckinExpireOnlyWhenUnusedOptionKey, InviteRewardExpireOnlyWhenUnusedKey, InviteAbuseBanEnabledKey, InviteAbuseBanExemptPaidInviterKey:
 		if value != "true" && value != "false" {
 			return common.NewMessage("Value must be true or false")
 		}
