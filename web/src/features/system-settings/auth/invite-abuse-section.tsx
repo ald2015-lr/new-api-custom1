@@ -19,7 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
-import { useState, type ChangeEvent, type FormEvent } from 'react'
+import {
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type ReactNode,
+} from 'react'
 import type { Resolver } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import * as z from 'zod'
@@ -60,7 +65,10 @@ import { useSettingsForm } from '../hooks/use-settings-form'
 import { useUpdateOption } from '../hooks/use-update-option'
 import type { InviteAbusePreviewParams } from '../types'
 import { integerRangeSchema } from '../utils/numeric-field'
-import { InviteAbusePreviewDialog } from './invite-abuse-preview-dialog'
+import {
+  InviteAbusePreviewDialog,
+  InviteAbusePreviewTotals,
+} from './invite-abuse-preview-dialog'
 
 const inviteAbuseSchema = z.object({
   InviteAbuseBanEnabled: z.boolean(),
@@ -95,6 +103,8 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const updateOption = useUpdateOption()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  // Whether the save waiting for confirmation turns the rule on.
+  const [confirmTurnsOn, setConfirmTurnsOn] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
 
   const { form, handleSubmit, isDirty, isSubmitting } =
@@ -106,14 +116,14 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       >,
       defaultValues: props.defaultValues,
       onSubmit: async (_data, changedFields) => {
-        // Turning the ban on scans every user at once, so the values it
-        // scans with are saved before the switch.
-        const entries = Object.entries(changedFields).sort(
-          ([a], [b]) =>
-            Number(a === 'InviteAbuseBanEnabled') -
-            Number(b === 'InviteAbuseBanEnabled')
-        )
-        for (const [key, value] of entries) {
+        // Every saved key can start a sweep, so the rule never runs with
+        // values from the middle of this save: turning it off goes first,
+        // turning it on goes after the values it scans with.
+        const { InviteAbuseBanEnabled: enabled, ...ruleValues } = changedFields
+        const updates = Object.entries(ruleValues)
+        if (enabled === false) updates.unshift(['InviteAbuseBanEnabled', false])
+        if (enabled === true) updates.push(['InviteAbuseBanEnabled', true])
+        for (const [key, value] of updates) {
           await updateOption.mutateAsync({
             key,
             value: value as string | number | boolean,
@@ -122,20 +132,36 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       },
     })
 
+  const loadPreview = async (params: InviteAbusePreviewParams) => {
+    const response = requireServerSuccess(await previewInviteAbuseBan(params))
+    if (!response.data) {
+      throw createServerError(response, t('Failed to preview'))
+    }
+    return response.data
+  }
+
   const preview = useMutation({
-    mutationFn: async (params: InviteAbusePreviewParams) => {
-      const response = requireServerSuccess(await previewInviteAbuseBan(params))
-      if (!response.data) {
-        throw createServerError(response, t('Failed to preview'))
-      }
-      return response.data
-    },
+    mutationFn: loadPreview,
     onSuccess: () => setPreviewOpen(true),
     onError: (error) => handleServerError(error, t('Failed to preview')),
   })
 
+  // What a save waiting for confirmation would disable; the confirmation
+  // shows a failure itself.
+  const savePreview = useMutation({
+    mutationFn: loadPreview,
+    meta: { errorToast: false },
+  })
+
   const threshold = form.watch('InviteAbuseBanThreshold')
   const minRedeemQuota = form.watch('InviteAbuseBanMinRedeemQuota')
+
+  // The unsaved values in the form, so the admin sees their effect first.
+  const unsavedPreviewParams = (): InviteAbusePreviewParams => ({
+    threshold: Number(form.getValues('InviteAbuseBanThreshold')),
+    min_redeem_quota: Number(form.getValues('InviteAbuseBanMinRedeemQuota')),
+    exempt_paid_inviter: form.getValues('InviteAbuseBanExemptPaidInviter'),
+  })
 
   const handlePreview = async () => {
     const valid = await form.trigger([
@@ -143,29 +169,64 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       'InviteAbuseBanMinRedeemQuota',
     ])
     if (!valid) return
-    // The unsaved values in the form, so the admin sees their effect first.
-    preview.mutate({
-      threshold: Number(form.getValues('InviteAbuseBanThreshold')),
-      min_redeem_quota: Number(form.getValues('InviteAbuseBanMinRedeemQuota')),
-      exempt_paid_inviter: form.getValues('InviteAbuseBanExemptPaidInviter'),
-    })
+    preview.mutate(unsavedPreviewParams())
+  }
+
+  const save = async () => {
+    try {
+      await handleSubmit()
+    } catch (error) {
+      // A failed request was already shown by useUpdateOption; this only
+      // reports anything else and keeps the rejection from going unhandled.
+      handleServerError(error, t('Failed to update setting'))
+    }
   }
 
   const requestSave = async (event?: FormEvent) => {
     event?.preventDefault()
-    const enabling =
+    const dirtyFields = form.formState.dirtyFields
+    // A save that turns the rule on, or changes it while it stays on, scans
+    // existing users at once: show what it disables and ask first.
+    const sweeps =
       form.getValues('InviteAbuseBanEnabled') &&
-      Boolean(form.formState.dirtyFields.InviteAbuseBanEnabled)
-    if (enabling && (await form.trigger())) {
+      Object.values(dirtyFields).some(Boolean)
+    if (sweeps && (await form.trigger())) {
+      savePreview.mutate(unsavedPreviewParams())
+      setConfirmTurnsOn(Boolean(dirtyFields.InviteAbuseBanEnabled))
       setConfirmOpen(true)
       return
     }
-    await handleSubmit()
+    await save()
   }
 
-  const confirmEnable = async () => {
+  const confirmSave = async () => {
     setConfirmOpen(false)
-    await handleSubmit()
+    await save()
+  }
+
+  const handleConfirmOpenChange = (open: boolean) => {
+    setConfirmOpen(open)
+    if (!open) savePreview.reset()
+  }
+
+  let saveImpact: ReactNode = (
+    <p className='text-muted-foreground flex items-center gap-2 text-sm'>
+      <Loader2 className='size-4 animate-spin' aria-hidden='true' />
+      {t('Loading...')}
+    </p>
+  )
+  if (savePreview.data) {
+    saveImpact = <InviteAbusePreviewTotals preview={savePreview.data} />
+  } else if (savePreview.isError) {
+    saveImpact = (
+      <Alert variant='destructive'>
+        <AlertDescription>
+          {t(
+            'The preview failed, so it is unknown how many accounts this disables. Saving can still disable many accounts at once.'
+          )}
+        </AlertDescription>
+      </Alert>
+    )
   }
 
   return (
@@ -281,7 +342,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'An invited user whose used redemption codes add up to at least this quota counts as recharged ({{formattedQuota}})',
+                    'An invited user whose used redemption codes add up to at least this quota counts as recharged ({{formattedQuota}}). With 0, any used redemption code counts as a recharge.',
                     {
                       formattedQuota: formatQuota(
                         typeof field.value === 'number' ? field.value : 0
@@ -346,15 +407,22 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
 
       <ConfirmDialog
         open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title={t('Turn on automatic invite abuse bans?')}
+        onOpenChange={handleConfirmOpenChange}
+        title={
+          confirmTurnsOn
+            ? t('Turn on automatic invite abuse bans?')
+            : t('Save the changed invite abuse rule?')
+        }
         desc={t(
-          'Existing users are scanned right after saving, and every inviter matching the rule is disabled together with the users they invited. Use Preview to see how many accounts that is.'
+          'Existing users are scanned right after saving, and every inviter matching the rule is disabled together with the users they invited.'
         )}
-        confirmText={t('Turn on')}
+        confirmText={confirmTurnsOn ? t('Turn on') : t('Save')}
         destructive
-        handleConfirm={() => void confirmEnable()}
-      />
+        disabled={savePreview.isPending}
+        handleConfirm={() => void confirmSave()}
+      >
+        {saveImpact}
+      </ConfirmDialog>
     </SettingsSection>
   )
 }

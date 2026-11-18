@@ -39,6 +39,41 @@ type InviteAbusePreviewDialogProps = {
   preview: InviteAbusePreview | undefined
 }
 
+/** How many inviters match the invite abuse rule and how many it disables. */
+export function InviteAbusePreviewTotals(props: {
+  preview: InviteAbusePreview
+}) {
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const totals = [
+    {
+      label: t('Inviters matching the rule'),
+      value: props.preview.abusive_inviters,
+    },
+    {
+      label: t('Inviters to disable'),
+      value: props.preview.inviters_to_disable,
+    },
+    {
+      label: t('Invited users to disable'),
+      value: props.preview.invitees_to_disable,
+    },
+  ]
+
+  return (
+    <dl className='grid gap-3 sm:grid-cols-3'>
+      {totals.map((total) => (
+        <div key={total.label} className='rounded-lg border px-3 py-2'>
+          <dt className='text-muted-foreground text-xs'>{total.label}</dt>
+          <dd className='text-lg font-semibold tabular-nums'>
+            {formatNumber(total.value, locale)}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
 /** Totals and top inviters the invite abuse rule would disable. */
 export function InviteAbusePreviewDialog(props: InviteAbusePreviewDialogProps) {
   const { t, i18n } = useTranslation()
@@ -52,23 +87,6 @@ export function InviteAbusePreviewDialog(props: InviteAbusePreviewDialogProps) {
       ? t('Inviters who recharged are exempt')
       : t('Inviters who recharged are not exempt')
   }
-
-  const totals = preview
-    ? [
-        {
-          label: t('Inviters matching the rule'),
-          value: preview.abusive_inviters,
-        },
-        {
-          label: t('Inviters to disable'),
-          value: preview.inviters_to_disable,
-        },
-        {
-          label: t('Invited users to disable'),
-          value: preview.invitees_to_disable,
-        },
-      ]
-    : []
 
   return (
     <Dialog
@@ -94,16 +112,7 @@ export function InviteAbusePreviewDialog(props: InviteAbusePreviewDialogProps) {
       contentClassName='sm:max-w-3xl'
       bodyClassName='space-y-4'
     >
-      <dl className='grid gap-3 sm:grid-cols-3'>
-        {totals.map((total) => (
-          <div key={total.label} className='rounded-lg border px-3 py-2'>
-            <dt className='text-muted-foreground text-xs'>{total.label}</dt>
-            <dd className='text-lg font-semibold tabular-nums'>
-              {formatNumber(total.value, locale)}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      {preview ? <InviteAbusePreviewTotals preview={preview} /> : null}
 
       {items.length === 0 ? (
         <p className='text-muted-foreground text-sm'>
