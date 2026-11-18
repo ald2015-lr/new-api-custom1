@@ -194,18 +194,42 @@ it('searches by a typed inviter ID and lists all users again after it is cleared
   expect(router.state.location.search).not.toHaveProperty('inviter')
 })
 
-it('drops leading zeros from a typed inviter ID and searches by the ID they name', async () => {
+it('searches by the ID that a typed inviter ID with leading zeros names and drops the zeros once the field is left', async () => {
   const user = userEvent.setup()
   const { get, router } = await renderUsers()
   const input = screen.getByRole('textbox', { name: 'Filter by inviter ID...' })
 
   await user.type(input, '042')
 
-  expect(input).toHaveValue('42')
+  expect(input).toHaveValue('042')
+  expect(input).toHaveAttribute('aria-invalid', 'false')
   await waitFor(() =>
     expect(get).toHaveBeenLastCalledWith(inviterSearchUrl(42))
   )
-  expect(router.state.location.search).toMatchObject({ inviter: '42' })
+
+  await user.tab()
+
+  expect(input).toHaveValue('42')
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({ inviter: '42' })
+  )
+})
+
+it('keeps the other digits when the first digit of an inviter ID is retyped', async () => {
+  const user = userEvent.setup()
+  const { get, router } = await renderUsers()
+  const input = screen.getByRole('textbox', { name: 'Filter by inviter ID...' })
+  await user.type(input, '1005')
+
+  await user.keyboard('{Home}{ArrowRight}{Backspace}')
+  expect(input).toHaveValue('005')
+  await user.keyboard('2')
+
+  expect(input).toHaveValue('2005')
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith(inviterSearchUrl(2005))
+  )
+  expect(router.state.location.search).toMatchObject({ inviter: '2005' })
 })
 
 it('marks an inviter ID above 2147483647 invalid and keeps listing every user', async () => {
@@ -217,6 +241,9 @@ it('marks an inviter ID above 2147483647 invalid and keeps listing every user', 
 
   expect(input).toHaveAttribute('aria-invalid', 'true')
   expect(input).toHaveAccessibleDescription('Invalid user ID')
+  // The hint hangs below the field instead of making the toolbar row taller,
+  // so the field stays in line with the other filters.
+  expect(screen.getByText('Invalid user ID')).toHaveClass('sm:absolute')
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       inviter: '2147483648',

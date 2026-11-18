@@ -129,8 +129,8 @@ export function UsersTable() {
   // field is marked invalid, so it never looks like an active filter.
   const inviterId = parseInviterId(inviterValue)
   const inviterFilter = inviterId === null ? '' : String(inviterId)
-  const inviterInputInvalid =
-    inviterInput !== '' && parseInviterId(inviterInput) === null
+  const inviterInputId = parseInviterId(inviterInput)
+  const inviterInputInvalid = inviterInput !== '' && inviterInputId === null
 
   const { data: groupsData } = useQuery({
     queryKey: ['groups'],
@@ -264,7 +264,7 @@ export function UsersTable() {
         searchPlaceholder: t('Filter by username, name or email...'),
         searchDebounceMs: 500,
         additionalSearch: (
-          <div className='grid w-full gap-1 sm:w-40'>
+          <div className='relative w-full sm:w-40'>
             <Input
               inputMode='numeric'
               placeholder={t('Filter by inviter ID...')}
@@ -272,15 +272,27 @@ export function UsersTable() {
               aria-invalid={inviterInputInvalid}
               aria-describedby={inviterInputInvalid ? inviterHintId : undefined}
               value={inviterInput}
+              // Digits only. Leading zeros stay while typing, so editing the
+              // first digit keeps the others; the filter ignores them.
               onChange={(event) =>
-                // Digits only and no leading zeros, like the ID it names.
-                setInviterInput(
-                  event.target.value.replaceAll(/\D/g, '').replace(/^0+/, '')
-                )
+                setInviterInput(event.target.value.replaceAll(/\D/g, ''))
               }
+              onBlur={() => {
+                // Once the field is left, show the ID the filter uses.
+                const shownId = String(inviterInputId)
+                if (inviterInputId !== null && shownId !== inviterInput) {
+                  setInviterInput(shownId)
+                }
+              }}
             />
             {inviterInputInvalid ? (
-              <p id={inviterHintId} className='text-destructive text-xs'>
+              // On wider screens the hint hangs below the field instead of
+              // making the toolbar row taller, which would lift the field
+              // out of line with the other filters.
+              <p
+                id={inviterHintId}
+                className='text-destructive sm:bg-popover mt-1 text-xs sm:absolute sm:top-full sm:left-0 sm:z-20 sm:rounded-md sm:border sm:px-2 sm:py-1 sm:whitespace-nowrap sm:shadow-md'
+              >
                 {t('Invalid user ID')}
               </p>
             ) : null}
