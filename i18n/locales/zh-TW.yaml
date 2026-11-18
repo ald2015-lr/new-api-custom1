@@ -100,6 +100,10 @@ gemini_free_key.keys_rpm_full: "{{.Count}} 個已達每分鐘請求數上限"
 gemini_free_key.keys_tpm_full: "{{.Count}} 個已達每分鐘輸入 tokens 上限"
 gemini_free_key.keys_ready: "{{.Count}} 個有餘量"
 gemini_free_key.keys_separator: "，"
+moderation.flagged: "請求未通過內容審查"
+moderation.unavailable: "內容審查暫不可用，請求未送出"
+moderation.unsupported: "開啟內容審查的管道不支援此介面"
+moderation.unsupported_input: "請求包含內容審查無法檢查的內容，未送出"
 
 # 分組充值門檻訊息
 group_access.topup_required: "分組 {{.Group}} 需要累計充值滿 {{.Required}} 才能使用（目前累計 {{.Current}}）"

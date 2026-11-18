@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -719,5 +720,54 @@ func TestGeminiFreeKeyTaskError(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A content moderation rejection is the gateway's own answer: it never
+// disables the channel or key, is never retried, and leaves the channel's
+// health unchanged; a pass audit reaches only the log row of its own attempt.
+func TestContentModerationRejectionsStayLocal(t *testing.T) {
+	previousAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previousAutoDisable })
+	for _, tc := range []struct {
+		code   types.ErrorCode
+		status int
+	}{
+		{types.ErrorCodeContentModerationFlagged, http.StatusBadRequest},
+		{types.ErrorCodeContentModerationFlagged, http.StatusUnauthorized},
+		{types.ErrorCodeContentModerationUnavailable, http.StatusServiceUnavailable},
+		{types.ErrorCodeContentModerationUnsupported, http.StatusBadRequest},
+	} {
+		apiErr := types.NewErrorWithStatusCode(errors.New("rejected"), tc.code, tc.status, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+		assert.True(t, types.IsContentModerationErrorCode(apiErr.GetErrorCode()))
+		assert.False(t, ShouldDisableChannel(apiErr), tc.code)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set("auto_ban", true)
+		assert.Equal(t, PolicyDecision{Action: "stop", Reason: "non_retryable_error", Source: "system"}, DecideRelayRetry(c, apiErr, 3), tc.code)
+		RecordPolicyFailure(c, 7, apiErr, PolicyDecision{Action: "stop", Reason: "local_rejection", Source: "channel"})
+		events := RequestPolicy(c).Events()
+		require.Len(t, events, 2)
+		assert.Equal(t, PolicyDecision{Action: "failure", Reason: "local_rejection", Source: "local"}, events[0].Decision)
+		assert.Equal(t, PolicyDecision{Action: "stop", Reason: "local_rejection", Source: "channel"}, events[1].Decision)
+		assert.Equal(t, "unchanged", events[1].Health)
+	}
+	assert.False(t, types.IsContentModerationErrorCode(types.ErrorCodeInvalidRequest))
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	audit := &relaycommon.ModerationAudit{ChannelID: 7, RetryIndex: 1, Status: relaycommon.ModerationStatusPassed}
+	common.SetContextKey(c, constant.ContextKeyModerationAudit, audit)
+	for _, tc := range []struct {
+		channelID, retryIndex int
+		want                  bool
+	}{{7, 1, true}, {8, 1, false}, {7, 2, false}} {
+		other := model.NewLogOther()
+		AppendRelayLogAdminInfo(c, &relaycommon.RelayInfo{RetryIndex: tc.retryIndex, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: tc.channelID}}, other)
+		got, ok := other.Snapshot()["admin_info"].(map[string]any)["moderation"]
+		assert.Equal(t, tc.want, ok, "channel %d retry %d", tc.channelID, tc.retryIndex)
+		if tc.want {
+			assert.Same(t, audit, got)
+		}
 	}
 }

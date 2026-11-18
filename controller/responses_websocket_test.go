@@ -1954,3 +1954,104 @@ func TestResponsesWebSocketPreRoutingRejectionsFollowHealthClassification(t *tes
 		})
 	}
 }
+
+// A moderated channel checks every response.create of a connection before
+// anything is written upstream: a flagged first event never dials, a flagged
+// event on a locked connection is answered with an error event while the
+// socket stays open, a failed check answers 503, and rejected events are
+// refunded. The check runs before the payload builder, so a clean event
+// still goes out under the channel's model mapping.
+func TestResponsesWebSocketModeratesEachCreate(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	var creates atomic.Int32
+	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+		for index := 1; ; index++ {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+			creates.Add(1)
+			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_mod_%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}`, index)
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
+				return
+			}
+		}
+	})
+	var moderationFails atomic.Bool
+	var moderationCalls atomic.Int32
+	fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path != "/v1/moderations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		moderationCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if moderationFails.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"The server had an error","type":"server_error"}}`)
+			return
+		}
+		flagged := strings.Contains(string(body), "MOD-FLAG-SEXUAL")
+		_, _ = fmt.Fprintf(w, `{"id":"modr-ws","model":"omni-moderation-2024-09-26","results":[{"flagged":%t,"categories":{"sexual":%t},"category_scores":{"sexual":0.9},"category_applied_input_types":{"sexual":["text"]}}]}`, flagged, flagged)
+	}
+	fixture.channel.SetOtherSettings(dto.ChannelOtherSettings{AllowServiceTier: true, ModerationEnabled: true})
+	require.NoError(t, model.DB.Model(fixture.channel).Update("settings", fixture.channel.OtherSettings).Error)
+	create := func(input string) map[string]any {
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"`+input+`"}`)))
+		return readResponsesWSTestEvent(t, fixture.client)
+	}
+	assertRejected := func(t *testing.T, event map[string]any, status int, code string) {
+		t.Helper()
+		assert.Equal(t, "error", event["type"], event)
+		assert.Equal(t, float64(status), event["status"], event)
+		eventError, _ := event["error"].(map[string]any)
+		assert.Equal(t, code, eventError["code"], event)
+	}
+
+	assertRejected(t, create("MOD-FLAG-SEXUAL on a fresh connection"), http.StatusBadRequest, "content_moderation_flagged")
+	assert.Zero(t, fixture.connections.Load(), "a flagged first event never dials")
+
+	assert.Equal(t, "response.completed", create("a clean question")["type"])
+	assert.Equal(t, int32(1), creates.Load())
+
+	assertRejected(t, create("MOD-FLAG-SEXUAL on the locked connection"), http.StatusBadRequest, "content_moderation_flagged")
+	moderationFails.Store(true)
+	assertRejected(t, create("a question while moderation is down"), http.StatusServiceUnavailable, "content_moderation_unavailable")
+	moderationFails.Store(false)
+	assert.Equal(t, int32(1), creates.Load(), "no rejected event reached the upstream")
+
+	assert.Equal(t, "response.completed", create("another clean question")["type"], "the socket stays open")
+	assert.Equal(t, int32(2), creates.Load())
+	assert.Equal(t, int32(5), moderationCalls.Load())
+
+	fixture.closeAndWait(t)
+	require.Eventually(t, func() bool {
+		require.NoError(t, model.DB.First(fixture.token, fixture.token.Id).Error)
+		return fixture.token.RemainQuota == 3000-2000
+	}, 3*time.Second, 10*time.Millisecond, "rejected events are refunded")
+	assertResponsesWSAccounting(t, fixture, []int{1000, 1000})
+
+	var consumed model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").First(&consumed).Error)
+	var other struct {
+		RequestConversion []string `json:"request_conversion"`
+		ResponseModel     struct {
+			UpstreamModel string `json:"upstream_model"`
+		} `json:"response_model"`
+		AdminInfo struct {
+			Moderation struct {
+				Status    string `json:"status"`
+				ChannelID int    `json:"channel_id"`
+			} `json:"moderation"`
+		} `json:"admin_info"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(consumed.Other, &other))
+	assert.Equal(t, "gpt-4o", other.ResponseModel.UpstreamModel, "the payload builder ran after the check")
+	assert.NotEmpty(t, other.RequestConversion)
+	assert.Equal(t, "passed", other.AdminInfo.Moderation.Status)
+	assert.Equal(t, fixture.channel.Id, other.AdminInfo.Moderation.ChannelID)
+	var rejected []model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeModeration).Order("id").Find(&rejected).Error)
+	require.Len(t, rejected, 3)
+	assert.Equal(t, []string{"responses-ws-billing-ws-0", "responses-ws-billing-ws-2", "responses-ws-billing-ws-3"}, []string{rejected[0].RequestId, rejected[1].RequestId, rejected[2].RequestId})
+}

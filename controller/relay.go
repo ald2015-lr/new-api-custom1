@@ -24,6 +24,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/moderation"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -105,9 +106,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			service.RecordRequestPolicyTermination(c, newAPIError)
-			if service.ClientGone(c) {
+			switch {
+			case service.ClientGone(c):
 				logger.LogInfo(c, common.LogText("relay stopped, client disconnected: %s", common.LocalLogPreview(newAPIError.Error())))
-			} else {
+			case types.IsContentModerationErrorCode(newAPIError.GetErrorCode()):
+				// An expected business rejection, already logged at WARN by
+				// the moderation check; it must not trip error alerting.
+				logger.LogInfo(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+			default:
 				logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			}
 			// Taken before SetMessage replaces the wrapped error.
@@ -283,6 +289,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+		// A moderated channel checks this attempt before anything is sent. A
+		// rejection is already recorded and never retried, disabled or billed
+		// (refund: the defer above).
+		if modErr := moderation.CheckAttempt(c, relayInfo); modErr != nil {
+			newAPIError = modErr
+			break
+		}
 
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
@@ -688,6 +701,11 @@ func executeTaskSubmissionWith(
 			diagnostics.attemptSucceeded(retryParam.GetRetry()+1, result)
 			break
 		}
+		if types.IsContentModerationErrorCode(types.ErrorCode(taskErr.Code)) {
+			// The check recorded its policy event and log row; no other
+			// channel may receive the request.
+			break
+		}
 
 		taskAPIError := taskSubmissionAPIError(taskErr)
 		userErr := service.MaskUpstreamQuotaTaskError(c, taskErr)
@@ -961,6 +979,10 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 		// The channel's own message for an upstream balance error stays as
 		// the channel set it, under any status it chose, with the request id
 		// as new-api's relay errors carry it.
+		taskErr.Message = common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey))
+	case types.IsContentModerationErrorCode(types.ErrorCode(taskErr.Code)):
+		// Content moderation's generic message, which names nothing of what
+		// fired, with the request id.
 		taskErr.Message = common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey))
 	case taskErr.StatusCode == http.StatusTooManyRequests:
 		taskErr.Message = i18n.T(c, i18n.MsgRelayGroupUpstreamSaturated)

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
@@ -914,4 +915,170 @@ func TestChannelOtherSettingsGeminiFreeKey(t *testing.T) {
 	var decoded ChannelOtherSettings
 	require.NoError(t, json.Unmarshal([]byte(`{"gemini_free_key_enabled":true,"gemini_free_key_reveal_tier_errors":true,"gemini_free_key_token_counter":"local","gemini_free_key_max_attempts":5}`), &decoded))
 	assert.Equal(t, ChannelOtherSettings{GeminiFreeKeyEnabled: true, GeminiFreeKeyRevealTierErrors: true, GeminiFreeKeyTokenCounter: "local", GeminiFreeKeyMaxAttempts: 5}, decoded)
+}
+
+// Moderation settings are off and write nothing unless saved; their effective
+// values fall back to the defaults, and saving rejects every malformed value
+// with a message that names the field.
+func TestChannelOtherSettingsModeration(t *testing.T) {
+	var unset *ChannelOtherSettings
+	assert.NoError(t, unset.ValidateModeration())
+	assert.Equal(t, 10000, unset.EffectiveModerationMaxChars())
+	assert.Equal(t, 10*time.Second, unset.EffectiveModerationTimeout())
+	assert.Nil(t, unset.EffectiveModerationRulePresets())
+	for _, tc := range []struct {
+		settings ChannelOtherSettings
+		maxChars int
+		timeout  time.Duration
+	}{
+		{ChannelOtherSettings{}, 10000, 10 * time.Second},
+		{ChannelOtherSettings{ModerationMaxChars: 1000, ModerationTimeoutSeconds: 1}, 1000, time.Second},
+		{ChannelOtherSettings{ModerationMaxChars: 200000, ModerationTimeoutSeconds: 60}, 200000, 60 * time.Second},
+		{ChannelOtherSettings{ModerationMaxChars: 999, ModerationTimeoutSeconds: 61}, 10000, 10 * time.Second},
+		{ChannelOtherSettings{ModerationMaxChars: -1, ModerationTimeoutSeconds: -1}, 10000, 10 * time.Second},
+	} {
+		assert.Equal(t, tc.maxChars, tc.settings.EffectiveModerationMaxChars())
+		assert.Equal(t, tc.timeout, tc.settings.EffectiveModerationTimeout())
+	}
+	empty := []string{}
+	listed := []string{"zh-reveal-cot", "en-reveal-cot"}
+	assert.Nil(t, (&ChannelOtherSettings{ModerationRulePresets: &empty}).EffectiveModerationRulePresets())
+	assert.Equal(t, listed, (&ChannelOtherSettings{ModerationRulePresets: &listed}).EffectiveModerationRulePresets())
+
+	presets := func(ids ...string) *[]string { return &ids }
+	keyword := func(pattern string) ModerationRule {
+		return ModerationRule{Type: ModerationRuleTypeKeyword, Pattern: pattern}
+	}
+	regex := func(pattern string) ModerationRule {
+		return ModerationRule{Type: ModerationRuleTypeRegex, Pattern: pattern}
+	}
+	rules := func(n int, rule func(int) ModerationRule) []ModerationRule {
+		out := make([]ModerationRule, 0, n)
+		for i := range n {
+			out = append(out, rule(i))
+		}
+		return out
+	}
+	heavy := "a" + strings.Repeat(".{0,999}a", 50) + ".{0,999}q"
+	longError := "(" + strings.Repeat("字", 300)
+	for _, tc := range []struct {
+		name     string
+		settings ChannelOtherSettings
+		wantErr  string
+	}{
+		{name: "empty"},
+		{name: "bounds", settings: ChannelOtherSettings{ModerationMaxChars: 1000, ModerationTimeoutSeconds: 60}},
+		{name: "upper bounds", settings: ChannelOtherSettings{ModerationMaxChars: 200000, ModerationTimeoutSeconds: 1}},
+		{name: "max chars below", settings: ChannelOtherSettings{ModerationMaxChars: 999}, wantErr: "moderation_max_chars must be 0 or between 1000 and 200000"},
+		{name: "max chars above", settings: ChannelOtherSettings{ModerationMaxChars: 200001}, wantErr: "moderation_max_chars must be 0 or between 1000 and 200000"},
+		{name: "max chars negative", settings: ChannelOtherSettings{ModerationMaxChars: -1}, wantErr: "moderation_max_chars must be 0 or between 1000 and 200000"},
+		{name: "timeout above", settings: ChannelOtherSettings{ModerationTimeoutSeconds: 61}, wantErr: "moderation_timeout_seconds must be 0 or between 1 and 60"},
+		{name: "timeout negative", settings: ChannelOtherSettings{ModerationTimeoutSeconds: -1}, wantErr: "moderation_timeout_seconds must be 0 or between 1 and 60"},
+		{name: "categories", settings: ChannelOtherSettings{ModerationCategories: []string{"sexual", "violence/graphic"}}},
+		{name: "unknown category", settings: ChannelOtherSettings{ModerationCategories: []string{"sexual", "nsfw"}}, wantErr: `moderation_categories[1] "nsfw" is not an OpenAI moderation category`},
+		{name: "repeated category", settings: ChannelOtherSettings{ModerationCategories: []string{"hate", "sexual", "hate"}}, wantErr: `moderation_categories[2] "hate" is listed more than once`},
+		{name: "explicit empty presets", settings: ChannelOtherSettings{ModerationRulePresets: presets()}},
+		{name: "unknown preset", settings: ChannelOtherSettings{ModerationRulePresets: presets("en-reveal-cot", "gone")}, wantErr: `moderation_rule_presets[1] "gone" is not a built-in preset`},
+		{name: "repeated preset", settings: ChannelOtherSettings{ModerationRulePresets: presets("en-reveal-cot", "en-reveal-cot")}, wantErr: `moderation_rule_presets[1] "en-reveal-cot" is listed more than once`},
+		{name: "100 rules", settings: ChannelOtherSettings{ModerationRules: rules(100, func(i int) ModerationRule { return keyword(fmt.Sprintf("k%d", i)) })}},
+		{name: "101 rules", settings: ChannelOtherSettings{ModerationRules: rules(101, func(i int) ModerationRule { return keyword(fmt.Sprintf("k%d", i)) })}, wantErr: "moderation_rules must have at most 100 rules"},
+		{name: "30 regexes", settings: ChannelOtherSettings{ModerationRules: rules(30, func(i int) ModerationRule { return regex(fmt.Sprintf("r%d", i)) })}},
+		{name: "31 regexes", settings: ChannelOtherSettings{ModerationRules: rules(31, func(i int) ModerationRule { return regex(fmt.Sprintf("r%d", i)) })}, wantErr: "moderation_rules must have at most 30 regex rules"},
+		{name: "unknown type", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword("a"), {Type: "glob", Pattern: "b"}}}, wantErr: "moderation_rules[1].type must be keyword or regex"},
+		{name: "untrimmed name", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Name: "x ", Type: "keyword", Pattern: "a"}}}, wantErr: "moderation_rules[0].name must not start or end with spaces"},
+		{name: "64-rune name", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Name: strings.Repeat("名", 64), Type: "keyword", Pattern: "a"}}}},
+		{name: "65-rune name", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Name: strings.Repeat("名", 65), Type: "keyword", Pattern: "a"}}}, wantErr: "moderation_rules[0].name must be at most 64 characters"},
+		{name: "empty pattern", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword("")}}, wantErr: "moderation_rules[0].pattern must not be empty"},
+		{name: "untrimmed pattern", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword(" a")}}, wantErr: "moderation_rules[0].pattern must not start or end with spaces"},
+		{name: "512-rune pattern", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword(strings.Repeat("词", 512))}}},
+		{name: "513-rune pattern", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword(strings.Repeat("词", 513))}}, wantErr: "moderation_rules[0].pattern must be at most 512 characters"},
+		{name: "U+200E only", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword("‎")}}, wantErr: "moderation_rules[0].pattern must contain a visible character"},
+		{name: "combining marks only", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword("̲́️")}}, wantErr: "moderation_rules[0].pattern must contain a visible character"},
+		{name: "macron becomes a combining mark", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword("¯")}}, wantErr: "moderation_rules[0].pattern must contain a visible character"},
+		{name: "keyword repeated ignoring case", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{keyword("Secret"), regex("secret"), {Type: "keyword", Pattern: "SECRET", CaseSensitive: true}}}, wantErr: "moderation_rules[2].pattern repeats moderation_rules[0]"},
+		{name: "regex repeated", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("a+b"), regex("A+B"), regex("a+b")}}, wantErr: "moderation_rules[2].pattern repeats moderation_rules[0]"},
+		{name: "invalid regex", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`(?=x)y`)}}, wantErr: "moderation_rules[0].pattern is not a valid regular expression: error parsing regexp: invalid or unsupported Perl syntax: `(?=`"},
+		{name: "invalid regex error is cut", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(longError)}}, wantErr: "moderation_rules[0].pattern is not a valid regular expression: " + cutModerationError("error parsing regexp: missing closing ): `(?i)"+longError+"`")},
+		{name: "too complex", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(heavy)}}, wantErr: "moderation_rules[0].pattern is too complex (more than 2000 regular expression instructions)"},
+		{name: "2002 instructions", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("a.{0,999}q")}}, wantErr: "moderation_rules[0].pattern is too complex (more than 2000 regular expression instructions)"},
+		{name: "matches empty text", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("a*")}}, wantErr: "moderation_rules[0].pattern matches empty text"},
+		{name: "valid rules", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Name: "cot", Type: "keyword", Pattern: "chain of thought"}, {Type: "regex", Pattern: `(?i)reveal\s+your`, CaseSensitive: true}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantErr == "" {
+				assert.NoError(t, tc.settings.ValidateModeration())
+			} else {
+				assert.EqualError(t, tc.settings.ValidateModeration(), tc.wantErr)
+			}
+		})
+	}
+	assert.LessOrEqual(t, len("moderation_rules[0].pattern is not a valid regular expression: "+cutModerationError("error parsing regexp: missing closing ): `(?i)"+longError+"`")), len("moderation_rules[0].pattern is not a valid regular expression: ")+200+len("…"))
+	assert.Equal(t, 2002, moderationRegexProgramSize("a.{0,999}q", false))
+	imagine, ok := ModerationRulePresetByID("en-imagine-internal-reasoning")
+	require.True(t, ok)
+	assert.Equal(t, 606, moderationRegexProgramSize(imagine.Pattern, false))
+	assert.NoError(t, (&ChannelOtherSettings{ModerationRules: []ModerationRule{regex(imagine.Pattern)}}).ValidateModeration(), "the largest preset is within the limit")
+
+	// Only saved values are written; an explicitly empty preset list survives
+	// the round trip that re-saving the settings does, an absent one stays absent.
+	encoded, err := json.Marshal(ChannelOtherSettings{})
+	require.NoError(t, err)
+	assert.Equal(t, "{}", string(encoded))
+	for _, raw := range []string{`{"moderation_rule_presets":[]}`, `{"moderation_enabled":true}`} {
+		var decoded ChannelOtherSettings
+		require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+		encoded, err = json.Marshal(decoded)
+		require.NoError(t, err)
+		assert.JSONEq(t, raw, string(encoded))
+	}
+	full := `{"moderation_enabled":true,"moderation_fail_open":true,"moderation_categories":["sexual"],"moderation_skip_images":true,"moderation_max_chars":5000,"moderation_timeout_seconds":5,"moderation_rule_presets":["en-reveal-cot"],"moderation_rules":[{"name":"n","type":"regex","pattern":"x+","case_sensitive":true}],"send_safety_identifier":true}`
+	var decoded ChannelOtherSettings
+	require.NoError(t, json.Unmarshal([]byte(full), &decoded))
+	assert.Equal(t, ChannelOtherSettings{
+		ModerationEnabled: true, ModerationFailOpen: true, ModerationCategories: []string{"sexual"}, ModerationSkipImages: true,
+		ModerationMaxChars: 5000, ModerationTimeoutSeconds: 5, ModerationRulePresets: presets("en-reveal-cot"),
+		ModerationRules:      []ModerationRule{{Name: "n", Type: "regex", Pattern: "x+", CaseSensitive: true}},
+		SendSafetyIdentifier: true,
+	}, decoded)
+	encoded, err = json.Marshal(decoded)
+	require.NoError(t, err)
+	assert.JSONEq(t, full, string(encoded))
+}
+
+// The built-in rules are the catalogue the web shows: unique IDs in two risk
+// groups, every pattern valid with its case flag, not matching empty text,
+// within the program limit and with hints; both negation guards compile, and
+// each call returns a fresh catalogue.
+func TestModerationRulePresetsAreValid(t *testing.T) {
+	presets := ModerationRulePresets()
+	require.Len(t, presets, 16)
+	seen := map[string]bool{}
+	for _, preset := range presets {
+		assert.False(t, seen[preset.ID], preset.ID)
+		seen[preset.ID] = true
+		assert.Contains(t, []string{ModerationPresetGroupLower, ModerationPresetGroupHigher}, preset.Group, preset.ID)
+		assert.Equal(t, preset.Group == ModerationPresetGroupLower, preset.DefaultOn, preset.ID)
+		assert.Contains(t, []string{ModerationNegationNone, ModerationNegationEnglish, ModerationNegationChinese}, preset.Negation, preset.ID)
+		assert.NotEmpty(t, preset.Hints, preset.ID)
+		for _, hint := range preset.Hints {
+			assert.Equal(t, strings.ToLower(hint), hint, preset.ID)
+		}
+		re, err := CompileModerationRegex(preset.Pattern, preset.CaseSensitive)
+		require.NoError(t, err, preset.ID)
+		assert.False(t, re.MatchString(""), preset.ID)
+		assert.LessOrEqual(t, moderationRegexProgramSize(preset.Pattern, preset.CaseSensitive), ModerationRegexProgramMax, preset.ID)
+		found, ok := ModerationRulePresetByID(preset.ID)
+		assert.True(t, ok)
+		assert.Equal(t, preset, found)
+	}
+	for _, guard := range []string{ModerationNegationGuardEnglish, ModerationNegationGuardChinese} {
+		_, err := regexp.Compile(guard)
+		assert.NoError(t, err)
+	}
+	_, ok := ModerationRulePresetByID("gone")
+	assert.False(t, ok)
+	presets[0].Pattern = "x"
+	presets[0].Hints[0] = "x"
+	assert.NotEqual(t, "x", ModerationRulePresets()[0].Pattern)
+	assert.Equal(t, "chain", ModerationRulePresets()[0].Hints[0])
 }

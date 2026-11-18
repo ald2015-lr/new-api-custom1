@@ -195,6 +195,36 @@ type ChannelOtherSettings struct {
 	// GeminiFreeKeyModelLimits are the free tier's limits per model; nil
 	// (or empty, which is not stored) means DefaultGeminiFreeKeyModelLimits.
 	GeminiFreeKeyModelLimits []GeminiFreeKeyModelLimit `json:"gemini_free_key_model_limits,omitempty"`
+	// ModerationEnabled checks every request on an OpenAI channel before it
+	// is sent upstream: the channel's rules first, then OpenAI's moderation
+	// model with the channel's own key. Off (unset) relays as before.
+	ModerationEnabled bool `json:"moderation_enabled,omitempty"`
+	// ModerationFailOpen sends a request upstream unchecked when the
+	// moderation call fails; off (unset) rejects it.
+	ModerationFailOpen bool `json:"moderation_fail_open,omitempty"`
+	// ModerationCategories are the categories (ModerationCategoryNames) whose
+	// flag rejects a request; empty lets OpenAI's flagged verdict decide.
+	ModerationCategories []string `json:"moderation_categories,omitempty"`
+	// ModerationSkipImages leaves a request's images unchecked.
+	ModerationSkipImages bool `json:"moderation_skip_images,omitempty"`
+	// ModerationMaxChars is how many characters of not yet checked text one
+	// attempt may send to OpenAI; 0 means ModerationMaxCharsDefault.
+	ModerationMaxChars int `json:"moderation_max_chars,omitempty"`
+	// ModerationTimeoutSeconds is one time limit for all moderation calls of
+	// an attempt; 0 means ModerationTimeoutSecondsDefault.
+	ModerationTimeoutSeconds int `json:"moderation_timeout_seconds,omitempty"`
+	// ModerationRulePresets lists the built-in rules (ModerationRulePresets)
+	// the channel runs. It is a pointer so that a list the admin emptied
+	// stays an explicit [] when the settings are re-marshalled; nil means it
+	// was never set. Nil and empty both run no preset.
+	ModerationRulePresets *[]string `json:"moderation_rule_presets,omitempty"`
+	// ModerationRules are the channel's own keyword and regex rules.
+	ModerationRules []ModerationRule `json:"moderation_rules,omitempty"`
+	// SendSafetyIdentifier sets safety_identifier on the Chat Completions and
+	// Responses bodies an OpenAI channel sends upstream to a stable hashed
+	// value of the user, replacing the client's value. Independent of
+	// ModerationEnabled.
+	SendSafetyIdentifier bool `json:"send_safety_identifier,omitempty"`
 }
 
 const (

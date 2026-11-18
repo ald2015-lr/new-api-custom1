@@ -69,6 +69,7 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodPost, path: "/:id/quota_limit/reset", permission: authz.ChannelOperate, handler: controller.ResetChannelQuotaLimit},
 	{method: http.MethodGet, path: "/test", permission: authz.ChannelOperate, handler: controller.TestAllChannels},
 	{method: http.MethodGet, path: "/test/:id", permission: authz.ChannelOperate, handler: controller.TestChannel},
+	{method: http.MethodPost, path: "/:id/moderation_test", permission: authz.ChannelOperate, handler: controller.TestChannelModeration},
 	{method: http.MethodGet, path: "/update_balance", permission: authz.ChannelOperate, handler: controller.UpdateAllChannelsBalance},
 	{method: http.MethodGet, path: "/update_balance/:id", permission: authz.ChannelOperate, handler: controller.UpdateChannelBalance},
 	{method: http.MethodPost, path: "/", permission: authz.ChannelSensitiveWrite, handler: controller.AddChannel},

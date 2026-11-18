@@ -687,6 +687,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelHeaderOverride, headerOverride)
 	if nil != channel.OpenAIOrganization && *channel.OpenAIOrganization != "" {
 		common.SetContextKey(c, constant.ContextKeyChannelOrganization, *channel.OpenAIOrganization)
+	} else {
+		// A retry must not send the previous channel's organization with
+		// this channel's key.
+		common.SetContextKey(c, constant.ContextKeyChannelOrganization, "")
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelAutoBan, channel.GetAutoBan())
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
