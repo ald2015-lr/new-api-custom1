@@ -4032,6 +4032,14 @@ test.each(['0', '11', '2.5'])(
   }
 )
 
+test('with free key mode on, the settings fieldset can shrink, so the model limits table scrolls inside its block on a narrow screen', async () => {
+  await openGeminiRequestTab(geminiChannel({ gemini_free_key_enabled: true }))
+  const limits = screen.getByRole('group', { name: 'Model limits' })
+  // A fieldset is at least as wide as its content by default, so without
+  // min-w-0 it grows to the table's width and the panel scrolls sideways.
+  expect(limits.closest('fieldset')).toHaveClass('min-w-0')
+})
+
 test('editing one limit of the default table saves the whole table with that change and aliases only where a model has some', async () => {
   const { user } = await openGeminiRequestTab(
     geminiChannel({ gemini_free_key_enabled: true })

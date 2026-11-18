@@ -98,7 +98,7 @@ export const GeminiFreeKeySettings = memo(
       <div className='space-y-4'>
         <fieldset
           disabled={props.locked}
-          className='space-y-4 disabled:opacity-60'
+          className='min-w-0 space-y-4 disabled:opacity-60'
         >
           <FormField
             control={form.control}
