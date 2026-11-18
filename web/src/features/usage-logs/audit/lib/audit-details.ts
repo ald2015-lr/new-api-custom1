@@ -194,6 +194,12 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Admin permissions updated')
     case 'provider_id':
       return t('Provider ID')
+    case 'inviter_id':
+      return t('Inviter ID')
+    case 'invite_count':
+      return t('Invited Users')
+    case 'kind':
+      return t('Type')
     default:
       return key
   }
@@ -528,6 +534,9 @@ export function buildAuditDetails(
   }
   if (typeof params.method === 'string') {
     params.method = loginMethodLabel(params.method, t)
+  }
+  if (action === 'user.invite_abuse_ban' && typeof params.kind === 'string') {
+    params.kind = params.kind === 'inviter' ? t('Inviter') : t('Invitee')
   }
   if (typeof params.verification_method === 'string') {
     params.verification_method = loginMethodLabel(params.verification_method, t)
