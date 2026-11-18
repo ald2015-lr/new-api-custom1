@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -765,4 +766,140 @@ func TestChannelTestCountsInlineImagesAsImages(t *testing.T) {
 			assert.Equal(t, tc.wantCompletion, log.CompletionTokens)
 		})
 	}
+}
+
+func TestChannelModerationProbe(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	var requests atomic.Int32
+	var lastAuthorization, lastProbeHeader atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		lastAuthorization.Store(r.Header.Get("Authorization"))
+		lastProbeHeader.Store(r.Header.Get("X-Probe"))
+		if r.URL.Path != "/v1/moderations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") == "Bearer sk-probe-revoked" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"Incorrect API key provided: sk-probe-revoked","type":"invalid_request_error","code":"invalid_api_key"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"modr-1","model":"omni-moderation-2024-09-26","results":[{"flagged":false,"categories":{"sexual":false},"category_scores":{"sexual":0.001},"category_applied_input_types":{"sexual":["text"]}}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	newChannel := func(t *testing.T, channel model.Channel) *model.Channel {
+		t.Helper()
+		if channel.Type == 0 {
+			channel.Type = constant.ChannelTypeOpenAI
+		}
+		channel.Name = t.Name()
+		channel.BaseURL = common.GetPointer(server.URL)
+		channel.Status = common.ChannelStatusEnabled
+		require.NoError(t, db.Create(&channel).Error)
+		return &channel
+	}
+	probe := func(t *testing.T, id string) (bool, string, relayProbeAnswer) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Params = gin.Params{{Key: "id", Value: id}}
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/"+id+"/moderation_test", nil)
+		TestChannelModeration(ctx)
+		var response struct {
+			Success bool             `json:"success"`
+			Message string           `json:"message"`
+			Data    relayProbeAnswer `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response), recorder.Body.String())
+		assert.NotContains(t, recorder.Body.String(), "sk-probe")
+		assert.NotContains(t, recorder.Body.String(), server.URL)
+		return response.Success, response.Message, response.Data
+	}
+
+	t.Run("ok", func(t *testing.T) {
+		channel := newChannel(t, model.Channel{Key: "sk-probe-ok", HeaderOverride: common.GetPointer(`{"X-Probe":"{api_key}-h"}`)})
+		success, _, answer := probe(t, strconv.Itoa(channel.Id))
+		require.True(t, success)
+		assert.True(t, answer.OK)
+		assert.Equal(t, http.StatusOK, answer.Status)
+		assert.Equal(t, "omni-moderation-2024-09-26", answer.Model)
+		assert.False(t, answer.Flagged)
+		assert.Empty(t, answer.ErrorClass)
+		assert.GreaterOrEqual(t, answer.LatencyMs, int64(0))
+		assert.Equal(t, "Bearer sk-probe-ok", lastAuthorization.Load())
+		assert.Equal(t, "sk-probe-ok-h", lastProbeHeader.Load())
+	})
+	t.Run("revoked key is masked", func(t *testing.T) {
+		channel := newChannel(t, model.Channel{Key: "sk-probe-revoked"})
+		success, _, answer := probe(t, strconv.Itoa(channel.Id))
+		require.True(t, success)
+		assert.False(t, answer.OK)
+		assert.Equal(t, http.StatusUnauthorized, answer.Status)
+		assert.Equal(t, relaycommon.ModerationErrorClassHTTP401, answer.ErrorClass)
+		assert.Equal(t, "Incorrect API key provided: ***", answer.ErrorMessage)
+	})
+	t.Run("multi-key uses the first enabled key without polling", func(t *testing.T) {
+		channel := newChannel(t, model.Channel{Key: "sk-probe-disabled\nsk-probe-second\nsk-probe-third", ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling,
+			MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled}, MultiKeyPollingIndex: 2,
+		}})
+		success, _, answer := probe(t, strconv.Itoa(channel.Id))
+		require.True(t, success)
+		assert.True(t, answer.OK)
+		assert.Equal(t, "Bearer sk-probe-second", lastAuthorization.Load())
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, 2, stored.ChannelInfo.MultiKeyPollingIndex)
+	})
+	t.Run("invalid proxy sends nothing", func(t *testing.T) {
+		channel := newChannel(t, model.Channel{Key: "sk-probe-ok", Setting: common.GetPointer(`{"proxy":"ftp://proxy.example"}`)})
+		before := requests.Load()
+		success, _, answer := probe(t, strconv.Itoa(channel.Id))
+		require.True(t, success)
+		assert.Equal(t, relaycommon.ModerationErrorClassNetwork, answer.ErrorClass)
+		assert.Zero(t, answer.Status)
+		assert.Equal(t, before, requests.Load())
+	})
+	for _, channelType := range []int{constant.ChannelTypeAzure, constant.ChannelTypeAnthropic} {
+		t.Run(fmt.Sprintf("type %d", channelType), func(t *testing.T) {
+			channel := newChannel(t, model.Channel{Type: channelType, Key: "sk-probe-ok"})
+			success, message, _ := probe(t, strconv.Itoa(channel.Id))
+			assert.False(t, success)
+			assert.Equal(t, "Content moderation is only available on OpenAI channels", message)
+		})
+	}
+	t.Run("no enabled key", func(t *testing.T) {
+		channel := newChannel(t, model.Channel{Key: "sk-probe-off", ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: 1, MultiKeyStatusList: map[int]int{0: common.ChannelStatusAutoDisabled},
+		}})
+		success, message, _ := probe(t, strconv.Itoa(channel.Id))
+		assert.False(t, success)
+		assert.Equal(t, "The channel has no enabled key", message)
+	})
+	for id, want := range map[string]string{"x": "Invalid channel ID", "0": "Invalid channel ID", "999999": "Channel does not exist"} {
+		t.Run("id "+id, func(t *testing.T) {
+			success, message, _ := probe(t, id)
+			assert.False(t, success)
+			assert.Equal(t, want, message)
+		})
+	}
+
+	var rows int64
+	require.NoError(t, db.Model(&model.Log{}).Count(&rows).Error)
+	assert.Zero(t, rows)
+}
+
+// relayProbeAnswer is the data of the moderation probe's answer, as the web
+// reads it.
+type relayProbeAnswer struct {
+	OK           bool   `json:"ok"`
+	Status       int    `json:"status"`
+	LatencyMs    int64  `json:"latency_ms"`
+	Model        string `json:"model"`
+	Flagged      bool   `json:"flagged"`
+	ErrorClass   string `json:"error_class"`
+	ErrorMessage string `json:"error_message"`
 }

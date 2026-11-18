@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1289,6 +1290,27 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if channel.Key != "" && channel.Key != originChannel.Key {
 		changedFields = append(changedFields, "key")
+	}
+	if channel.OtherSettings != "" {
+		// The content moderation and safety identifier settings, compared
+		// as the settings JSON stores them.
+		var moderationParts [2][]byte
+		for i, settings := range []dto.ChannelOtherSettings{channel.GetOtherSettings(), originChannel.GetOtherSettings()} {
+			moderationParts[i], _ = common.Marshal(dto.ChannelOtherSettings{
+				ModerationEnabled:        settings.ModerationEnabled,
+				ModerationFailOpen:       settings.ModerationFailOpen,
+				ModerationCategories:     settings.ModerationCategories,
+				ModerationSkipImages:     settings.ModerationSkipImages,
+				ModerationMaxChars:       settings.ModerationMaxChars,
+				ModerationTimeoutSeconds: settings.ModerationTimeoutSeconds,
+				ModerationRulePresets:    settings.ModerationRulePresets,
+				ModerationRules:          settings.ModerationRules,
+				SendSafetyIdentifier:     settings.SendSafetyIdentifier,
+			})
+		}
+		if !bytes.Equal(moderationParts[0], moderationParts[1]) {
+			changedFields = append(changedFields, "content_moderation")
+		}
 	}
 	updateAudit := map[string]any{
 		"id":             channel.Id,
