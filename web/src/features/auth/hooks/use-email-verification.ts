@@ -27,10 +27,16 @@ import { createServerError } from '@/lib/server-error-message'
 
 import { sendEmailVerification } from '../api'
 import { EMAIL_VERIFICATION_COUNTDOWN } from '../constants'
+import type { RegisterCaptchaParams } from '../types'
 
 interface UseEmailVerificationOptions {
   turnstileToken?: string
   validateTurnstile?: () => boolean
+  /** Registration captcha answer sent with the request */
+  captcha?: RegisterCaptchaParams
+  validateCaptcha?: () => boolean
+  /** Runs after every request that reached the server, with its outcome */
+  onRequestSettled?: (outcome: unknown) => void
 }
 
 /**
@@ -57,10 +63,19 @@ export function useEmailVerification(options?: UseEmailVerificationOptions) {
     if (options?.validateTurnstile && !options.validateTurnstile()) {
       return false
     }
+    if (options?.validateCaptcha && !options.validateCaptcha()) {
+      return false
+    }
 
     setIsSending(true)
+    let outcome: unknown
     try {
-      const res = await sendEmailVerification(email, options?.turnstileToken)
+      const res = await sendEmailVerification(
+        email,
+        options?.turnstileToken,
+        options?.captcha
+      )
+      outcome = res
       if (res?.success) {
         startCountdown()
         toast.success(i18next.t('Verification email sent'))
@@ -71,6 +86,7 @@ export function useEmailVerification(options?: UseEmailVerificationOptions) {
       )
       return false
     } catch (_error) {
+      outcome = _error
       handleServerError(
         AuthOperationError.from(
           _error,
@@ -80,6 +96,7 @@ export function useEmailVerification(options?: UseEmailVerificationOptions) {
       return false
     } finally {
       setIsSending(false)
+      options?.onRequestSettled?.(outcome)
     }
   }
 

@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import i18next from 'i18next'
 import type { ChangeEvent } from 'react'
 import type {
   ControllerRenderProps,
@@ -26,6 +27,27 @@ import { z } from 'zod'
 
 export function positiveIntegerSchema(message: string) {
   return z.number().int(message).positive(message)
+}
+
+/**
+ * An integer from `min` to `max` held by a number input that may be empty
+ * (`''`) while editing. Every failure shows `messageKey`, the message the
+ * server uses for the same range.
+ */
+export function integerRangeSchema(
+  min: number,
+  max: number,
+  messageKey: string
+) {
+  const error = () => i18next.t(messageKey)
+  return z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.coerce
+      .number({ error })
+      .int({ error })
+      .min(min, { error })
+      .max(max, { error })
+  )
 }
 
 /**

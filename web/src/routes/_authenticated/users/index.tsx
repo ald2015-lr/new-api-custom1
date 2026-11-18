@@ -36,6 +36,8 @@ const usersSearchSchema = z.object({
     .optional()
     .catch([]),
   group: z.array(z.string()).optional().catch([]),
+  // A user ID; a hand-written `?inviter=42` arrives as a number.
+  inviter: z.coerce.string().optional().catch(undefined),
 })
 
 export const Route = createFileRoute('/_authenticated/users/')({

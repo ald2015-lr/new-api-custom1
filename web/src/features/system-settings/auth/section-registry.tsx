@@ -21,6 +21,7 @@ import { createSectionRegistry } from '../utils/section-registry'
 import { BasicAuthSection } from './basic-auth-section'
 import { BotProtectionSection } from './bot-protection-section'
 import { CustomOAuthSection } from './custom-oauth/custom-oauth-section'
+import { InviteAbuseSection } from './invite-abuse-section'
 import { OAuthSection } from './oauth-section'
 import { PasskeySection } from './passkey-section'
 
@@ -37,6 +38,7 @@ const AUTH_SECTIONS = [
           RegisterEnabled: settings.RegisterEnabled,
           EmailDomainRestrictionEnabled: settings.EmailDomainRestrictionEnabled,
           EmailAliasRestrictionEnabled: settings.EmailAliasRestrictionEnabled,
+          EmailQQNumericOnlyEnabled: settings.EmailQQNumericOnlyEnabled,
           EmailDomainWhitelist: settings.EmailDomainWhitelist,
         }}
       />
@@ -111,6 +113,25 @@ const AUTH_SECTIONS = [
           TurnstileCheckEnabled: settings.TurnstileCheckEnabled,
           TurnstileSiteKey: settings.TurnstileSiteKey,
           TurnstileSecretKey: settings.TurnstileSecretKey,
+          RegisterCaptchaEnabled: settings.RegisterCaptchaEnabled,
+          RegisterIPRateLimitEnabled: settings.RegisterIPRateLimitEnabled,
+          RegisterIPRateLimitNum: settings.RegisterIPRateLimitNum,
+          RegisterIPRateLimitMinutes: settings.RegisterIPRateLimitMinutes,
+        }}
+      />
+    ),
+  },
+  {
+    id: 'invite-abuse',
+    titleKey: 'Invite abuse protection',
+    build: (settings: AuthSettings) => (
+      <InviteAbuseSection
+        defaultValues={{
+          InviteAbuseBanEnabled: settings.InviteAbuseBanEnabled,
+          InviteAbuseBanThreshold: settings.InviteAbuseBanThreshold,
+          InviteAbuseBanMinRedeemQuota: settings.InviteAbuseBanMinRedeemQuota,
+          InviteAbuseBanExemptPaidInviter:
+            settings.InviteAbuseBanExemptPaidInviter,
         }}
       />
     ),

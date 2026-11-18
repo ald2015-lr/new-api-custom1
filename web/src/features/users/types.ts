@@ -51,6 +51,10 @@ export const userSchema = z.object({
   aff_quota: z.number().optional(),
   aff_history_quota: z.number().optional(),
   inviter_id: z.number().optional(),
+  /** Users this user invited that are not deleted (admin list only) */
+  invite_count: z.number().optional(),
+  /** Set while an automatic invite abuse ban is active */
+  invite_abuse_ban: z.enum(['inviter', 'invitee']).optional(),
   linux_do_id: z.string().optional(),
   status: userStatusSchema,
   role: userRoleSchema,
@@ -85,6 +89,7 @@ export type UserSortBy =
   | 'group'
   | 'created_at'
   | 'last_login_at'
+  | 'invite_count'
 
 export type UserSortOrder = 'asc' | 'desc'
 
@@ -111,6 +116,8 @@ export interface SearchUsersParams {
   group?: string
   role?: string
   status?: string
+  /** Only users invited by this user ID */
+  inviter_id?: string
   p?: number
   page_size?: number
   sort_by?: UserSortBy

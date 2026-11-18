@@ -423,6 +423,16 @@ it.each([
     ['Enabled', '0 / 3'],
   ],
   ['user.create', { username: 'alice', role: 10 }, ['admin', 'alice']],
+  [
+    'user.invite_abuse_ban',
+    { kind: 'invitee', inviter_id: 88996, invite_count: 57 },
+    ['Invitee', 'Inviter ID', '88996', 'Invited Users', '57'],
+  ],
+  [
+    'user.register',
+    { method: 'oauth:github', inviter_id: 0 },
+    ['OAuth · GitHub', 'Inviter ID', '0'],
+  ],
 ])(
   'formats known parameters for %s without losing zero or false',
   async (action, params, values) => {
@@ -511,6 +521,109 @@ it.each([
     expect(within(dialog).getByText('user')).toBeVisible()
   }
 )
+
+it.each([
+  [
+    'a password sign-up',
+    'user.register',
+    { method: 'password', inviter_id: 0 },
+    'Registered via Password',
+  ],
+  [
+    'an invited OAuth sign-up',
+    'user.register',
+    { method: 'oauth:github', inviter_id: 42 },
+    'Registered via OAuth · GitHub, invited by user ID 42',
+  ],
+  [
+    'an inviter banned for invite abuse',
+    'user.invite_abuse_ban',
+    { kind: 'inviter', inviter_id: 88996, invite_count: 57 },
+    'Disabled automatically for invite abuse: 57 invited users and none of them has recharged',
+  ],
+  [
+    'an invitee banned for invite abuse',
+    'user.invite_abuse_ban',
+    { kind: 'invitee', inviter_id: 88996, invite_count: 57 },
+    'Disabled automatically for invite abuse: the 57 users invited by user ID 88996 have not recharged',
+  ],
+])('summarizes %s', async (_case, action, params, summary) => {
+  const { dialog } = await openDetails({
+    ...entry,
+    category: 'security',
+    action,
+    actor_role: 1,
+    content: '',
+    other: { op: { action, params } },
+  })
+  expect(within(dialog).getAllByText(summary).length).toBeGreaterThan(0)
+})
+
+it('shows the invite abuse rule as the operator instead of the disabled account', async () => {
+  const { dialog } = await openDetails({
+    ...entry,
+    user_id: 4242,
+    username: 'farmer',
+    actor_role: 10,
+    category: 'operation',
+    action: 'user.invite_abuse_ban',
+    content: '',
+    other: {
+      admin_info: { admin_username: 'system', auth_method: 'system' },
+      op: {
+        action: 'user.invite_abuse_ban',
+        params: {
+          id: 4242,
+          username: 'farmer',
+          kind: 'inviter',
+          inviter_id: 4242,
+          invite_count: 57,
+        },
+      },
+    },
+  })
+
+  expect(within(dialog).getByText('farmer (ID: 4242)')).toBeVisible()
+  expect(within(dialog).getAllByText('System').length).toBeGreaterThan(0)
+  expect(dialog).not.toHaveTextContent('system (ID: 4242)')
+  expect(within(dialog).queryByText('admin')).not.toBeInTheDocument()
+  expect(within(dialog).getByText('Inviter')).toBeVisible()
+})
+
+it('shows the shared registration audit summaries in Chinese', async () => {
+  const i18n = createInstance()
+  await i18n.init({ lng: 'zh', resources: { zh } })
+  renderWithQueryClient(
+    <I18nextProvider i18n={i18n}>
+      <AuditLogDetailsDialog
+        entry={{
+          ...entry,
+          category: 'security',
+          action: 'user.register',
+          actor_role: 1,
+          content: '',
+          other: {
+            op: {
+              action: 'user.register',
+              params: { method: 'password', inviter_id: 42 },
+            },
+          },
+        }}
+      />
+    </I18nextProvider>
+  )
+  await userEvent.click(screen.getByRole('button', { name: '详情' }))
+  const dialog = await screen.findByRole('dialog', { name: '日志详情' })
+  expect(
+    within(dialog).getAllByText(
+      i18n.t('Registered via {{method}}, invited by user ID {{inviter_id}}', {
+        method: i18n.t('Password'),
+        inviter_id: 42,
+      })
+    ).length
+  ).toBeGreaterThan(0)
+  expect(dialog).not.toHaveTextContent('Registered via')
+})
 
 it('shows the quota target and committed balances before operator information', async () => {
   const user = userEvent.setup()

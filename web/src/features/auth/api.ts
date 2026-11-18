@@ -39,6 +39,8 @@ import type {
   Login2FAResponse,
   TwoFAPayload,
   RegisterPayload,
+  RegisterCaptcha,
+  RegisterCaptchaParams,
   ApiResponse,
 } from './types'
 
@@ -246,10 +248,22 @@ export async function telegramLogin(
 // Registration
 // ----------------------------------------------------------------------------
 
+// Fetch a new single-use registration captcha
+export async function getRegisterCaptcha(): Promise<
+  ApiResponse<RegisterCaptcha>
+> {
+  // Each refresh must reach the server; sharing an in-flight request would
+  // hand back the challenge that is being replaced.
+  const res = await api.get('/api/captcha', { disableDuplicate: true })
+  return res.data
+}
+
 // User registration
 export async function register(payload: RegisterPayload): Promise<ApiResponse> {
-  const res = await api.post(`/api/user/register`, payload, {
-    params: { turnstile: payload.turnstile ?? '' },
+  // The captcha travels in the query string like Turnstile, not in the body.
+  const { captcha_id, captcha, ...body } = payload
+  const res = await api.post(`/api/user/register`, body, {
+    params: { turnstile: payload.turnstile ?? '', captcha_id, captcha },
   })
   return res.data
 }
@@ -257,10 +271,16 @@ export async function register(payload: RegisterPayload): Promise<ApiResponse> {
 // Send email verification code
 export async function sendEmailVerification(
   email: string,
-  turnstile?: string
+  turnstile?: string,
+  captcha?: RegisterCaptchaParams
 ): Promise<ApiResponse> {
   const res = await api.get('/api/verification', {
-    params: { email, turnstile },
+    params: {
+      email,
+      turnstile,
+      captcha_id: captcha?.captcha_id,
+      captcha: captcha?.captcha,
+    },
   })
   return res.data
 }

@@ -51,6 +51,7 @@ const basicAuthSchema = z.object({
   RegisterEnabled: z.boolean(),
   EmailDomainRestrictionEnabled: z.boolean(),
   EmailAliasRestrictionEnabled: z.boolean(),
+  EmailQQNumericOnlyEnabled: z.boolean(),
   EmailDomainWhitelist: z.string(),
 })
 
@@ -228,6 +229,29 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
                   <FormLabel>{t('Email Alias Restriction')}</FormLabel>
                   <FormDescription>
                     {t('Block email aliases (e.g., user+alias@domain.com)')}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+              </SettingsSwitchItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='EmailQQNumericOnlyEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('QQ Mail: QQ number only')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'qq.com addresses must use the numeric QQ number, such as 123456789@qq.com; English aliases are rejected. Applies to new registrations and email bindings, not to existing accounts.'
+                    )}
                   </FormDescription>
                 </SettingsSwitchContent>
                 <FormControl>
