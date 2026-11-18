@@ -20,6 +20,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import {
+  useRef,
   useState,
   type ChangeEvent,
   type FormEvent,
@@ -98,6 +99,28 @@ function numberInputValue(event: ChangeEvent<HTMLInputElement>): number | '' {
   return Number.isNaN(value) ? '' : value
 }
 
+/**
+ * Whether saving a changed rule value makes the rule disable fewer accounts
+ * than the saved value does: a higher threshold, a lower minimum redeemed
+ * quota, or inviters who recharged becoming exempt.
+ */
+function loosensRule(
+  key: string,
+  value: unknown,
+  saved: Readonly<Partial<InviteAbuseFormValues>> | undefined
+): boolean {
+  switch (key) {
+    case 'InviteAbuseBanThreshold':
+      return Number(value) > Number(saved?.InviteAbuseBanThreshold)
+    case 'InviteAbuseBanMinRedeemQuota':
+      return Number(value) < Number(saved?.InviteAbuseBanMinRedeemQuota)
+    case 'InviteAbuseBanExemptPaidInviter':
+      return value === true
+    default:
+      return false
+  }
+}
+
 export function InviteAbuseSection(props: InviteAbuseSectionProps) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
@@ -106,6 +129,9 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
   // Whether the save waiting for confirmation turns the rule on.
   const [confirmTurnsOn, setConfirmTurnsOn] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
+  // Set from a Save click until its save has run or its confirmation was
+  // cancelled, so a double click neither previews nor saves twice.
+  const savePending = useRef(false)
 
   const { form, handleSubmit, isDirty, isSubmitting } =
     useSettingsForm<InviteAbuseFormValues>({
@@ -116,11 +142,18 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       >,
       defaultValues: props.defaultValues,
       onSubmit: async (_data, changedFields) => {
-        // Every saved key can start a sweep, so the rule never runs with
-        // values from the middle of this save: turning it off goes first,
-        // turning it on goes after the values it scans with.
+        // Every saved key can start a sweep with the values saved so far, and
+        // a later save can fail, so no point of this save may be stricter
+        // than the rule that was confirmed: turning the rule off goes first,
+        // changes that loosen it go before those that tighten it, and turning
+        // it on goes last, after the values it scans with.
         const { InviteAbuseBanEnabled: enabled, ...ruleValues } = changedFields
-        const updates = Object.entries(ruleValues)
+        const saved = form.formState.defaultValues
+        const changes = Object.entries(ruleValues)
+        const updates = [
+          ...changes.filter(([key, value]) => loosensRule(key, value, saved)),
+          ...changes.filter(([key, value]) => !loosensRule(key, value, saved)),
+        ]
         if (enabled === false) updates.unshift(['InviteAbuseBanEnabled', false])
         if (enabled === true) updates.push(['InviteAbuseBanEnabled', true])
         for (const [key, value] of updates) {
@@ -179,14 +212,19 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
       // A failed request was already shown by useUpdateOption; this only
       // reports anything else and keeps the rejection from going unhandled.
       handleServerError(error, t('Failed to update setting'))
+    } finally {
+      savePending.current = false
     }
   }
 
   const requestSave = async (event?: FormEvent) => {
     event?.preventDefault()
+    if (savePending.current) return
+    savePending.current = true
     const dirtyFields = form.formState.dirtyFields
     // A save that turns the rule on, or changes it while it stays on, scans
-    // existing users at once: show what it disables and ask first.
+    // existing users at once: show what it disables and ask first. The save
+    // stays pending until the admin answers.
     const sweeps =
       form.getValues('InviteAbuseBanEnabled') &&
       Object.values(dirtyFields).some(Boolean)
@@ -206,7 +244,10 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
 
   const handleConfirmOpenChange = (open: boolean) => {
     setConfirmOpen(open)
-    if (!open) savePreview.reset()
+    if (open) return
+    // Cancelled: nothing is saved.
+    savePreview.reset()
+    savePending.current = false
   }
 
   let saveImpact: ReactNode = (
@@ -418,7 +459,9 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
         )}
         confirmText={confirmTurnsOn ? t('Turn on') : t('Save')}
         destructive
-        disabled={savePreview.isPending}
+        // The dialog stays clickable while it fades out after a click; that
+        // click already started the save.
+        disabled={savePreview.isPending || !confirmOpen}
         handleConfirm={() => void confirmSave()}
       >
         {saveImpact}
