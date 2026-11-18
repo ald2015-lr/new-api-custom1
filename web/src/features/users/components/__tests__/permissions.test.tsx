@@ -19,10 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { createInstance, type i18n as I18n } from 'i18next'
+import { I18nextProvider } from 'react-i18next'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import en from '@/i18n/locales/en.json'
+import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
-import { useAuthStore } from '@/stores/auth-store'
+import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 
 import type { User } from '../../types'
 import { UsersMutateDrawer } from '../users-mutate-drawer'
@@ -264,9 +268,15 @@ const rechargeCatalog = {
 const deputyNote =
   'Deputy admins can never view or manage recharge information.'
 
+const rootViewer: AuthUser = { id: 1, username: 'root', role: 100 }
+
 /** served: what GET /api/user/:id returns over the list row. */
-function renderRechargeDrawer(currentRow?: User, served: Partial<User> = {}) {
-  useAuthStore.getState().auth.setUser({ id: 1, username: 'root', role: 100 })
+function renderRechargeDrawer(
+  currentRow?: User,
+  served: Partial<User> = {},
+  { viewer = rootViewer, i18n }: { viewer?: AuthUser; i18n?: I18n } = {}
+) {
+  useAuthStore.getState().auth.setUser(viewer)
   const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
     if (url === '/api/authz/catalog') {
       return { data: { success: true, data: rechargeCatalog } }
@@ -307,7 +317,7 @@ function renderRechargeDrawer(currentRow?: User, served: Partial<User> = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
-  render(
+  const drawer = (
     <QueryClientProvider client={client}>
       <UsersProvider>
         <UsersMutateDrawer
@@ -317,6 +327,9 @@ function renderRechargeDrawer(currentRow?: User, served: Partial<User> = {}) {
         />
       </UsersProvider>
     </QueryClientProvider>
+  )
+  render(
+    i18n ? <I18nextProvider i18n={i18n}>{drawer}</I18nextProvider> : drawer
   )
   return get
 }
@@ -561,3 +574,53 @@ it('root creating a full admin keeps the recharge permissions and the role-only 
     expect.anything()
   )
 })
+
+// Only root may create administrators of either kind (the server refuses a
+// role at or above the operator's own), so the role select offers no more.
+it.each([
+  ['root', rootViewer, ['Common User', 'Admin', 'Deputy Admin']],
+  [
+    'an admin',
+    { id: 5, username: 'admin', role: 10, admin_role: 'admin' } as AuthUser,
+    ['Common User'],
+  ],
+  [
+    'a deputy admin',
+    { id: 6, username: 'deputy', role: 10, admin_role: 'deputy' } as AuthUser,
+    ['Common User'],
+  ],
+] as const)(
+  '%s creating a user is offered only the roles it may create',
+  async (_kind, viewer, roles) => {
+    renderRechargeDrawer(undefined, {}, { viewer })
+    await screen.findByPlaceholderText('Enter username')
+    await userEvent.click(screen.getByRole('combobox', { name: 'Role' }))
+    await screen.findByRole('option', { name: 'Common User' })
+
+    expect(
+      screen.getAllByRole('option').map((option) => option.textContent)
+    ).toEqual(roles)
+  }
+)
+
+it.each([
+  ['create', undefined, '新建用户'],
+  ['update', target, '更新用户'],
+] as const)(
+  'the %s drawer has a one-phrase Chinese title',
+  async (_mode, currentRow, title) => {
+    const i18n = createInstance()
+    await i18n.init({
+      lng: 'zh',
+      fallbackLng: false,
+      nsSeparator: false,
+      resources: { en, zh },
+      initAsync: false,
+    })
+    renderRechargeDrawer(currentRow, {}, { i18n })
+
+    expect(
+      await screen.findByRole('dialog', { name: title })
+    ).toBeInTheDocument()
+  }
+)

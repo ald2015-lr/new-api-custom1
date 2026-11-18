@@ -175,6 +175,17 @@ export function UsersMutateDrawer({
   const selectedRole = form.watch('role')
   const selectedAdminRole = form.watch('admin_role')
   const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
+  // Only root creates administrators of either kind (the server refuses a
+  // role at or above the operator's own).
+  const roleOptions = [
+    { value: '1', label: t('Common User') },
+    ...(currentUser?.role === ROLE.SUPER_ADMIN
+      ? [
+          { value: '10', label: t('Admin') },
+          { value: DEPUTY_ROLE_VALUE, label: t('Deputy Admin') },
+        ]
+      : []),
+  ]
   const targetRole = selectedRole ?? currentRow?.role ?? 0
   const targetIsAdmin = targetRole >= ROLE.ADMIN
   // A deputy admin: chosen in the create form, or on update the kind the
@@ -326,7 +337,7 @@ export function UsersMutateDrawer({
         >
           <SheetHeader className={sideDrawerHeaderClassName()}>
             <SheetTitle>
-              {isUpdate ? t('Update') : t('Create')} {t('User')}
+              {isUpdate ? t('Update User') : t('Create User')}
             </SheetTitle>
             <SheetDescription>
               {isUpdate
@@ -372,14 +383,7 @@ export function UsersMutateDrawer({
                       <FormItem>
                         <FormLabel>{t('Role')}</FormLabel>
                         <Select
-                          items={[
-                            { value: '1', label: t('Common User') },
-                            { value: '10', label: t('Admin') },
-                            {
-                              value: DEPUTY_ROLE_VALUE,
-                              label: t('Deputy Admin'),
-                            },
-                          ]}
+                          items={roleOptions}
                           onValueChange={(value) => {
                             if (value === null) return
                             // A deputy admin is role 10 plus admin_role.
@@ -405,13 +409,14 @@ export function UsersMutateDrawer({
                           </FormControl>
                           <SelectContent alignItemWithTrigger={false}>
                             <SelectGroup>
-                              <SelectItem value='1'>
-                                {t('Common User')}
-                              </SelectItem>
-                              <SelectItem value='10'>{t('Admin')}</SelectItem>
-                              <SelectItem value={DEPUTY_ROLE_VALUE}>
-                                {t('Deputy Admin')}
-                              </SelectItem>
+                              {roleOptions.map((option) => (
+                                <SelectItem
+                                  key={option.value}
+                                  value={option.value}
+                                >
+                                  {option.label}
+                                </SelectItem>
+                              ))}
                             </SelectGroup>
                           </SelectContent>
                         </Select>

@@ -200,7 +200,8 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const isAdmin = user.role >= USER_ROLE.ADMIN
   const isRoot = user.role === USER_ROLE.ROOT
   const isDeputy = user.role === USER_ROLE.ADMIN && user.admin_role === 'deputy'
-  // Only root creates or converts deputy admins (the server enforces it too).
+  // Only root promotes users or creates and converts deputy admins (the
+  // server enforces it too).
   const viewerIsRoot = currentUser?.role === ROLE.SUPER_ADMIN
   // User subscriptions are recharge information (prices, free plan grants).
   const canManageSubscriptions = hasPermission(
@@ -270,7 +271,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuItem>
         )}
 
-        {!isAdmin && (
+        {viewerIsRoot && !isAdmin && (
           <DropdownMenuItem onClick={() => handleManage('promote')}>
             {t('Promote')}
             <DropdownMenuShortcut>

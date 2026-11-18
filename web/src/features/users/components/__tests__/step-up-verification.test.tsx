@@ -320,6 +320,53 @@ it.each([
   ).not.toBeInTheDocument()
 })
 
+it('root promotes a common user from the row menu with a proof bound to the user and action', async () => {
+  const proof = mockVerification('admin.user.manage', 'manage-proof')
+  const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+    if (url === '/api/verify') return proof
+    if (url === '/api/user/manage') return { data: { success: true } }
+    throw new Error(`Unexpected POST ${url}`)
+  })
+  await openRowMenu(rootViewer, target)
+
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Promote' }))
+  await completeTwoFactorVerification()
+
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/user/manage',
+      { id: 2, action: 'promote' },
+      expect.objectContaining({
+        headers: { 'X-Security-Proof': 'manage-proof' },
+        singleUseAuthorization: true,
+      })
+    )
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'admin.user.manage',
+      context: { user_id: 2, action: 'promote' },
+    }),
+    expect.anything()
+  )
+})
+
+// Only root may promote (the server refuses everyone else), so the row menu
+// does not offer it to admins of either kind.
+it.each([
+  ['a full admin', adminViewer('admin')],
+  ['a deputy admin', adminViewer('deputy')],
+])('%s is not offered to promote a common user', async (_kind, viewer) => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(viewer, target)
+
+  expect(
+    screen.queryByRole('menuitem', { name: 'Promote' })
+  ).not.toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: 'Disable' })).toBeVisible()
+})
+
 it.each(withoutRecharge)(
   '%s is not offered the subscriptions of a user',
   async (_kind, viewer) => {
