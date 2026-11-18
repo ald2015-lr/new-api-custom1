@@ -815,9 +815,14 @@ func (user *User) finishInsert(inviterId int) {
 		if defaultSidebarConfig != "" {
 			currentSetting := createdUser.GetSetting()
 			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
-			common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			// Only the setting column (and a cached copy of the user): writing
+			// the snapshot back whole would enable again a new user an invite
+			// abuse check disabled after the read, and bump its auth version.
+			if err := UpdateUserSetting(createdUser.Id, currentSetting); err != nil {
+				common.SysError(common.LogText("failed to initialize the sidebar config for new user %s: %v", createdUser.Username, err))
+			} else {
+				common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			}
 		}
 	}
 
@@ -865,9 +870,12 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 		if defaultSidebarConfig != "" {
 			currentSetting := createdUser.GetSetting()
 			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
-			common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			// Only the setting column, as in finishInsert.
+			if err := UpdateUserSetting(createdUser.Id, currentSetting); err != nil {
+				common.SysError(common.LogText("failed to initialize the sidebar config for new user %s: %v", createdUser.Username, err))
+			} else {
+				common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
+			}
 		}
 	}
 

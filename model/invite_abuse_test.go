@@ -183,6 +183,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("ban effects and idempotency", testInviteAbuseBanEffects)
 			t.Run("release", testInviteAbuseRelease)
 			t.Run("sign-up", testInviteAbuseSignUp)
+			t.Run("sign-up keeps a concurrent ban", testInviteAbuseSignUpKeepsConcurrentBan)
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
 			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
 			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
@@ -606,6 +607,56 @@ func testInviteAbuseSignUp(t *testing.T) {
 				assert.Equal(t, InviteAbuseKindInvitee, ban.Kind)
 				assert.Equal(t, 3, ban.InviteCount)
 			}
+		})
+	}
+}
+
+// Another sign-up's check or a sweep may disable a new user right after the
+// sign-up read it to write its sidebar config. That write touches only the
+// setting column: the account stays disabled, only the ban moved its
+// authentication version, and a cached copy gets the new setting with the
+// disabled status.
+func testInviteAbuseSignUpKeepsConcurrentBan(t *testing.T) {
+	for _, oauth := range []bool{false, true} {
+		t.Run(fmt.Sprintf("OAuth sign-up: %v", oauth), func(t *testing.T) {
+			resetInviteAbuseTables(t)
+			useInviteAbuseSettings(t, false, 2, 500_000)
+			useUserCacheMiniRedis(t)
+			newcomer := User{Username: "newcomer", DisplayName: "newcomer", Role: common.RoleCommonUser, Status: common.UserStatusEnabled}
+			require.NoError(t, DB.Transaction(func(tx *gorm.DB) error { return newcomer.InsertWithTx(tx, 0) }))
+			_, err := GetUserCache(newcomer.Id)
+			require.NoError(t, err)
+			banned := false
+			const name = "test:ban-during-sign-up"
+			require.NoError(t, DB.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+				// The first read of a user is the sign-up's read of the new user.
+				if banned || tx.Statement.Schema == nil || tx.Statement.Schema.Name != "User" {
+					return
+				}
+				banned = true
+				changed, err := DisableUserBySystem(newcomer.Id, inviteAbuseRevokeReason)
+				require.NoError(t, err)
+				require.True(t, changed)
+			}))
+			t.Cleanup(func() { assert.NoError(t, DB.Callback().Query().Remove(name)) })
+
+			if oauth {
+				newcomer.FinalizeOAuthUserCreation(0)
+			} else {
+				newcomer.FinishInsert(0)
+			}
+			require.True(t, banned)
+			stored := inviteAbuseUserState(t, newcomer.Id)
+			assert.Equal(t, common.UserStatusDisabled, stored.Status, "the ban is kept")
+			assert.EqualValues(t, 2, stored.AuthVersion, "only the ban moved the authentication version")
+			var setting User
+			require.NoError(t, DB.Select("setting").Where("id = ?", newcomer.Id).Take(&setting).Error)
+			assert.NotEmpty(t, setting.GetSetting().SidebarModules, "the sidebar config is written")
+			cached, err := GetUserCache(newcomer.Id)
+			require.NoError(t, err)
+			assert.Equal(t, common.UserStatusDisabled, cached.Status)
+			assert.EqualValues(t, 2, cached.AuthVersion)
+			assert.NotEmpty(t, cached.GetSetting().SidebarModules)
 		})
 	}
 }
