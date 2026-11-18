@@ -170,6 +170,14 @@ func inviteAbuseExemptUsers() *gorm.DB {
 	return DB.Model(&InviteAbuseBan{}).Select("user_id").Where("released_at > ?", 0)
 }
 
+// inviteAbuseNotReleased is a condition that holds while none of userIds is
+// exempt. It costs one lookup on the unique user_id index per id on every
+// database, where PostgreSQL scans all the records for NOT IN (subquery).
+func inviteAbuseNotReleased(userIds ...int) clause.Expr {
+	released := DB.Model(&InviteAbuseBan{}).Select("1").Where("user_id IN ? AND released_at > ?", userIds, 0)
+	return clause.Expr{SQL: "NOT EXISTS (?)", Vars: []any{released}}
+}
+
 // listInviteAbuseCandidates returns up to limit candidates with an inviter id
 // above afterInviterId, in inviter id order. One grouped scan of the counted
 // invited users with the qualifying recharges joined (at most one row per
@@ -239,7 +247,7 @@ func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings
 	var inviter User
 	err := DB.Select("id", "username", "status", "role").
 		Where("id = ? AND role < ?", inviterId, common.RoleAdminUser).
-		Where("id NOT IN (?)", inviteAbuseExemptUsers()).
+		Where(inviteAbuseNotReleased(inviterId)).
 		Take(&inviter).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, true, nil // deleted, an administrator or exempt
@@ -319,8 +327,7 @@ func disableAbusiveInviter(inviter User, inviteCount int64, settings InviteAbuse
 		var changed bool
 		// The exemption is part of the update that disables: an account an
 		// administrator released after the list above was loaded stays enabled.
-		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason,
-			clause.Expr{SQL: "id NOT IN (?)", Vars: []any{inviteAbuseExemptUsers()}})
+		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason, inviteAbuseNotReleased(target.user.Id))
 		if err != nil {
 			finished = false
 			break
