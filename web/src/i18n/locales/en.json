@@ -6687,6 +6687,7 @@
     "Text description of the desired image": "Text description of the desired image",
     "Text description of the desired video": "Text description of the desired video",
     "Text Input": "Text Input",
+    "Text is normalised first (full-width letters and punctuation become half-width, repeated spaces become one), so write regular expressions in half-width form.": "Text is normalised first (full-width letters and punctuation become half-width, repeated spaces become one), so write regular expressions in half-width form.",
     "Text or array of texts to embed": "Text or array of texts to embed",
     "Text Output": "Text Output",
     "Text to Video": "Text to Video",

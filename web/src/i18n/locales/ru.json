@@ -6687,6 +6687,7 @@
     "Text description of the desired image": "Текстовое описание желаемого изображения",
     "Text description of the desired video": "Текстовое описание желаемого видео",
     "Text Input": "Текстовый вход",
+    "Text is normalised first (full-width letters and punctuation become half-width, repeated spaces become one), so write regular expressions in half-width form.": "Сначала текст нормализуется (полноширинные буквы и знаки препинания становятся обычными, повторяющиеся пробелы — одним), поэтому пишите регулярные выражения обычными символами половинной ширины.",
     "Text or array of texts to embed": "Текст или массив текстов для векторизации",
     "Text Output": "Текстовый выход",
     "Text to Video": "Текст в видео",

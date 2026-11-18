@@ -197,6 +197,9 @@ export function ChannelModerationRulesEditor(props: {
         <p className='text-muted-foreground text-sm'>
           {t(
             'Keywords match anywhere in the text. Regular expressions use RE2 syntax (no look-around or back-references), are checked when saved and should stay simple: each one runs on up to 256 KB of every request. Up to 100 rules, at most 30 regular expressions.'
+          )}{' '}
+          {t(
+            'Text is normalised first (full-width letters and punctuation become half-width, repeated spaces become one), so write regular expressions in half-width form.'
           )}
         </p>
       </div>
