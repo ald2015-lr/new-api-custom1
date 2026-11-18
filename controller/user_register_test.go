@@ -186,23 +186,25 @@ func TestRegisterWithEmailVerificationAsksForTheCaptchaBeforeTheCode(t *testing.
 	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10002@qq.com"))
 }
 
-// A registration code only serves password registration: while registration
-// or password registration is closed, the request is refused with Register's
-// message and nothing is mailed.
-func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
+// A registration code only serves password registration with email
+// verification: while registration or password registration is closed, the
+// request is refused with Register's message, while email verification is
+// off with the unavailable verification method, and nothing is mailed.
+func TestSendEmailVerificationIsRefusedWhileRegistrationTakesNoCode(t *testing.T) {
 	setupRegisterTest(t, true, false)
 	mailbox := newSecurityMailbox(t)
 	router := newRegisterTestRouter()
 	for _, tc := range []struct {
-		name               string
-		register, password bool
-		key                string
+		name                             string
+		register, password, verification bool
+		key                              string
 	}{
-		{"registration closed", false, true, "New user registration has been disabled by administrator"},
-		{"password registration closed", true, false, "Password registration has been disabled by administrator, please use third-party account verification"},
+		{"registration closed", false, true, true, "New user registration has been disabled by administrator"},
+		{"password registration closed", true, false, true, "Password registration has been disabled by administrator, please use third-party account verification"},
+		{"email verification off", true, true, false, "This verification method is currently unavailable."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			common.RegisterEnabled, common.PasswordRegisterEnabled = tc.register, tc.password
+			common.RegisterEnabled, common.PasswordRegisterEnabled, common.EmailVerificationEnabled = tc.register, tc.password, tc.verification
 			response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
 			assert.False(t, response.Success)
 			assert.Equal(t, tc.key, response.MessageKey)
@@ -212,7 +214,7 @@ func TestSendEmailVerificationIsRefusedWhileRegistrationIsClosed(t *testing.T) {
 	assert.Empty(t, mailbox.mail)
 	mailbox.mutex.Unlock()
 
-	common.RegisterEnabled, common.PasswordRegisterEnabled = true, true
+	common.RegisterEnabled, common.PasswordRegisterEnabled, common.EmailVerificationEnabled = true, true, true
 	response := performRegisterTestRequest(t, router, http.MethodGet, "/api/verification?email=10007@qq.com", "")
 	require.True(t, response.Success, response.Message)
 	assert.NotEmpty(t, registrationMailCode(t, mailbox, "10007@qq.com"))
