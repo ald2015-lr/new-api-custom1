@@ -1300,34 +1300,46 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 	// answered like for GitHub, without signing up a second account, also
 	// when the provider email is not stored and so cannot collide with the
 	// deleted account (an unverified one, a verified one outside the policy).
-	for _, tc := range []struct{ sub, userInfo string }{
-		{"oidc-1", `{"sub":"oidc-1","email":"10001@qq.com","email_verified":false}`},
-		{"oidc-6", `{"sub":"oidc-6","email":"someone@gmail.com","email_verified":true}`},
+	// Each case signs up its own subject, so it does not depend on the cases
+	// above.
+	for _, tc := range []struct{ name, userInfo string }{
+		{"deleted account with an unverified email", `{"sub":"oidc-deleted-unverified","email":"10021@qq.com","email_verified":false}`},
+		{"deleted account with an email outside the policy", `{"sub":"oidc-deleted-outside-policy","email":"deleted@gmail.com","email_verified":true}`},
 	} {
-		var account model.User
-		require.NoError(t, db.Where("oidc_id = ?", tc.sub).First(&account).Error)
-		require.Empty(t, account.Email)
-		require.NoError(t, db.Delete(&account).Error)
-		setUserInfo(tc.userInfo)
+		t.Run(tc.name, func(t *testing.T) {
+			setUserInfo(tc.userInfo)
+			identity, err := oidc.GetUserInfo(context.Background(), providerToken)
+			require.NoError(t, err)
+			account, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+			require.NoError(t, err)
+			require.Empty(t, account.Email)
+			require.NoError(t, db.Delete(account).Error)
+
+			recorder := httptest.NewRecorder()
+			login, _ := gin.CreateTestContext(recorder)
+			login.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/oidc", nil)
+			login.Request.RemoteAddr = "203.0.113.8:4321"
+			handleOAuthLogin(login, oidc, identity, providerToken, &model.AuthFlow{Payload: `{}`})
+			assert.JSONEq(t, `{"success":false,"message":"User has been deleted","message_key":"User has been deleted"}`, recorder.Body.String())
+			var count int64
+			require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", identity.ProviderUserID).Count(&count).Error)
+			assert.EqualValues(t, 1, count, "no second account")
+		})
+	}
+	t.Run("live account", func(t *testing.T) {
+		setUserInfo(`{"sub":"oidc-live","email":"10022@qq.com","email_verified":true}`)
 		identity, err := oidc.GetUserInfo(context.Background(), providerToken)
 		require.NoError(t, err)
-		recorder := httptest.NewRecorder()
-		login, _ := gin.CreateTestContext(recorder)
-		login.Request = httptest.NewRequest(http.MethodGet, "/api/oauth/oidc", nil)
-		login.Request.RemoteAddr = "203.0.113.8:4321"
-		handleOAuthLogin(login, oidc, identity, providerToken, &model.AuthFlow{Payload: `{}`})
-		assert.JSONEq(t, `{"success":false,"message":"User has been deleted","message_key":"User has been deleted"}`, recorder.Body.String(), tc.sub)
-		require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", tc.sub).Count(&count).Error)
-		assert.EqualValues(t, 1, count, "no second account for %s", tc.sub)
-	}
-	setUserInfo(`{"sub":"oidc-4","email":"10004@qq.com","email_verified":true}`)
-	identity, err = oidc.GetUserInfo(context.Background(), providerToken)
-	require.NoError(t, err)
-	existing, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
-	require.NoError(t, err, "a live OIDC account still signs in")
-	assert.Equal(t, "10004@qq.com", existing.Email)
-	require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", "oidc-4").Count(&count).Error)
-	assert.EqualValues(t, 1, count)
+		created, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+		require.NoError(t, err)
+		existing, _, err := findOrCreateOAuthUser(oauthSignUpContext("203.0.113.8:4321"), oidc, identity, providerToken, "")
+		require.NoError(t, err, "a live OIDC account still signs in")
+		assert.Equal(t, created.Id, existing.Id)
+		assert.Equal(t, "10022@qq.com", existing.Email)
+		var count int64
+		require.NoError(t, db.Unscoped().Model(&model.User{}).Where("oidc_id = ?", "oidc-live").Count(&count).Error)
+		assert.EqualValues(t, 1, count)
+	})
 }
 
 // GitHub's user endpoint returns only the public profile email, and GitHub
