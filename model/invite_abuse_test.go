@@ -83,7 +83,8 @@ func resetInviteAbuseTables(t *testing.T) {
 
 // useInviteAbuseSettings pins the rule's options (paid inviters exempt, the
 // default), the settings a sign-up reads and the sweep's schedule state, and
-// restores them afterwards.
+// restores them afterwards. The rule counts as unchanged for a long time, so
+// nothing waits for a change to settle.
 func useInviteAbuseSettings(t *testing.T, enabled bool, threshold int, minRedeemQuota int) {
 	t.Helper()
 	payment := operation_setting.GetPaymentSetting()
@@ -96,13 +97,13 @@ func useInviteAbuseSettings(t *testing.T, enabled bool, threshold int, minRedeem
 		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = savedEnabled, savedThreshold, savedMin
 		common.InviteAbuseBanExemptPaidInviter = savedExemptPaid
 		common.QuotaForNewUser, common.OptionMap = savedNewUser, savedOptions
-		inviteAbuseSweep = inviteAbuseSweepState{}
+		inviteAbuseSweep, inviteAbuseRuleChangedAt = inviteAbuseSweepState{}, time.Time{}
 	})
 	payment.ComplianceConfirmed = false
 	common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = enabled, threshold, minRedeemQuota
 	common.InviteAbuseBanExemptPaidInviter = true
 	common.QuotaForNewUser, common.OptionMap = 0, map[string]string{}
-	inviteAbuseSweep = inviteAbuseSweepState{}
+	inviteAbuseSweep, inviteAbuseRuleChangedAt = inviteAbuseSweepState{}, time.Time{}
 }
 
 func createInviteAbuseTestUser(t *testing.T, name string, inviterId int, role int) User {
@@ -186,6 +187,7 @@ func TestInviteAbuseDatabaseMatrix(t *testing.T) {
 			t.Run("sign-up keeps a concurrent ban", testInviteAbuseSignUpKeepsConcurrentBan)
 			t.Run("sweep schedule", testInviteAbuseSweepSchedule)
 			t.Run("sweep task", testInviteAbuseSweepTask)
+			t.Run("settings saved one option at a time", testInviteAbuseSettingsSavedOneAtATime)
 			t.Run("settings change stops a pass", testInviteAbuseSettingsChangeStopsPass)
 			t.Run("change saved on another node", testInviteAbuseChangeSavedOnAnotherNode)
 			t.Run("verdict taken again before disabling", testInviteAbuseVerdictAtDisableTime)
@@ -738,12 +740,15 @@ func testInviteAbuseSweepSchedule(t *testing.T) {
 	assert.Equal(t, common.UserStatusDisabled, status(patron), "no longer exempting paid inviters sweeps at once")
 }
 
-// The master node's task sweeps when the rule changes, without waiting for
-// its tick: right after the rule is turned on, and again after it is turned
-// off and on between two ticks.
+// The master node's task sweeps when the rule changes, as soon as the change
+// has settled and without waiting for its tick: after the rule is turned on,
+// and again after it is turned off and on between two ticks.
 func testInviteAbuseSweepTask(t *testing.T) {
 	resetInviteAbuseTables(t)
 	useInviteAbuseSettings(t, false, 2, 500_000)
+	savedDelay := inviteAbuseSettleDelay
+	inviteAbuseSettleDelay = 50 * time.Millisecond
+	t.Cleanup(func() { inviteAbuseSettleDelay = savedDelay })
 	tick, stop, done := make(chan time.Time), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -769,6 +774,60 @@ func testInviteAbuseSweepTask(t *testing.T) {
 	second, _ := createInviteAbuseTestInviter(t, "second", common.RoleCommonUser, 2)
 	require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "true"))
 	assert.Eventually(t, disabled(second), 10*time.Second, 5*time.Millisecond, "turning the rule off and on between two ticks sweeps again")
+}
+
+// An administrator's save reaches the server one option per request, a
+// browser round trip apart, and the wake-up that follows the first one comes
+// at once. Neither a pass nor a sign-up check disables anybody until the rule
+// has stayed the same for inviteAbuseSettleDelay: nobody is disabled with
+// only some of the options applied, whether the rule stays on or the same
+// save turns it off (the switch is saved last).
+func testInviteAbuseSettingsSavedOneAtATime(t *testing.T) {
+	t.Run("threshold and minimum lowered", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 5, 500_000)
+		// Abusive with the new threshold and the old minimum only: one of the
+		// invited users redeemed 0.5 USD.
+		half, halfInvitees := createInviteAbuseTestInviter(t, "half", common.RoleCommonUser, 3)
+		seedUsedRedemption(t, halfInvitees[0].Id, 250_000)
+		late, lateInvitees := createInviteAbuseTestInviter(t, "late", common.RoleCommonUser, 2)
+		seedUsedRedemption(t, lateInvitees[0].Id, 250_000)
+		// Abusive with the new settings.
+		farm, farmInvitees := createInviteAbuseTestInviter(t, "farm", common.RoleCommonUser, 3)
+		runInviteAbuseSweepIfDue(time.Now())
+		require.Empty(t, disabledInviteAbuseTestUsers(t), "nobody is abusive with the old settings")
+
+		require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "3"))
+		assert.Positive(t, runInviteAbuseSweepIfDue(time.Now()), "the wake-up right after the first option waits")
+		newcomer := User{Username: "late-3", DisplayName: "late-3", Role: common.RoleCommonUser, InviterId: late.Id}
+		require.NoError(t, newcomer.Insert(late.Id)) // a sign-up between the two requests
+		assert.Empty(t, disabledInviteAbuseTestUsers(t))
+		beforeSecond := time.Now()
+		require.NoError(t, updateOptionMap("InviteAbuseBanMinRedeemQuota", "100000"))
+		assert.Positive(t, runInviteAbuseSweepIfDue(beforeSecond.Add(inviteAbuseSettleDelay)), "the second option starts the wait again")
+		assert.Empty(t, disabledInviteAbuseTestUsers(t))
+
+		assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
+		assert.Equal(t, inviteAbuseTestUserIds(append([]User{farm}, farmInvitees...)...), disabledInviteAbuseTestUsers(t),
+			"once settled, the pass disables what the saved settings call abusive")
+		for _, user := range []User{half, late, newcomer} {
+			assert.Equal(t, common.UserStatusEnabled, inviteAbuseUserState(t, user.Id).Status, user.Username)
+		}
+	})
+
+	t.Run("threshold lowered and rule turned off", func(t *testing.T) {
+		resetInviteAbuseTables(t)
+		useInviteAbuseSettings(t, true, 5, 500_000)
+		createInviteAbuseTestInviter(t, "farm", common.RoleCommonUser, 3)
+		runInviteAbuseSweepIfDue(time.Now())
+		require.Empty(t, disabledInviteAbuseTestUsers(t))
+
+		require.NoError(t, updateOptionMap("InviteAbuseBanThreshold", "3"))
+		assert.Positive(t, runInviteAbuseSweepIfDue(time.Now()))
+		require.NoError(t, updateOptionMap("InviteAbuseBanEnabled", "false"))
+		assert.Zero(t, runInviteAbuseSweepIfDue(time.Now().Add(inviteAbuseSettleDelay)))
+		assert.Empty(t, disabledInviteAbuseTestUsers(t), "the rule ends up off")
+	})
 }
 
 // Saving an option of the rule, or the periodic option sync applying one,

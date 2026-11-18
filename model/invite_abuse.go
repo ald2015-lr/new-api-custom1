@@ -48,6 +48,12 @@ var (
 	// inviteAbuseRecheckInterval is how often the rule takes its verdict on an
 	// inviter again while it disables the inviter's accounts.
 	inviteAbuseRecheckInterval = time.Second
+	// inviteAbuseSettleDelay is how long the rule must stay the same after a
+	// change before anything is disabled under it. An administrator's save
+	// reaches the server one option per request, a browser round trip apart;
+	// with only some of them applied the rule would disable accounts that
+	// neither the old nor the new settings call abusive.
+	inviteAbuseSettleDelay = 5 * time.Second
 )
 
 // InviteAbuseBan records an account the invite abuse rule disabled. A record
@@ -100,18 +106,20 @@ var inviteAbuseOptionKeys = []string{
 
 var (
 	// inviteAbuseRuleMu guards this node's copy of the options, kept in
-	// common.InviteAbuseBan* like the other legacy options, and the rule
-	// generation; applyInviteAbuseOption writes both.
+	// common.InviteAbuseBan* like the other legacy options, and the record
+	// of the rule's changes; applyInviteAbuseOption writes them.
 	inviteAbuseRuleMu sync.RWMutex
 	// inviteAbuseRuleGeneration moves on with every change of the rule that
 	// calls for a new pass, so the sweep cannot miss one, however quickly the
 	// rule is turned off and on again.
 	inviteAbuseRuleGeneration int64
+	// inviteAbuseRuleChangedAt is when that happened last.
+	inviteAbuseRuleChangedAt time.Time
 )
 
 // loadedInviteAbuseRule returns this node's copy of the options together
-// with the rule generation.
-func loadedInviteAbuseRule() (inviteAbuseOptions, int64) {
+// with the rule generation and the time of the rule's last change.
+func loadedInviteAbuseRule() (inviteAbuseOptions, int64, time.Time) {
 	inviteAbuseRuleMu.RLock()
 	defer inviteAbuseRuleMu.RUnlock()
 	options := inviteAbuseOptions{
@@ -120,12 +128,12 @@ func loadedInviteAbuseRule() (inviteAbuseOptions, int64) {
 		minRedeemQuota:    common.InviteAbuseBanMinRedeemQuota,
 		exemptPaidInviter: common.InviteAbuseBanExemptPaidInviter,
 	}
-	return options, inviteAbuseRuleGeneration
+	return options, inviteAbuseRuleGeneration, inviteAbuseRuleChangedAt
 }
 
 // loadedInviteAbuseOptions returns this node's copy of the options.
 func loadedInviteAbuseOptions() inviteAbuseOptions {
-	options, _ := loadedInviteAbuseRule()
+	options, _, _ := loadedInviteAbuseRule()
 	return options
 }
 
@@ -500,11 +508,13 @@ func recordInviteAbuseBan(user User, inviterId int, kind string, inviteCount int
 // applyInviteAbuseRuleAfterSignUp checks the inviter of a user who just signed
 // up with an invite code, then reloads the user's status and authentication
 // version: a sign-up that makes the inviter abusive leaves the new account
-// disabled at once, and the OAuth login that follows refuses it. Errors are
-// logged and never fail the sign-up.
+// disabled at once, and the OAuth login that follows refuses it. Right after
+// a change of the rule it checks nothing: the pass that follows the change
+// once it has settled checks every inviter. Errors are logged and never fail
+// the sign-up.
 func (user *User) applyInviteAbuseRuleAfterSignUp(inviterId int) {
-	options := loadedInviteAbuseOptions()
-	if inviterId == 0 || !options.enabled {
+	options, _, changedAt := loadedInviteAbuseRule()
+	if inviterId == 0 || !options.enabled || time.Since(changedAt) < inviteAbuseSettleDelay {
 		return
 	}
 	if _, _, err := enforceInviteAbuseRuleOnInviter(inviterId, options.settings(), time.Now().Add(inviteAbuseSignUpBudget)); err != nil {
@@ -616,9 +626,9 @@ var (
 // applyInviteAbuseOption applies one of the rule's options. A real change
 // that calls for a new pass — the rule turned on, or the threshold, the
 // minimum redeemed quota or the paid-inviter exemption changed while it is
-// on — moves the rule generation on and wakes the master node's task.
-// Applying a value that did not change, as the periodic option sync does,
-// changes nothing.
+// on — moves the rule generation on, records when, and wakes the master
+// node's task. Applying a value that did not change, as the periodic option
+// sync does, changes nothing.
 func applyInviteAbuseOption(key string, value string) {
 	// updateOptionMap holds common.OptionMapRWMutex: options are applied one
 	// at a time.
@@ -631,6 +641,7 @@ func applyInviteAbuseOption(key string, value string) {
 	common.InviteAbuseBanMinRedeemQuota, common.InviteAbuseBanExemptPaidInviter = options.minRedeemQuota, options.exemptPaidInviter
 	if changed {
 		inviteAbuseRuleGeneration++
+		inviteAbuseRuleChangedAt = time.Now()
 	}
 	inviteAbuseRuleMu.Unlock()
 	if !changed {
@@ -643,17 +654,24 @@ func applyInviteAbuseOption(key string, value string) {
 }
 
 // RunInviteAbuseSweepTask is the rule's task on the master node, until stop
-// is closed: it sweeps at startup, on every tick and as soon as the rule
-// changes on this node, whether an administrator saved the change here or the
-// option sync brought it from another node (see runInviteAbuseSweepIfDue).
+// is closed: it sweeps at startup, on every tick and as soon as a change of
+// the rule on this node has settled, whether an administrator saved the
+// change here or the option sync brought it from another node (see
+// runInviteAbuseSweepIfDue).
 func RunInviteAbuseSweepTask(tick <-chan time.Time, stop <-chan struct{}) {
-	now := time.Now()
+	settled := time.NewTimer(inviteAbuseSettleDelay)
+	settled.Stop()
+	defer settled.Stop()
 	for {
-		runInviteAbuseSweepIfDue(now)
+		// The current time, not a tick's: a tick that waited in its channel
+		// during a long pass would put the end of a settling change later.
+		if wait := runInviteAbuseSweepIfDue(time.Now()); wait > 0 {
+			settled.Reset(wait)
+		}
 		select {
-		case now = <-tick:
+		case <-tick:
 		case <-inviteAbuseSweepWake:
-			now = time.Now()
+		case <-settled.C:
 		case <-stop:
 			return
 		}
@@ -664,27 +682,32 @@ func RunInviteAbuseSweepTask(tick <-chan time.Time, stop <-chan struct{}) {
 // every tick and when the rule changes. While the rule is enabled it sweeps
 // every inviter right after startup, after the rule is turned on, after the
 // threshold, the minimum redeemed quota or the paid-inviter exemption
-// changed, and otherwise every InviteAbuseSweepInterval. A pass stops at its
-// time budget and continues on the next tick; it also stops when the rule is
-// turned off or its settings change, and the next tick then starts over with
-// the new settings. Several masters are safe: every ban is a conditional
-// update.
-func runInviteAbuseSweepIfDue(now time.Time) {
+// changed, and otherwise every InviteAbuseSweepInterval. After a change it
+// starts nothing until the rule has stayed the same for
+// inviteAbuseSettleDelay, and returns how much of that wait is left (0 when
+// it is not waiting). A pass stops at its time budget and continues on the
+// next tick; it also stops at once when the rule is turned off or its
+// settings change, and starts over with the new settings. Several masters
+// are safe: every ban is a conditional update.
+func runInviteAbuseSweepIfDue(now time.Time) time.Duration {
 	if !inviteAbuseSweepRunning.CompareAndSwap(false, true) {
-		return
+		return 0
 	}
 	defer inviteAbuseSweepRunning.Store(false)
-	options, generation := loadedInviteAbuseRule()
+	options, generation, changedAt := loadedInviteAbuseRule()
 	if !options.enabled {
 		inviteAbuseSweep = inviteAbuseSweepState{}
-		return
+		return 0
+	}
+	if settled := changedAt.Add(inviteAbuseSettleDelay); now.Before(settled) {
+		return settled.Sub(now)
 	}
 	settings := options.settings()
 	if settings != inviteAbuseSweep.settings || generation != inviteAbuseSweep.generation {
 		inviteAbuseSweep = inviteAbuseSweepState{settings: settings, generation: generation}
 	}
 	if inviteAbuseSweep.cursor == 0 && !inviteAbuseSweep.finishedAt.IsZero() && now.Sub(inviteAbuseSweep.finishedAt) < InviteAbuseSweepInterval {
-		return
+		return 0
 	}
 	deadline := time.Now().Add(inviteAbuseSweepBudget)
 	cursor, complete, err := sweepInviteAbuse(settings, inviteAbuseSweep.cursor, deadline)
@@ -699,6 +722,7 @@ func runInviteAbuseSweepIfDue(now time.Time) {
 	default:
 		common.SysLog(common.LogText("invite abuse sweep reached its time budget, continuing after inviter %d on the next tick", cursor))
 	}
+	return 0
 }
 
 // sweepInviteAbuse applies the rule to the candidates after afterInviterId
