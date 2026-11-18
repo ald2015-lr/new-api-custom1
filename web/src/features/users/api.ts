@@ -67,7 +67,8 @@ export async function getUsers(
 }
 
 /**
- * Search users by keyword, group, role, status or inviter
+ * Search users by keyword, group, role, status or inviter. `role` is a role
+ * filter value: a numeric role or `deputy`.
  */
 export async function searchUsers(
   params: SearchUsersParams
@@ -86,7 +87,17 @@ export async function searchUsers(
   const queryParams = new URLSearchParams()
   queryParams.set('keyword', keyword)
   queryParams.set('group', group)
-  if (role) queryParams.set('role', role)
+  // Role 10 holds full admins and deputy admins; the server tells them apart
+  // with admin_role, so the Admin filter excludes deputies.
+  if (role === 'deputy') {
+    queryParams.set('role', '10')
+    queryParams.set('admin_role', 'deputy')
+  } else if (role === '10') {
+    queryParams.set('role', '10')
+    queryParams.set('admin_role', 'admin')
+  } else if (role) {
+    queryParams.set('role', role)
+  }
   if (status) queryParams.set('status', status)
   if (inviter_id) queryParams.set('inviter_id', inviter_id)
   queryParams.set('p', String(p))

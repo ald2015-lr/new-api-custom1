@@ -24,6 +24,8 @@ import { useEffect } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { ROLE } from '@/lib/roles'
+import { type AuthUser, useAuthStore } from '@/stores/auth-store'
 
 import type { User } from '../../types'
 import { DataTableRowActions } from '../data-table-row-actions'
@@ -105,6 +107,7 @@ async function completeTwoFactorVerification() {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  useAuthStore.getState().auth.reset()
 })
 
 it('deleting a user sends the request only with a single-use proof for that user', async () => {
@@ -197,4 +200,124 @@ it('disabling a user from the row menu binds the proof to the user and action', 
     }),
     expect.anything()
   )
+})
+
+const rootViewer: AuthUser = { id: 1, username: 'root', role: ROLE.SUPER_ADMIN }
+
+function adminViewer(adminRole: 'admin' | 'deputy'): AuthUser {
+  const granted = adminRole === 'admin'
+  return {
+    id: 5,
+    username: adminRole,
+    role: ROLE.ADMIN,
+    admin_role: adminRole,
+    permissions: {
+      admin_permissions: {
+        billing: { read: granted, write: granted },
+        redemption: { read: granted, write: granted },
+      },
+    },
+  }
+}
+
+const fullAdminTarget: User = { ...target, role: 10, admin_role: 'admin' }
+const deputyTarget: User = { ...target, role: 10, admin_role: 'deputy' }
+
+async function openRowMenu(viewer: AuthUser, row: User) {
+  useAuthStore.getState().auth.setUser(viewer)
+  renderInProvider(<DataTableRowActions row={{ original: row } as Row<User>} />)
+  await userEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+  await screen.findByRole('menuitem', { name: 'Manage Bindings' })
+}
+
+it.each([
+  ['a common user', 'set_deputy', target, 'Set as deputy admin'],
+  ['a full admin', 'set_deputy', fullAdminTarget, 'Set as deputy admin'],
+  ['a deputy admin', 'set_admin', deputyTarget, 'Set as full admin'],
+] as const)(
+  'root converting %s from the row menu binds the proof to the user and the %s action',
+  async (_kind, action, row, label) => {
+    const proof = mockVerification('admin.user.manage', 'manage-proof')
+    const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+      if (url === '/api/verify') return proof
+      if (url === '/api/user/manage') return { data: { success: true } }
+      throw new Error(`Unexpected POST ${url}`)
+    })
+    await openRowMenu(rootViewer, row)
+    const other =
+      action === 'set_deputy' ? 'Set as full admin' : 'Set as deputy admin'
+    expect(
+      screen.queryByRole('menuitem', { name: other })
+    ).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('menuitem', { name: label }))
+    await completeTwoFactorVerification()
+
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/user/manage',
+        { id: 2, action },
+        expect.objectContaining({
+          headers: { 'X-Security-Proof': 'manage-proof' },
+          singleUseAuthorization: true,
+        })
+      )
+    )
+    expect(post).toHaveBeenCalledWith(
+      '/api/verify',
+      expect.objectContaining({
+        scope: 'admin.user.manage',
+        context: { user_id: 2, action },
+      }),
+      expect.anything()
+    )
+  }
+)
+
+it('root is not offered a deputy conversion for another root account', async () => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(rootViewer, { ...target, role: 100 })
+
+  expect(
+    screen.queryByRole('menuitem', { name: 'Set as deputy admin' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('menuitem', { name: 'Set as full admin' })
+  ).not.toBeInTheDocument()
+})
+
+it.each([
+  ['a common user', target],
+  ['a deputy admin', deputyTarget],
+])('an admin is not offered deputy conversions for %s', async (_kind, row) => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(adminViewer('admin'), row)
+
+  expect(
+    screen.queryByRole('menuitem', { name: 'Set as deputy admin' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('menuitem', { name: 'Set as full admin' })
+  ).not.toBeInTheDocument()
+})
+
+it('a deputy admin is not offered the subscriptions of a user', async () => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(adminViewer('deputy'), target)
+
+  expect(
+    screen.queryByRole('menuitem', { name: 'Manage Subscriptions' })
+  ).not.toBeInTheDocument()
+})
+
+it('an admin with billing read opens the subscriptions of a user', async () => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(adminViewer('admin'), target)
+
+  await userEvent.click(
+    screen.getByRole('menuitem', { name: 'Manage Subscriptions' })
+  )
+  expect(
+    await screen.findByRole('dialog', { name: 'User Subscription Management' })
+  ).toBeInTheDocument()
 })

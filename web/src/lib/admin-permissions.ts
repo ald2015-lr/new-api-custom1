@@ -26,6 +26,8 @@ export type AdminCapabilities = AdminPermissionMatrix
 export const ADMIN_PERMISSION_RESOURCES = {
   AUDIT: 'audit',
   CHANNEL: 'channel',
+  BILLING: 'billing',
+  REDEMPTION: 'redemption',
   TASK_PLUGIN: 'task_plugin',
 } as const
 
@@ -40,6 +42,10 @@ export const ADMIN_PERMISSION_ACTIONS = {
 
 // The role whose baseline grants are used as defaults in the permission editor.
 export const ADMIN_ROLE_KEY = 'admin'
+// The deputy admin role: the admin baseline without recharge permissions. Its
+// baseline is used when editing a deputy; never use it to gate UI (gate on
+// hasPermission, which also covers admins whose recharge cells root unticked).
+export const DEPUTY_ROLE_KEY = 'deputy'
 
 // The permission catalog (resources, actions, labels and role baselines) is owned
 // by the backend authz package and fetched from GET /api/authz/catalog. It is
@@ -55,6 +61,8 @@ export interface PermissionResourceDef {
   resource: string
   label_key: string
   actions: PermissionActionDef[]
+  /** Holds recharge information or actions; a deputy admin never holds it. */
+  recharge?: boolean
 }
 
 export interface PermissionRoleDef {
@@ -94,12 +102,13 @@ export function roleGrants(
 }
 
 // normalizeAdminPermissions produces a full matrix for the catalog, filling any
-// value missing from `value` with the admin role's baseline grant.
+// value missing from `value` with the baseline grant of `roleKey`.
 export function normalizeAdminPermissions(
   value: AdminPermissionMatrix | null | undefined,
-  catalog: PermissionCatalog
+  catalog: PermissionCatalog,
+  roleKey: string = ADMIN_ROLE_KEY
 ): AdminPermissionMatrix {
-  const baseline = roleGrants(catalog, ADMIN_ROLE_KEY)
+  const baseline = roleGrants(catalog, roleKey)
   const normalized: AdminPermissionMatrix = {}
   for (const resource of catalog.resources) {
     const actions: Record<string, boolean> = {}
@@ -112,6 +121,16 @@ export function normalizeAdminPermissions(
     normalized[resource.resource] = actions
   }
   return normalized
+}
+
+// withoutRechargeResources drops the resources a deputy admin can never hold.
+export function withoutRechargeResources(
+  catalog: PermissionCatalog
+): PermissionCatalog {
+  return {
+    ...catalog,
+    resources: catalog.resources.filter((resource) => !resource.recharge),
+  }
 }
 
 // permissionMatrixToScopes lists the granted cells of a matrix as sorted

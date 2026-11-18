@@ -56,10 +56,24 @@ async function renderLogs(props: {
   role: number
   enabledPlans: boolean[]
   activeSubscription: boolean
+  /** billing:read; full admins hold it, deputy admins never do */
+  billingRead?: boolean
+  /** Enabled plans returned by the public plan list */
+  publicPlans?: number
 }) {
-  useAuthStore
-    .getState()
-    .auth.setUser({ id: 1, username: 'tester', role: props.role })
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'tester',
+    role: props.role,
+    permissions: {
+      admin_permissions: {
+        billing: {
+          read: props.billingRead ?? props.role >= ROLE.ADMIN,
+          write: false,
+        },
+      },
+    },
+  })
   const records = ['wallet', 'subscription'].map((source, index) =>
     usageLogSchema.parse({
       id: index + 1,
@@ -75,6 +89,10 @@ async function renderLogs(props: {
     let data: unknown = { quota: 0, rpm: 0, tpm: 0 }
     if (url === '/api/subscription/admin/plans') {
       data = props.enabledPlans.map((enabled) => ({ plan: { enabled } }))
+    } else if (url === '/api/subscription/plans') {
+      data = Array.from({ length: props.publicPlans ?? 0 }, () => ({
+        plan: { enabled: true },
+      }))
     } else if (url === '/api/subscription/self') {
       data = {
         subscriptions: props.activeSubscription
@@ -119,6 +137,10 @@ async function renderLogs(props: {
   await screen.findAllByText('$0.01')
   await waitFor(() => expect(client.isFetching()).toBe(0))
   return client
+}
+
+function requestedUrls() {
+  return vi.mocked(api.get).mock.calls.map(([url]) => url)
 }
 
 afterEach(() => {
@@ -193,4 +215,44 @@ test('uses personal subscriptions when an admin switches to only-self view', asy
 
   await user.click(screen.getByRole('button', { name: 'Switch scope' }))
   expect(await screen.findByRole('img', { name: 'Wallet' })).toBeVisible()
+})
+
+test.each([
+  { publicPlans: 1, walletShown: true },
+  { publicPlans: 0, walletShown: false },
+])(
+  'a deputy admin decides the wallet icon from the public plans without asking for the admin plan list ($publicPlans enabled)',
+  async ({ publicPlans, walletShown }) => {
+    await renderLogs({
+      role: ROLE.ADMIN,
+      billingRead: false,
+      enabledPlans: [true],
+      activeSubscription: false,
+      publicPlans,
+    })
+
+    expect(requestedUrls()).toContain('/api/subscription/plans')
+    expect(requestedUrls()).not.toContain('/api/subscription/admin/plans')
+    expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
+    if (walletShown) {
+      expect(screen.getByRole('img', { name: 'Wallet' })).toBeVisible()
+    } else {
+      expect(
+        screen.queryByRole('img', { name: 'Wallet' })
+      ).not.toBeInTheDocument()
+    }
+  }
+)
+
+test('an admin with billing read decides the wallet icon from the admin plan list', async () => {
+  await renderLogs({
+    role: ROLE.ADMIN,
+    enabledPlans: [true],
+    activeSubscription: false,
+    publicPlans: 0,
+  })
+
+  expect(requestedUrls()).toContain('/api/subscription/admin/plans')
+  expect(requestedUrls()).not.toContain('/api/subscription/plans')
+  expect(screen.getByRole('img', { name: 'Wallet' })).toBeVisible()
 })

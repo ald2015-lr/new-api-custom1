@@ -58,6 +58,8 @@ export const userSchema = z.object({
   linux_do_id: z.string().optional(),
   status: userStatusSchema,
   role: userRoleSchema,
+  /** Role-10 users only: a full admin or a deputy admin (no recharge access) */
+  admin_role: z.enum(['admin', 'deputy']).optional(),
   created_at: z.number().optional(),
   updated_at: z.number().optional(),
   last_login_at: z.number().optional(),
@@ -114,6 +116,7 @@ export interface GetUsersResponse {
 export interface SearchUsersParams {
   keyword?: string
   group?: string
+  /** A numeric role, or `deputy` for deputy admins */
   role?: string
   status?: string
   /** Only users invited by this user ID */
@@ -129,6 +132,7 @@ export interface UserFormData {
   display_name: string
   password?: string
   role?: number // Only used when creating user
+  admin_role?: 'deputy' // Only used when creating a deputy admin (role 10)
   quota?: number // Only used when updating user
   group?: string // Only used when updating user
   remark?: string // Only used when updating user
@@ -138,6 +142,8 @@ export interface UserFormData {
 export type ManageUserAction =
   | 'promote'
   | 'demote'
+  | 'set_deputy'
+  | 'set_admin'
   | 'enable'
   | 'disable'
   | 'delete'

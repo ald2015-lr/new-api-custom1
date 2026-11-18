@@ -29,10 +29,16 @@ import {
 } from '@/components/data-table'
 import {
   getAdminPlans,
+  getPublicPlans,
   getSelfSubscriptionFull,
 } from '@/features/subscriptions/api'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
 import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -97,13 +103,24 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
-  const userId = useAuthStore((state) => state.auth.user?.id)
+  const user = useAuthStore((state) => state.auth.user)
+  const userId = user?.id
+  // The admin plan list is recharge information (billing:read). Without it,
+  // e.g. as a deputy admin, the enabled public plans answer the same question
+  // and no request ends in a 403 toast.
+  const canReadAdminPlans = hasPermission(
+    user,
+    ADMIN_PERMISSION_RESOURCES.BILLING,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
   const { data: showBillingSource = false } = useQuery({
-    queryKey: ['usage-log-billing-source', isAdmin, userId],
+    queryKey: ['usage-log-billing-source', isAdmin, canReadAdminPlans, userId],
     enabled: logCategory === 'common' && userId != null,
     queryFn: async () => {
       if (isAdmin) {
-        const plansResult = await getAdminPlans()
+        const plansResult = canReadAdminPlans
+          ? await getAdminPlans()
+          : await getPublicPlans()
         return shouldShowBillingSource({
           isAdmin,
           plans: plansResult.success ? plansResult.data : undefined,

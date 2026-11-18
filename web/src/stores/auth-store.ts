@@ -34,6 +34,8 @@ export interface AuthUser {
   display_name?: string
   email?: string
   role: number
+  /** Set for role-10 users: a full admin or a deputy admin (no recharge access) */
+  admin_role?: 'admin' | 'deputy'
   status?: number
   group?: string
   quota?: number

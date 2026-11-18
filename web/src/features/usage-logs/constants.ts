@@ -118,6 +118,16 @@ export const LOG_TYPE_FILTERS = [
   ),
 ] as const
 
+/**
+ * Type filter values of recharge logs (Top-up and the legacy Manage type),
+ * mirroring the backend `model.RechargeLogTypes`. The server excludes these
+ * rows from every user's logs for viewers without billing:read.
+ */
+export const RECHARGE_LOG_TYPE_FILTER_VALUES: readonly string[] = [
+  String(LOG_TYPE_ENUM.TOPUP),
+  String(LOG_TYPE_ENUM.MANAGE),
+]
+
 // ============================================================================
 // Drawing Logs (MjProxy) Constants
 // ============================================================================
