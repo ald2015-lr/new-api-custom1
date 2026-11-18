@@ -7,7 +7,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
-	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 
@@ -73,11 +72,9 @@ func (e *extractor) add(role, text string) {
 	e.order++
 }
 
-func (e *extractor) image(role, url string) {
-	if role != roleUser {
-		e.unchecked()
-		return
-	}
+// image records an image of a system or user message (an upstream reads
+// both).
+func (e *extractor) image(url string) {
 	if url == "" {
 		return
 	}
@@ -128,10 +125,7 @@ func extractRequest(c *gin.Context, info *relaycommon.RelayInfo, viaResponses, p
 		} else {
 			e.add(roleUser, req.Prompt)
 		}
-	case *dto.AudioRequest:
-		if info.RelayMode != relayconstant.RelayModeAudioSpeech {
-			return e.ex, true
-		}
+	case *dto.AudioRequest: // speech; transcriptions skip moderation
 		e.add(roleSystem, req.Instructions)
 		e.add(roleUser, req.Input)
 	default:
@@ -258,7 +252,7 @@ func (e *extractor) chatContent(role string, content any) {
 						e.unchecked()
 					}
 				case dto.ContentTypeImageURL:
-					e.image(role, chatImageURL(part["image_url"]))
+					e.image(chatImageURL(part["image_url"]))
 				default:
 					e.unchecked()
 				}
@@ -284,7 +278,7 @@ func (e *extractor) mediaContent(role string, part *dto.MediaContent, texts []st
 		return append(texts, part.Text)
 	case dto.ContentTypeImageURL:
 		if image := part.GetImageMedia(); image != nil {
-			e.image(role, image.Url)
+			e.image(image.Url)
 		}
 	default:
 		e.unchecked()
@@ -392,7 +386,7 @@ func (e *extractor) responsesItems(items []any, defaultRole string) {
 						e.unchecked()
 						continue
 					}
-					e.image(class, url)
+					e.image(url)
 				default:
 					e.unchecked()
 				}
@@ -447,7 +441,7 @@ func (e *extractor) promptVariables(prompt map[string]any) {
 				e.add(roleUser, text)
 			case "input_image":
 				if url, ok := e.responsesImageURL(v["image_url"]); ok {
-					e.image(roleUser, url)
+					e.image(url)
 				} else {
 					e.unchecked()
 				}
@@ -464,11 +458,15 @@ func (e *extractor) claude(req *dto.ClaudeRequest, viaResponses bool) {
 	if req.IsStringSystem() {
 		e.add(roleSystem, req.GetStringSystem())
 	} else if req.System != nil {
-		var texts []string
+		// Both conversions concatenate the blocks' text; the Responses one
+		// keeps only text blocks.
+		var system strings.Builder
 		for _, block := range req.ParseSystem() {
-			texts = append(texts, block.GetText())
+			if !viaResponses || block.Type == "text" || block.Type == "input_text" || block.Type == "" {
+				system.WriteString(block.GetText())
+			}
 		}
-		e.add(roleSystem, strings.Join(texts, "\n"))
+		e.add(roleSystem, system.String())
 	}
 	for i := range req.Messages {
 		msg := &req.Messages[i]
@@ -501,7 +499,7 @@ func (e *extractor) claude(req *dto.ClaudeRequest, viaResponses bool) {
 					e.unchecked()
 					continue
 				}
-				e.image(class, url)
+				e.image(url)
 			case "document":
 				if !viaResponses && block.Source != nil && block.Source.Type == "text" {
 					texts = append(texts, common.Interface2String(block.Source.Data))
@@ -513,7 +511,7 @@ func (e *extractor) claude(req *dto.ClaudeRequest, viaResponses bool) {
 				// user message; its text stays tool output.
 				if !viaResponses && !block.IsStringContent() {
 					for _, url := range claudeToolResultImages(block.ParseMediaContent()) {
-						e.image(class, url)
+						e.image(url)
 					}
 				}
 			case "tool_use", "thinking", "redacted_thinking":
@@ -581,7 +579,7 @@ func (e *extractor) gemini(req *dto.GeminiChatRequest) {
 					texts = append(texts, media.Text)
 				case dto.ContentTypeImageURL:
 					if image := media.GetImageMedia(); image != nil {
-						e.image(roleUser, image.Url)
+						e.image(image.Url)
 					}
 				default:
 					e.unchecked()

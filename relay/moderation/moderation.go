@@ -42,16 +42,24 @@ const probeText = "new-api moderation probe: the quick brown fox jumps over the 
 // attempts reuse: the extraction per conversion path and every verdict the
 // request obtained (keyed as the cache, http(s) images included).
 type requestState struct {
-	extractions map[bool]*extraction
+	extractions map[extractionKey]*extraction
 	task        *extraction
 	verdicts    map[string]Verdict
+}
+
+// extractionKey is what an extraction depends on besides the request: a
+// retry on another channel may convert to Responses or pass the body through
+// where the first did not.
+type extractionKey struct {
+	viaResponses bool
+	passthrough  bool
 }
 
 func stateOf(c *gin.Context) *requestState {
 	if state, ok := common.GetContextKeyType[*requestState](c, constant.ContextKeyModerationState); ok && state != nil {
 		return state
 	}
-	state := &requestState{extractions: make(map[bool]*extraction), verdicts: make(map[string]Verdict)}
+	state := &requestState{extractions: make(map[extractionKey]*extraction), verdicts: make(map[string]Verdict)}
 	common.SetContextKey(c, constant.ContextKeyModerationState, state)
 	return state
 }
@@ -96,14 +104,15 @@ func CheckAttempt(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 		viaResponses = !passthrough && service.ShouldChatCompletionsUseResponsesGlobal(info.ChannelId, info.ChannelType, info.OriginModelName)
 	}
 	state := stateOf(c)
-	ex, ok := state.extractions[viaResponses]
+	key := extractionKey{viaResponses: viaResponses, passthrough: passthrough}
+	ex, ok := state.extractions[key]
 	if !ok {
 		var handled bool
 		ex, handled = extractRequest(c, info, viaResponses, passthrough)
 		if !handled {
 			return rejectUnsupported(c, info, audit, started, relaycommon.ModerationDetailRequestType)
 		}
-		state.extractions[viaResponses] = ex
+		state.extractions[key] = ex
 	}
 	if info.ApiKey == "" {
 		return nil // nothing to protect: the upstream call fails anyway
