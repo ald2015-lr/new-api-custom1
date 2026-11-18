@@ -175,6 +175,9 @@ func TestValidateOptionValueBonusSettings(t *testing.T) {
 		"InviteRewardExpireDays":                  {"-1", "x"},
 		"checkin_setting.expire_only_when_unused": {"yes", "1", ""},
 		"InviteRewardExpireOnlyWhenUnused":        {"TRUE"},
+		"InviteAbuseBanEnabled":                   {"yes", "1", ""},
+		"InviteAbuseBanThreshold":                 {"", "0", "100001", "1.5", "five"},
+		"InviteAbuseBanMinRedeemQuota":            {"", "-1", "1.5", fmt.Sprint(int64(common.MaxWalletQuota) + 1)},
 	}
 	for key, values := range invalid {
 		for _, value := range values {
@@ -189,24 +192,31 @@ func TestValidateOptionValueBonusSettings(t *testing.T) {
 		"InviteRewardExpireDays":                  {"0", "3650"},
 		"checkin_setting.expire_only_when_unused": {"true", "false"},
 		"InviteRewardExpireOnlyWhenUnused":        {"true", "false"},
+		"InviteAbuseBanEnabled":                   {"true", "false"},
+		"InviteAbuseBanThreshold":                 {"1", "5", "100000"},
+		"InviteAbuseBanMinRedeemQuota":            {"0", "500000", fmt.Sprint(int64(common.MaxWalletQuota))},
 	}
 	for key, values := range valid {
 		for _, value := range values {
 			assert.NoError(t, validateOptionValue(key, value), "%s=%q", key, value)
 		}
 	}
+	assert.EqualError(t, validateOptionValue("InviteAbuseBanThreshold", "0"), "Invite count threshold must be an integer between 1 and 100000")
+	assert.EqualError(t, validateOptionValue("InviteAbuseBanMinRedeemQuota", "-1"), "Minimum redeemed quota must be a non-negative integer")
 }
 
 // The invite reward options are plain options and the check-in fields are
 // read through the config manager, so a saved value takes effect at once.
 func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 	threshold, days, sliding := common.InviteRechargeThresholdQuota, common.InviteRewardExpireDays, common.InviteRewardExpireOnlyWhenUnused
+	abuseEnabled, abuseThreshold, abuseMinRedeem := common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota
 	checkin := *operation_setting.GetCheckinSetting()
 	originalMap := common.OptionMap
 	common.OptionMap = map[string]string{}
 	t.Cleanup(func() {
 		common.OptionMap = originalMap
 		common.InviteRechargeThresholdQuota, common.InviteRewardExpireDays, common.InviteRewardExpireOnlyWhenUnused = threshold, days, sliding
+		common.InviteAbuseBanEnabled, common.InviteAbuseBanThreshold, common.InviteAbuseBanMinRedeemQuota = abuseEnabled, abuseThreshold, abuseMinRedeem
 		*operation_setting.GetCheckinSetting() = checkin
 	})
 
@@ -218,6 +228,9 @@ func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 		"checkin_setting.paid_threshold_quota":    "0",
 		"checkin_setting.paid_expire_days":        "14",
 		"checkin_setting.expire_only_when_unused": "true",
+		"InviteAbuseBanEnabled":                   "true",
+		"InviteAbuseBanThreshold":                 "8",
+		"InviteAbuseBanMinRedeemQuota":            "250000",
 	} {
 		require.NoError(t, updateOptionMap(key, value))
 	}
@@ -225,6 +238,8 @@ func TestBonusOptionsApplyWhenSaved(t *testing.T) {
 	assert.Equal(t, 500000, common.InviteRechargeThresholdQuota)
 	assert.Equal(t, 7, common.InviteRewardExpireDays)
 	assert.True(t, common.InviteRewardExpireOnlyWhenUnused)
+	assert.True(t, common.InviteAbuseBanEnabled)
+	assert.Equal(t, InviteAbuseSettings{Threshold: 8, MinRedeemQuota: 250000}, CurrentInviteAbuseSettings())
 	setting := operation_setting.GetCheckinSetting()
 	assert.Equal(t, 1.5, setting.PaidMultiplier)
 	assert.Zero(t, setting.PaidThresholdQuota)

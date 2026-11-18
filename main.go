@@ -141,6 +141,9 @@ func main() {
 	// Expiring check-in / invite rewards and pending invite rewards
 	service.StartBonusExpiryTask()
 
+	// Invite abuse rule: disables inviters whose invited users never recharge
+	service.StartInviteAbuseBanTask()
+
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
 	service.StartSystemInstanceReporter()

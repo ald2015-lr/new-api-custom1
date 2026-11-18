@@ -1,0 +1,459 @@
+package model
+
+import (
+	"cmp"
+	"errors"
+	"fmt"
+	"slices"
+	"sync/atomic"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// The invite abuse rule: an inviter (not deleted, not an administrator, not
+// exempt) with at least the threshold of invited users that are not deleted,
+// none of whom — deleted ones included — has a qualifying recharge, is
+// disabled together with its invited users that are enabled, not
+// administrators and not exempt. Invited users are the users whose
+// inviter_id is the inviter; aff_count is not a reliable count.
+const (
+	InviteAbuseKindInviter = "inviter"
+	InviteAbuseKindInvitee = "invitee"
+
+	// InviteAbuseSweepInterval is how often the master node sweeps every
+	// inviter while the rule is enabled and its settings stay the same.
+	InviteAbuseSweepInterval = 10 * time.Minute
+
+	inviteAbuseSweepBudget = 50 * time.Second
+	// A sign-up waits for its inviter's check at most this long; accounts it
+	// leaves enabled are disabled by the sweep.
+	inviteAbuseSignUpBudget = 5 * time.Second
+	inviteAbusePreviewItems = 100
+	inviteAbuseRevokeReason = "invite_abuse"
+	inviteAbuseAuditAction  = "user.invite_abuse_ban"
+)
+
+// inviteAbuseBatchSize is how many candidate inviters one grouped query
+// returns; the sweep and the preview page through them by inviter id.
+var inviteAbuseBatchSize = 200
+
+// InviteAbuseBan records an account the invite abuse rule disabled. A record
+// an administrator released by enabling the account again exempts the
+// account from the rule from then on.
+type InviteAbuseBan struct {
+	Id          int    `json:"id"`
+	UserId      int    `json:"user_id" gorm:"not null;uniqueIndex"`
+	InviterId   int    `json:"inviter_id" gorm:"not null;index"` // the abusive inviter; its own id for kind inviter
+	Kind        string `json:"kind" gorm:"type:varchar(16);not null"`
+	InviteCount int    `json:"invite_count" gorm:"not null"` // the inviter's invited users when the account was disabled
+	CreatedAt   int64  `json:"created_at" gorm:"type:bigint;not null"`
+	ReleasedAt  int64  `json:"released_at" gorm:"type:bigint;not null;default:0"`
+	ReleasedBy  int    `json:"released_by" gorm:"not null;default:0"`
+}
+
+// InviteAbuseSettings are the thresholds the invite abuse rule runs with.
+type InviteAbuseSettings struct {
+	// Threshold is the number of invited users (not deleted) from which an
+	// inviter is checked.
+	Threshold int
+	// MinRedeemQuota is the redeemed quota from which an invited user's used
+	// redemption codes count as a recharge.
+	MinRedeemQuota int64
+}
+
+// CurrentInviteAbuseSettings returns the saved settings of the rule.
+func CurrentInviteAbuseSettings() InviteAbuseSettings {
+	return InviteAbuseSettings{
+		Threshold:      max(common.InviteAbuseBanThreshold, 1),
+		MinRedeemQuota: max(int64(common.InviteAbuseBanMinRedeemQuota), 0),
+	}
+}
+
+// InviteAbusePreview is what the rule would disable with some settings.
+type InviteAbusePreview struct {
+	Threshold         int                      `json:"threshold"`
+	MinRedeemQuota    int64                    `json:"min_redeem_quota"`
+	AbusiveInviters   int                      `json:"abusive_inviters"`
+	InvitersToDisable int                      `json:"inviters_to_disable"`
+	InviteesToDisable int64                    `json:"invitees_to_disable"`
+	Items             []InviteAbusePreviewItem `json:"items"`
+	Truncated         bool                     `json:"truncated"`
+}
+
+// InviteAbusePreviewItem is one abusive inviter of a preview.
+type InviteAbusePreviewItem struct {
+	Id                int    `json:"id"`
+	Username          string `json:"username"`
+	DisplayName       string `json:"display_name"`
+	Status            int    `json:"status"`
+	InviteCount       int64  `json:"invite_count"`
+	InviteesToDisable int64  `json:"invitees_to_disable"`
+}
+
+// inviteAbuseCandidate is an inviter whose invited users reach the threshold
+// without a qualifying recharge. Whether the rule applies to the inviter
+// itself (deleted, administrator, exempt) is checked separately.
+type inviteAbuseCandidate struct {
+	InviterId   int
+	InviteCount int64
+	// InviteesToDisable counts the invited users that are not deleted,
+	// enabled, not administrators and not exempt.
+	InviteesToDisable int64
+}
+
+// qualifyingTopUps selects the successful paid orders that count as a
+// recharge: online top-ups (amount > 0), subscriptions paid through a payment
+// gateway (amount 0, money > 0) and orders an administrator completed. A
+// subscription paid from the balance writes no top_ups row.
+func qualifyingTopUps() *gorm.DB {
+	return DB.Model(&TopUp{}).Where("status = ? AND (amount > 0 OR money > 0)", common.TopUpStatusSuccess)
+}
+
+// qualifyingRedemptions groups the used redemption codes by user and keeps
+// the users who redeemed at least minQuota in total. Codes deleted after use
+// still count.
+func qualifyingRedemptions(minQuota int64) *gorm.DB {
+	return DB.Unscoped().Model(&Redemption{}).Where("status = ?", common.RedemptionCodeStatusUsed).
+		Group("used_user_id").Having("SUM(quota) >= ?", minQuota)
+}
+
+// inviteAbuseExemptUsers selects the users an administrator enabled again
+// after the rule disabled them.
+func inviteAbuseExemptUsers() *gorm.DB {
+	return DB.Model(&InviteAbuseBan{}).Select("user_id").Where("released_at > ?", 0)
+}
+
+// listInviteAbuseCandidates returns up to limit candidates with an inviter id
+// above afterInviterId, in inviter id order. One grouped scan of users with
+// the qualifying recharges joined; portable to SQLite, MySQL and PostgreSQL.
+func listInviteAbuseCandidates(settings InviteAbuseSettings, afterInviterId int, limit int) ([]inviteAbuseCandidate, error) {
+	userId := clause.Column{Table: clause.CurrentTable, Name: "id"}
+	const counted = "SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END)"
+	var candidates []inviteAbuseCandidate
+	err := DB.Unscoped().Model(&User{}).
+		Select("inviter_id, "+counted+" AS invite_count, "+
+			"SUM(CASE WHEN deleted_at IS NULL AND status = ? AND role < ? AND exempt_users.user_id IS NULL THEN 1 ELSE 0 END) AS invitees_to_disable",
+			common.UserStatusEnabled, common.RoleAdminUser).
+		Joins("LEFT JOIN (?) AS paid_top_ups ON paid_top_ups.user_id = ?", qualifyingTopUps().Distinct("user_id"), userId).
+		Joins("LEFT JOIN (?) AS paid_redemptions ON paid_redemptions.used_user_id = ?", qualifyingRedemptions(settings.MinRedeemQuota).Select("used_user_id"), userId).
+		Joins("LEFT JOIN (?) AS exempt_users ON exempt_users.user_id = ?", inviteAbuseExemptUsers(), userId).
+		Where("inviter_id > ?", afterInviterId).
+		Group("inviter_id").
+		Having(counted+" >= ? AND COUNT(paid_top_ups.user_id) = 0 AND COUNT(paid_redemptions.used_user_id) = 0", settings.Threshold).
+		Order("inviter_id").
+		Limit(limit).
+		Scan(&candidates).Error
+	return candidates, err
+}
+
+// loadInviteAbuseInviters returns, by id, the candidates' inviters the rule
+// applies to: not deleted, not administrators and not exempt.
+func loadInviteAbuseInviters(candidates []inviteAbuseCandidate) (map[int]User, error) {
+	inviters := make(map[int]User, len(candidates))
+	if len(candidates) == 0 {
+		return inviters, nil
+	}
+	ids := make([]int, 0, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.InviterId)
+	}
+	var users []User
+	if err := DB.Select("id", "username", "display_name", "status", "role").
+		Where("id IN ? AND role < ?", ids, common.RoleAdminUser).
+		Where("id NOT IN (?)", inviteAbuseExemptUsers()).
+		Find(&users).Error; err != nil {
+		return nil, err
+	}
+	for _, user := range users {
+		inviters[user.Id] = user
+	}
+	return inviters, nil
+}
+
+// enforceInviteAbuseRuleOnInviter applies the rule to one inviter with a few
+// indexed single-inviter queries and returns how many accounts it disabled.
+func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings, deadline time.Time) (int, error) {
+	var inviter User
+	err := DB.Select("id", "username", "status", "role").
+		Where("id = ? AND role < ?", inviterId, common.RoleAdminUser).
+		Where("id NOT IN (?)", inviteAbuseExemptUsers()).
+		Take(&inviter).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, nil // deleted, an administrator or exempt
+	}
+	if err != nil {
+		return 0, err
+	}
+	var inviteCount int64
+	if err := DB.Model(&User{}).Where("inviter_id = ?", inviterId).Count(&inviteCount).Error; err != nil {
+		return 0, err
+	}
+	if inviteCount < int64(settings.Threshold) {
+		return 0, nil
+	}
+	// Deleted invited users are included: one who paid before being deleted
+	// still clears the inviter.
+	invitees := DB.Unscoped().Model(&User{}).Select("id").Where("inviter_id = ?", inviterId)
+	var paid []int
+	if err := qualifyingTopUps().Where("user_id IN (?)", invitees).Limit(1).Pluck("user_id", &paid).Error; err != nil {
+		return 0, err
+	}
+	if len(paid) == 0 {
+		if err := qualifyingRedemptions(settings.MinRedeemQuota).Where("used_user_id IN (?)", invitees).Limit(1).Pluck("used_user_id", &paid).Error; err != nil {
+			return 0, err
+		}
+	}
+	if len(paid) > 0 {
+		return 0, nil
+	}
+	disabled, _, err := disableAbusiveInviter(inviter, inviteCount, deadline)
+	return disabled, err
+}
+
+// disableAbusiveInviter disables an abusive inviter and then its invited
+// users that are not deleted, enabled, not administrators and not exempt,
+// newest first, until the deadline. It returns how many accounts it disabled
+// and whether it got through all of them.
+func disableAbusiveInviter(inviter User, inviteCount int64, deadline time.Time) (int, bool, error) {
+	var invitees []User
+	if err := DB.Select("id", "username").
+		Where("inviter_id = ? AND status = ? AND role < ?", inviter.Id, common.UserStatusEnabled, common.RoleAdminUser).
+		Where("id NOT IN (?)", inviteAbuseExemptUsers()).
+		Order("id DESC").
+		Find(&invitees).Error; err != nil {
+		return 0, false, err
+	}
+	type account struct {
+		user User
+		kind string
+	}
+	accounts := make([]account, 0, len(invitees)+1)
+	if inviter.Status == common.UserStatusEnabled {
+		accounts = append(accounts, account{user: inviter, kind: InviteAbuseKindInviter})
+	}
+	for _, invitee := range invitees {
+		accounts = append(accounts, account{user: invitee, kind: InviteAbuseKindInvitee})
+	}
+	disabled, finished := 0, true
+	var err error
+	for _, target := range accounts {
+		if time.Now().After(deadline) {
+			finished = false
+			break
+		}
+		var changed bool
+		changed, err = DisableUserBySystem(target.user.Id, inviteAbuseRevokeReason)
+		if err != nil {
+			finished = false
+			break
+		}
+		if changed {
+			recordInviteAbuseBan(target.user, inviter.Id, target.kind, inviteCount)
+			disabled++
+		}
+	}
+	if disabled > 0 {
+		common.SysLog(common.LogText("invite abuse: inviter %d has %d invited users without a recharge, disabled %d accounts", inviter.Id, inviteCount, disabled))
+	}
+	return disabled, finished, err
+}
+
+// recordInviteAbuseBan stores the ban record of an account the rule just
+// disabled and tells the user (user log) and the administrators (audit log)
+// why it was disabled.
+func recordInviteAbuseBan(user User, inviterId int, kind string, inviteCount int64) {
+	ban := InviteAbuseBan{
+		UserId:      user.Id,
+		InviterId:   inviterId,
+		Kind:        kind,
+		InviteCount: int(inviteCount),
+		CreatedAt:   common.GetTimestamp(),
+	}
+	if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&ban).Error; err != nil {
+		common.SysError(common.LogText("failed to record the invite abuse ban of user %d: %v", user.Id, err))
+	}
+	message := common.NewMessage("Account disabled automatically: {{count}} invited users and none of them has recharged.", map[string]any{"count": inviteCount})
+	if kind == InviteAbuseKindInvitee {
+		message = common.NewMessage("Account disabled automatically: your inviter's {{count}} invited users have no recharge.", map[string]any{"count": inviteCount})
+	}
+	RecordLog(user.Id, LogTypeSystem, message)
+	params := map[string]any{
+		"id":           user.Id,
+		"username":     user.Username,
+		"kind":         kind,
+		"inviter_id":   inviterId,
+		"invite_count": inviteCount,
+	}
+	content := fmt.Sprintf("Disabled automatically by the invite abuse rule (%s, inviter ID %d, %d invited users without a recharge)", kind, inviterId, inviteCount)
+	// No administrator acts here; the system actor is shown with the
+	// administrator role so administrators see the entry in the audit log.
+	RecordOperationAuditLog(user.Id, common.RoleAdminUser, content, "", inviteAbuseAuditAction, params,
+		&AuditAdminInfo{AdminUsername: "system", AuthMethod: "system"}, nil)
+}
+
+// applyInviteAbuseRuleAfterSignUp checks the inviter of a user who just signed
+// up with an invite code, then reloads the user's status and authentication
+// version: a sign-up that makes the inviter abusive leaves the new account
+// disabled at once, and the OAuth login that follows refuses it. Errors are
+// logged and never fail the sign-up.
+func (user *User) applyInviteAbuseRuleAfterSignUp(inviterId int) {
+	if inviterId == 0 || !common.InviteAbuseBanEnabled {
+		return
+	}
+	if _, err := enforceInviteAbuseRuleOnInviter(inviterId, CurrentInviteAbuseSettings(), time.Now().Add(inviteAbuseSignUpBudget)); err != nil {
+		common.SysError(common.LogText("invite abuse check of inviter %d failed: %v", inviterId, err))
+	}
+	var current User
+	if err := DB.Select("status", "auth_version").Where("id = ?", user.Id).Take(&current).Error; err != nil {
+		common.SysError(common.LogText("failed to reload the status of new user %d: %v", user.Id, err))
+		return
+	}
+	user.Status, user.AuthVersion = current.Status, current.AuthVersion
+}
+
+// ReleaseInviteAbuseBan marks the user's active ban record as released by the
+// administrator who is enabling the account again; the user is exempt from
+// the rule from then on. It reports whether a record was released.
+func ReleaseInviteAbuseBan(userId int, adminId int) (bool, error) {
+	result := DB.Model(&InviteAbuseBan{}).
+		Where("user_id = ? AND released_at = ?", userId, 0).
+		Updates(map[string]any{"released_at": common.GetTimestamp(), "released_by": adminId})
+	return result.RowsAffected > 0, result.Error
+}
+
+// PreviewInviteAbuse reports what the rule would disable now with settings,
+// whether or not the rule is enabled: totals and the abusive inviters with
+// the most invited users first.
+func PreviewInviteAbuse(settings InviteAbuseSettings) (*InviteAbusePreview, error) {
+	preview := &InviteAbusePreview{Threshold: settings.Threshold, MinRedeemQuota: settings.MinRedeemQuota}
+	items := make([]InviteAbusePreviewItem, 0)
+	afterInviterId := 0
+	for {
+		candidates, err := listInviteAbuseCandidates(settings, afterInviterId, inviteAbuseBatchSize)
+		if err != nil {
+			return nil, err
+		}
+		inviters, err := loadInviteAbuseInviters(candidates)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range candidates {
+			afterInviterId = candidate.InviterId
+			inviter, applies := inviters[candidate.InviterId]
+			if !applies {
+				continue
+			}
+			preview.AbusiveInviters++
+			if inviter.Status == common.UserStatusEnabled {
+				preview.InvitersToDisable++
+			}
+			preview.InviteesToDisable += candidate.InviteesToDisable
+			items = append(items, InviteAbusePreviewItem{
+				Id:                inviter.Id,
+				Username:          inviter.Username,
+				DisplayName:       inviter.DisplayName,
+				Status:            inviter.Status,
+				InviteCount:       candidate.InviteCount,
+				InviteesToDisable: candidate.InviteesToDisable,
+			})
+		}
+		if len(candidates) < inviteAbuseBatchSize {
+			break
+		}
+	}
+	slices.SortFunc(items, func(a, b InviteAbusePreviewItem) int {
+		if order := cmp.Compare(b.InviteCount, a.InviteCount); order != 0 {
+			return order
+		}
+		return cmp.Compare(b.Id, a.Id)
+	})
+	if len(items) > inviteAbusePreviewItems {
+		items, preview.Truncated = items[:inviteAbusePreviewItems], true
+	}
+	preview.Items = items
+	return preview, nil
+}
+
+// inviteAbuseSweepState is where the master node's sweep stands. Only the
+// caller holding inviteAbuseSweepRunning reads or writes it.
+type inviteAbuseSweepState struct {
+	settings   InviteAbuseSettings // the settings of the current pass
+	cursor     int                 // > 0: the current pass continues after this inviter id
+	finishedAt time.Time           // when the last complete pass with settings ended
+}
+
+var (
+	inviteAbuseSweepRunning atomic.Bool
+	inviteAbuseSweep        inviteAbuseSweepState
+)
+
+// RunInviteAbuseSweepIfDue is the master node's minute tick of the rule.
+// While the rule is enabled it sweeps every inviter right after startup,
+// after the rule is turned on, after the threshold or the minimum redeemed
+// quota changed, and otherwise every InviteAbuseSweepInterval. A pass stops
+// at its time budget and continues on the next tick. Several masters are
+// safe: every ban is a conditional update.
+func RunInviteAbuseSweepIfDue(now time.Time) {
+	if !inviteAbuseSweepRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer inviteAbuseSweepRunning.Store(false)
+	if !common.InviteAbuseBanEnabled {
+		inviteAbuseSweep = inviteAbuseSweepState{} // turning the rule on sweeps at once
+		return
+	}
+	settings := CurrentInviteAbuseSettings()
+	if settings != inviteAbuseSweep.settings {
+		inviteAbuseSweep = inviteAbuseSweepState{settings: settings}
+	}
+	if inviteAbuseSweep.cursor == 0 && !inviteAbuseSweep.finishedAt.IsZero() && now.Sub(inviteAbuseSweep.finishedAt) < InviteAbuseSweepInterval {
+		return
+	}
+	cursor, complete, err := sweepInviteAbuse(settings, inviteAbuseSweep.cursor, time.Now().Add(inviteAbuseSweepBudget))
+	if err != nil {
+		common.SysError(common.LogText("invite abuse sweep failed: %v", err))
+	}
+	inviteAbuseSweep.cursor = cursor
+	if complete {
+		inviteAbuseSweep.cursor, inviteAbuseSweep.finishedAt = 0, now
+	} else if err == nil {
+		common.SysLog(common.LogText("invite abuse sweep reached its time budget, continuing after inviter %d on the next tick", cursor))
+	}
+}
+
+// sweepInviteAbuse applies the rule to the candidates after afterInviterId
+// until the deadline. It returns the inviter id the pass continues after and
+// whether the pass reached the end.
+func sweepInviteAbuse(settings InviteAbuseSettings, afterInviterId int, deadline time.Time) (int, bool, error) {
+	for {
+		candidates, err := listInviteAbuseCandidates(settings, afterInviterId, inviteAbuseBatchSize)
+		if err != nil {
+			return afterInviterId, false, err
+		}
+		inviters, err := loadInviteAbuseInviters(candidates)
+		if err != nil {
+			return afterInviterId, false, err
+		}
+		for _, candidate := range candidates {
+			inviter, applies := inviters[candidate.InviterId]
+			// A disabled inviter whose invited users are all disabled is done.
+			if applies && (inviter.Status == common.UserStatusEnabled || candidate.InviteesToDisable > 0) {
+				if time.Now().After(deadline) {
+					return afterInviterId, false, nil
+				}
+				_, finished, err := disableAbusiveInviter(inviter, candidate.InviteCount, deadline)
+				if err != nil || !finished {
+					return afterInviterId, false, err
+				}
+			}
+			afterInviterId = candidate.InviterId
+		}
+		if len(candidates) < inviteAbuseBatchSize {
+			return afterInviterId, true, nil
+		}
+	}
+}

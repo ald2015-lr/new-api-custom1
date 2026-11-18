@@ -159,6 +159,9 @@ func InitOptionMap() {
 	common.OptionMap["InviteRechargeThresholdQuota"] = strconv.Itoa(common.InviteRechargeThresholdQuota)
 	common.OptionMap["InviteRewardExpireDays"] = strconv.Itoa(common.InviteRewardExpireDays)
 	common.OptionMap["InviteRewardExpireOnlyWhenUnused"] = strconv.FormatBool(common.InviteRewardExpireOnlyWhenUnused)
+	common.OptionMap["InviteAbuseBanEnabled"] = strconv.FormatBool(common.InviteAbuseBanEnabled)
+	common.OptionMap["InviteAbuseBanThreshold"] = strconv.Itoa(common.InviteAbuseBanThreshold)
+	common.OptionMap["InviteAbuseBanMinRedeemQuota"] = strconv.Itoa(common.InviteAbuseBanMinRedeemQuota)
 	common.OptionMap["QuotaRemindEnabled"] = strconv.FormatBool(common.QuotaRemindEnabled)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
@@ -469,6 +472,8 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticEnableChannelEnabled = boolValue
 		case "QuotaRemindEnabled":
 			common.QuotaRemindEnabled = boolValue
+		case "InviteAbuseBanEnabled":
+			common.InviteAbuseBanEnabled = boolValue
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
 		case "LogResponseModelEnabled":
@@ -697,6 +702,10 @@ func updateOptionMap(key string, value string) (err error) {
 		common.InviteRewardExpireDays, _ = strconv.Atoi(value)
 	case "InviteRewardExpireOnlyWhenUnused":
 		common.InviteRewardExpireOnlyWhenUnused = value == "true"
+	case "InviteAbuseBanThreshold":
+		common.InviteAbuseBanThreshold, _ = strconv.Atoi(value)
+	case "InviteAbuseBanMinRedeemQuota":
+		common.InviteAbuseBanMinRedeemQuota, _ = strconv.Atoi(value)
 	case "QuotaRemindThreshold":
 		common.QuotaRemindThreshold, _ = strconv.Atoi(value)
 	case "PreConsumedQuota":

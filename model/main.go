@@ -382,6 +382,7 @@ func migrateDB() error {
 		&ChannelQuotaLimit{},
 		&BonusGrant{},
 		&InviteReward{},
+		&InviteAbuseBan{},
 	)
 	if err != nil {
 		return err

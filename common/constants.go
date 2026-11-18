@@ -161,6 +161,20 @@ var InviteRewardExpireDays = 30
 // InviteRewardExpireOnlyWhenUnused makes invite rewards expire only after
 // InviteRewardExpireDays without any use; every use restarts the period.
 var InviteRewardExpireOnlyWhenUnused = false
+
+// InviteAbuseBanEnabled turns on the invite abuse rule: an inviter with at
+// least InviteAbuseBanThreshold invited users, none of whom has recharged, is
+// disabled together with those users (see model/invite_abuse.go).
+var InviteAbuseBanEnabled = false
+
+// InviteAbuseBanThreshold is the number of invited users (not deleted) from
+// which the invite abuse rule checks an inviter.
+var InviteAbuseBanThreshold = 5
+
+// InviteAbuseBanMinRedeemQuota is the redeemed quota from which an invited
+// user's redemption codes count as a recharge for the invite abuse rule.
+var InviteAbuseBanMinRedeemQuota = int(QuotaPerUnit)
+
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
