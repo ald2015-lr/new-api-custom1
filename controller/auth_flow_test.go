@@ -1223,6 +1223,16 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 		Id: 77, Slug: "email-trust", Name: "Email trust", Enabled: true,
 		UserIdField: "sub", EmailField: "email", UserInfoEndpoint: idp.URL,
 	})
+	// The root email_verified claim speaks for the root email claim only, not
+	// for an address mapped from another field.
+	customNested := oauth.NewGenericOAuthProvider(&model.CustomOAuthProvider{
+		Id: 78, Slug: "nested-email", Name: "Nested email", Enabled: true,
+		UserIdField: "sub", EmailField: "profile.contact_email", UserInfoEndpoint: idp.URL,
+	})
+	customMail := oauth.NewGenericOAuthProvider(&model.CustomOAuthProvider{
+		Id: 79, Slug: "mail-field", Name: "Mail field", Enabled: true,
+		UserIdField: "sub", EmailField: "mail", UserInfoEndpoint: idp.URL,
+	})
 	oidc := &oauth.OIDCProvider{}
 	providerToken := &oauth.OAuthToken{AccessToken: "provider-token", TokenType: "Bearer"}
 
@@ -1244,6 +1254,11 @@ func TestOAuthSignUpStoresOnlyVerifiedEmailsThatMeetThePolicy(t *testing.T) {
 		{"custom without the claim", custom, `{"sub":"custom-3","email":"10008@qq.com"}`, ""},
 		{"custom claim below the root", custom, `{"sub":"custom-4","email":"10009@qq.com","profile":{"email_verified":true}}`, ""},
 		{"custom verified QQ alias", custom, `{"sub":"custom-5","email":"owner@qq.com","email_verified":true}`, ""},
+		{"custom nested field that is not the root email", customNested, `{"sub":"nested-1","email":"10012@qq.com","email_verified":true,"profile":{"contact_email":"10013@qq.com"}}`, ""},
+		{"custom nested field that is the root email", customNested, `{"sub":"nested-2","email":"10014@qq.com","email_verified":true,"profile":{"contact_email":" 10014@QQ.com "}}`, "10014@qq.com"},
+		{"custom mail field that is not the root email", customMail, `{"sub":"mail-1","email":"10015@qq.com","email_verified":true,"mail":"10016@qq.com"}`, ""},
+		{"custom mail field without a root email", customMail, `{"sub":"mail-2","email_verified":true,"mail":"10017@qq.com"}`, ""},
+		{"custom mail field that is the root email", customMail, `{"sub":"mail-3","email":"10018@qq.com","email_verified":true,"mail":"10018@qq.com"}`, "10018@qq.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setUserInfo(tc.userInfo)

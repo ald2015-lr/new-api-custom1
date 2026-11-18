@@ -274,14 +274,20 @@ func (p *GenericOAuthProvider) GetUserInfo(ctx context.Context, token *OAuthToke
 		}
 	}
 
+	// Only the conventional root-level email_verified claim vouches for an
+	// address, and only for the root email claim it describes: an address
+	// mapped from another field counts as verified only when it is that same
+	// address. A provider without the claim signs users up without an email.
+	rootEmail := strings.TrimSpace(gjson.Get(bodyStr, "email").String())
+	emailVerified := isTrueClaim([]byte(gjson.Get(bodyStr, "email_verified").Raw)) &&
+		rootEmail != "" && strings.EqualFold(rootEmail, strings.TrimSpace(email))
+
 	return &OAuthUser{
 		ProviderUserID: userId,
 		Username:       username,
 		DisplayName:    displayName,
 		Email:          email,
-		// Only the conventional root-level email_verified claim vouches for
-		// the address; a provider without it signs users up without an email.
-		EmailVerified: isTrueClaim([]byte(gjson.Get(bodyStr, "email_verified").Raw)),
+		EmailVerified:  emailVerified,
 		Extra: map[string]any{
 			"provider": p.config.Slug,
 		},
