@@ -423,6 +423,41 @@ func TestManageUserConvertsBetweenFullAndDeputyAdmin(t *testing.T) {
 		})
 	}
 
+	// Promote makes a full admin even when the id still carries a stale deputy
+	// assignment and an allow override: both go with the role change.
+	require.NoError(t, db.Create(&model.CasbinRule{Ptype: "p", V0: authz.UserSubject(staleMarker.Id), V1: authz.ResourceChannel, V2: authz.ActionSecretView, V3: "allow"}).Error)
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"promote"}`, staleMarker.Id), identity, manageActionProof(t, identity, staleMarker.Id, "promote"))
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assertConverted(staleMarker, common.RoleAdminUser, false, 2)
+	assert.Empty(t, userCasbinRules(t, db, staleMarker.Id))
+	assert.True(t, authz.Can(staleMarker.Id, common.RoleAdminUser, authz.BillingRead))
+	assert.False(t, authz.Can(staleMarker.Id, common.RoleAdminUser, authz.ChannelSecretView))
+	var promoted struct {
+		Data model.User `json:"data"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(performAdminUserGet(t, fmt.Sprintf("/api/user/%d", staleMarker.Id), model.User{Id: identity.UserID, Role: common.RoleRootUser}), &promoted))
+	assert.Equal(t, authz.BuiltInRoleAdmin, promoted.Data.AdminRole)
+
+	// Once the change has committed, a failed policy reload is logged: the
+	// sessions still end and the change is still audited and reported.
+	reloadFails := createTarget("reload-fails", common.RoleCommonUser)
+	const failReload = "test:fail_policy_reload"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(failReload, func(tx *gorm.DB) {
+		// Only the policy load reads whole rows; the assignment checks count.
+		if _, loading := tx.Statement.Dest.(*[]model.CasbinRule); loading {
+			tx.AddError(errors.New("policy store unavailable"))
+		}
+	}))
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"set_deputy"}`, reloadFails.Id), identity, manageActionProof(t, identity, reloadFails.Id, "set_deputy"))
+	require.NoError(t, db.Callback().Query().Remove(failReload))
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assertConverted(reloadFails, common.RoleAdminUser, true, 2)
+	var reloadAudit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Order("id desc").First(&reloadAudit).Error)
+	params, err = common.Marshal(reloadAudit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf(`{"action":"set_deputy","username":"reload-fails","id":%d,"verification_method":"password","target_user_id":%d}`, reloadFails.Id, reloadFails.Id), string(params))
+
 	// The role change and the assignment commit together: a failed role
 	// update leaves no assignment behind.
 	failing := createTarget("failing-promotion", common.RoleCommonUser)
@@ -449,9 +484,37 @@ func TestDeleteUserClearsAuthorizationOfTheDeletedId(t *testing.T) {
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 		return authz.SetUserPermissionsInTx(tx, deputy.Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSensitiveWrite: true}})
 	}))
-	identity, proof := manageUserProof(t, db, service.VerificationOperation{Scope: service.VerificationScopeAdminUserDelete, Context: []byte(fmt.Sprintf(`{"user_id":%d}`, deputy.Id))})
-	recorder := adminUserRequest(http.MethodDelete, "/api/user/:id", "", proof, identity, common.RoleRootUser, gin.Params{{Key: "id", Value: fmt.Sprint(deputy.Id)}}, DeleteUser)
-	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	rulesBefore := userCasbinRules(t, db, deputy.Id)
+	deleteOperation := service.VerificationOperation{Scope: service.VerificationScopeAdminUserDelete, Context: []byte(fmt.Sprintf(`{"user_id":%d}`, deputy.Id))}
+	identity, proof := manageUserProof(t, db, deleteOperation)
+	deleteDeputy := func(proof string) string {
+		return adminUserRequest(http.MethodDelete, "/api/user/:id", "", proof, identity, common.RoleRootUser, gin.Params{{Key: "id", Value: fmt.Sprint(deputy.Id)}}, DeleteUser).Body.String()
+	}
+
+	// The rows go in the delete transaction: when they cannot be removed, the
+	// user stays, so no id is freed with an allow override still attached.
+	const failCleanup = "test:fail_authorization_cleanup"
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register(failCleanup, func(tx *gorm.DB) {
+		if tx.Statement.Table == "casbin_rule" {
+			tx.AddError(errors.New("policy store unavailable"))
+		}
+	}))
+	body := deleteDeputy(proof)
+	require.NoError(t, db.Callback().Delete().Remove(failCleanup))
+	assert.Contains(t, body, `"success":false`)
+	_, err := model.GetUserById(deputy.Id, false)
+	require.NoError(t, err, "the user is not deleted without its authorization rows")
+	assert.Equal(t, rulesBefore, userCasbinRules(t, db, deputy.Id))
+
+	binding, err := service.BindVerificationOperation(deleteOperation)
+	require.NoError(t, err)
+	proof, _, err = service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+	require.NoError(t, err)
+	body = deleteDeputy(proof)
+	require.Contains(t, body, `"success":true`, body)
+	var remaining int64
+	require.NoError(t, db.Unscoped().Model(&model.User{}).Where("id = ?", deputy.Id).Count(&remaining).Error)
+	assert.Zero(t, remaining)
 	assert.Empty(t, userCasbinRules(t, db, deputy.Id), "a reused id must not inherit the deleted user's rows")
 	assert.False(t, authz.Can(deputy.Id, common.RoleAdminUser, authz.ChannelSensitiveWrite))
 }

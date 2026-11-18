@@ -1059,19 +1059,20 @@ func DeleteUser(c *gin.Context) {
 	if authorization == nil {
 		return
 	}
-	revokedAccessTokens, err := model.HardDeleteUserById(id)
+	// A database can hand the id out again (MySQL 5.7 derives AUTO_INCREMENT
+	// from MAX(id) after a restart), so the user's authorization rows go in the
+	// delete transaction: a leftover allow override would grant the next
+	// account with this id permissions (only a leftover deputy assignment
+	// would restrict it).
+	deleted := model.User{Id: id}
+	revokedAccessTokens, err := deleted.HardDelete(func(tx *gorm.DB) error {
+		return authz.ClearUserAuthorizationInTx(tx, id)
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	// A database can hand the id out again (MySQL 5.7 derives AUTO_INCREMENT
-	// from MAX(id) after a restart); the new account must not inherit the
-	// overrides or the deputy assignment. A leftover row only restricts.
-	if err := model.DB.Transaction(func(tx *gorm.DB) error {
-		return authz.ClearUserAuthorizationInTx(tx, id)
-	}); err != nil {
-		common.SysError(common.LogText("failed to clear the authorization of deleted user %d: %s", id, err.Error()))
-	} else if err := authz.ReloadPolicy(); err != nil {
+	if err := authz.ReloadPolicy(); err != nil {
 		common.SysError(common.LogText("failed to reload authz policy: %s", err.Error()))
 	}
 	recordManageAuditFor(c, originUser.Id, "user.delete", map[string]any{
@@ -1371,66 +1372,62 @@ func ManageUser(c *gin.Context) {
 			return
 		}
 	}
-	if req.Action == "demote" {
+	switch req.Action {
+	case "promote", "demote", "set_deputy", "set_admin":
+		// A privilege change: the role and the authorization rows commit
+		// together, so no node ever sees the new role with stale rows. Promote
+		// and demote drop every override and the deputy assignment, so a
+		// promoted user starts from the full admin baseline even when a stale
+		// assignment is left for the id; set_deputy and set_admin switch the
+		// assignment.
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
-			if err := user.UpdateWithTx(tx, false); err != nil {
-				return err
-			}
-			return authz.ClearUserAuthorizationInTx(tx, user.Id)
-		}); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		if err := authz.ReloadPolicy(); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		if err := model.PublishUserAuthCache(user.Id); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		if _, err := model.RevokeAllUserSessions(user.Id, "admin_demote"); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-	} else if req.Action == "set_deputy" || req.Action == "set_admin" {
-		// The assignment and the role change commit together, so no node ever
-		// sees a role-10 user without its deputy assignment. The account's
-		// sessions end on every privilege change.
-		if err := model.DB.Transaction(func(tx *gorm.DB) error {
-			if req.Action == "set_admin" {
+			switch req.Action {
+			case "set_deputy":
+				if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
+					return err
+				}
+				if user.Role == common.RoleAdminUser {
+					_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
+					return err
+				}
+				user.Role = common.RoleAdminUser
+				return user.UpdateWithTx(tx, false)
+			case "set_admin":
 				if err := authz.UnassignDeputyInTx(tx, user.Id); err != nil {
 					return err
 				}
 				_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
 				return err
+			default:
+				if err := user.UpdateWithTx(tx, false); err != nil {
+					return err
+				}
+				return authz.ClearUserAuthorizationInTx(tx, user.Id)
 			}
-			if err := authz.AssignDeputyInTx(tx, user.Id); err != nil {
-				return err
-			}
-			if user.Role == common.RoleAdminUser {
-				_, err := model.IncrementUserAuthVersionWithTx(tx, user.Id)
-				return err
-			}
-			user.Role = common.RoleAdminUser
-			return user.UpdateWithTx(tx, false)
 		}); err != nil {
 			common.ApiError(c, err)
 			return
 		}
+		// The change has committed and the new auth version already refuses
+		// the account's sessions everywhere; what follows refreshes caches and
+		// ends those sessions. A failure is logged and the change is still
+		// audited and reported (the deputy assignment is read from the
+		// database on every decision, so a stale policy snapshot cannot widen
+		// it).
 		if err := authz.ReloadPolicy(); err != nil {
-			common.ApiError(c, err)
-			return
+			common.SysError(common.LogText("failed to reload authz policy: %s", err.Error()))
 		}
 		if err := model.PublishUserAuthCache(user.Id); err != nil {
-			common.ApiError(c, err)
-			return
+			common.SysError(common.LogText("failed to publish the auth cache of user %d: %v", user.Id, err))
 		}
-		if _, err := model.RevokeAllUserSessions(user.Id, "admin_role_change"); err != nil {
-			common.ApiError(c, err)
-			return
+		revokeReason := "admin_role_change"
+		if req.Action == "demote" {
+			revokeReason = "admin_demote"
 		}
-	} else {
+		if _, err := model.RevokeAllUserSessions(user.Id, revokeReason); err != nil {
+			common.SysError(common.LogText("failed to revoke the sessions of user %d: %v", user.Id, err))
+		}
+	default:
 		if err := user.Update(false); err != nil {
 			common.ApiError(c, err)
 			return

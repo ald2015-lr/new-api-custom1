@@ -668,7 +668,7 @@ func HardDeleteUserById(id int) (int64, error) {
 		return 0, common.NewMessage("ID is empty!")
 	}
 	user := User{Id: id}
-	return user.HardDelete()
+	return user.HardDelete(nil)
 }
 
 // TransferAffQuotaToQuota moves invitation balance into the wallet. Expiring
@@ -1157,7 +1157,10 @@ func (user *User) delete(identity *AuthSessionIdentity) (int64, error) {
 	return revokedAccessTokens, invalidateUserCache(user.Id)
 }
 
-func (user *User) HardDelete() (int64, error) {
+// HardDelete permanently deletes the user. alsoInTx, when not nil, runs in the
+// same transaction for rows another package keeps about the user (its
+// authorization rows), so they are deleted with the user or not at all.
+func (user *User) HardDelete(alsoInTx func(tx *gorm.DB) error) (int64, error) {
 	if user.Id == 0 {
 		return 0, common.NewMessage("ID is empty!")
 	}
@@ -1182,7 +1185,13 @@ func (user *User) HardDelete() (int64, error) {
 		if err := deleteUserAuthenticationData(tx, user.Id); err != nil {
 			return err
 		}
-		return tx.Unscoped().Delete(user).Error
+		if err := tx.Unscoped().Delete(user).Error; err != nil {
+			return err
+		}
+		if alsoInTx != nil {
+			return alsoInTx(tx)
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
