@@ -586,7 +586,11 @@ it('gives the focus back to the answer after focusing it replaced an expired cap
   await waitFor(() => expect(answer).toHaveFocus())
 })
 
-it.each([
+/**
+ * The buttons whose request carries the captcha, with the layout that shows
+ * each one and what it needs filled in.
+ */
+const captchaButtons = [
   {
     button: 'Create account',
     status: { register_captcha: true, email_verification: false },
@@ -601,7 +605,9 @@ it.each([
         '123456789@qq.com'
       ),
   },
-])(
+]
+
+it.each(captchaButtons)(
   'gives the focus to the answer once the captcha that $button replaced is shown',
   async ({ button, status, fill }) => {
     vi.useFakeTimers({
@@ -661,6 +667,54 @@ it('loads a new captcha instead of registering with an expired one', async () =>
   )
   expect(screen.getByRole('textbox', { name: 'Captcha' })).toHaveValue('')
 })
+
+it.each(captchaButtons)(
+  'loads a new captcha instead of sending one whose expiry passed before its timer fired, from $button',
+  async ({ button, status, fill }) => {
+    // A sleeping phone or laptop holds the timers while the wall clock goes
+    // on: on waking, the expiry timer has not fired and only the clock tells
+    // that the server dropped the challenge.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'Date'],
+      shouldAdvanceTime: true,
+    })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    // What the server answers for a challenge it has dropped.
+    const captchaRefusal = {
+      data: {
+        success: false,
+        code: 'CAPTCHA_INVALID',
+        message: 'Captcha is incorrect or has expired. Please try a new one.',
+        message_key:
+          'Captcha is incorrect or has expired. Please try a new one.',
+      },
+    }
+    const get = mockGet({ '/api/verification': async () => captchaRefusal })
+    const post = vi.spyOn(api, 'post').mockResolvedValue(captchaRefusal)
+    const error = vi.spyOn(toast, 'error')
+    await renderSignUp(status)
+    await findCaptchaImage(1)
+    await fill(user)
+    await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '12')
+
+    // An hour asleep: the clock moves on, the pending timers do not run, so
+    // the image still reads as valid.
+    vi.setSystemTime(Date.now() + 60 * 60_000)
+    expect(screen.getByRole('img', { name: 'Captcha' })).toHaveAttribute(
+      'src',
+      captchaImage(1)
+    )
+
+    await user.click(screen.getByRole('button', { name: button }))
+
+    await findCaptchaImage(2)
+    expect(post).not.toHaveBeenCalled()
+    expect(emailCodeRequests(get)).toEqual([])
+    expect(error).toHaveBeenCalledWith(
+      'The captcha has expired. Please enter the result of the new one.'
+    )
+  }
+)
 
 it('re-reads the status when the server wants a captcha that the cached email verification layout left out', async () => {
   const user = userEvent.setup()
