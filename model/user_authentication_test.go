@@ -388,3 +388,43 @@ func assertUserAuthVersion(t *testing.T, userID int, expected int64) {
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", userID).Select("auth_version").Scan(&version).Error)
 	assert.Equal(t, expected, version)
 }
+
+// A provider ID stays taken after its account is deleted, so signing in with
+// it reports the deleted account instead of signing up a new one. An ID that
+// a deleted and a live account both hold (the duplicates soft-deleted OIDC
+// accounts could produce) is taken too, so the live account signs in.
+func TestProviderIdLookupsIncludeDeletedAccountsDatabaseMatrix(t *testing.T) {
+	lookups := []struct {
+		column string
+		taken  func(string) bool
+		bind   func(*User, string)
+	}{
+		{"github_id", IsGitHubIdAlreadyTaken, func(user *User, id string) { user.GitHubId = id }},
+		{"discord_id", IsDiscordIdAlreadyTaken, func(user *User, id string) { user.DiscordId = id }},
+		{"oidc_id", IsOidcIdAlreadyTaken, func(user *User, id string) { user.OidcId = id }},
+		{"wechat_id", IsWeChatIdAlreadyTaken, func(user *User, id string) { user.WeChatId = id }},
+		{"telegram_id", IsTelegramIdAlreadyTaken, func(user *User, id string) { user.TelegramId = id }},
+		{"linux_do_id", IsLinuxDOIdAlreadyTaken, func(user *User, id string) { user.LinuxDOId = id }},
+	}
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			useInviteTestDatabase(t, dialect, "provider_id_test_", &User{})
+			for _, lookup := range lookups {
+				t.Run(lookup.column, func(t *testing.T) {
+					subject := lookup.column + "-subject"
+					assert.False(t, lookup.taken(subject))
+					deleted := User{Username: lookup.column + "-deleted", AffCode: lookup.column + "-deleted"}
+					lookup.bind(&deleted, subject)
+					require.NoError(t, DB.Create(&deleted).Error)
+					require.NoError(t, DB.Delete(&deleted).Error)
+					assert.True(t, lookup.taken(subject), "a deleted account keeps its provider ID")
+					live := User{Username: lookup.column + "-live", AffCode: lookup.column + "-live"}
+					lookup.bind(&live, subject)
+					require.NoError(t, DB.Create(&live).Error)
+					assert.True(t, lookup.taken(subject), "a deleted and a live account")
+					assert.False(t, lookup.taken(lookup.column+"-other"))
+				})
+			}
+		})
+	}
+}
