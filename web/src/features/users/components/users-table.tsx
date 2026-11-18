@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { OnChangeFn, SortingState } from '@tanstack/react-table'
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -66,8 +66,19 @@ function isDisabledUserRow(user: User) {
   return isUserDeleted(user) || user.status === USER_STATUS.DISABLED
 }
 
+// The backend reads the inviter ID as an int; stay within a 32-bit one.
+const MAX_INVITER_ID = 2147483647
+
+/** The user ID an inviter filter value names, or null when it names none. */
+function parseInviterId(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null
+  const id = Number(value)
+  return id >= 1 && id <= MAX_INVITER_ID ? id : null
+}
+
 export function UsersTable() {
   const { t } = useTranslation()
+  const inviterHintId = useId()
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
@@ -114,8 +125,12 @@ export function UsersTable() {
     columnId: INVITER_FILTER_ID,
     onColumnFiltersChange,
   })
-  // Only a positive user ID filters; anything else lists every user.
-  const inviterFilter = /^[1-9]\d*$/.test(inviterValue) ? inviterValue : ''
+  // Only a valid user ID filters; anything else lists every user and the
+  // field is marked invalid, so it never looks like an active filter.
+  const inviterId = parseInviterId(inviterValue)
+  const inviterFilter = inviterId === null ? '' : String(inviterId)
+  const inviterInputInvalid =
+    inviterInput !== '' && parseInviterId(inviterInput) === null
 
   const { data: groupsData } = useQuery({
     queryKey: ['groups'],
@@ -249,16 +264,27 @@ export function UsersTable() {
         searchPlaceholder: t('Filter by username, name or email...'),
         searchDebounceMs: 500,
         additionalSearch: (
-          <Input
-            inputMode='numeric'
-            placeholder={t('Filter by inviter ID...')}
-            aria-label={t('Filter by inviter ID...')}
-            value={inviterInput}
-            onChange={(event) =>
-              setInviterInput(event.target.value.replaceAll(/\D/g, ''))
-            }
-            className='w-full sm:w-40'
-          />
+          <div className='grid w-full gap-1 sm:w-40'>
+            <Input
+              inputMode='numeric'
+              placeholder={t('Filter by inviter ID...')}
+              aria-label={t('Filter by inviter ID...')}
+              aria-invalid={inviterInputInvalid}
+              aria-describedby={inviterInputInvalid ? inviterHintId : undefined}
+              value={inviterInput}
+              onChange={(event) =>
+                // Digits only and no leading zeros, like the ID it names.
+                setInviterInput(
+                  event.target.value.replaceAll(/\D/g, '').replace(/^0+/, '')
+                )
+              }
+            />
+            {inviterInputInvalid ? (
+              <p id={inviterHintId} className='text-destructive text-xs'>
+                {t('Invalid user ID')}
+              </p>
+            ) : null}
+          </div>
         ),
         filters: [
           {
