@@ -59,7 +59,15 @@ func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
 // characters. Password reset tokens have 32 random hexadecimal characters, so
 // counting guesses at them would only let anyone who knows an address cancel
 // its reset link.
+//
+// A registration code is typed or pasted from a mail, so spaces around it and
+// capital letters do not matter, and input that cannot be a code (another
+// length, or not hexadecimal like every code GenerateVerificationCode makes)
+// is refused without counting as a guess.
 func VerifyCodeWithKey(key string, code string, purpose string) bool {
+	if purpose == EmailVerificationPurpose {
+		code = strings.ToLower(strings.TrimSpace(code))
+	}
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
 	mapKey := purpose + key
@@ -72,6 +80,9 @@ func VerifyCodeWithKey(key string, code string, purpose string) bool {
 		return true
 	}
 	if purpose != EmailVerificationPurpose {
+		return false
+	}
+	if len(code) != len(value.code) || strings.ContainsFunc(code, func(r rune) bool { return !strings.ContainsRune("0123456789abcdef", r) }) {
 		return false
 	}
 	value.failures++

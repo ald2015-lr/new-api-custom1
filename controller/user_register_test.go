@@ -251,22 +251,27 @@ func TestClientIPDiagnosticShowsTheAddressTheServerSees(t *testing.T) {
 	}
 }
 
+// A registration code allows four wrong guesses; the fifth deletes it. Spaces
+// around the code and capital letters do not matter, and input that cannot be
+// a code (another length, not hexadecimal) is refused without spending a
+// guess.
 func TestRegisterEmailCodeIsDeletedAfterFiveWrongGuesses(t *testing.T) {
 	db := setupRegisterTest(t, true, false)
 	router := newRegisterTestRouter()
 
 	common.RegisterVerificationCodeWithKey("10003@qq.com", "a1b2c3", common.EmailVerificationPurpose)
-	for range 4 {
-		response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", "ffffff", ""))
-		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey)
+	for _, input := range []string{"ffffff", "ffffff", "ffffff", "ffffff", "a1b2c", "a1b2c3d", "a1b2cg", "a1 b2c3", "１２３４５６", "   "} {
+		response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", input, ""))
+		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, input)
 	}
-	response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", "a1b2c3", ""))
-	require.True(t, response.Success, response.Message, "four wrong guesses leave the code usable")
+	response := performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-guess", "10003@qq.com", " A1B2C3\n", ""))
+	require.True(t, response.Success, "four wrong guesses and any number of inputs that cannot be a code leave the code usable: %s", response.Message)
 
+	// Wrong guesses count after the same normalisation.
 	common.RegisterVerificationCodeWithKey("10004@qq.com", "d4e5f6", common.EmailVerificationPurpose)
-	for range 5 {
-		response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", "ffffff", ""))
-		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey)
+	for _, guess := range []string{"ffffff", " FFFFFF", "000000\n", "D4E5F7", "abcdef"} {
+		response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", guess, ""))
+		assert.Equal(t, "Verification code is incorrect or has expired", response.MessageKey, guess)
 	}
 	response = performRegisterTestRequest(t, router, http.MethodPost, "/api/user/register", registerTestBody("reg-locked", "10004@qq.com", "d4e5f6", ""))
 	assert.False(t, response.Success)
