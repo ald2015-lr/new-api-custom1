@@ -3505,7 +3505,7 @@
     "Invited by user ID": "Invité par l'ID utilisateur",
     "Invited Users": "Utilisateurs invités",
     "Invited users to disable": "Invités à désactiver",
-    "Invited users, deleted ones excluded, from which an inviter is checked": "Nombre d’invités (hors supprimés) à partir duquel un parrain est vérifié",
+    "Invited users, deleted ones included, from which an inviter is checked": "Nombre d’invités (supprimés inclus) à partir duquel un parrain est vérifié",
     "Invitee": "Invité",
     "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.": "Bonus de l'invité : toute dépense du portefeuille compte comme une utilisation. Récompense de l'inviteur : transférer le solde d'invitation compte comme une utilisation ; les montants transférés n'expirent jamais.",
     "Invitee Reward": "Récompense de l'invité",

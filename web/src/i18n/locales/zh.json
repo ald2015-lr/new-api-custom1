@@ -3505,7 +3505,7 @@
     "Invited by user ID": "由用户 ID 邀请",
     "Invited Users": "受邀用户",
     "Invited users to disable": "将被禁用的被邀请人",
-    "Invited users, deleted ones excluded, from which an inviter is checked": "邀请人数（不含已删除用户）达到此值时开始检查",
+    "Invited users, deleted ones included, from which an inviter is checked": "邀请人数（含已删除用户）达到此值时开始检查",
     "Invitee": "被邀请人",
     "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.": "受邀者奖励：任何钱包消费都算使用。邀请者奖励：将邀请额度转移到余额算使用；已转移的额度永不过期。",
     "Invitee Reward": "受邀者奖励",

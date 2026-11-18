@@ -251,7 +251,7 @@ export function InviteAbuseSection(props: InviteAbuseSectionProps) {
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'Invited users, deleted ones excluded, from which an inviter is checked'
+                    'Invited users, deleted ones included, from which an inviter is checked'
                   )}
                 </FormDescription>
                 <FormMessage />

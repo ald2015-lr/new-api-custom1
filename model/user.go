@@ -29,7 +29,7 @@ var userSortColumns = map[string]string{
 }
 
 // UserSortByInviteCount sorts users by how many users they invited (users
-// whose inviter_id is the user and that are not deleted).
+// whose inviter_id is the user, deleted ones included; see countedInvitees).
 const UserSortByInviteCount = "invite_count"
 
 type UserSortOptions struct {
@@ -62,9 +62,8 @@ func (options UserSortOptions) Apply(query *gorm.DB) *gorm.DB {
 		// replace an expression ORDER BY. The derived columns have their own
 		// names so the page query's unqualified conditions stay unambiguous.
 		userId := clause.Column{Table: clause.CurrentTable, Name: "id"}
-		inviteCounts := query.Session(&gorm.Session{NewDB: true}).Model(&User{}).
+		inviteCounts := countedInvitees(query.Session(&gorm.Session{NewDB: true})).
 			Select("inviter_id AS invite_user_id, COUNT(*) AS invite_count").
-			Where("inviter_id <> ?", 0).
 			Group("inviter_id")
 		direction := "DESC"
 		if options.SortOrder == "asc" {
@@ -146,7 +145,7 @@ type User struct {
 	BonusSettledFrom     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_from"` // start of the last settlement's window (the settlement before it)
 	BonusSettledPaid     int64                      `json:"-" gorm:"type:bigint;not null;default:0;column:bonus_settled_paid"` // paid part of the last settlement not yet matched by a refund
 	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
-	InviteCount          int64                      `json:"invite_count,omitempty" gorm:"-:all"`     // admin list only: invited users that are not deleted
+	InviteCount          int64                      `json:"invite_count,omitempty" gorm:"-:all"`     // admin list only: invited users, deleted ones included
 	InviteAbuseBan       string                     `json:"invite_abuse_ban,omitempty" gorm:"-:all"` // admin list only: kind of the active invite abuse ban
 }
 
@@ -489,8 +488,7 @@ func fillUserInviteInfo(tx *gorm.DB, users []*User) error {
 		InviterId   int
 		InviteCount int64
 	}
-	// Invited users count while they are not deleted, as for the invite abuse rule.
-	if err := tx.Model(&User{}).Select("inviter_id, COUNT(*) AS invite_count").
+	if err := countedInvitees(tx).Select("inviter_id, COUNT(*) AS invite_count").
 		Where("inviter_id IN ?", ids).Group("inviter_id").Scan(&counts).Error; err != nil {
 		return err
 	}
@@ -530,6 +528,10 @@ func SearchUsers(keyword string, group string, role *int, status *int, inviterId
 
 	// 构建基础查询
 	query := tx.Unscoped().Model(&User{})
+	if inviterId != nil {
+		// Exactly the users the inviter's invite_count counts.
+		query = countedInvitees(tx).Where("inviter_id = ?", *inviterId)
+	}
 
 	// 构建搜索条件
 	likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
@@ -556,9 +558,6 @@ func SearchUsers(keyword string, group string, role *int, status *int, inviterId
 		} else {
 			query = query.Where("deleted_at IS NULL").Where("status = ?", *status)
 		}
-	}
-	if inviterId != nil {
-		query = query.Where("inviter_id = ?", *inviterId)
 	}
 
 	// 获取总数

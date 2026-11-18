@@ -16,11 +16,11 @@ import (
 
 // The invite abuse rule: an inviter (not deleted, not an administrator, not
 // exempt and, while paid inviters are exempt, without a qualifying recharge
-// of its own) with at least the threshold of invited users that are not
-// deleted, none of whom — deleted ones included — has a qualifying recharge,
-// is disabled together with its invited users that are enabled, not
-// administrators and not exempt. Invited users are the users whose
-// inviter_id is the inviter; aff_count is not a reliable count.
+// of its own) with at least the threshold of invited users, none of whom has
+// a qualifying recharge, is disabled together with its invited users that
+// are not deleted, enabled, not administrators and not exempt. Invited users
+// are the users whose inviter_id is the inviter, deleted ones included (see
+// countedInvitees); aff_count is not a reliable count.
 const (
 	InviteAbuseKindInviter = "inviter"
 	InviteAbuseKindInvitee = "invitee"
@@ -58,8 +58,8 @@ type InviteAbuseBan struct {
 
 // InviteAbuseSettings are the thresholds the invite abuse rule runs with.
 type InviteAbuseSettings struct {
-	// Threshold is the number of invited users (not deleted) from which an
-	// inviter is checked.
+	// Threshold is the number of invited users (deleted ones included) from
+	// which an inviter is checked.
 	Threshold int
 	// MinRedeemQuota is the redeemed quota from which a user's used
 	// redemption codes count as a recharge.
@@ -111,6 +111,17 @@ type inviteAbuseCandidate struct {
 	InviteesToDisable int64
 }
 
+// countedInvitees selects the invited users that count for their inviter
+// (inviter_id). Everything that counts or lists a user's invited users builds
+// on it: the users list's invite_count, its sort and its inviter filter, and
+// the invite abuse rule's threshold, recharge check and preview. Deleted
+// users count too: an invited account deleted afterwards is still somebody
+// its inviter invited, so a farm cannot slip under the threshold by deleting
+// its invited accounts.
+func countedInvitees(db *gorm.DB) *gorm.DB {
+	return db.Unscoped().Model(&User{}).Where("inviter_id <> ?", 0)
+}
+
 // qualifyingTopUps selects the successful paid orders that count as a
 // recharge: online top-ups (amount > 0), subscriptions paid through a payment
 // gateway (amount 0, money > 0) and orders an administrator completed. A
@@ -158,14 +169,15 @@ func inviteAbuseExemptUsers() *gorm.DB {
 }
 
 // listInviteAbuseCandidates returns up to limit candidates with an inviter id
-// above afterInviterId, in inviter id order. One grouped scan of users with
-// the qualifying recharges joined; portable to SQLite, MySQL and PostgreSQL.
+// above afterInviterId, in inviter id order. One grouped scan of the counted
+// invited users with the qualifying recharges joined (at most one row per
+// user each, so COUNT(*) counts invited users); portable to SQLite, MySQL and
+// PostgreSQL.
 func listInviteAbuseCandidates(settings InviteAbuseSettings, afterInviterId int, limit int) ([]inviteAbuseCandidate, error) {
 	userId := clause.Column{Table: clause.CurrentTable, Name: "id"}
-	const counted = "SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END)"
 	var candidates []inviteAbuseCandidate
-	err := DB.Unscoped().Model(&User{}).
-		Select("inviter_id, "+counted+" AS invite_count, "+
+	err := countedInvitees(DB).
+		Select("inviter_id, COUNT(*) AS invite_count, "+
 			"SUM(CASE WHEN deleted_at IS NULL AND status = ? AND role < ? AND exempt_users.user_id IS NULL THEN 1 ELSE 0 END) AS invitees_to_disable",
 			common.UserStatusEnabled, common.RoleAdminUser).
 		Joins("LEFT JOIN (?) AS paid_top_ups ON paid_top_ups.user_id = ?", qualifyingTopUps().Distinct("user_id"), userId).
@@ -173,7 +185,7 @@ func listInviteAbuseCandidates(settings InviteAbuseSettings, afterInviterId int,
 		Joins("LEFT JOIN (?) AS exempt_users ON exempt_users.user_id = ?", inviteAbuseExemptUsers(), userId).
 		Where("inviter_id > ?", afterInviterId).
 		Group("inviter_id").
-		Having(counted+" >= ? AND COUNT(paid_top_ups.user_id) = 0 AND COUNT(paid_redemptions.used_user_id) = 0", settings.Threshold).
+		Having("COUNT(*) >= ? AND COUNT(paid_top_ups.user_id) = 0 AND COUNT(paid_redemptions.used_user_id) = 0", settings.Threshold).
 		Order("inviter_id").
 		Limit(limit).
 		Scan(&candidates).Error
@@ -230,7 +242,7 @@ func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings
 		return 0, err
 	}
 	var inviteCount int64
-	if err := DB.Model(&User{}).Where("inviter_id = ?", inviterId).Count(&inviteCount).Error; err != nil {
+	if err := countedInvitees(DB).Where("inviter_id = ?", inviterId).Count(&inviteCount).Error; err != nil {
 		return 0, err
 	}
 	if inviteCount < int64(settings.Threshold) {
@@ -244,7 +256,7 @@ func enforceInviteAbuseRuleOnInviter(inviterId int, settings InviteAbuseSettings
 	}
 	// Deleted invited users are included: one who paid before being deleted
 	// still clears the inviter.
-	invitees := DB.Unscoped().Model(&User{}).Select("id").Where("inviter_id = ?", inviterId)
+	invitees := countedInvitees(DB).Select("id").Where("inviter_id = ?", inviterId)
 	paid, err := rechargedUserIds(invitees, settings.MinRedeemQuota, 1)
 	if err != nil || len(paid) > 0 {
 		return 0, err

@@ -3505,7 +3505,7 @@
     "Invited by user ID": "ユーザーIDによる招待",
     "Invited Users": "招待されたユーザー",
     "Invited users to disable": "無効化される招待ユーザー",
-    "Invited users, deleted ones excluded, from which an inviter is checked": "招待者の確認を始める招待人数（削除済みユーザーを除く）",
+    "Invited users, deleted ones included, from which an inviter is checked": "招待者の確認を始める招待人数（削除済みユーザーを含む）",
     "Invitee": "被招待者",
     "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.": "招待された側のボーナス：ウォレットでの利用はすべて使用とみなします。招待した側の報酬：招待残高の振替を使用とみなします。振替済みの額は失効しません。",
     "Invitee Reward": "招待された側の報酬",

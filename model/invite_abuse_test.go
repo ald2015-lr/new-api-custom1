@@ -350,7 +350,9 @@ func testInviteAbuseThreshold(t *testing.T) {
 	}{
 		{name: "one short of the threshold", threshold: 3, invitees: 2, minRedeem: 500_000},
 		{name: "exactly the threshold", threshold: 3, invitees: 3, minRedeem: 500_000, abusive: true},
-		{name: "deleted invited users are not counted", threshold: 3, invitees: 3, deleted: 1, minRedeem: 500_000},
+		// A farm cannot stay under the threshold by deleting its invited
+		// accounts; the deleted ones are counted but cannot be disabled.
+		{name: "deleted invited users are counted", threshold: 3, invitees: 3, deleted: 1, minRedeem: 500_000, abusive: true},
 		{name: "threshold of one", threshold: 1, invitees: 1, minRedeem: 500_000, abusive: true},
 		{name: "redeemed exactly the minimum", threshold: 2, invitees: 2, minRedeem: 500_000, redeemed: 500_000},
 		{name: "minimum of zero takes any redemption", threshold: 2, invitees: 2, minRedeem: 0, redeemed: 1},
@@ -376,6 +378,8 @@ func testInviteAbuseThreshold(t *testing.T) {
 				return
 			}
 			assert.Equal(t, 1, preview.AbusiveInviters)
+			require.Len(t, preview.Items, 1)
+			assert.EqualValues(t, tc.invitees, preview.Items[0].InviteCount)
 			assert.Equal(t, 1+tc.invitees-tc.deleted, disabled)
 		})
 	}
@@ -674,7 +678,8 @@ func testInviteAbuseSweepBatches(t *testing.T) {
 func testInviteAbusePreview(t *testing.T) {
 	resetInviteAbuseTables(t)
 	useInviteAbuseSettings(t, false, 2, 500_000)
-	// a: enabled, invited one user of each kind plus a deleted one.
+	// a: enabled, invited one user of each kind plus a deleted one, who is
+	// counted but cannot be disabled.
 	a, aInvitees := createInviteAbuseTestInviter(t, "a", common.RoleCommonUser, 2)
 	require.NoError(t, DB.Model(&User{}).Where("id = ?", aInvitees[1].Id).Update("status", common.UserStatusDisabled).Error)
 	createInviteAbuseTestUser(t, "a-admin", a.Id, common.RoleAdminUser)
@@ -701,7 +706,7 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Equal(t, &InviteAbusePreview{
 		Threshold: 2, MinRedeemQuota: 500_000, ExemptPaidInviter: true, AbusiveInviters: 2, InvitersToDisable: 1, InviteesToDisable: 3,
 		Items: []InviteAbusePreviewItem{
-			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 4, InviteesToDisable: 1},
+			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 5, InviteesToDisable: 1},
 			{Id: b.Id, Username: "b", DisplayName: "b", Status: common.UserStatusDisabled, InviteCount: 2, InviteesToDisable: 2},
 		},
 	}, preview)
@@ -711,13 +716,13 @@ func testInviteAbusePreview(t *testing.T) {
 	assert.Equal(t, &InviteAbusePreview{
 		Threshold: 2, MinRedeemQuota: 500_000, AbusiveInviters: 3, InvitersToDisable: 2, InviteesToDisable: 5,
 		Items: []InviteAbusePreviewItem{
-			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 4, InviteesToDisable: 1},
+			{Id: a.Id, Username: "a", DisplayName: "a", Status: common.UserStatusEnabled, InviteCount: 5, InviteesToDisable: 1},
 			{Id: patron.Id, Username: "patron", DisplayName: "patron", Status: common.UserStatusEnabled, InviteCount: 2, InviteesToDisable: 2},
 			{Id: b.Id, Username: "b", DisplayName: "b", Status: common.UserStatusDisabled, InviteCount: 2, InviteesToDisable: 2},
 		},
 	}, unexempted, "without the exemption the inviter who paid is abusive like the others")
 
-	stricter, err := PreviewInviteAbuse(InviteAbuseSettings{Threshold: 5, MinRedeemQuota: 500_000})
+	stricter, err := PreviewInviteAbuse(InviteAbuseSettings{Threshold: 6, MinRedeemQuota: 500_000})
 	require.NoError(t, err)
 	assert.Zero(t, stricter.AbusiveInviters)
 	assert.Empty(t, stricter.Items)

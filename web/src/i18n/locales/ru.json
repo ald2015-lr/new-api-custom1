@@ -3505,7 +3505,7 @@
     "Invited by user ID": "Приглашен пользователем с ID",
     "Invited Users": "Приглашенные пользователи",
     "Invited users to disable": "Будут отключены приглашённые",
-    "Invited users, deleted ones excluded, from which an inviter is checked": "Число приглашённых (без удалённых), начиная с которого пригласивший проверяется",
+    "Invited users, deleted ones included, from which an inviter is checked": "Число приглашённых (включая удалённых), начиная с которого пригласивший проверяется",
     "Invitee": "Приглашённый",
     "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.": "Бонус приглашённого: любое списание с кошелька считается использованием. Награда приглашающего: использованием считается перевод баланса приглашений; переведённые суммы не истекают.",
     "Invitee Reward": "Награда приглашенному",

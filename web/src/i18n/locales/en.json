@@ -3505,7 +3505,7 @@
     "Invited by user ID": "Invited by user ID",
     "Invited Users": "Invited Users",
     "Invited users to disable": "Invited users to disable",
-    "Invited users, deleted ones excluded, from which an inviter is checked": "Invited users, deleted ones excluded, from which an inviter is checked",
+    "Invited users, deleted ones included, from which an inviter is checked": "Invited users, deleted ones included, from which an inviter is checked",
     "Invitee": "Invitee",
     "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.": "Invitee bonus: any wallet spending counts as use. Inviter reward: transferring the invitation balance counts as use; transferred amounts never expire.",
     "Invitee Reward": "Invitee Reward",
