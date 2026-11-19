@@ -5034,13 +5034,15 @@ test('with moderation on, the custom rules help and the normalisation note are s
   expect(within(rules).getByText(/^Text is normalised first/).tagName).toBe('P')
 })
 
-test('with moderation on, the normalisation note says a keyword matches across a line break and a regular expression sees it as \\n', async () => {
+test('with moderation on, the normalisation note says line breaks between Chinese characters are removed, a keyword matches across a line break and a regular expression sees the other line breaks as \\n', async () => {
   await openModerationCard(openAIChannel({ moderation_enabled: true }))
   const rules = screen.getByRole('group', { name: 'Custom rules' })
-  expect(
-    within(rules).getByText(/^Text is normalised first/)
-  ).toHaveTextContent(
-    /Keywords treat a line break as a space, so a keyword still matches when the text breaks it across two lines; regular expressions see a line break as \\n\.$/
+  const note = within(rules).getByText(/^Text is normalised first/)
+  expect(note).toHaveTextContent(
+    /spaces and line breaks between Chinese characters or Chinese punctuation are removed\)/
+  )
+  expect(note).toHaveTextContent(
+    /Keywords treat a line break as a space, so a keyword still matches when the text breaks it across two lines; regular expressions see any other line break as \\n\.$/
   )
 })
 
