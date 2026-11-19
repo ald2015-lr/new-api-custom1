@@ -30,13 +30,23 @@ type segment struct {
 
 // normalize returns seg normalised, normalising it on first use within the
 // extraction's normalisation budget (see normalizeBudgetBytes). nil means the
-// budget is spent: seg is neither checked nor scanned.
+// budget is spent: seg is neither checked nor scanned. Once it refuses a
+// segment it normalises nothing more, so it then forgets the text of every
+// segment it has not normalised, which dropPastBudget cannot tell from raw
+// sizes when NFKC made the earlier segments longer.
 func (ex *extraction) normalize(seg *segment) *normalized {
 	if seg.norm != nil {
 		return seg.norm
 	}
 	if seg.dropped || ex.normalizeStopped || ex.normalizeUsed+len(seg.text) > normalizeBudgetBytes {
-		ex.normalizeStopped = true
+		if !ex.normalizeStopped {
+			ex.normalizeStopped = true
+			for _, s := range ex.segments {
+				if s.norm == nil {
+					s.text, s.dropped = "", true
+				}
+			}
+		}
 		return nil
 	}
 	seg.norm = normalizeSegment(seg.text)
@@ -74,12 +84,14 @@ func (ex *extraction) orderedSegments() []*segment {
 	return append(ordered, older...)
 }
 
-// dropPastBudget forgets the text of the segments that the normalisation
-// budget can never reach, so the request state does not keep it. normalize
-// charges each segment at least its raw size and runs in budgetOrder, so it
-// stops at or before the first segment whose raw text no longer fits after
-// the raw text of all the segments before it: that segment and every later
-// one are dropped, and normalize refuses them as it would have anyway.
+// dropPastBudget forgets, before anything is normalised, the text of the
+// segments that raw sizes alone rule out, so the request state does not keep
+// it. normalize charges each segment at least its raw size and runs in
+// budgetOrder, so it stops at or before the first segment whose raw text no
+// longer fits after the raw text of all the segments before it: that segment
+// and every later one are dropped, and normalize refuses them as it would
+// have anyway. When NFKC expansion makes normalize stop earlier, normalize
+// itself drops the rest.
 func (ex *extraction) dropPastBudget() {
 	used := 0
 	ordered := ex.orderedSegments()

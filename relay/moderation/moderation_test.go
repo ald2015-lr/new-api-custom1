@@ -1825,6 +1825,71 @@ func TestNormalisationBudget(t *testing.T) {
 		}
 	})
 
+	t.Run("text the budget refuses is not kept", func(t *testing.T) {
+		// 96 KiB of U+FDFA is charged its normalised size of about 1 MiB, so
+		// the budget runs out long before the raw text does and
+		// dropPastBudget drops nothing: the text normalize refuses goes when
+		// it first refuses a segment.
+		big := strings.Repeat("ﷺ", 32<<10)
+		roleTexts := []string{roleSystem, "be nice"}
+		for range 40 {
+			roleTexts = append(roleTexts, roleUser, big)
+		}
+		roleTexts = append(roleTexts, roleUser, "MOD-FLAG-SEXUAL")
+		type result struct {
+			candidates     []*piece
+			truncated      bool
+			scan           []scanText
+			scanTruncated  bool
+			normalizeUsed  int
+			normalised     int
+			dropped        int
+			droppedKeptRaw int
+		}
+		run := func(rulesFirst bool) result {
+			ex := segmentsOf(roleTexts...)
+			ex.dropPastBudget()
+			for _, seg := range ex.segments {
+				require.False(t, seg.dropped, "the raw text fits the budget")
+			}
+			var r result
+			if rulesFirst {
+				r.scan, r.scanTruncated = ex.ruleScan()
+			}
+			r.candidates, r.truncated = candidatePieces(ex, endpoint, 10000)
+			if !rulesFirst {
+				r.scan, r.scanTruncated = ex.ruleScan()
+			}
+			r.normalizeUsed = ex.normalizeUsed
+			r.normalised, _ = normalisedSegments(ex)
+			for _, seg := range ex.segments {
+				if seg.norm == nil {
+					r.droppedKeptRaw += len(seg.text)
+				}
+				if seg.dropped {
+					r.dropped++
+				}
+			}
+			return r
+		}
+		got := run(false)
+		assert.True(t, got.truncated, "the audit says 「未完全审查」")
+		assert.True(t, got.scanTruncated)
+		assert.Less(t, got.normalised, 42, "the budget refuses some segments")
+		assert.Greater(t, got.normalised, 2)
+		assert.Equal(t, 42-got.normalised, got.dropped, "every segment the budget refused is dropped")
+		assert.Zero(t, got.droppedKeptRaw, "the raw text of the segments the budget refused is gone")
+		assert.LessOrEqual(t, got.normalizeUsed, normalizeBudgetBytes+segmentMaxBytes)
+		sent := sentTexts(planBudget(got.candidates, noVerdicts, 10000, endpoint))
+		assert.Contains(t, sent, "MOD-FLAG-SEXUAL")
+		assert.Contains(t, sent, "be nice")
+
+		// The rules scan first here and stop at their own cap, so the budget
+		// refuses a segment only later, while the pieces are listed: what
+		// is checked and scanned does not depend on when the text goes.
+		assert.Equal(t, got, run(true))
+	})
+
 	t.Run("a request under the budget is checked as before", func(t *testing.T) {
 		// 3.4 MiB in 121 segments, most of whose pieces repeat, so the piece
 		// cap does not stop the listing before the oldest message.
