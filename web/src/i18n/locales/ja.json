@@ -6690,7 +6690,7 @@
     "Text description of the desired image": "生成したい画像のテキスト説明",
     "Text description of the desired video": "生成したい動画のテキスト説明",
     "Text Input": "テキスト入力",
-    "Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become ' \" -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form.": "テキストは先に正規化されます（全角の英字と記号は半角に、曲がった引用符とダッシュは ' \" - に、連続する空白は 1 つに、漢字の間の空白は削除）。正規表現は正規化後の形で書いてください。",
+    "Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become ' \" -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form. Keywords treat a line break as a space, so a keyword still matches when the text breaks it across two lines; regular expressions see a line break as \\n.": "テキストは先に正規化されます（全角の英字と記号は半角に、曲がった引用符とダッシュは ' \" - に、連続する空白は 1 つに、漢字の間の空白は削除）。正規表現は正規化後の形で書いてください。キーワードでは改行を空白として扱うため、2 行に分かれたテキストにも一致します。正規表現では改行は \\n のままです。",
     "Text or array of texts to embed": "ベクトル化するテキストまたは配列",
     "Text Output": "テキスト出力",
     "Text to Video": "テキストから動画",

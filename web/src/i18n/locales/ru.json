@@ -6690,7 +6690,7 @@
     "Text description of the desired image": "Текстовое описание желаемого изображения",
     "Text description of the desired video": "Текстовое описание желаемого видео",
     "Text Input": "Текстовый вход",
-    "Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become ' \" -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form.": "Сначала текст нормализуется (полноширинные буквы и знаки препинания становятся обычными, типографские кавычки и тире — символами ' \" -, повторяющиеся пробелы — одним, пробелы между китайскими иероглифами удаляются), поэтому пишите регулярные выражения в такой форме.",
+    "Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become ' \" -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form. Keywords treat a line break as a space, so a keyword still matches when the text breaks it across two lines; regular expressions see a line break as \\n.": "Сначала текст нормализуется (полноширинные буквы и знаки препинания становятся обычными, типографские кавычки и тире — символами ' \" -, повторяющиеся пробелы — одним, пробелы между китайскими иероглифами удаляются), поэтому пишите регулярные выражения в такой форме. Для ключевых слов перенос строки считается пробелом, поэтому ключевое слово находится и в тексте, разбитом на две строки; регулярные выражения видят перенос строки как \\n.",
     "Text or array of texts to embed": "Текст или массив текстов для векторизации",
     "Text Output": "Текстовый выход",
     "Text to Video": "Текст в видео",
