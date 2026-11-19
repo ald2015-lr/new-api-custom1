@@ -4957,6 +4957,18 @@ test('an OpenAI channel shows the content moderation card with moderation off an
   ).not.toBeChecked()
 })
 
+test('with moderation on, the category selector is named by its label and described by its help text', async () => {
+  await openModerationCard(openAIChannel({ moderation_enabled: true }))
+  const card = screen.getByRole('group', { name: 'Content moderation' })
+  const categories = within(card).getByRole('combobox', {
+    name: 'Block only these categories',
+  })
+  expect(categories).toHaveAccessibleDescription(
+    /Empty: reject whatever OpenAI flags/
+  )
+  expect(categories).toHaveAttribute('placeholder', 'Select categories')
+})
+
 test('with moderation on, every content moderation fieldset can shrink, so the custom rules table scrolls inside the card on a narrow screen', async () => {
   await openModerationCard(
     openAIChannel({

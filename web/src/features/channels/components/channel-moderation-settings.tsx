@@ -364,6 +364,9 @@ export const ChannelModerationSettings = memo(
     // Whether the default presets were selected by this drawer: they are
     // selected once, so presets the admin removed are not added back.
     const preselectedRef = useRef(false)
+    // Names the category selector, whose placeholder would otherwise be
+    // its accessible name.
+    const categoriesLabelId = useId()
     const categoryOptions = MODERATION_CATEGORIES.map((category) => ({
       value: category.value,
       label: t(category.labelKey),
@@ -538,13 +541,16 @@ export const ChannelModerationSettings = memo(
               name='moderation_categories'
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t('Block only these categories')}</FormLabel>
+                  <FormLabel id={categoriesLabelId}>
+                    {t('Block only these categories')}
+                  </FormLabel>
                   <FormControl>
                     <MultiSelect
                       options={categoryOptions}
                       selected={field.value ?? []}
                       onChange={field.onChange}
                       placeholder={t('Select categories')}
+                      aria-labelledby={categoriesLabelId}
                       disabled={props.locked}
                     />
                   </FormControl>
