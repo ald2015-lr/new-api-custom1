@@ -5014,6 +5014,24 @@ test('with moderation on, the custom rules help and the normalisation note are s
   expect(within(rules).getByText(/^Text is normalised first/).tagName).toBe('P')
 })
 
+test('a custom rule row centers its case-sensitive switch on the height of the row inputs', async () => {
+  await openModerationCard(
+    openAIChannel({
+      moderation_enabled: true,
+      moderation_rules: [{ type: 'keyword', pattern: 'cot' }],
+    })
+  )
+  const caseSensitive = screen.getByRole('switch', {
+    name: 'Case sensitive #1',
+  })
+  // The cells are top-aligned so row errors line up; the switch is shorter
+  // than the h-8 inputs and sat above their middle.
+  expect(caseSensitive.closest('[data-slot="form-item"]')).toHaveClass(
+    'h-8',
+    'content-center'
+  )
+})
+
 test.each([3, 8, 57, 59, 60, 14])(
   'a channel of type %i, next to OpenAI, has no content moderation card',
   async (type) => {

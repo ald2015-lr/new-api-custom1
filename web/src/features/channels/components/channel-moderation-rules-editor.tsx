@@ -139,7 +139,9 @@ function CaseSensitiveCell(props: CellProps) {
       control={props.control}
       name={`moderation_rules.${props.index}.case_sensitive`}
       render={({ field }) => (
-        <FormItem className='gap-1'>
+        // As tall as the row inputs, so the shorter switch sits on their
+        // middle in the top-aligned row.
+        <FormItem className='h-8 content-center gap-1'>
           <FormControl>
             <Switch
               aria-label={`${props.label} #${props.index + 1}`}
