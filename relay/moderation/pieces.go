@@ -99,9 +99,12 @@ func alternate(n int) []int {
 }
 
 // candidatePieces lists the distinct pieces worth looking up, in the order of
-// the budget: system text up to half the budget, the newest user message, the
-// rest of the system text, then the older user messages from the newest. At
-// most maxPiecesConsidered are listed; truncated reports that more existed.
+// the budget: system text up to half the budget and half of the pieces, the
+// newest user message, the rest of the system text, then the older user
+// messages from the newest. At most maxPiecesConsidered are listed;
+// truncated reports that more existed. The first step is capped in pieces as
+// well as in runes, so many short system messages cannot use up the pieces
+// before the newest user message is listed.
 func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []*piece, truncated bool) {
 	var system, users []*segment
 	for _, seg := range ex.segments {
@@ -134,9 +137,11 @@ func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []
 		seen[key] = true
 		candidates = append(candidates, &piece{text: text, runes: utf8.RuneCountInString(text), key: key, group: group, fromEnd: fromEnd})
 	}
-	drain := func(source *pieceSource, group int, limit int) {
+	// drain stops at runeLimit runes taken or pieceLimit pieces listed (-1:
+	// no limit); only a piece refused by the overall cap makes the list full.
+	drain := func(source *pieceSource, group, runeLimit, pieceLimit int) {
 		used := 0
-		for !full && (limit < 0 || used < limit) {
+		for !full && (runeLimit < 0 || used < runeLimit) && (pieceLimit < 0 || len(candidates) < pieceLimit) {
 			text, fromEnd, ok := source.take()
 			if !ok {
 				return
@@ -145,10 +150,10 @@ func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []
 			used += utf8.RuneCountInString(text)
 		}
 	}
-	drain(systemSource, groupSystem, budget/2)
-	drain(newestSource, groupNewestUser, -1)
-	drain(systemSource, groupSystem, -1)
-	drain(olderSource, groupOlderUser, -1)
+	drain(systemSource, groupSystem, budget/2, maxPiecesConsidered/2)
+	drain(newestSource, groupNewestUser, -1, -1)
+	drain(systemSource, groupSystem, -1, -1)
+	drain(olderSource, groupOlderUser, -1, -1)
 	return candidates, full
 }
 

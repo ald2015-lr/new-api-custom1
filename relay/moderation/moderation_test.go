@@ -1534,6 +1534,43 @@ func TestBudgetOrder(t *testing.T) {
 		assert.True(t, truncated)
 		assert.Equal(t, "message 299", candidates[0].text, "the newest message comes first")
 	})
+	t.Run("short system messages cannot use up the pieces before the newest user message", func(t *testing.T) {
+		for _, n := range []int{255, 256, 300, 1000} {
+			var roleTexts []string
+			for i := range n {
+				roleTexts = append(roleTexts, roleSystem, fmt.Sprintf("note %d", i))
+			}
+			roleTexts = append(roleTexts, roleUser, "MOD-FLAG-SEXUAL")
+			candidates, truncated := candidatePieces(segmentsOf(roleTexts...), endpoint, 10000)
+			assert.LessOrEqual(t, len(candidates), maxPiecesConsidered, n)
+			require.Greater(t, len(candidates), maxPiecesConsidered/2, n)
+			assert.Equal(t, groupNewestUser, candidates[maxPiecesConsidered/2].group, "listed after half of the pieces: %d", n)
+			assert.Equal(t, n >= maxPiecesConsidered, truncated, n)
+			plan := planBudget(candidates, noVerdicts, 10000, endpoint)
+			assert.Contains(t, sentTexts(plan), "MOD-FLAG-SEXUAL", n)
+			// The padding is cached: the newest message is still sent.
+			systemCached := func(key string) bool { return key != textKey(endpoint, "MOD-FLAG-SEXUAL") }
+			assert.Equal(t, []string{"MOD-FLAG-SEXUAL"}, sentTexts(planBudget(candidates, systemCached, 10000, endpoint)), n)
+		}
+	})
+	t.Run("the piece cap still applies to the rest of the system text and older history", func(t *testing.T) {
+		var roleTexts []string
+		for i := range 300 {
+			roleTexts = append(roleTexts, roleSystem, fmt.Sprintf("note %d", i))
+		}
+		for i := range 10 {
+			roleTexts = append(roleTexts, roleUser, fmt.Sprintf("message %d", i))
+		}
+		candidates, truncated := candidatePieces(segmentsOf(roleTexts...), endpoint, 10000)
+		assert.Len(t, candidates, maxPiecesConsidered)
+		assert.True(t, truncated)
+		groups := map[int]int{}
+		for _, p := range candidates {
+			groups[p.group]++
+		}
+		assert.Equal(t, map[int]int{groupSystem: maxPiecesConsidered - 1, groupNewestUser: 1}, groups, "no older user message is listed")
+		assert.Equal(t, "message 9", candidates[maxPiecesConsidered/2].text)
+	})
 	t.Run("calls stay within the per-call limits", func(t *testing.T) {
 		var roleTexts []string
 		for i := range 100 {

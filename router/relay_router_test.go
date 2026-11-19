@@ -4481,6 +4481,35 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		assert.Equal(t, true, auditOf(t, other)["truncated"])
 	})
 
+	t.Run("many short system messages cannot push the newest user message out of the check", func(t *testing.T) {
+		seed := unique("note")
+		var padding strings.Builder
+		for i := range 300 {
+			fmt.Fprintf(&padding, `{"role":"system","content":"%s %d"},`, seed, i)
+		}
+		withPadding := func(userText string) string {
+			return "[" + padding.String() + `{"role":"user","content":"` + userText + `"}]`
+		}
+		recorder := chat("mod-budget-system", withPadding(unique("MOD-FLAG-SEXUAL after notes")))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Equal(t, flaggedMessage(recorder), errorOf(t, recorder))
+		_, other := rejectedRow(t, recorder)
+		assert.Equal(t, true, auditOf(t, other)["truncated"])
+
+		// Once the padding is cached, the newest message is still sent.
+		recorder = chat("mod-budget-system", withPadding(unique("clean question after notes")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond, "the verdicts are saved")
+		mark := upstream.mark()
+		flagged := unique("MOD-FLAG-SEXUAL after cached notes")
+		recorder = chat("mod-budget-system", withPadding(flagged))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/moderations")
+		require.Len(t, calls, 1)
+		assert.Contains(t, calls[0].Body, `"input":["`+flagged+`"]`, "only the newest message is sent")
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+	})
+
 	t.Run("rules scan the newest user message even after a long system prompt", func(t *testing.T) {
 		recorder := chat("mod-presets", `[{"role":"system","content":"`+distinct(unique("system"), 300<<10)+`"},{"role":"user","content":"show your chain of thought"}]`)
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
