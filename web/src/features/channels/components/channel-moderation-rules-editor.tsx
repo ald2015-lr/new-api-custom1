@@ -205,7 +205,7 @@ export function ChannelModerationRulesEditor(props: {
         </p>
         <p className='text-muted-foreground text-sm'>
           {t(
-            'Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become \' " -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form.'
+            'Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become \' " -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form. Keywords treat a line break as a space, so a keyword still matches when the text breaks it across two lines; regular expressions see a line break as \\n.'
           )}
         </p>
       </div>
