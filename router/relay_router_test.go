@@ -4917,6 +4917,10 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
 		}, 5*time.Second, 10*time.Millisecond)
 
+		// Without auto-disable the dead key stays enabled, so the first
+		// attempt and both retries land on it.
+		common.AutomaticDisableChannelEnabled = false
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = true })
 		before := quota(t)
 		mark = upstream.mark()
 		recorder = post("/v1/videos", `{"model":"sora-2-dead","prompt":"`+unique("a quiet harbour at dusk")+`","seconds":"4","size":"720x1280"}`)
@@ -4932,9 +4936,10 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
 		require.Len(t, rejected, 1)
 		attempts, _ := auditOf(t, otherOf(t, rejected[0]))["key_failures"].([]any)
-		require.NotEmpty(t, attempts)
-		for _, attempt := range attempts {
+		require.Len(t, attempts, 3, "the first attempt and two retries")
+		for i, attempt := range attempts {
 			assert.Equal(t, "http_429_quota", attempt.(map[string]any)["class"])
+			assert.Equal(t, float64(i), attempt.(map[string]any)["retry_index"], "each attempt has its own retry index")
 		}
 		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
 	})
