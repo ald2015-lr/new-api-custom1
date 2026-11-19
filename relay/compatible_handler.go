@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,6 +119,16 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			}
 		}
 		requestBody = common.NewReplayableBodyReader(storage)
+		if info.RelayMode == relayconstant.RelayModeChatCompletions {
+			body, closer, apiErr := passthroughChatBody(storage, info)
+			if apiErr != nil {
+				return apiErr
+			}
+			if closer != nil {
+				defer closer.Close()
+			}
+			requestBody = body
+		}
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
 		if err != nil {
@@ -138,6 +149,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		if info.RelayMode == relayconstant.RelayModeChatCompletions {
+			jsonData, err = relaycommon.ApplyGatewaySafetyIdentifier(jsonData, info)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
 		}
 
 		// apply param override
@@ -206,4 +223,32 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), logContent)
 	}
 	return nil
+}
+
+// passthroughChatBody is the body a passthrough attempt sends to a Chat
+// Completions endpoint: the client's stored bytes, except that an OpenAI
+// channel with send_safety_identifier on gets the gateway's
+// safety_identifier in place of the client's (every other byte stays the
+// client's). closer is nil when the body is the storage itself.
+func passthroughChatBody(storage common.BodyStorage, info *relaycommon.RelayInfo) (io.Reader, io.Closer, *types.NewAPIError) {
+	body := common.NewReplayableBodyReader(storage)
+	if !info.ChannelOtherSettings.SendSafetyIdentifier {
+		return body, nil, nil
+	}
+	raw, err := storage.Bytes()
+	if err != nil {
+		return nil, nil, types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	identified, err := relaycommon.ApplyGatewaySafetyIdentifier(raw, info)
+	if err != nil {
+		return nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	if bytes.Equal(identified, raw) {
+		return body, nil, nil
+	}
+	identifiedBody, closer, err := relaycommon.NewOutboundJSONBody(identified)
+	if err != nil {
+		return nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	return identifiedBody, closer, nil
 }

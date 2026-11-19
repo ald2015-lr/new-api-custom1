@@ -1587,9 +1587,10 @@ func RespondTaskPluginError(c *gin.Context, taskErr *dto.TaskError) bool {
 		return false
 	}
 	sanitized := sanitizedTaskPluginError(taskErr.StatusCode, taskErr.Message)
-	if taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted) {
+	if taskErr.Code == string(types.ErrorCodeServiceQuotaExhausted) || types.IsContentModerationErrorCode(types.ErrorCode(taskErr.Code)) {
 		// The channel's own message for an upstream balance error, under any
-		// status the channel chose.
+		// status the channel chose, and content moderation's generic
+		// message.
 		sanitized.Code, sanitized.Message = taskErr.Code, taskErr.Message
 	}
 	requestID := c.GetString(common.RequestIdKey)

@@ -103,7 +103,25 @@ const (
 	// channel's upstream_quota_error_mask_enabled setting). It names no
 	// upstream and does not tell the user that their own quota is short.
 	ErrorCodeServiceQuotaExhausted ErrorCode = "service_quota_exhausted"
+
+	// Content moderation of an OpenAI channel (its moderation_* settings).
+	// A request with one of these codes was never sent upstream; it is not
+	// retried on another channel, billed, or a reason to disable a channel
+	// or key.
+	ErrorCodeContentModerationFlagged     ErrorCode = "content_moderation_flagged"     // OpenAI flag or rule hit
+	ErrorCodeContentModerationUnavailable ErrorCode = "content_moderation_unavailable" // the moderation call failed and the channel rejects on failure
+	ErrorCodeContentModerationUnsupported ErrorCode = "content_moderation_unsupported" // the endpoint or the input cannot be moderated (Realtime, NovelAI-native, token prompts, ambiguous keys)
 )
+
+// IsContentModerationErrorCode reports whether code is one of the content
+// moderation codes.
+func IsContentModerationErrorCode(code ErrorCode) bool {
+	switch code {
+	case ErrorCodeContentModerationFlagged, ErrorCodeContentModerationUnavailable, ErrorCodeContentModerationUnsupported:
+		return true
+	}
+	return false
+}
 
 type NewAPIError struct {
 	Err            error

@@ -337,3 +337,49 @@ it('shows loading placeholders without displaying stale log fields', () => {
     screen.queryByRole('button', { name: /^Model:/ })
   ).not.toBeInTheDocument()
 })
+
+const moderationLog = usageLogSchema.parse({
+  id: 9,
+  user_id: 2,
+  created_at: 1788840000,
+  type: 100,
+  content: 'Rejected by content moderation',
+  model_name: 'gpt-moderated',
+  username: 'production-admin',
+  channel: 372,
+  channel_name: 'openai-main',
+  token_name: 'backend-production-token',
+  group: 'default',
+  quota: 0,
+  use_time: 2,
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  other: JSON.stringify({
+    content_parts: [{ key: 'Rejected by content moderation' }],
+    error_code: 'content_moderation_flagged',
+    status_code: 400,
+  }),
+})
+
+it.each([true, false])(
+  'a content moderation row reads as one, admin=%s',
+  (admin) => {
+    const { container } = renderLogs({ admin, logs: [moderationLog] })
+    expect(screen.getByText('Moderation')).toBeVisible()
+    expect(screen.getByText('Rejected by content moderation')).toHaveClass(
+      'text-red-600'
+    )
+    expect(
+      screen.getByRole('button', { name: 'Model: gpt-moderated' })
+    ).toBeVisible()
+    expect(screen.getByText('Duration')).toBeVisible()
+    expect(screen.queryByText('Input')).not.toBeInTheDocument()
+    const channel = screen.queryByRole('button', { name: /^Channel:/ })
+    if (admin) expect(channel).toBeVisible()
+    else expect(channel).not.toBeInTheDocument()
+    expect(
+      container.querySelector('[data-slot="log-time-and-timing"]')
+        ?.parentElement?.parentElement
+    ).toHaveClass('bg-amber-50/40')
+  }
+)

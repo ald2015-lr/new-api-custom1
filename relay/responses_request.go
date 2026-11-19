@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,6 +56,25 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
 		body := common.NewReplayableBodyReader(storage)
+		if info.RelayMode == relayconstant.RelayModeResponses && info.ChannelOtherSettings.SendSafetyIdentifier {
+			// Only the client's safety_identifier is replaced; every other
+			// byte is the client's.
+			raw, err := storage.Bytes()
+			if err != nil {
+				return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+			}
+			identified, err := relaycommon.ApplyGatewaySafetyIdentifier(raw, info)
+			if err != nil {
+				return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			if !bytes.Equal(identified, raw) {
+				identifiedBody, closer, err := relaycommon.NewOutboundJSONBody(identified)
+				if err != nil {
+					return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+				}
+				return adaptor, identifiedBody, closer, nil
+			}
+		}
 		return adaptor, body, io.NopCloser(body), nil
 	}
 
@@ -70,6 +90,12 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 	jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
 	if err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	if info.RelayMode == relayconstant.RelayModeResponses {
+		jsonData, err = relaycommon.ApplyGatewaySafetyIdentifier(jsonData, info)
+		if err != nil {
+			return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
 	}
 	if len(info.ParamOverride) > 0 {
 		jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)

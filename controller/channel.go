@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1289,6 +1290,35 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if channel.Key != "" && channel.Key != originChannel.Key {
 		changedFields = append(changedFields, "key")
+	}
+	if channel.OtherSettings != "" {
+		// The content moderation and safety identifier settings, compared
+		// as the settings JSON stores them. Both sides are parsed here
+		// without GetOtherSettings: on a stored value that no longer parses
+		// it saves the pre-update originChannel over the row just updated.
+		// A value that does not parse counts as changed.
+		var moderationParts [2][]byte
+		settingsUnparseable := false
+		for i, raw := range []string{channel.OtherSettings, originChannel.OtherSettings} {
+			settings := dto.ChannelOtherSettings{}
+			if raw != "" && common.UnmarshalJsonStr(raw, &settings) != nil {
+				settingsUnparseable = true
+			}
+			moderationParts[i], _ = common.Marshal(dto.ChannelOtherSettings{
+				ModerationEnabled:        settings.ModerationEnabled,
+				ModerationFailOpen:       settings.ModerationFailOpen,
+				ModerationCategories:     settings.ModerationCategories,
+				ModerationSkipImages:     settings.ModerationSkipImages,
+				ModerationMaxChars:       settings.ModerationMaxChars,
+				ModerationTimeoutSeconds: settings.ModerationTimeoutSeconds,
+				ModerationRulePresets:    settings.ModerationRulePresets,
+				ModerationRules:          settings.ModerationRules,
+				SendSafetyIdentifier:     settings.SendSafetyIdentifier,
+			})
+		}
+		if settingsUnparseable || !bytes.Equal(moderationParts[0], moderationParts[1]) {
+			changedFields = append(changedFields, "content_moderation")
+		}
 	}
 	updateAudit := map[string]any{
 		"id":             channel.Id,

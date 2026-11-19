@@ -147,6 +147,10 @@ function buildTypeDetailSegments(
     return [{ text: t('Async task refund') }]
   }
 
+  if (log.type === 100) {
+    return [{ text: renderLogContent(other, t) ?? log.content, danger: true }]
+  }
+
   if (log.type !== 2) return []
 
   const isViolation = isViolationFeeLog(other)

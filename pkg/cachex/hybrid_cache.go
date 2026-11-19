@@ -128,6 +128,88 @@ func (c *HybridCache[V]) SetWithTTL(key string, v V, ttl time.Duration) error {
 	return nil
 }
 
+// GetMany looks keys up in one round trip: one MGET of the namespaced keys on
+// ctx when Redis is on, memory lookups otherwise. The result holds the keys
+// that were found, keyed as given; a value that does not decode counts as
+// missing.
+func (c *HybridCache[V]) GetMany(ctx context.Context, keys []string) (map[string]V, error) {
+	found := make(map[string]V, len(keys))
+	rawKeys := make([]string, 0, len(keys))
+	fullKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		full := c.ns.FullKey(key)
+		if full == "" {
+			continue
+		}
+		rawKeys = append(rawKeys, key)
+		fullKeys = append(fullKeys, full)
+	}
+	if len(fullKeys) == 0 {
+		return found, nil
+	}
+
+	if c.redisOn() {
+		values, err := c.redis.MGet(ctx, fullKeys...).Result()
+		if err != nil {
+			return found, err
+		}
+		for i, value := range values {
+			raw, ok := value.(string)
+			if !ok {
+				continue
+			}
+			decoded, err := c.redisCodec.Decode(raw)
+			if err != nil {
+				continue
+			}
+			found[rawKeys[i]] = decoded
+		}
+		return found, nil
+	}
+
+	mem := c.memCache()
+	for i, full := range fullKeys {
+		if value, ok, _ := mem.Get(full); ok {
+			found[rawKeys[i]] = value
+		}
+	}
+	return found, nil
+}
+
+// SetManyWithTTL stores values in one round trip: one pipeline of SET … EX on
+// ctx when Redis is on, memory writes otherwise.
+func (c *HybridCache[V]) SetManyWithTTL(ctx context.Context, values map[string]V, ttl time.Duration) error {
+	if c.redisOn() {
+		pipe := c.redis.Pipeline()
+		queued := 0
+		for key, value := range values {
+			full := c.ns.FullKey(key)
+			if full == "" {
+				continue
+			}
+			raw, err := c.redisCodec.Encode(value)
+			if err != nil {
+				return err
+			}
+			pipe.Set(ctx, full, raw, ttl)
+			queued++
+		}
+		if queued == 0 {
+			return nil
+		}
+		_, err := pipe.Exec(ctx)
+		return err
+	}
+
+	mem := c.memCache()
+	for key, value := range values {
+		if full := c.ns.FullKey(key); full != "" {
+			mem.SetWithTTL(full, value, ttl)
+		}
+	}
+	return nil
+}
+
 // Keys returns keys with valid values. In Redis, it returns all matching keys.
 func (c *HybridCache[V]) Keys() ([]string, error) {
 	if c.redisOn() {

@@ -16,6 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   render,
@@ -476,6 +479,30 @@ it('translates changed field names and shows unknown nested metadata as readable
   expect(within(dialog).getByText('No')).toBeVisible()
   expect(dialog).not.toHaveTextContent('[object Object]')
   expect(dialog.querySelector('pre')).not.toBeInTheDocument()
+})
+
+it('names a change of the content moderation settings with the token the server records', async () => {
+  const controller = readFileSync(
+    resolve(import.meta.dirname, '../../../../../..', 'controller/channel.go'),
+    'utf8'
+  )
+  expect(controller).toContain(
+    'changedFields = append(changedFields, "content_moderation")'
+  )
+  const { dialog } = await openDetails({
+    ...entry,
+    other: {
+      op: {
+        action: 'channel.update',
+        params: {
+          id: 42,
+          name: 'batch',
+          changed_fields: ['models', 'content_moderation'],
+        },
+      },
+    },
+  })
+  expect(within(dialog).getByText('Models, Content moderation')).toBeVisible()
 })
 
 it.each([null, undefined, '', '{broken', [], 42])(

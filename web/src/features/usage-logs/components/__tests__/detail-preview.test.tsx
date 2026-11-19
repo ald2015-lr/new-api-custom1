@@ -501,3 +501,19 @@ test.each(['missing schema', 'unsupported expression', 'unknown tier'])(
     )
   }
 )
+
+test.each([true, false])(
+  'a content moderation row shows its rejection as the details, in the danger style, admin=%s',
+  (isAdmin) => {
+    const preview = renderPreview(
+      {
+        content_parts: [{ key: 'Rejected by content moderation' }],
+      },
+      isAdmin,
+      100
+    )
+    const text = within(preview).getByText('Rejected by content moderation')
+    expect(text).toHaveClass('text-red-600')
+    expect(preview.textContent).toBe('Rejected by content moderation')
+  }
+)

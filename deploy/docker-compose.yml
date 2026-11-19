@@ -29,6 +29,12 @@ services:
       - USER_CONTENT_REQUEST_TIMEOUT=60
       - SQL_MAX_OPEN_CONNS=10000
       - GLOBAL_API_RATE_LIMIT=18000
+      # 加密密钥：在 .env 里设一个长随机串（openssl rand -hex 32）后不要再改。
+      # 留空时沿用 SESSION_SECRET，两者都没设则每次重启随机生成，
+      # 渠道「向 OpenAI 发送用户安全标识」发出的标识会随之改变。
+      # 改动它会让之前发出的任务结果下载链接失效；已设 SESSION_SECRET 的
+      # 部署可以留空或设成与它相同的值。
+      - CRYPTO_SECRET=${CRYPTO_SECRET:-}
       # 前面有 CDN / 反向代理时必须填它的回源网段，否则所有用户会被算成同一个 IP
       # 共用一个限流桶。默认只信任回环和内网段（10/8、172.16/12、192.168/16）。
       # - TRUSTED_PROXIES=<CDN 或反代的回源网段，逗号分隔>

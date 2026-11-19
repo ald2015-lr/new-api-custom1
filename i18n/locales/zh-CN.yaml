@@ -100,6 +100,10 @@ gemini_free_key.keys_rpm_full: "{{.Count}} 个已达每分钟请求数上限"
 gemini_free_key.keys_tpm_full: "{{.Count}} 个已达每分钟输入 tokens 上限"
 gemini_free_key.keys_ready: "{{.Count}} 个有余量"
 gemini_free_key.keys_separator: "，"
+moderation.flagged: "请求未通过内容审查"
+moderation.unavailable: "内容审查暂不可用，请求未发送"
+moderation.unsupported: "开启内容审查的渠道不支持此接口"
+moderation.unsupported_input: "请求包含内容审查无法检查的内容，未发送"
 
 # 分组充值门槛消息
 group_access.topup_required: "分组 {{.Group}} 需要累计充值满 {{.Required}} 才能使用（当前累计 {{.Current}}）"

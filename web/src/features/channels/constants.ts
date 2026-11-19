@@ -63,6 +63,33 @@ export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_DEFAULT = 403
 export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_MIN = 400
 export const UPSTREAM_QUOTA_ERROR_STATUS_CODE_MAX = 599
 
+// Content moderation of an OpenAI channel (settings.moderation_*). The
+// server applies the same defaults and bounds; the channel form saves only
+// what differs from the defaults. Characters are Unicode code points.
+export const MODERATION_MAX_CHARS_DEFAULT = 10000
+export const MODERATION_MAX_CHARS_MIN = 1000
+export const MODERATION_MAX_CHARS_MAX = 200000
+export const MODERATION_TIMEOUT_SECONDS_DEFAULT = 10
+export const MODERATION_TIMEOUT_SECONDS_MIN = 1
+export const MODERATION_TIMEOUT_SECONDS_MAX = 60
+export const MODERATION_RULES_MAX = 100
+export const MODERATION_REGEX_RULES_MAX = 30
+export const MODERATION_RULE_PATTERN_MAX = 512
+export const MODERATION_RULE_NAME_MAX = 64
+// Every settings key of content moderation and the safety identifier; a
+// channel of another type saves none of them.
+export const MODERATION_SETTINGS_KEYS = [
+  'moderation_enabled',
+  'moderation_fail_open',
+  'moderation_categories',
+  'moderation_skip_images',
+  'moderation_max_chars',
+  'moderation_timeout_seconds',
+  'moderation_rule_presets',
+  'moderation_rules',
+  'send_safety_identifier',
+] as const
+
 // Free key mode of a Gemini (AI Studio) channel (settings.gemini_free_key_*).
 // The server applies the same defaults and bounds; the channel form saves
 // only what differs from the defaults.
@@ -554,6 +581,18 @@ export const ERROR_MESSAGES = {
   GEMINI_FREE_KEY_MODEL_LIMITS_EMPTY:
     'Keep at least one model, or restore the defaults',
   GEMINI_FREE_KEY_MODEL_LIMITS_TOO_MANY: 'At most 300 models',
+  INVALID_MODERATION_MAX_CHARS:
+    'Enter a whole number from 1,000 to 200,000, or leave it empty for 10,000',
+  INVALID_MODERATION_TIMEOUT:
+    'Enter a whole number from 1 to 60, or leave it empty for 10',
+  MODERATION_RULES_TOO_MANY: 'At most 100 rules',
+  MODERATION_REGEX_RULES_TOO_MANY: 'At most 30 regular expression rules',
+  MODERATION_RULE_PATTERN_REQUIRED: 'Enter a pattern',
+  MODERATION_RULE_PATTERN_INVISIBLE:
+    'The pattern must contain a visible character',
+  MODERATION_RULE_PATTERN_TOO_LONG: 'A pattern must be at most 512 characters',
+  MODERATION_RULE_NAME_TOO_LONG: 'A name must be at most 64 characters',
+  MODERATION_RULE_DUPLICATE: 'This pattern is already used by another rule',
   CREATE_FAILED: 'Failed to create channel',
   UPDATE_FAILED: 'Failed to update channel',
   DELETE_FAILED: 'Failed to delete channel',

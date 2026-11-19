@@ -98,6 +98,20 @@ const CONFIGURATION_BLOCKS = {
       'claude_beta_query',
     ],
   },
+  contentModeration: {
+    section: 'request',
+    fields: [
+      'moderation_enabled',
+      'moderation_fail_open',
+      'moderation_categories',
+      'moderation_skip_images',
+      'moderation_max_chars',
+      'moderation_timeout_seconds',
+      'moderation_rule_presets',
+      'moderation_rules',
+      'send_safety_identifier',
+    ],
+  },
   extraSettings: {
     section: 'other',
     fields: [
@@ -202,6 +216,10 @@ export function getChannelConfigurationState(
         (values.allow_speed ||
           (values.type === 14 && values.claude_beta_query)))
     ),
+    contentModeration:
+      values.type === 1 &&
+      (values.moderation_enabled === true ||
+        values.send_safety_identifier === true),
     extraSettings: Boolean(
       values.proxy?.trim() ||
       (values.http_protocol && values.http_protocol !== 'auto') ||

@@ -30,6 +30,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/alicebob/miniredis/v2"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
@@ -1951,6 +1952,235 @@ func TestResponsesWebSocketPreRoutingRejectionsFollowHealthClassification(t *tes
 			requests, successes := waitPerfCounters(t, 1)
 			assert.Equal(t, int64(1), requests)
 			assert.Zero(t, successes)
+		})
+	}
+}
+
+// A moderated channel checks every response.create of a connection before
+// anything is written upstream: a flagged first event never dials, a flagged
+// event on a locked connection is answered with an error event while the
+// socket stays open, a failed check answers 503, and rejected events are
+// refunded. The check runs before the payload builder, so a clean event
+// still goes out under the channel's model mapping.
+func TestResponsesWebSocketModeratesEachCreate(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	var creates atomic.Int32
+	fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+		for index := 1; ; index++ {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+			creates.Add(1)
+			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_mod_%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}`, index)
+			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
+				return
+			}
+		}
+	})
+	var moderationFails atomic.Bool
+	var moderationCalls atomic.Int32
+	fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path != "/v1/moderations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		moderationCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if moderationFails.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"The server had an error","type":"server_error"}}`)
+			return
+		}
+		flagged := strings.Contains(string(body), "MOD-FLAG-SEXUAL")
+		_, _ = fmt.Fprintf(w, `{"id":"modr-ws","model":"omni-moderation-2024-09-26","results":[{"flagged":%t,"categories":{"sexual":%t},"category_scores":{"sexual":0.9},"category_applied_input_types":{"sexual":["text"]}}]}`, flagged, flagged)
+	}
+	fixture.channel.SetOtherSettings(dto.ChannelOtherSettings{AllowServiceTier: true, ModerationEnabled: true})
+	require.NoError(t, model.DB.Model(fixture.channel).Update("settings", fixture.channel.OtherSettings).Error)
+	create := func(input string) map[string]any {
+		require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"`+input+`"}`)))
+		return readResponsesWSTestEvent(t, fixture.client)
+	}
+	assertRejected := func(t *testing.T, event map[string]any, status int, code string) {
+		t.Helper()
+		assert.Equal(t, "error", event["type"], event)
+		assert.Equal(t, float64(status), event["status"], event)
+		eventError, _ := event["error"].(map[string]any)
+		assert.Equal(t, code, eventError["code"], event)
+	}
+
+	assertRejected(t, create("MOD-FLAG-SEXUAL on a fresh connection"), http.StatusBadRequest, "content_moderation_flagged")
+	assert.Zero(t, fixture.connections.Load(), "a flagged first event never dials")
+
+	assert.Equal(t, "response.completed", create("a clean question")["type"])
+	assert.Equal(t, int32(1), creates.Load())
+
+	assertRejected(t, create("MOD-FLAG-SEXUAL on the locked connection"), http.StatusBadRequest, "content_moderation_flagged")
+	moderationFails.Store(true)
+	assertRejected(t, create("a question while moderation is down"), http.StatusServiceUnavailable, "content_moderation_unavailable")
+	moderationFails.Store(false)
+	assert.Equal(t, int32(1), creates.Load(), "no rejected event reached the upstream")
+
+	assert.Equal(t, "response.completed", create("another clean question")["type"], "the socket stays open")
+	assert.Equal(t, int32(2), creates.Load())
+	assert.Equal(t, int32(5), moderationCalls.Load())
+
+	fixture.closeAndWait(t)
+	require.Eventually(t, func() bool {
+		require.NoError(t, model.DB.First(fixture.token, fixture.token.Id).Error)
+		return fixture.token.RemainQuota == 3000-2000
+	}, 3*time.Second, 10*time.Millisecond, "rejected events are refunded")
+	assertResponsesWSAccounting(t, fixture, []int{1000, 1000})
+
+	var consumed model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").First(&consumed).Error)
+	var other struct {
+		RequestConversion []string `json:"request_conversion"`
+		ResponseModel     struct {
+			UpstreamModel string `json:"upstream_model"`
+		} `json:"response_model"`
+		AdminInfo struct {
+			Moderation struct {
+				Status    string `json:"status"`
+				ChannelID int    `json:"channel_id"`
+			} `json:"moderation"`
+		} `json:"admin_info"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(consumed.Other, &other))
+	assert.Equal(t, "gpt-4o", other.ResponseModel.UpstreamModel, "the payload builder ran after the check")
+	assert.NotEmpty(t, other.RequestConversion)
+	assert.Equal(t, "passed", other.AdminInfo.Moderation.Status)
+	assert.Equal(t, fixture.channel.Id, other.AdminInfo.Moderation.ChannelID)
+	var rejected []model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeModeration).Order("id").Find(&rejected).Error)
+	require.Len(t, rejected, 3)
+	assert.Equal(t, []string{"responses-ws-billing-ws-0", "responses-ws-billing-ws-2", "responses-ws-billing-ws-3"}, []string{rejected[0].RequestId, rejected[1].RequestId, rejected[2].RequestId})
+}
+
+// A moderation call that says the key is unusable, on the first event of a
+// connection, is the channel's error: nothing is dialled with that key, the
+// key is disabled and the event moves to the next key; with no retry left the
+// event gets the failed check's 503 and the socket stays open. A locked
+// connection cannot move, so there the event is rejected like any failed
+// check and the key stays enabled.
+func TestResponsesWebSocketModerationKeyFailures(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousAutoDisable, previousErrorLog, previousRetries := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = previousAutoDisable, previousErrorLog, previousRetries
+	})
+	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled = true, true
+	for _, tc := range []struct {
+		name    string
+		retries int
+	}{{"retried on the next key", 1}, {"without a retry", 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			common.RetryTimes = tc.retries
+			var creates atomic.Int32
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				for index := 1; ; index++ {
+					if _, _, err := ws.ReadMessage(); err != nil {
+						return
+					}
+					creates.Add(1)
+					terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_key_%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}`, index)
+					if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
+						return
+					}
+				}
+			})
+			var dead sync.Map
+			dead.Store("upstream-first", true)
+			var checkedMu sync.Mutex
+			var checked []string
+			fixture.httpUpstream = func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/moderations" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				checkedMu.Lock()
+				checked = append(checked, key)
+				checkedMu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				if _, ok := dead.Load(key); ok {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = io.WriteString(w, `{"error":{"message":"Incorrect API key provided: `+key+`","type":"invalid_request_error","code":"invalid_api_key"}}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"id":"modr-ws","model":"omni-moderation-2024-09-26","results":[{"flagged":false,"categories":{"sexual":false},"category_scores":{"sexual":0.0001},"category_applied_input_types":{"sexual":["text"]}}]}`)
+			}
+			fixture.channel.SetOtherSettings(dto.ChannelOtherSettings{AllowServiceTier: true, ModerationEnabled: true})
+			require.NoError(t, model.DB.Model(fixture.channel).Updates(map[string]any{"settings": fixture.channel.OtherSettings, "auto_ban": 1}).Error)
+			create := func(input string) map[string]any {
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"`+input+`"}`)))
+				return readResponsesWSTestEvent(t, fixture.client)
+			}
+			assertUnavailable := func(t *testing.T, event map[string]any) {
+				t.Helper()
+				assert.Equal(t, "error", event["type"], event)
+				assert.Equal(t, float64(http.StatusServiceUnavailable), event["status"], event)
+				eventError, _ := event["error"].(map[string]any)
+				assert.Equal(t, "content_moderation_unavailable", eventError["code"], event)
+				assert.NotContains(t, fmt.Sprint(event), "upstream-first")
+			}
+			keyStatus := func(index int) int {
+				stored, err := model.GetChannelById(fixture.channel.Id, true)
+				require.NoError(t, err)
+				return stored.ChannelInfo.MultiKeyStatusList[index]
+			}
+
+			if tc.retries > 0 {
+				assert.Equal(t, "response.completed", create("a question for the first key")["type"])
+			} else {
+				assertUnavailable(t, create("a question for the first key"))
+				assert.Zero(t, fixture.connections.Load(), "nothing is dialled")
+				assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && keyStatus(0) == common.ChannelStatusAutoDisabled },
+					3*time.Second, 10*time.Millisecond, "the key is disabled")
+				assert.Equal(t, "response.completed", create("a question for the next key")["type"], "the socket stays open")
+			}
+			assert.Equal(t, int32(1), creates.Load())
+			checkedMu.Lock()
+			assert.Equal(t, []string{"upstream-first", "upstream-second"}, checked)
+			checkedMu.Unlock()
+
+			// The connection is locked to the second key.
+			dead.Store("upstream-second", true)
+			assertUnavailable(t, create("a question while the locked key is dead"))
+			dead.Delete("upstream-second")
+			assert.Equal(t, "response.completed", create("a question once the key works again")["type"], "the socket stays open")
+			assert.Equal(t, int32(2), creates.Load())
+			fixture.closeAndWait(t)
+			assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 3*time.Second, 10*time.Millisecond)
+			assert.NotEqual(t, common.ChannelStatusAutoDisabled, keyStatus(1), "a locked connection never disables its key")
+
+			var errorRows, rejected []model.Log
+			require.NoError(t, model.LOG_DB.Where("token_id = ? AND type = ?", fixture.token.Id, model.LogTypeError).Order("id").Find(&errorRows).Error)
+			require.Len(t, errorRows, 1, "the first event's attempt on the unusable key")
+			assert.Equal(t, "status_code=503, Content moderation is unavailable; the request was not sent", errorRows[0].Content)
+			assert.NotContains(t, errorRows[0].Other, "upstream-first")
+			require.NoError(t, model.LOG_DB.Where("token_id = ? AND type = ?", fixture.token.Id, model.LogTypeModeration).Order("id").Find(&rejected).Error)
+			keyFailures := func(row model.Log) []any {
+				var other struct {
+					AdminInfo struct {
+						Moderation struct {
+							KeyFailures []any `json:"key_failures"`
+						} `json:"moderation"`
+					} `json:"admin_info"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(row.Other, &other))
+				return other.AdminInfo.Moderation.KeyFailures
+			}
+			failure := func(retryIndex, keyIndex int) map[string]any {
+				return map[string]any{"channel_id": float64(fixture.channel.Id), "retry_index": float64(retryIndex), "attempt": float64(1), "multi_key_index": float64(keyIndex), "class": "http_401", "status": float64(http.StatusUnauthorized)}
+			}
+			if tc.retries > 0 {
+				require.Len(t, rejected, 1, "the event another key served is not rejected")
+			} else {
+				require.Len(t, rejected, 2)
+				assert.Equal(t, []any{failure(0, 0)}, keyFailures(rejected[0]))
+			}
+			assert.Equal(t, []any{failure(0, 1)}, keyFailures(rejected[len(rejected)-1]))
 		})
 	}
 }

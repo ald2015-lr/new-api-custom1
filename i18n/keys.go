@@ -117,6 +117,14 @@ const (
 	MsgGeminiFreeKeyKeysTPMFull       = "gemini_free_key.keys_tpm_full"
 	MsgGeminiFreeKeyKeysReady         = "gemini_free_key.keys_ready"
 	MsgGeminiFreeKeyKeysSeparator     = "gemini_free_key.keys_separator"
+
+	// Content moderation of an OpenAI channel rejected the request. The same
+	// flagged text answers an OpenAI flag and a rule hit, so users cannot tell
+	// which layer fired.
+	MsgModerationFlagged          = "moderation.flagged"
+	MsgModerationUnavailable      = "moderation.unavailable"
+	MsgModerationUnsupported      = "moderation.unsupported"
+	MsgModerationUnsupportedInput = "moderation.unsupported_input"
 )
 
 // Emails and the name of the token created at registration, in the

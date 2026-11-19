@@ -21,6 +21,7 @@ For commercial licensing, please contact support@quantumnous.com
  */
 import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
 import type { PolicyEvent } from '@/features/system-settings/request-policies/api'
+import type { ModerationAudit } from '@/lib/content-moderation'
 
 import type { UsageLog } from './data/schema'
 // ============================================================================
@@ -153,6 +154,10 @@ export interface LogOtherData {
     upstream_error_code?: string
     upstream_request_id?: string
     task_plugin?: TaskPluginInfo
+    // What content moderation did on this attempt of an OpenAI channel:
+    // the rejection of a moderation log, or a pass or fail-open pass on a
+    // consume row.
+    moderation?: ModerationAudit
   }
   root_info?: {
     task_plugin?: TaskPluginRuntimeInfo

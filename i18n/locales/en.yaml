@@ -99,6 +99,10 @@ gemini_free_key.keys_rpm_full: "{{.Count}} at the requests per minute"
 gemini_free_key.keys_tpm_full: "{{.Count}} at the input tokens per minute"
 gemini_free_key.keys_ready: "{{.Count}} with room"
 gemini_free_key.keys_separator: ", "
+moderation.flagged: "The request was rejected by content moderation"
+moderation.unavailable: "Content moderation is unavailable; the request was not sent"
+moderation.unsupported: "This endpoint is not available on channels with content moderation"
+moderation.unsupported_input: "This request contains content that content moderation cannot check, so it was not sent"
 
 # Recharge-gated group messages
 group_access.topup_required: "Group {{.Group}} requires a cumulative top-up of at least {{.Required}} (current: {{.Current}})"

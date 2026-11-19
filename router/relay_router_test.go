@@ -37,11 +37,13 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay/channel/novelai"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/tokenkit"
@@ -3653,5 +3655,1362 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 		assert.True(t, enabled)
 		require.Len(t, keys, 1)
 		assert.False(t, keys[0].Enabled, "a single key is off with its channel")
+	})
+}
+
+// moderationUpstream plays OpenAI for the content moderation test. It records
+// every request and answers moderation calls by the key: the sk-mod-* keys
+// fail as their names say, and any other key flags sexual content when an
+// input carries MOD-FLAG-SEXUAL or an image URL contains flag-image, and
+// violence for MOD-FLAG-VIOLENCE. Chat answers 500 for the key sk-chat-500.
+// Channel records the X-Channel header a channel's header override sets.
+type moderationUpstream struct {
+	mu       sync.Mutex
+	requests []moderationUpstreamRequest
+}
+
+type moderationUpstreamRequest struct {
+	Path, Authorization, Organization, Channel, Body string
+}
+
+func (u *moderationUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	u.mu.Lock()
+	u.requests = append(u.requests, moderationUpstreamRequest{Path: r.URL.Path, Authorization: r.Header.Get("Authorization"), Organization: r.Header.Get("OpenAI-Organization"), Channel: r.Header.Get("X-Channel"), Body: string(body)})
+	u.mu.Unlock()
+	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	reply := func(status int, contentType, answer string) {
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, answer)
+	}
+	const jsonType = "application/json"
+	switch r.URL.Path {
+	case "/v1/moderations":
+		var call struct {
+			Input any `json:"input"`
+		}
+		_ = common.Unmarshal(body, &call)
+		inputs, ok := call.Input.([]any)
+		if !ok {
+			inputs = []any{call.Input}
+		}
+		image := false
+		results := make([]string, 0, len(inputs))
+		for _, input := range inputs {
+			text, url := "", ""
+			switch value := input.(type) {
+			case string:
+				text = value
+			case map[string]any:
+				image = true
+				if imageURL, ok := value["image_url"].(map[string]any); ok {
+					url, _ = imageURL["url"].(string)
+				}
+			}
+			sexual := strings.Contains(text, "MOD-FLAG-SEXUAL") || strings.Contains(url, "flag-image")
+			violence := strings.Contains(text, "MOD-FLAG-VIOLENCE")
+			inputType := "text"
+			if image {
+				inputType = "image"
+			}
+			score := func(flagged bool, high float64) float64 {
+				if flagged {
+					return high
+				}
+				return 0.0001
+			}
+			results = append(results, fmt.Sprintf(`{"flagged":%t,"categories":{"sexual":%t,"violence":%t},"category_scores":{"sexual":%v,"violence":%v},"category_applied_input_types":{"sexual":["%s"],"violence":["%s"]}}`,
+				sexual || violence, sexual, violence, score(sexual, 0.91), score(violence, 0.88), inputType, inputType))
+		}
+		switch {
+		case key == "sk-mod-401":
+			reply(http.StatusUnauthorized, jsonType, `{"error":{"message":"Incorrect API key provided: sk-mod-401","type":"invalid_request_error","code":"invalid_api_key"}}`)
+		case key == "sk-mod-403":
+			reply(http.StatusForbidden, jsonType, `{"error":{"message":"You are not allowed to use this model","type":"invalid_request_error","code":"model_not_found"}}`)
+		case key == "sk-mod-404":
+			reply(http.StatusNotFound, "text/html", "<html><body>Not Found</body></html>")
+		case key == "sk-mod-429":
+			reply(http.StatusTooManyRequests, jsonType, `{"error":{"message":"Rate limit reached for requests","type":"requests","code":"rate_limit_exceeded"}}`)
+		case key == "sk-mod-quota":
+			reply(http.StatusTooManyRequests, jsonType, `{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}`)
+		case key == "sk-mod-500":
+			reply(http.StatusInternalServerError, jsonType, `{"error":{"message":"The server had an error","type":"server_error"}}`)
+		case key == "sk-mod-slow":
+			<-r.Context().Done()
+		case key == "sk-mod-html":
+			reply(http.StatusOK, "text/html", "<html><body>gateway</body></html>")
+		case key == "sk-mod-empty":
+			reply(http.StatusOK, jsonType, `{"id":"modr-empty","model":"omni-moderation-2024-09-26","results":[]}`)
+		case key == "sk-mod-429size":
+			reply(http.StatusTooManyRequests, jsonType, `{"error":{"message":"Request too large for omni-moderation-latest on tokens per min (TPM): Limit 10000, Requested 12000.","type":"tokens","code":"rate_limit_exceeded"}}`)
+		case key == "sk-mod-image400" && image:
+			reply(http.StatusBadRequest, jsonType, `{"error":{"message":"The image could not be downloaded","type":"invalid_request_error","code":"invalid_image_url"}}`)
+		default:
+			reply(http.StatusOK, jsonType, `{"id":"modr-test","model":"omni-moderation-2024-09-26","results":[`+strings.Join(results, ",")+`]}`)
+		}
+	case "/v1/chat/completions":
+		if key == "sk-chat-500" {
+			reply(http.StatusInternalServerError, jsonType, `{"error":{"message":"upstream broke","type":"server_error"}}`)
+			return
+		}
+		if strings.Contains(string(body), `"stream":true`) {
+			reply(http.StatusOK, "text/event-stream", "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"forwarded\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+			return
+		}
+		reply(http.StatusOK, jsonType, `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"forwarded"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	case "/v1/completions":
+		reply(http.StatusOK, jsonType, `{"id":"cmpl-1","object":"text_completion","created":1,"model":"m","choices":[{"index":0,"text":"forwarded","finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	case "/v1/responses", "/v1/responses/compact":
+		reply(http.StatusOK, jsonType, `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"forwarded","annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
+	case "/v1/images/generations", "/v1/images/edits":
+		reply(http.StatusOK, jsonType, `{"created":1,"data":[{"url":"https://img.example/out.png"}]}`)
+	case "/v1/videos":
+		reply(http.StatusOK, jsonType, `{"id":"video_mod_1","object":"video","status":"queued","model":"sora-2","created_at":1}`)
+	case "/v1/audio/speech":
+		reply(http.StatusOK, "audio/mpeg", "ID3")
+	case "/v1/embeddings":
+		reply(http.StatusOK, jsonType, `{"object":"list","data":[{"object":"embedding","embedding":[0.1],"index":0}],"model":"m","usage":{"prompt_tokens":1,"total_tokens":1}}`)
+	default:
+		reply(http.StatusNotFound, jsonType, `{"error":{"message":"not found"}}`)
+	}
+}
+
+func (u *moderationUpstream) mark() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.requests)
+}
+
+// since returns the requests to path (every path when empty) after mark.
+func (u *moderationUpstream) since(mark int, path string) []moderationUpstreamRequest {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	var requests []moderationUpstreamRequest
+	for _, request := range u.requests[mark:] {
+		if path == "" || request.Path == path {
+			requests = append(requests, request)
+		}
+	}
+	return requests
+}
+
+// An OpenAI channel with content moderation on checks every attempt before
+// anything reaches its upstream: rules first, then OpenAI's moderation model
+// with the attempt's own key. A rejection is answered with a generic message,
+// never retried on another channel, never billed and never a reason to
+// disable the channel; it is recorded as one log row of type 100 whose
+// details only administrators see. Other channels and channel types behave
+// as before, and the gateway safety identifier is independent of it.
+func TestRelayModeratesOpenAIChannels(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}, &model.Task{}))
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	autoDisable, errorLog, retryTimes := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes
+	disableCodes, disableKeywords := operation_setting.AutomaticDisableStatusCodesToString(), operation_setting.AutomaticDisableKeywordsToString()
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	globalSettings := model_setting.GetGlobalSettings()
+	passThrough, responsesPolicy := globalSettings.PassThroughRequestEnabled, globalSettings.ChatCompletionsToResponsesPolicy
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = autoDisable, errorLog, retryTimes
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(disableCodes))
+		operation_setting.AutomaticDisableKeywordsFromString(disableKeywords)
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		globalSettings.PassThroughRequestEnabled, globalSettings.ChatCompletionsToResponsesPolicy = passThrough, responsesPolicy
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	// Every status a moderation failure or rejection carries would disable
+	// a channel if it reached the channel error path, which only a key-level
+	// moderation failure does.
+	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = true, true, 2
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("400,401,403,404,429,503"))
+	operation_setting.AutomaticDisableKeywordsFromString("")
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+
+	upstream := &moderationUpstream{}
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	// The leak guard: an unmoderated channel of the same model and group with
+	// a lower priority, which a retry would reach.
+	leak := &moderationUpstream{}
+	leakServer := httptest.NewServer(leak)
+	t.Cleanup(leakServer.Close)
+
+	user := model.User{Id: 6600000 + int(relayRouterTestUsers.Add(1)), Username: "mod-user", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "modtestkey", Name: "mod-token", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+
+	prices := map[string]float64{}
+	type channelOption func(*model.Channel)
+	create := func(modelName, key, settings string, options ...channelOption) model.Channel {
+		priority, autoBan := int64(10), 1
+		channel := model.Channel{Name: "mod-" + modelName, Key: key, Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: modelName, BaseURL: common.GetPointer(server.URL), OtherSettings: settings, Priority: &priority, AutoBan: &autoBan}
+		for _, option := range options {
+			option(&channel)
+		}
+		require.NoError(t, model.DB.Create(&channel).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: modelName, Group: "default", Enabled: true, Priority: channel.Priority}).Error)
+		prices[modelName] = 0.01
+		return channel
+	}
+	lowPriority := func(channel *model.Channel) { channel.Priority = common.GetPointer(int64(0)) }
+	noAutoBan := func(channel *model.Channel) { channel.AutoBan = common.GetPointer(0) }
+	withSetting := func(setting string) channelOption {
+		return func(channel *model.Channel) { channel.Setting = common.GetPointer(setting) }
+	}
+	guarded := func(modelName string) {
+		create(modelName, "sk-leak", "", lowPriority, func(channel *model.Channel) {
+			channel.Name, channel.BaseURL = "mod-leak-"+modelName, common.GetPointer(leakServer.URL)
+		})
+	}
+	const on = `{"moderation_enabled":true}`
+	create("mod-off", "sk-ok-off", "")
+	create("mod-clean", "sk-ok-clean", on)
+	flagChannel := create("mod-flag", "sk-ok-flag", on)
+	guarded("mod-flag")
+	create("mod-categories", "sk-ok-categories", `{"moderation_enabled":true,"moderation_categories":["sexual"]}`)
+	create("mod-rules", "sk-ok-rules", `{"moderation_enabled":true,"moderation_rule_presets":["en-reveal-cot"],"moderation_rules":[{"type":"keyword","pattern":"Forbidden-Word-X"},{"name":"plans","type":"regex","pattern":"secret\\s+plan\\d+"}]}`)
+	guarded("mod-rules")
+	failures := []struct{ suffix, class string }{
+		{"404", "http_404"}, {"429", "http_429_rate"},
+		{"500", "http_5xx"}, {"html", "decode"}, {"empty", "decode"}, {"429size", "http_429_size"}, {"slow", "timeout"}, {"image400", "image_rejected"},
+	}
+	failureChannels := map[string]model.Channel{}
+	for _, failure := range failures {
+		settings := on
+		if failure.suffix == "slow" {
+			settings = `{"moderation_enabled":true,"moderation_timeout_seconds":1}`
+		}
+		failureChannels[failure.suffix] = create("mod-fail-"+failure.suffix, "sk-mod-"+failure.suffix, settings)
+		guarded("mod-fail-" + failure.suffix)
+	}
+	// A moderation answer that says the key or its OpenAI account is
+	// unusable is the channel's error, retried under the normal rules on the
+	// next channel, which applies its own moderation settings: each such
+	// channel has a lower-priority moderated backup with a working key, and
+	// no other channel.
+	keyFailures := []struct{ suffix, class string }{{"401", "http_401"}, {"403", "http_403"}, {"quota", "http_429_quota"}}
+	keyChannels, keyBackups := map[string]model.Channel{}, map[string]model.Channel{}
+	for _, failure := range keyFailures {
+		keyChannels[failure.suffix] = create("mod-key-"+failure.suffix, "sk-mod-"+failure.suffix, on)
+		keyBackups[failure.suffix] = create("mod-key-"+failure.suffix, "sk-ok-key-backup-"+failure.suffix, on, lowPriority)
+	}
+	keyAlone := create("mod-key-alone", "sk-mod-401", on)
+	// The only channel of both groups of an auto token with cross-group
+	// retry, whose retry counter starts again in the second group.
+	keyCross := create("mod-key-cross", "sk-mod-401", on, noAutoBan, func(channel *model.Channel) { channel.Group = "default,vip" })
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: keyCross.Id, Model: "mod-key-cross", Group: "vip", Enabled: true, Priority: keyCross.Priority}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "modautokey", Name: "mod-auto-token", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, Group: "auto", CrossGroupRetry: true}).Error)
+	// A key-level failure whose retry reaches a moderated backup whose own
+	// upstream then fails.
+	keyThenBroken := create("mod-key-then-500", "sk-mod-401", on)
+	create("mod-key-then-500", "sk-chat-500", on, noAutoBan, lowPriority)
+	keyMulti := create("mod-key-multi", "sk-mod-401\nsk-ok-key-multi", on, func(channel *model.Channel) {
+		channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+	})
+	create("mod-fail-open", "sk-mod-500", `{"moderation_enabled":true,"moderation_fail_open":true}`)
+	create("mod-multikey", "sk-mk-1\nsk-mk-2", on, func(channel *model.Channel) {
+		channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+	})
+	create("mod-retry", "sk-chat-500", on, noAutoBan)
+	create("mod-retry", "sk-ok-retry-b", on, lowPriority)
+	create("mod-retry-rule", "sk-chat-500", on, noAutoBan)
+	retryRuleB := create("mod-retry-rule", "sk-ok-retry-rule-b", `{"moderation_enabled":true,"moderation_rules":[{"type":"keyword","pattern":"retry-rule-hit"}]}`, lowPriority)
+	create("mod-org", "sk-chat-500", "", noAutoBan, func(channel *model.Channel) { channel.OpenAIOrganization = common.GetPointer("org-a") })
+	create("mod-org", "sk-ok-org-b", on, lowPriority)
+	// The first channel's header override sends the key chat fails for, and
+	// its param override makes the relay use a runtime header override.
+	create("mod-hdr", "sk-hdr-a", "", noAutoBan, func(channel *model.Channel) {
+		channel.HeaderOverride = common.GetPointer(`{"Authorization":"Bearer sk-chat-500"}`)
+		channel.ParamOverride = common.GetPointer(`{"temperature":0.5}`)
+	})
+	create("mod-hdr", "sk-ok-hdr-b", on, lowPriority, func(channel *model.Channel) {
+		channel.HeaderOverride = common.GetPointer(`{"X-Channel":"B"}`)
+	})
+	for _, modelName := range []string{"mod-claude", "mod-gemini", "mod-responses", "mod-own", "mod-embed", "mod-image", "mod-speech", "mod-realtime", "mod-novelai", "mod-budget-system", "mod-img", "mod-completions", "mod-cache", "mod-global-pass"} {
+		create(modelName, "sk-ok-"+modelName, on)
+	}
+	for _, modelName := range []string{"mod-responses", "mod-completions", "mod-global-pass"} {
+		guarded(modelName)
+	}
+	create("mod-budget", "sk-ok-budget", `{"moderation_enabled":true,"moderation_max_chars":1000}`)
+	create("mod-img-skip", "sk-ok-img-skip", `{"moderation_enabled":true,"moderation_skip_images":true}`)
+	create("mod-presets", "sk-ok-presets", `{"moderation_enabled":true,"moderation_rule_presets":["en-reveal-cot"]}`)
+	create("mod-pass", "sk-ok-pass", on, withSetting(`{"pass_through_body_enabled":true}`))
+	guarded("mod-pass")
+	create("mod-pass-img", "sk-ok-pass-img", on, withSetting(`{"pass_through_body_enabled":true}`))
+	guarded("mod-pass-img")
+	const identifierOn = `{"send_safety_identifier":true}`
+	create("mod-sid", "sk-ok-sid", identifierOn)
+	sidResponses := create("mod-sid-resp", "sk-ok-sid-resp", identifierOn, func(channel *model.Channel) {
+		channel.ParamOverride = common.GetPointer(`{"operations":[{"path":"safety_identifier","mode":"delete"}]}`)
+	})
+	create("mod-sid-pass", "sk-ok-sid-pass", identifierOn, withSetting(`{"pass_through_body_enabled":true}`))
+	create("mod-sid-off", "sk-ok-sid-off", "")
+	create("mod-sid-off-pass", "sk-ok-sid-off-pass", "", withSetting(`{"pass_through_body_enabled":true}`))
+	for _, channelType := range []int{constant.ChannelTypeAzure, constant.ChannelTypeCustom, constant.ChannelTypeAnthropic, constant.ChannelTypeCodex} {
+		create(fmt.Sprintf("mod-type-%d", channelType), "sk-ok-type", `{"moderation_enabled":true,"send_safety_identifier":true}`, func(channel *model.Channel) {
+			channel.Type = channelType
+			if channelType == constant.ChannelTypeCustom {
+				channel.BaseURL = common.GetPointer(server.URL + "/v1/chat/completions")
+			}
+		})
+	}
+	soraChannel := create("sora-2", "sk-ok-sora", on)
+	create("sora-2-pro", "sk-mod-500", on)
+	soraKey := create("sora-2-key", "sk-mod-403", on)
+	create("sora-2-key", "sk-ok-sora-key-backup", on, lowPriority)
+	create("sora-2-dead", "sk-mod-quota", on)
+	guarded("sora-2")
+	guarded("sora-2-pro")
+	chatToResponses := create("mod-c2r", "sk-ok-c2r", on)
+	globalSettings.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{
+		Enabled: true, ChannelIDs: []int{sidResponses.Id, chatToResponses.Id}, ModelPatterns: []string{"^mod-sid-resp$", "^mod-c2r$"},
+	}
+	priceJSON, err := common.Marshal(prices)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(priceJSON)))
+
+	engine := gin.New()
+	engine.Use(middleware.RequestId())
+	SetRelayRouter(engine)
+	SetVideoRouter(engine)
+	SetTaskPluginProtocolRouter(engine)
+	send := func(path, contentType string, body io.Reader) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, body)
+		request.Header.Set("Content-Type", contentType)
+		request.Header.Set("Authorization", "Bearer modtestkey")
+		engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+	post := func(path, body string) *httptest.ResponseRecorder {
+		return send(path, "application/json", strings.NewReader(body))
+	}
+	chat := func(modelName, messages string) *httptest.ResponseRecorder {
+		return post("/v1/chat/completions", `{"model":"`+modelName+`","messages":`+messages+`}`)
+	}
+	var sequence atomic.Int64
+	// unique makes a text no earlier request sent, so no verdict is cached.
+	unique := func(text string) string { return fmt.Sprintf("%s (sample %d)", text, sequence.Add(1)) }
+	userMessage := func(text string) string { return `[{"role":"user","content":"` + text + `"}]` }
+	type apiError struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	}
+	errorOf := func(t *testing.T, recorder *httptest.ResponseRecorder) apiError {
+		t.Helper()
+		var payload struct {
+			Error apiError `json:"error"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload), recorder.Body.String())
+		return payload.Error
+	}
+	requestID := func(recorder *httptest.ResponseRecorder) string { return recorder.Header().Get(common.RequestIdKey) }
+	rowsOf := func(t *testing.T, id string) []*model.Log {
+		t.Helper()
+		var rows []*model.Log
+		require.NoError(t, model.LOG_DB.Where("request_id = ?", id).Order("id").Find(&rows).Error)
+		return rows
+	}
+	otherOf := func(t *testing.T, row *model.Log) map[string]any {
+		t.Helper()
+		other, err := common.StrToMap(row.Other)
+		require.NoError(t, err)
+		return other
+	}
+	adminOf := func(t *testing.T, other map[string]any) map[string]any {
+		t.Helper()
+		adminInfo, ok := other["admin_info"].(map[string]any)
+		require.True(t, ok, other)
+		return adminInfo
+	}
+	auditOf := func(t *testing.T, other map[string]any) map[string]any {
+		t.Helper()
+		audit, ok := adminOf(t, other)["moderation"].(map[string]any)
+		require.True(t, ok, other)
+		return audit
+	}
+	// rejectedRow is the one row of a rejected request: type 100.
+	rejectedRow := func(t *testing.T, recorder *httptest.ResponseRecorder) (*model.Log, map[string]any) {
+		t.Helper()
+		rows := rowsOf(t, requestID(recorder))
+		require.Len(t, rows, 1, "a rejection writes exactly one row")
+		assert.Equal(t, model.LogTypeModeration, rows[0].Type)
+		return rows[0], otherOf(t, rows[0])
+	}
+	consumeAudit := func(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		var row model.Log
+		require.Eventually(t, func() bool {
+			return model.LOG_DB.Where("request_id = ? AND type = ?", requestID(recorder), model.LogTypeConsume).First(&row).Error == nil
+		}, 5*time.Second, 10*time.Millisecond)
+		return auditOf(t, otherOf(t, &row))
+	}
+	userView := func(t *testing.T, id string) string {
+		t.Helper()
+		logs, _, err := model.GetUserLogs(user.Id, model.LogFilter{RequestId: id}, 0, 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, logs)
+		view, err := common.Marshal(logs)
+		require.NoError(t, err)
+		return string(view)
+	}
+	quota := func(t *testing.T) int {
+		t.Helper()
+		value, err := model.GetUserQuota(user.Id, true)
+		require.NoError(t, err)
+		return value
+	}
+	// assertNoRetry checks the leak guard: no lower-priority channel was
+	// asked and the policy events hold no retry.
+	assertNoRetry := func(t *testing.T, other map[string]any) {
+		t.Helper()
+		assert.Empty(t, leak.since(0, ""), "an unmoderated channel received the request")
+		events, _ := adminOf(t, other)["request_policy"].([]any)
+		require.NotEmpty(t, events)
+		for _, event := range events {
+			decision, _ := event.(map[string]any)["decision"].(map[string]any)
+			assert.NotEqual(t, "retry", decision["action"], events)
+		}
+		last, _ := events[len(events)-1].(map[string]any)["decision"].(map[string]any)
+		assert.Equal(t, map[string]any{"action": "stop", "reason": "local_rejection", "source": "channel"}, last)
+	}
+	flaggedMessage := func(recorder *httptest.ResponseRecorder) apiError {
+		return apiError{Message: "The request was rejected by content moderation (request id: " + requestID(recorder) + ")", Type: "new_api_error", Code: "content_moderation_flagged"}
+	}
+
+	t.Run("switched off, nothing is moderated", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-off", userMessage(unique("MOD-FLAG-SEXUAL off")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, "/v1/moderations"))
+		assert.Len(t, upstream.since(mark, "/v1/chat/completions"), 1)
+	})
+
+	t.Run("a clean request is checked with the channel's key and forwarded", func(t *testing.T) {
+		mark := upstream.mark()
+		system, userText := unique("clean system prompt"), unique("clean user question")
+		recorder := chat("mod-clean", `[{"role":"system","content":"`+system+`"},{"role":"user","content":"`+userText+`"},{"role":"assistant","content":"assistant text MOD-FLAG-SEXUAL","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"tool text MOD-FLAG-SEXUAL"}]`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/moderations")
+		require.Len(t, calls, 1)
+		assert.Equal(t, "Bearer sk-ok-clean", calls[0].Authorization)
+		assert.Contains(t, calls[0].Body, system)
+		assert.Contains(t, calls[0].Body, userText)
+		assert.Contains(t, calls[0].Body, `"model":"omni-moderation-latest"`)
+		assert.NotContains(t, calls[0].Body, "MOD-FLAG-SEXUAL", "assistant and tool text are not checked")
+		assert.Len(t, upstream.since(mark, "/v1/chat/completions"), 1)
+		audit := consumeAudit(t, recorder)
+		assert.Equal(t, "passed", audit["status"])
+		assert.Greater(t, audit["checked_chars"], float64(0))
+		assert.NotContains(t, userView(t, requestID(recorder)), "admin_info")
+	})
+
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("a flagged request is rejected, refunded and recorded (stream %t)", stream), func(t *testing.T) {
+			var logs bytes.Buffer
+			if !stream {
+				common.LogWriterMu.Lock()
+				infoWriter, errorWriter := gin.DefaultWriter, gin.DefaultErrorWriter
+				gin.DefaultWriter, gin.DefaultErrorWriter = &logs, &logs
+				common.LogWriterMu.Unlock()
+				t.Cleanup(func() {
+					common.LogWriterMu.Lock()
+					gin.DefaultWriter, gin.DefaultErrorWriter = infoWriter, errorWriter
+					common.LogWriterMu.Unlock()
+				})
+			}
+			before := quota(t)
+			mark := upstream.mark()
+			flagged := unique("MOD-FLAG-SEXUAL flagged")
+			recorder := post("/v1/chat/completions", fmt.Sprintf(`{"model":"mod-flag","stream":%t,"messages":%s}`, stream, userMessage(flagged)))
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Equal(t, flaggedMessage(recorder), errorOf(t, recorder))
+			for _, hidden := range []string{"sexual", "MOD-FLAG", server.URL} {
+				assert.NotContains(t, recorder.Body.String(), hidden)
+			}
+			assert.Len(t, upstream.since(mark, "/v1/moderations"), 1)
+			assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+			assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "the pre-consumed quota is refunded")
+
+			row, other := rejectedRow(t, recorder)
+			assert.Equal(t, flagChannel.Id, row.ChannelId)
+			assert.Equal(t, "mod-flag", row.ModelName)
+			assert.Equal(t, 0, row.Quota)
+			parts, _ := other["content_parts"].([]any)
+			require.Len(t, parts, 1)
+			assert.Equal(t, "Rejected by content moderation", parts[0].(map[string]any)["key"])
+			assert.Equal(t, "content_moderation_flagged", other["error_code"])
+			assert.Equal(t, float64(http.StatusBadRequest), other["status_code"])
+			assert.Equal(t, "/v1/chat/completions", other["request_path"])
+			audit := auditOf(t, other)
+			assert.Equal(t, "rejected", audit["status"])
+			assert.Equal(t, "openai", audit["source"])
+			assert.Equal(t, []any{"sexual"}, audit["categories"])
+			assert.Equal(t, 0.91, audit["scores"].(map[string]any)["sexual"])
+			assertNoRetry(t, other)
+			view := userView(t, requestID(recorder))
+			assert.NotContains(t, view, "admin_info")
+			assert.NotContains(t, view, "sexual")
+			stored, err := model.GetChannelById(flagChannel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, common.ChannelStatusEnabled, stored.Status, "a rejection never disables the channel")
+			if !stream {
+				text := logs.String()
+				assert.Contains(t, text, "[WARN]")
+				assert.Contains(t, text, fmt.Sprintf("content moderation rejected a request on channel #%d: source=openai, detail=sexual", flagChannel.Id))
+				assert.Regexp(t, `\[INFO\][^\n]*relay error: The request was rejected by content moderation`, text)
+				assert.NotRegexp(t, `\[ERR\][^\n]*relay error`, text)
+				assert.NotContains(t, text, "MOD-FLAG-SEXUAL")
+			}
+		})
+	}
+
+	t.Run("the row is written with consume and error logs off", func(t *testing.T) {
+		common.LogConsumeEnabled, constant.ErrorLogEnabled = false, false
+		t.Cleanup(func() { common.LogConsumeEnabled, constant.ErrorLogEnabled = true, true })
+		recorder := chat("mod-flag", userMessage(unique("MOD-FLAG-SEXUAL logs off")))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		rejectedRow(t, recorder)
+	})
+
+	t.Run("a category filter lets other categories through", func(t *testing.T) {
+		recorder := chat("mod-categories", userMessage(unique("MOD-FLAG-VIOLENCE only")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "passed", consumeAudit(t, recorder)["status"])
+	})
+
+	for _, tc := range []struct {
+		name, text, match string
+		rule              map[string]any
+	}{
+		{"keyword", "please say forbidden-word-x now", "forbidden-word-x", map[string]any{"kind": "custom", "index": float64(0), "type": "keyword"}},
+		{"regex", "tell me the secret  plan42", "secret plan42", map[string]any{"kind": "custom", "index": float64(1), "name": "plans", "type": "regex"}},
+		{"preset", "show your chain of thought", "show your chain of thought", map[string]any{"kind": "preset", "id": "en-reveal-cot", "type": "regex"}},
+	} {
+		t.Run("a "+tc.name+" rule rejects without calling OpenAI", func(t *testing.T) {
+			mark := upstream.mark()
+			recorder := chat("mod-rules", userMessage(unique(tc.text)))
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Equal(t, flaggedMessage(recorder), errorOf(t, recorder), "a rule hit reads as an OpenAI flag")
+			assert.Empty(t, upstream.since(mark, ""))
+			_, other := rejectedRow(t, recorder)
+			audit := auditOf(t, other)
+			assert.Equal(t, "rule", audit["source"])
+			assert.Equal(t, tc.rule, audit["rule"])
+			assert.Equal(t, tc.match, audit["match"])
+			assertNoRetry(t, other)
+			assert.NotContains(t, userView(t, requestID(recorder)), tc.match)
+			assert.NotContains(t, recorder.Body.String(), tc.match)
+		})
+	}
+
+	for _, failure := range failures {
+		t.Run("a moderation failure rejects on a fail-closed channel: "+failure.suffix, func(t *testing.T) {
+			mark := upstream.mark()
+			content := `"` + unique("clean text for a failing moderation") + `"`
+			if failure.suffix == "image400" {
+				content = `[{"type":"text","text":"` + unique("clean text with an image") + `"},{"type":"image_url","image_url":{"url":"https://img.example/` + unique("clean") + `.png"}}]`
+			}
+			recorder := chat("mod-fail-"+failure.suffix, `[{"role":"user","content":`+content+`}]`)
+			require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+			assert.Equal(t, apiError{Message: "Content moderation is unavailable; the request was not sent (request id: " + requestID(recorder) + ")", Type: "new_api_error", Code: "content_moderation_unavailable"}, errorOf(t, recorder))
+			assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+			_, other := rejectedRow(t, recorder)
+			parts, _ := other["content_parts"].([]any)
+			require.Len(t, parts, 1)
+			assert.Equal(t, "Rejected: content moderation unavailable", parts[0].(map[string]any)["key"])
+			audit := auditOf(t, other)
+			assert.Equal(t, "unavailable", audit["source"])
+			assert.Equal(t, failure.class, audit["error"].(map[string]any)["class"])
+			assert.NotContains(t, other, "sk-mod-")
+			assertNoRetry(t, other)
+			stored, err := model.GetChannelById(failureChannels[failure.suffix].Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+		})
+	}
+
+	rowsOfType := func(rows []*model.Log, logType int) []*model.Log {
+		var found []*model.Log
+		for _, row := range rows {
+			if row.Type == logType {
+				found = append(found, row)
+			}
+		}
+		return found
+	}
+	// keyFailureRow checks the error row of an attempt that a key-level
+	// moderation failure ended: the user reads the failed check's message,
+	// administrators the moderation answer and the check.
+	keyFailureRow := func(t *testing.T, row *model.Log, channelID int, class string, status int) {
+		t.Helper()
+		assert.Equal(t, channelID, row.ChannelId)
+		assert.Equal(t, "status_code=503, Content moderation is unavailable; the request was not sent", row.Content)
+		other := otherOf(t, row)
+		assert.Equal(t, "content_moderation_unavailable", other["error_code"])
+		adminInfo := adminOf(t, other)
+		assert.Equal(t, float64(status), adminInfo["upstream_status_code"])
+		assert.Contains(t, adminInfo["upstream_error"], fmt.Sprintf("status_code=%d, content moderation call failed: ", status))
+		assert.Equal(t, class, auditOf(t, other)["error"].(map[string]any)["class"])
+		assert.NotContains(t, row.Other, "sk-mod-", "never the key")
+	}
+	for _, failure := range keyFailures {
+		t.Run("a key-level moderation failure is the channel's error and fails over: "+failure.suffix, func(t *testing.T) {
+			mark := upstream.mark()
+			recorder := chat("mod-key-"+failure.suffix, userMessage(unique("clean text for an unusable key")))
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			calls := upstream.since(mark, "")
+			require.Len(t, calls, 3)
+			backupKey := "Bearer " + keyBackups[failure.suffix].Key
+			assert.Equal(t, []string{"/v1/moderations", "/v1/moderations", "/v1/chat/completions"}, []string{calls[0].Path, calls[1].Path, calls[2].Path})
+			assert.Equal(t, []string{"Bearer sk-mod-" + failure.suffix, backupKey, backupKey}, []string{calls[0].Authorization, calls[1].Authorization, calls[2].Authorization},
+				"only the check went out with the unusable key")
+			assert.Empty(t, leak.since(0, ""), "an unmoderated channel received the request")
+			audit := consumeAudit(t, recorder)
+			assert.Equal(t, "passed", audit["status"])
+			assert.Equal(t, float64(keyBackups[failure.suffix].Id), audit["channel_id"])
+
+			rows := rowsOf(t, requestID(recorder))
+			assert.Empty(t, rowsOfType(rows, model.LogTypeModeration), "a request another channel served is not rejected")
+			errorRows := rowsOfType(rows, model.LogTypeError)
+			require.Len(t, errorRows, 1)
+			status := http.StatusUnauthorized
+			switch failure.suffix {
+			case "403":
+				status = http.StatusForbidden
+			case "quota":
+				status = http.StatusTooManyRequests
+			}
+			keyFailureRow(t, errorRows[0], keyChannels[failure.suffix].Id, failure.class, status)
+			view := userView(t, requestID(recorder))
+			assert.NotContains(t, view, "content moderation call failed")
+			assert.NotContains(t, view, "sk-mod-")
+			events, _ := adminOf(t, otherOf(t, errorRows[0]))["request_policy"].([]any)
+			require.NotEmpty(t, events)
+			last := events[len(events)-1].(map[string]any)
+			assert.Equal(t, "retry", last["decision"].(map[string]any)["action"])
+			assert.Equal(t, "channel_disable_requested", last["health"])
+			assert.Eventually(t, func() bool {
+				stored, err := model.GetChannelById(keyChannels[failure.suffix].Id, true)
+				return err == nil && stored.Status == common.ChannelStatusAutoDisabled
+			}, 5*time.Second, 10*time.Millisecond, "the status code disables the channel")
+		})
+	}
+
+	t.Run("a key-level moderation failure that no other channel serves answers 503 with one moderation row", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-key-alone", userMessage(unique("clean text, no other channel")))
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		assert.Equal(t, apiError{Message: "Content moderation is unavailable; the request was not sent (request id: " + requestID(recorder) + ")", Type: "new_api_error", Code: "content_moderation_unavailable"}, errorOf(t, recorder))
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+		checks := upstream.since(mark, "/v1/moderations")
+		require.NotEmpty(t, checks)
+
+		rows := rowsOf(t, requestID(recorder))
+		rejected := rowsOfType(rows, model.LogTypeModeration)
+		require.Len(t, rejected, 1, "one moderation row for the request")
+		assert.Equal(t, rejected[0], rows[len(rows)-1])
+		errorRows := rowsOfType(rows, model.LogTypeError)
+		require.Len(t, errorRows, len(checks), "one error row per attempt")
+		for _, row := range errorRows {
+			keyFailureRow(t, row, keyAlone.Id, "http_401", http.StatusUnauthorized)
+		}
+		other := otherOf(t, rejected[0])
+		audit := auditOf(t, other)
+		assert.Equal(t, "unavailable", audit["source"])
+		assert.Equal(t, "http_401", audit["error"].(map[string]any)["class"])
+		attempts, _ := audit["key_failures"].([]any)
+		require.Len(t, attempts, len(checks))
+		for i, attempt := range attempts {
+			assert.Equal(t, map[string]any{"channel_id": float64(keyAlone.Id), "retry_index": float64(i), "attempt": float64(i + 1), "class": "http_401", "status": float64(http.StatusUnauthorized)}, attempt)
+		}
+		assert.NotContains(t, rejected[0].Other, "sk-mod-")
+		events, _ := adminOf(t, other)["request_policy"].([]any)
+		require.NotEmpty(t, events)
+		assert.Equal(t, map[string]any{"action": "stop", "reason": "local_rejection", "source": "channel"}, events[len(events)-1].(map[string]any)["decision"])
+		assert.Eventually(t, func() bool {
+			stored, err := model.GetChannelById(keyAlone.Id, true)
+			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("key-level moderation failures under auto cross-group retry are numbered by attempt", func(t *testing.T) {
+		// One retry per group: the second group starts its retry counter at
+		// 0 again, so the retry index repeats while the attempt number does
+		// not.
+		common.RetryTimes = 1
+		previousUsable, previousAuto := setting.UserUsableGroups2JSONString(), setting.AutoGroups2JsonString()
+		t.Cleanup(func() {
+			common.RetryTimes = 2
+			require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsable))
+			require.NoError(t, setting.UpdateAutoGroupsByJsonString(previousAuto))
+		})
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP","auto":"Auto"}`))
+		require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["vip","default"]`))
+		mark := upstream.mark()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mod-key-cross","messages":`+userMessage(unique("clean text, two groups"))+`}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer modautokey")
+		engine.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+		require.Len(t, upstream.since(mark, "/v1/moderations"), 4, "two attempts in each group")
+
+		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
+		require.Len(t, rejected, 1)
+		var got []map[string]any
+		attempts, _ := auditOf(t, otherOf(t, rejected[0]))["key_failures"].([]any)
+		for _, attempt := range attempts {
+			entry := attempt.(map[string]any)
+			assert.Equal(t, float64(keyCross.Id), entry["channel_id"])
+			got = append(got, map[string]any{"retry_index": entry["retry_index"], "attempt": entry["attempt"]})
+		}
+		assert.Equal(t, []map[string]any{
+			{"retry_index": float64(0), "attempt": float64(1)},
+			{"retry_index": float64(1), "attempt": float64(2)},
+			{"retry_index": float64(0), "attempt": float64(3)},
+			{"retry_index": float64(1), "attempt": float64(4)},
+		}, got, "the retry index starts again in the second group; the attempt number does not")
+	})
+
+	t.Run("a key-level moderation failure whose retry meets an upstream error answers with that error and no moderation row", func(t *testing.T) {
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = 2 })
+		mark := upstream.mark()
+		recorder := chat("mod-key-then-500", userMessage(unique("clean text, broken backup")))
+		require.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), "upstream broke", "the backup's own error")
+		assert.NotContains(t, recorder.Body.String(), "content_moderation_unavailable")
+		chats := upstream.since(mark, "/v1/chat/completions")
+		require.Len(t, chats, 1)
+		assert.Equal(t, "Bearer sk-chat-500", chats[0].Authorization, "sent on the backup")
+
+		rows := rowsOf(t, requestID(recorder))
+		assert.Empty(t, rowsOfType(rows, model.LogTypeModeration), "a request that was sent is not a moderation rejection")
+		errorRows := rowsOfType(rows, model.LogTypeError)
+		require.Len(t, errorRows, 2, "one error row per attempt")
+		keyFailureRow(t, errorRows[0], keyThenBroken.Id, "http_401", http.StatusUnauthorized)
+		assert.NotEqual(t, keyThenBroken.Id, errorRows[1].ChannelId)
+	})
+
+	t.Run("a key-level moderation failure on a multi-key channel disables only that key", func(t *testing.T) {
+		// Without a retry, so that no key selection saves the channel while
+		// the key is being disabled.
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 2 })
+		mark := upstream.mark()
+		recorder := chat("mod-key-multi", userMessage(unique("clean multi-key text")))
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
+		require.Len(t, rejected, 1)
+		other := otherOf(t, rejected[0])
+		assert.Equal(t, []any{map[string]any{"channel_id": float64(keyMulti.Id), "retry_index": float64(0), "attempt": float64(1), "multi_key_index": float64(0), "class": "http_401", "status": float64(http.StatusUnauthorized)}},
+			auditOf(t, other)["key_failures"], "the polling mode starts with the first key")
+		assert.Eventually(t, func() bool {
+			stored, err := model.GetChannelById(keyMulti.Id, true)
+			return err == nil && stored.ChannelInfo.MultiKeyStatusList[0] == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond, "the key is disabled")
+		for range 2 {
+			recorder = chat("mod-key-multi", userMessage(unique("clean multi-key text")))
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		var keys []string
+		for _, call := range upstream.since(mark, "") {
+			keys = append(keys, call.Path+" "+call.Authorization)
+		}
+		assert.Equal(t, []string{
+			"/v1/moderations Bearer sk-mod-401",
+			"/v1/moderations Bearer sk-ok-key-multi", "/v1/chat/completions Bearer sk-ok-key-multi",
+			"/v1/moderations Bearer sk-ok-key-multi", "/v1/chat/completions Bearer sk-ok-key-multi",
+		}, keys, "the disabled key is not used again")
+		stored, err := model.GetChannelById(keyMulti.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+		assert.NotEqual(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1])
+	})
+
+	t.Run("a fail-open channel forwards on a moderation failure and audits it", func(t *testing.T) {
+		recorder := chat("mod-fail-open", userMessage(unique("clean text, fail open")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		audit := consumeAudit(t, recorder)
+		assert.Equal(t, "fail_open", audit["status"])
+		assert.Equal(t, "http_5xx", audit["error"].(map[string]any)["class"])
+		var rows int64
+		require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("request_id = ? AND type = ?", requestID(recorder), model.LogTypeModeration).Count(&rows).Error)
+		assert.Zero(t, rows)
+	})
+
+	t.Run("a multi-key channel moderates with the key of the attempt", func(t *testing.T) {
+		var keys []string
+		for range 2 {
+			mark := upstream.mark()
+			recorder := chat("mod-multikey", userMessage(unique("clean multi-key text")))
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			calls := upstream.since(mark, "")
+			require.Len(t, calls, 2)
+			assert.Equal(t, "/v1/moderations", calls[0].Path)
+			assert.Equal(t, calls[0].Authorization, calls[1].Authorization, "moderation and chat use one key")
+			keys = append(keys, calls[0].Authorization)
+		}
+		assert.ElementsMatch(t, []string{"Bearer sk-mk-1", "Bearer sk-mk-2"}, keys)
+	})
+
+	t.Run("a retry is moderated again on its channel, reusing verdicts", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-retry", userMessage(unique("clean retried text")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Len(t, upstream.since(mark, "/v1/moderations"), 1, "the second channel reuses the first verdict")
+		assert.Len(t, upstream.since(mark, "/v1/chat/completions"), 2)
+
+		recorder = chat("mod-retry-rule", userMessage(unique("retry-rule-hit text")))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		var types []int
+		for _, row := range rowsOf(t, requestID(recorder)) {
+			types = append(types, row.Type)
+			if row.Type == model.LogTypeModeration {
+				assert.Equal(t, retryRuleB.Id, row.ChannelId, "the row names the channel that rejected")
+			}
+		}
+		assert.Equal(t, []int{model.LogTypeError, model.LogTypeModeration}, types, "the first channel's failure, then the rejection")
+	})
+
+	t.Run("a retry does not carry the first channel's organization", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-org", userMessage(unique("clean organization text")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "")
+		require.Len(t, calls, 3)
+		assert.Equal(t, "org-a", calls[0].Organization)
+		for _, call := range calls[1:] {
+			assert.Empty(t, call.Organization, call.Path)
+		}
+	})
+
+	t.Run("a retry does not carry the first channel's header override", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-hdr", userMessage(unique("clean header override text")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "")
+		require.Len(t, calls, 3)
+		assert.Equal(t, "Bearer sk-chat-500", calls[0].Authorization, "the first channel's own override")
+		assert.Equal(t, []string{"/v1/moderations", "/v1/chat/completions"}, []string{calls[1].Path, calls[2].Path})
+		for _, call := range calls[1:] {
+			assert.Equal(t, "Bearer sk-ok-hdr-b", call.Authorization, call.Path)
+			assert.Equal(t, "B", call.Channel, call.Path)
+		}
+	})
+
+	// distinct makes text of at least n runes, without whitespace, in which
+	// no 2000-rune piece repeats another.
+	distinct := func(prefix string, n int) string {
+		prefix = strings.ReplaceAll(prefix, " ", "")
+		var builder strings.Builder
+		for i := 0; builder.Len() < n; i++ {
+			fmt.Fprintf(&builder, "%s%06d,", prefix, i)
+		}
+		return builder.String()
+	}
+	engine.POST("/pg-test/chat/completions", func(c *gin.Context) {
+		userCache, err := model.GetUserCache(user.Id)
+		require.NoError(t, err)
+		c.Set("id", user.Id)
+		c.Set("username", user.Username)
+		c.Set("role", common.RoleCommonUser)
+		c.Set("group", user.Group)
+		c.Set("user_group", user.Group)
+		userCache.WriteContext(c)
+	}, middleware.Distribute(), controller.Playground)
+
+	t.Run("Claude- and Gemini-format clients are moderated with their system text", func(t *testing.T) {
+		mark := upstream.mark()
+		system, flagged := unique("claude system prompt"), unique("MOD-FLAG-SEXUAL claude")
+		recorder := post("/v1/messages", `{"model":"mod-claude","max_tokens":16,"system":"`+system+`","messages":[{"role":"user","content":"`+flagged+`"}]}`)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.JSONEq(t, `{"type":"error","error":{"type":"new_api_error","message":"The request was rejected by content moderation (request id: `+requestID(recorder)+`)"}}`, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/moderations")
+		require.NotEmpty(t, calls)
+		assert.Contains(t, calls[0].Body, system)
+		assert.Contains(t, calls[0].Body, flagged)
+
+		mark = upstream.mark()
+		system, flagged = unique("gemini system prompt"), unique("MOD-FLAG-SEXUAL gemini")
+		recorder = post("/v1beta/models/mod-gemini:generateContent", `{"systemInstruction":{"parts":[{"text":"`+system+`"}]},"contents":[{"role":"user","parts":[{"text":"`+flagged+`"}]}]}`)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Equal(t, flaggedMessage(recorder), errorOf(t, recorder))
+		calls = upstream.since(mark, "/v1/moderations")
+		require.NotEmpty(t, calls)
+		assert.Contains(t, calls[0].Body, system)
+		assert.Contains(t, calls[0].Body, flagged)
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+	})
+
+	for _, tc := range []struct{ name, path, body string }{
+		{"Responses", "/v1/responses", `{"model":"mod-responses","input":"%s"}`},
+		{"Responses compact", "/v1/responses/compact", `{"model":"mod-responses","input":"%s"}`},
+		{"image generation", "/v1/images/generations", `{"model":"mod-image","prompt":"%s"}`},
+		{"speech", "/v1/audio/speech", `{"model":"mod-speech","input":"%s","voice":"alloy"}`},
+		{"playground", "/pg-test/chat/completions", `{"model":"mod-flag","messages":[{"role":"user","content":"%s"}]}`},
+		{"chat converted to Responses", "/v1/chat/completions", `{"model":"mod-c2r","messages":[{"role":"user","content":"%s"}]}`},
+		{"tool output that becomes user text on Responses", "/v1/chat/completions", `{"model":"mod-c2r","messages":[{"role":"user","content":"hello"},{"role":"tool","content":"%s"}]}`},
+		{"a channel that passes the body through", "/v1/chat/completions", `{"model":"mod-pass","messages":[{"role":"user","content":"%s"}]}`},
+	} {
+		t.Run("a flagged "+tc.name+" request is rejected before the upstream", func(t *testing.T) {
+			mark := upstream.mark()
+			recorder := post(tc.path, fmt.Sprintf(tc.body, unique("MOD-FLAG-SEXUAL "+tc.name)))
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Equal(t, "content_moderation_flagged", errorOf(t, recorder).Code)
+			for _, call := range upstream.since(mark, "") {
+				assert.Equal(t, "/v1/moderations", call.Path, "nothing but moderation reached the upstream")
+			}
+			_, other := rejectedRow(t, recorder)
+			assertNoRetry(t, other)
+		})
+	}
+
+	t.Run("Claude- and Gemini-format bodies passed through to Chat Completions are moderated as chat bodies", func(t *testing.T) {
+		flagURL := "https://img.example/" + strings.ReplaceAll(unique("flag-image-claude-pass"), " ", "") + ".png"
+		for _, tc := range []struct{ name, path, body string }{
+			{"a chat image part in a Claude-format body", "/v1/messages", `{"model":"mod-pass","max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"` + flagURL + `"}}]}]}`},
+			{"chat messages in a Gemini-format body", "/v1beta/models/mod-pass:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"messages":[{"role":"user","content":"` + unique("MOD-FLAG-SEXUAL gemini pass-through") + `"}]}`},
+		} {
+			mark := upstream.mark()
+			recorder := post(tc.path, tc.body)
+			require.Equal(t, http.StatusBadRequest, recorder.Code, tc.name+": "+recorder.Body.String())
+			assert.Contains(t, recorder.Body.String(), "rejected by content moderation", tc.name)
+			assert.NotEmpty(t, upstream.since(mark, "/v1/moderations"), tc.name)
+			assert.Empty(t, upstream.since(mark, "/v1/chat/completions"), tc.name)
+		}
+	})
+
+	t.Run("with the global pass-through setting a flagged request is rejected", func(t *testing.T) {
+		globalSettings.PassThroughRequestEnabled = true
+		t.Cleanup(func() { globalSettings.PassThroughRequestEnabled = passThrough })
+		mark := upstream.mark()
+		recorder := chat("mod-global-pass", userMessage(unique("MOD-FLAG-SEXUAL global pass-through")))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+		_, other := rejectedRow(t, recorder)
+		assertNoRetry(t, other)
+	})
+
+	t.Run("a clean request converted to Responses reaches the Responses endpoint", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-c2r", userMessage(unique("clean chat for Responses")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Len(t, upstream.since(mark, "/v1/responses"), 1)
+	})
+
+	t.Run("the user's own moderation call and embeddings are not moderated again", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := post("/v1/moderations", `{"model":"mod-own","input":"`+unique("MOD-FLAG-SEXUAL own moderation call")+`"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Len(t, upstream.since(mark, "/v1/moderations"), 1, "only the relayed call")
+
+		mark = upstream.mark()
+		recorder = post("/v1/embeddings", `{"model":"mod-embed","input":"`+unique("MOD-FLAG-SEXUAL embedding")+`"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, "/v1/moderations"))
+	})
+
+	t.Run("Realtime on a moderated channel is refused as unsupported", func(t *testing.T) {
+		testServer := httptest.NewServer(engine)
+		t.Cleanup(testServer.Close)
+		mark := upstream.mark()
+		client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(testServer.URL, "http")+"/v1/realtime?model=mod-realtime", http.Header{"Authorization": []string{"Bearer modtestkey"}})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = client.Close() })
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, message, err := client.ReadMessage()
+		require.NoError(t, err)
+		var event struct {
+			Type    string   `json:"type"`
+			EventID string   `json:"event_id"`
+			Error   apiError `json:"error"`
+		}
+		require.NoError(t, common.Unmarshal(message, &event), string(message))
+		assert.Equal(t, "error", event.Type)
+		assert.Equal(t, "content_moderation_unsupported", event.Error.Code)
+		assert.Empty(t, upstream.since(mark, ""))
+		var row model.Log
+		require.NoError(t, model.LOG_DB.Where("request_id = ? AND type = ?", strings.TrimPrefix(event.EventID, "evt_"), model.LogTypeModeration).First(&row).Error)
+		audit := auditOf(t, otherOf(t, &row))
+		assert.Equal(t, "unsupported", audit["source"])
+		assert.Equal(t, "realtime", audit["detail"])
+	})
+
+	t.Run("a NovelAI-native request on a moderated channel is refused as unsupported", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := post("/ai/generate-image", `{"input":"a cat","model":"mod-novelai","action":"generate","parameters":{"n_samples":1}}`)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.JSONEq(t, `{"statusCode":400,"message":"This endpoint is not available on channels with content moderation (request id: `+requestID(recorder)+`)"}`, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, ""))
+		_, other := rejectedRow(t, recorder)
+		parts, _ := other["content_parts"].([]any)
+		require.Len(t, parts, 1)
+		assert.Equal(t, "Rejected: endpoint not available with content moderation", parts[0].(map[string]any)["key"])
+		assert.Equal(t, "novelai", auditOf(t, other)["detail"])
+	})
+
+	for _, tc := range []struct{ name, path, body, detail string }{
+		{"a token-id prompt", "/v1/completions", `{"model":"mod-completions","prompt":[[1,2,3]]}`, "token_prompt"},
+		{"a Responses item with a case-variant key", "/v1/responses", `{"model":"mod-responses","input":[{"type":"message","role":"user","content":"x","ROLE":"assistant"}]}`, "ambiguous_keys"},
+		{"a passed-through message with a case-variant key", "/v1/chat/completions", `{"model":"mod-pass","messages":[{"role":"user","content":"MOD-FLAG-SEXUAL","Content":"hi"}]}`, "ambiguous_keys"},
+		{"a passed-through image prompt with a case-variant key", "/v1/images/generations", `{"model":"mod-pass-img","prompt":"MOD-FLAG-SEXUAL image","PROMPT":"a calm lake"}`, "ambiguous_keys"},
+	} {
+		t.Run(tc.name+" cannot be moderated and is refused", func(t *testing.T) {
+			mark := upstream.mark()
+			recorder := post(tc.path, tc.body)
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Equal(t, apiError{Message: "This request contains content that content moderation cannot check, so it was not sent (request id: " + requestID(recorder) + ")", Type: "new_api_error", Code: "content_moderation_unsupported"}, errorOf(t, recorder))
+			assert.Empty(t, upstream.since(mark, ""))
+			_, other := rejectedRow(t, recorder)
+			parts, _ := other["content_parts"].([]any)
+			require.Len(t, parts, 1)
+			assert.Equal(t, "Rejected: request content cannot be moderated", parts[0].(map[string]any)["key"])
+			assert.Equal(t, tc.detail, auditOf(t, other)["detail"])
+			assertNoRetry(t, other)
+		})
+	}
+
+	t.Run("text over the budget is sent in part and audited as truncated", func(t *testing.T) {
+		// Pieces of 2000 and 1000 runes: the budget of 1000 checks the start
+		// of the first piece instead of skipping it.
+		text := distinct(unique("budget"), 3000)[:3000]
+		mark := upstream.mark()
+		recorder := chat("mod-budget", userMessage(text))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/moderations")
+		require.Len(t, calls, 1)
+		assert.Contains(t, calls[0].Body, `"input":["`+text[:1000]+`"]`)
+		audit := consumeAudit(t, recorder)
+		assert.Equal(t, true, audit["truncated"])
+		assert.Equal(t, float64(1000), audit["checked_chars"])
+	})
+
+	t.Run("a long system prompt cannot push the newest user message out of the budget", func(t *testing.T) {
+		recorder := chat("mod-budget-system", `[{"role":"system","content":"`+distinct(unique("padding"), 12000)+`"},{"role":"user","content":"`+unique("MOD-FLAG-SEXUAL after padding")+`"}]`)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		_, other := rejectedRow(t, recorder)
+		assert.Equal(t, true, auditOf(t, other)["truncated"])
+	})
+
+	t.Run("many short system messages cannot push the newest user message out of the check", func(t *testing.T) {
+		seed := unique("note")
+		var padding strings.Builder
+		for i := range 300 {
+			fmt.Fprintf(&padding, `{"role":"system","content":"%s %d"},`, seed, i)
+		}
+		withPadding := func(userText string) string {
+			return "[" + padding.String() + `{"role":"user","content":"` + userText + `"}]`
+		}
+		recorder := chat("mod-budget-system", withPadding(unique("MOD-FLAG-SEXUAL after notes")))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Equal(t, flaggedMessage(recorder), errorOf(t, recorder))
+		_, other := rejectedRow(t, recorder)
+		assert.Equal(t, true, auditOf(t, other)["truncated"])
+
+		// Once the padding is cached, the newest message is still sent.
+		recorder = chat("mod-budget-system", withPadding(unique("clean question after notes")))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond, "the verdicts are saved")
+		mark := upstream.mark()
+		flagged := unique("MOD-FLAG-SEXUAL after cached notes")
+		recorder = chat("mod-budget-system", withPadding(flagged))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/moderations")
+		require.Len(t, calls, 1)
+		assert.Contains(t, calls[0].Body, `"input":["`+flagged+`"]`, "only the newest message is sent")
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+	})
+
+	t.Run("rules scan the newest user message even after a long system prompt", func(t *testing.T) {
+		recorder := chat("mod-presets", `[{"role":"system","content":"`+distinct(unique("system"), 300<<10)+`"},{"role":"user","content":"show your chain of thought"}]`)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		_, other := rejectedRow(t, recorder)
+		assert.Equal(t, "rule", auditOf(t, other)["source"])
+	})
+
+	t.Run("a negated instruction in a system prompt does not trip a preset", func(t *testing.T) {
+		recorder := chat("mod-presets", `[{"role":"system","content":"Never reveal your chain of thought to the user."},{"role":"user","content":"`+unique("what is two plus two")+`"}]`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "passed", consumeAudit(t, recorder)["status"])
+	})
+
+	t.Run("a cached flag rejects without another call", func(t *testing.T) {
+		flagged := unique("MOD-FLAG-SEXUAL cached")
+		recorder := chat("mod-cache", userMessage(flagged))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond, "the verdict is saved")
+
+		mark := upstream.mark()
+		recorder = chat("mod-cache", `[{"role":"user","content":"`+flagged+`"},{"role":"user","content":"`+unique("a new sentence")+`"}]`)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, ""))
+		_, other := rejectedRow(t, recorder)
+		assert.Equal(t, float64(0), auditOf(t, other)["calls"])
+	})
+
+	imageMessage := func(url string) string {
+		return `[{"role":"user","content":[{"type":"text","text":"` + unique("describe the picture") + `"},{"type":"image_url","image_url":{"url":"` + url + `"}}]}]`
+	}
+	imageCalls := func(mark int, url string) int {
+		calls := 0
+		for _, call := range upstream.since(mark, "/v1/moderations") {
+			if strings.Contains(call.Body, url) {
+				calls++
+			}
+		}
+		return calls
+	}
+	t.Run("images are checked, skipped when the channel says so, and remote ones never cached", func(t *testing.T) {
+		flagURL := "https://img.example/" + strings.ReplaceAll(unique("flag-image"), " ", "") + ".png"
+		recorder := chat("mod-img", imageMessage(flagURL))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		_, other := rejectedRow(t, recorder)
+		applied, _ := auditOf(t, other)["applied_input_types"].(map[string]any)
+		assert.Contains(t, applied["sexual"], "image")
+
+		recorder = chat("mod-img-skip", imageMessage(flagURL))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, float64(1), consumeAudit(t, recorder)["images_skipped"])
+
+		cleanURL := "https://img.example/" + strings.ReplaceAll(unique("clean"), " ", "") + ".png"
+		dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(unique("clean pixels")))
+		for _, tc := range []struct {
+			url   string
+			calls int
+		}{{cleanURL, 2}, {dataURL, 1}} {
+			mark := upstream.mark()
+			for range 2 {
+				recorder = chat("mod-img", imageMessage(tc.url))
+				require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+				assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+			}
+			assert.Equal(t, tc.calls, imageCalls(mark, tc.url), tc.url)
+		}
+	})
+
+	t.Run("converter paths that turn other fields into user or system content are moderated", func(t *testing.T) {
+		flag := func(name string) string { return unique("MOD-FLAG-SEXUAL " + name) }
+		flagImage := func(name string) string {
+			return "https://img.example/" + strings.ReplaceAll(unique("flag-image-"+name), " ", "") + ".png"
+		}
+		for name, body := range map[string]string{
+			"Claude system role message": `{"model":"mod-claude","max_tokens":16,"messages":[{"role":"system","content":"` + flag("claude system role") + `"},{"role":"user","content":"hi"}]}`,
+			"Claude input_text block":    `{"model":"mod-claude","max_tokens":16,"messages":[{"role":"user","content":[{"type":"input_text","text":"` + flag("claude input_text") + `"}]}]}`,
+			"Claude text document":       `{"model":"mod-claude","max_tokens":16,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"` + flag("claude document") + `"}}]}]}`,
+			"Claude tool_result image":   `{"model":"mod-claude","max_tokens":16,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"url","url":"` + flagImage("tool") + `"}}]}]}]}`,
+			"Claude image url over data": `{"model":"mod-claude","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo=","url":"` + flagImage("source") + `"}}]}]}`,
+			"Claude system block foo":    `{"model":"mod-claude","max_tokens":16,"system":[{"type":"foo","text":"` + flag("claude system block") + `"}],"messages":[{"role":"user","content":"hi"}]}`,
+			"Gemini system role":         `{"contents":[{"role":"system","parts":[{"text":"` + flag("gemini system role") + `"}]}]}`,
+			"Gemini USER role":           `{"contents":[{"role":"USER","parts":[{"text":"` + flag("gemini USER role") + `"}]}]}`,
+			"Gemini text inlineData":     `{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"text/plain","data":"` + base64.StdEncoding.EncodeToString([]byte(flag("gemini inline text"))) + `"}}]}]}`,
+			"Gemini image fileData":      `{"contents":[{"role":"user","parts":[{"fileData":{"mimeType":"image/png","fileUri":"` + flagImage("file") + `"}}]}]}`,
+			"Gemini thought system part": `{"systemInstruction":{"parts":[{"text":"` + flag("gemini thought") + `","thought":true}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		} {
+			path := "/v1/messages"
+			if strings.HasPrefix(name, "Gemini") {
+				path = "/v1beta/models/mod-gemini:generateContent"
+			}
+			mark := upstream.mark()
+			recorder := post(path, body)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code, name+": "+recorder.Body.String())
+			assert.Empty(t, upstream.since(mark, "/v1/chat/completions"), name)
+		}
+	})
+
+	t.Run("every prompt of a multipart image edit is moderated", func(t *testing.T) {
+		var form bytes.Buffer
+		writer := multipart.NewWriter(&form)
+		require.NoError(t, writer.WriteField("model", "mod-image"))
+		require.NoError(t, writer.WriteField("prompt", unique("a clean prompt")))
+		require.NoError(t, writer.WriteField("prompt", unique("MOD-FLAG-SEXUAL second prompt")))
+		part, err := writer.CreateFormFile("image", "a.png")
+		require.NoError(t, err)
+		_, err = part.Write([]byte("\x89PNG\r\n\x1a\n"))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		mark := upstream.mark()
+		recorder := send("/v1/images/edits", writer.FormDataContentType(), &form)
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, "/v1/images/edits"))
+	})
+
+	t.Run("an administrator's listing finds the rows, also with the deputy filter", func(t *testing.T) {
+		recorder := chat("mod-flag", userMessage(unique("MOD-FLAG-SEXUAL listing")))
+		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+		logs, _, err := model.GetAllLogs(model.LogFilter{ExcludeTypes: model.RechargeLogTypes, RequestId: requestID(recorder)}, 0, 10)
+		require.NoError(t, err)
+		require.Len(t, logs, 1)
+		assert.Equal(t, model.LogTypeModeration, logs[0].Type)
+		logs, _, err = model.GetAllLogs(model.LogFilter{Type: model.LogTypeModeration}, 0, 1000)
+		require.NoError(t, err)
+		require.NotEmpty(t, logs)
+		for _, row := range logs {
+			assert.Equal(t, model.LogTypeModeration, row.Type)
+		}
+	})
+
+	gatewayIdentifier := relaycommon.GatewaySafetyIdentifier(user.Id)
+	lastBody := func(t *testing.T, mark int, path string) string {
+		t.Helper()
+		calls := upstream.since(mark, path)
+		require.NotEmpty(t, calls, path)
+		return calls[len(calls)-1].Body
+	}
+	t.Run("the gateway safety identifier replaces the client's on every OpenAI body", func(t *testing.T) {
+		for _, tc := range []struct{ name, path, body, upstreamPath string }{
+			{"chat", "/v1/chat/completions", `{"model":"mod-sid","safety_identifier":"evil","messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions"},
+			{"Responses", "/v1/responses", `{"model":"mod-sid","safety_identifier":"evil","input":"hi"}`, "/v1/responses"},
+			{"Claude format", "/v1/messages", `{"model":"mod-sid","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions"},
+			{"Gemini format", "/v1beta/models/mod-sid:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, "/v1/chat/completions"},
+			{"chat converted to Responses despite a param override", "/v1/chat/completions", `{"model":"mod-sid-resp","safety_identifier":"evil","messages":[{"role":"user","content":"hi"}]}`, "/v1/responses"},
+		} {
+			mark := upstream.mark()
+			recorder := post(tc.path, tc.body)
+			require.Equal(t, http.StatusOK, recorder.Code, tc.name+": "+recorder.Body.String())
+			body := lastBody(t, mark, tc.upstreamPath)
+			assert.Contains(t, body, `"safety_identifier":"`+gatewayIdentifier+`"`, tc.name)
+			assert.NotContains(t, body, "evil", tc.name)
+		}
+		for _, tc := range []struct{ path, body, upstreamPath string }{
+			{"/v1/chat/completions", `{"model":"mod-sid-pass", "messages" : [{"role":"user","content":"hi"}], "safety_identifier":"evil"}`, "/v1/chat/completions"},
+			{"/v1/responses", `{"safety_identifier":"evil",  "model":"mod-sid-pass","input":"hi"}`, "/v1/responses"},
+			{"/v1/messages", `{"model":"mod-sid-pass","max_tokens":16, "safety_identifier":"evil","messages":[{"role":"user","content":"hi"}]}`, "/v1/chat/completions"},
+			{"/v1beta/models/mod-sid-pass:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"safety_identifier":"evil" }`, "/v1/chat/completions"},
+		} {
+			mark := upstream.mark()
+			recorder := post(tc.path, tc.body)
+			require.Equal(t, http.StatusOK, recorder.Code, tc.path+": "+recorder.Body.String())
+			assert.Equal(t, strings.Replace(tc.body, `"evil"`, `"`+gatewayIdentifier+`"`, 1), lastBody(t, mark, tc.upstreamPath), tc.path+": only the identifier changes")
+		}
+	})
+
+	t.Run("without the setting the client's identifier is handled as before", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := post("/v1/chat/completions", `{"model":"mod-sid-off","safety_identifier":"evil","messages":[{"role":"user","content":"hi"}]}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.NotContains(t, lastBody(t, mark, "/v1/chat/completions"), "safety_identifier")
+		mark = upstream.mark()
+		recorder = post("/v1/chat/completions", `{"model":"mod-sid-off-pass","safety_identifier":"evil","messages":[{"role":"user","content":"hi"}]}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Contains(t, lastBody(t, mark, "/v1/chat/completions"), `"safety_identifier":"evil"`)
+	})
+
+	for _, channelType := range []int{constant.ChannelTypeAzure, constant.ChannelTypeCustom, constant.ChannelTypeAnthropic, constant.ChannelTypeCodex} {
+		t.Run(fmt.Sprintf("channel type %d ignores both settings", channelType), func(t *testing.T) {
+			mark := upstream.mark()
+			post("/v1/chat/completions", fmt.Sprintf(`{"model":"mod-type-%d","safety_identifier":"evil","messages":[{"role":"user","content":"%s"}]}`, channelType, unique("MOD-FLAG-SEXUAL other type")))
+			assert.Empty(t, upstream.since(mark, "/v1/moderations"))
+			for _, call := range upstream.since(mark, "") {
+				assert.NotContains(t, call.Body, gatewayIdentifier)
+				if channelType == constant.ChannelTypeAzure || channelType == constant.ChannelTypeCustom {
+					assert.NotContains(t, call.Body, "evil", "stripped as before")
+				}
+			}
+			if channelType == constant.ChannelTypeAzure || channelType == constant.ChannelTypeCustom {
+				assert.NotEmpty(t, upstream.since(mark, ""), "the request was forwarded")
+			}
+		})
+	}
+
+	t.Run("a Sora task on a moderated OpenAI channel is checked before submission", func(t *testing.T) {
+		var tasks int64
+		countTasks := func() int64 {
+			require.NoError(t, model.DB.Model(&model.Task{}).Count(&tasks).Error)
+			return tasks
+		}
+		before, tasksBefore := quota(t), countTasks()
+		for _, tc := range []struct {
+			model, prompt, code string
+			status              int
+		}{
+			{"sora-2", unique("MOD-FLAG-SEXUAL video"), "content_moderation_flagged", http.StatusBadRequest},
+			{"sora-2-pro", unique("a quiet harbour at dawn"), "content_moderation_unavailable", http.StatusServiceUnavailable},
+		} {
+			mark := upstream.mark()
+			recorder := post("/v1/videos", `{"model":"`+tc.model+`","prompt":"`+tc.prompt+`","seconds":"4","size":"720x1280"}`)
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			var answer struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &answer))
+			assert.Equal(t, tc.code, answer.Code)
+			assert.True(t, strings.HasSuffix(answer.Message, " (request id: "+requestID(recorder)+")"), answer.Message)
+			assert.Empty(t, upstream.since(mark, "/v1/videos"))
+			_, other := rejectedRow(t, recorder)
+			assertNoRetry(t, other)
+		}
+		assert.Equal(t, tasksBefore, countTasks(), "no task row")
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
+
+		mark := upstream.mark()
+		recorder := post("/v1/videos", `{"model":"sora-2","prompt":"`+unique("a quiet harbour at dawn")+`","seconds":"4","size":"720x1280"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/videos")
+		require.Len(t, calls, 1)
+		assert.Equal(t, "Bearer "+soraChannel.Key, calls[0].Authorization)
+		assert.Equal(t, tasksBefore+1, countTasks())
+	})
+
+	t.Run("a key-level moderation failure on a Sora task is the channel's error", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := post("/v1/videos", `{"model":"sora-2-key","prompt":"`+unique("a quiet harbour at dawn")+`","seconds":"4","size":"720x1280"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/videos")
+		require.Len(t, calls, 1)
+		assert.Equal(t, "Bearer sk-ok-sora-key-backup", calls[0].Authorization, "submitted on the next channel")
+		rows := rowsOf(t, requestID(recorder))
+		assert.Empty(t, rowsOfType(rows, model.LogTypeModeration))
+		errorRows := rowsOfType(rows, model.LogTypeError)
+		require.Len(t, errorRows, 1)
+		keyFailureRow(t, errorRows[0], soraKey.Id, "http_403", http.StatusForbidden)
+		assert.Eventually(t, func() bool {
+			stored, err := model.GetChannelById(soraKey.Id, true)
+			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond)
+
+		// Without auto-disable the dead key stays enabled, so the first
+		// attempt and both retries land on it.
+		common.AutomaticDisableChannelEnabled = false
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = true })
+		before := quota(t)
+		mark = upstream.mark()
+		recorder = post("/v1/videos", `{"model":"sora-2-dead","prompt":"`+unique("a quiet harbour at dusk")+`","seconds":"4","size":"720x1280"}`)
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		var answer struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &answer))
+		assert.Equal(t, "content_moderation_unavailable", answer.Code)
+		assert.Equal(t, "Content moderation is unavailable; the request was not sent (request id: "+requestID(recorder)+")", answer.Message)
+		assert.Empty(t, upstream.since(mark, "/v1/videos"))
+		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
+		require.Len(t, rejected, 1)
+		attempts, _ := auditOf(t, otherOf(t, rejected[0]))["key_failures"].([]any)
+		require.Len(t, attempts, 3, "the first attempt and two retries")
+		for i, attempt := range attempts {
+			assert.Equal(t, "http_429_quota", attempt.(map[string]any)["class"])
+			assert.Equal(t, float64(i), attempt.(map[string]any)["retry_index"], "each attempt has its own retry index")
+			assert.Equal(t, float64(i+1), attempt.(map[string]any)["attempt"], "and its own place in the retry chain")
+		}
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
 	})
 }

@@ -68,6 +68,7 @@ import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
+import { LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import {
   parseLogOther,
@@ -94,6 +95,7 @@ import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
+import { ModerationDetailsSection } from './moderation-details-section'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
 // to its i18n label key for display in the audit details.
@@ -104,6 +106,7 @@ const CHANNEL_FIELD_LABELS: Record<string, string> = {
   type: 'Type',
   base_url: 'Base URL',
   key: 'Key',
+  content_moderation: 'Content moderation',
 }
 
 function timingTextColorClass(
@@ -895,6 +898,14 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
+        {/* What content moderation did on this attempt (admin only) */}
+        {props.isAdmin && adminInfo?.moderation && (
+          <ModerationDetailsSection
+            audit={adminInfo.moderation}
+            channel={{ id: props.log.channel, name: props.log.channel_name }}
+          />
+        )}
+
         {/* The upstream's balance error the channel hid from the user (admin only) */}
         {props.isAdmin && adminInfo?.upstream_error && (
           <DetailSection
@@ -1281,10 +1292,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {/* Admin billing mode indicator for non-consume */}
+        {/* Admin billing mode indicator for non-consume; a moderation row's
+          request was never sent upstream */}
         {props.isAdmin &&
           !isConsume &&
           props.log.type !== 6 &&
+          props.log.type !== LOG_TYPE_ENUM.MODERATION &&
           other?.admin_info && (
             <DetailRow
               label={t('Billing Path')}
@@ -1453,5 +1466,5 @@ export function DetailsDialog(props: DetailsDialogProps) {
 }
 
 function isDisplayableType(type: number): boolean {
-  return [0, 2, 5, 6].includes(type)
+  return [0, 2, 5, 6, 100].includes(type)
 }

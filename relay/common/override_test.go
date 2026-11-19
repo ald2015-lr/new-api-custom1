@@ -2777,3 +2777,55 @@ func TestReasoningEffortOverrideIsAuditedWithoutDebugMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"set reasoning.effort = max"}, info.ParamOverrideAudit)
 }
+
+func TestApplyGatewaySafetyIdentifier(t *testing.T) {
+	originalSecret := common2.CryptoSecret
+	common2.CryptoSecret = "safety-identifier-test-secret"
+	t.Cleanup(func() { common2.CryptoSecret = originalSecret })
+
+	gateway := GatewaySafetyIdentifier(7)
+	require.Regexp(t, `^u_[0-9a-f]{32}$`, gateway)
+	// Pinned values (HMAC-SHA256 keyed "safety-identifier-v1:" + secret over
+	// "new-api-user:<id>", computed independently): a change to the formula
+	// would re-key every user's identifier after an upgrade.
+	assert.Equal(t, "u_7471caff9788f60bd25ca58494f41ae7", gateway)
+	assert.Equal(t, "u_6cb343e08328c9cba96ebf1cf3f4d99e", GatewaySafetyIdentifier(8))
+	assert.Equal(t, gateway, GatewaySafetyIdentifier(7))
+	assert.NotEqual(t, gateway, GatewaySafetyIdentifier(8))
+
+	on := dto.ChannelOtherSettings{SendSafetyIdentifier: true}
+	info := func(channelType, userID int, settings dto.ChannelOtherSettings) *RelayInfo {
+		return &RelayInfo{UserId: userID, ChannelMeta: &ChannelMeta{ChannelType: channelType, ChannelOtherSettings: settings}}
+	}
+	cases := []struct {
+		name string
+		body string
+		info *RelayInfo
+		want string
+	}{
+		{"client value replaced in place", `{"model":"m","safety_identifier":"evil","messages":[]}`, info(1, 7, on),
+			`{"model":"m","safety_identifier":"` + gateway + `","messages":[]}`},
+		{"added when absent", `{"model":"m", "input" : "hi"}`, info(1, 7, on),
+			`{"model":"m", "input" : "hi","safety_identifier":"` + gateway + `"}`},
+		{"repeated client key written once", `{"safety_identifier":"a","model":"m","safety_identifier":"b"}`, info(1, 7, on),
+			`{"model":"m","safety_identifier":"` + gateway + `"}`},
+		{"off keeps the bytes", `{"safety_identifier":"evil"}`, info(1, 7, dto.ChannelOtherSettings{}), `{"safety_identifier":"evil"}`},
+		{"Azure keeps the bytes", `{"safety_identifier":"evil"}`, info(3, 7, on), `{"safety_identifier":"evil"}`},
+		{"Custom keeps the bytes", `{"safety_identifier":"evil"}`, info(8, 7, on), `{"safety_identifier":"evil"}`},
+		{"Claude keeps the bytes", `{"safety_identifier":"evil"}`, info(14, 7, on), `{"safety_identifier":"evil"}`},
+		{"Codex keeps the bytes", `{"safety_identifier":"evil"}`, info(57, 7, on), `{"safety_identifier":"evil"}`},
+		{"no user keeps the bytes", `{"safety_identifier":"evil"}`, info(1, 0, on), `{"safety_identifier":"evil"}`},
+		{"array body unchanged", `[{"safety_identifier":"evil"}]`, info(1, 7, on), `[{"safety_identifier":"evil"}]`},
+		{"invalid body unchanged", `{"safety_identifier":`, info(1, 7, on), `{"safety_identifier":`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ApplyGatewaySafetyIdentifier([]byte(tc.body), tc.info)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(out))
+		})
+	}
+
+	common2.CryptoSecret = "another-secret"
+	assert.NotEqual(t, gateway, GatewaySafetyIdentifier(7))
+}

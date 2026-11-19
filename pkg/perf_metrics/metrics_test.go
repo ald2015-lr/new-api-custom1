@@ -44,6 +44,9 @@ func TestClassifyRelayOutcome(t *testing.T) {
 		{"connection closed after non-stream response", canceled, nil, OutcomeSuccess},
 		{"client cancellation", canceled, types.NewOpenAIError(errors.New("context canceled"), types.ErrorCodeDoRequestFailed, 500), OutcomeIgnored},
 		{"upstream deadline", context.Background(), types.NewOpenAIError(context.DeadlineExceeded, types.ErrorCodeDoRequestFailed, 504), OutcomeFailure},
+		{"moderation flag", context.Background(), types.NewErrorWithStatusCode(errors.New("flagged"), types.ErrorCodeContentModerationFlagged, 400), OutcomeIgnored},
+		{"moderation unavailable", context.Background(), types.NewErrorWithStatusCode(errors.New("unavailable"), types.ErrorCodeContentModerationUnavailable, 503), OutcomeIgnored},
+		{"moderation unsupported", context.Background(), types.NewErrorWithStatusCode(errors.New("unsupported"), types.ErrorCodeContentModerationUnsupported, 400), OutcomeIgnored},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, ClassifyRelayOutcome(tc.ctx, &relaycommon.RelayInfo{}, tc.err))

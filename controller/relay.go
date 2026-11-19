@@ -24,6 +24,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/moderation"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -105,9 +106,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		if newAPIError != nil {
 			service.RecordRequestPolicyTermination(c, newAPIError)
-			if service.ClientGone(c) {
+			switch {
+			case service.ClientGone(c):
 				logger.LogInfo(c, common.LogText("relay stopped, client disconnected: %s", common.LocalLogPreview(newAPIError.Error())))
-			} else {
+			case types.IsContentModerationErrorCode(newAPIError.GetErrorCode()):
+				// An expected business rejection, already logged at WARN by
+				// the moderation check; it must not trip error alerting.
+				logger.LogInfo(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
+			default:
 				logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			}
 			// Taken before SetMessage replaces the wrapped error.
@@ -253,6 +259,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	// The last attempt's moderation call said its key or OpenAI account is
+	// unusable, and no later attempt ran.
+	moderationKeyFailed := false
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.StreamStatus = nil
@@ -266,6 +275,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		moderationKeyFailed = false
 		service.AppendUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
@@ -283,13 +293,27 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
+		// A moderated channel checks this attempt before anything is sent. A
+		// rejection is already recorded and never retried, disabled or billed
+		// (refund: the defer above). A moderation call that says the key or
+		// its OpenAI account is unusable is this channel's error instead:
+		// nothing is sent on it, and it is disabled and retried below as an
+		// upstream answer of that status would be.
+		modErr := moderation.CheckAttempt(c, relayInfo)
+		moderationKeyFailed = moderation.KeyFailed(c, modErr)
+		if modErr != nil && !moderationKeyFailed {
+			newAPIError = modErr
+			break
+		}
 
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
+		switch {
+		case moderationKeyFailed:
+			newAPIError = modErr
+		case relayFormat == types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
+		case relayFormat == types.RelayFormatClaude:
 			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
+		case relayFormat == types.RelayFormatGemini:
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
 			newAPIError = relayHandler(c, relayInfo)
@@ -315,6 +339,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// channel is not logged, disabled or blamed for that.
 		if !service.ClientGone(c) {
 			userErr := cmp.Or(service.MaskUpstreamQuotaError(c, newAPIError), service.DisguiseGeminiFreeKeyError(c, newAPIError))
+			if moderationKeyFailed {
+				userErr = moderation.UnavailableError(c)
+			}
 			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, userErr, relayInfo)
 		}
 
@@ -324,6 +351,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	// Every other way out of the loop decided the outcome as well.
 	keepAlive.Stop()
+	if moderationKeyFailed {
+		// No other channel served the request: the client gets the failed
+		// check's 503, recorded once, never the moderation call's answer.
+		newAPIError = moderation.RejectKeyFailure(c, relayInfo)
+	}
 
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {
@@ -634,8 +666,12 @@ func executeTaskSubmissionWith(
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	// As in the relay loop: the last attempt's moderation call said its key
+	// or OpenAI account is unusable, and no later attempt ran.
+	moderationKeyFailed := false
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		relayInfo.RetryIndex = retryParam.GetRetry()
 		stage = "select_channel"
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("before_attempt", retryParam.GetRetry()+1)
@@ -663,6 +699,7 @@ func executeTaskSubmissionWith(
 			}
 		}
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
+		moderationKeyFailed = false
 
 		service.AppendUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -688,6 +725,14 @@ func executeTaskSubmissionWith(
 			diagnostics.attemptSucceeded(retryParam.GetRetry()+1, result)
 			break
 		}
+		if types.IsContentModerationErrorCode(types.ErrorCode(taskErr.Code)) {
+			// The check recorded its policy event and log row; no other
+			// channel may receive the request.
+			break
+		}
+		// Nothing was submitted, but the channel is handled as for the
+		// upstream's answer: disabled and retried.
+		moderationKeyFailed = moderation.TaskKeyFailed(c, taskErr)
 
 		taskAPIError := taskSubmissionAPIError(taskErr)
 		userErr := service.MaskUpstreamQuotaTaskError(c, taskErr)
@@ -701,6 +746,9 @@ func executeTaskSubmissionWith(
 				types.ErrOptionWithErrorCode(types.ErrorCodeGeminiFreeKeyBusy)(&spared)
 				taskAPIError = &spared
 			}
+		}
+		if moderationKeyFailed {
+			userErr = moderation.UnavailableError(c)
 		}
 		relayInfo.LastError = taskAPIError
 		decision := decideTaskRetry(c, taskErr, common.RetryTimes-retryParam.GetRetry())
@@ -727,6 +775,9 @@ func executeTaskSubmissionWith(
 		logger.LogInfo(c, retryLogStr)
 	}
 
+	if moderationKeyFailed {
+		taskErr = moderation.RejectTaskKeyFailure(c, relayInfo)
+	}
 	if taskErr != nil {
 		diagnostics.failed(stage, "task_error", taskErr, false)
 		// The upstream's balance error on a channel that hides those reaches
@@ -961,6 +1012,10 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 		// The channel's own message for an upstream balance error stays as
 		// the channel set it, under any status it chose, with the request id
 		// as new-api's relay errors carry it.
+		taskErr.Message = common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey))
+	case types.IsContentModerationErrorCode(types.ErrorCode(taskErr.Code)):
+		// Content moderation's generic message, which names nothing of what
+		// fired, with the request id.
 		taskErr.Message = common.MessageWithRequestId(taskErr.Message, c.GetString(common.RequestIdKey))
 	case taskErr.StatusCode == http.StatusTooManyRequests:
 		taskErr.Message = i18n.T(c, i18n.MsgRelayGroupUpstreamSaturated)
