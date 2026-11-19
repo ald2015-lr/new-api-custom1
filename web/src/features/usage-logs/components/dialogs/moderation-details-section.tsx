@@ -30,8 +30,10 @@ import {
   moderationLabel,
   type ModerationAudit,
   type ModerationAuditRule,
+  type ModerationKeyFailure,
 } from '@/lib/content-moderation'
 import { formatNumber } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 import { DetailRow, DetailSection } from './log-detail-layout'
 
@@ -63,12 +65,49 @@ function ruleText(
   return type ? `${name} · ${type}` : name
 }
 
+function failureText(
+  failure: { class: string; status?: number },
+  t: (key: string) => string
+): string {
+  const text = moderationLabel(MODERATION_ERROR_CLASS_LABELS, failure.class, t)
+  return failure.status ? `${text} (HTTP ${failure.status})` : text
+}
+
+/** The log row's channel, the only one whose name the row carries. */
+type LogChannel = { id: number; name?: string | null }
+
+function keyFailureText(
+  failure: ModerationKeyFailure,
+  channel: LogChannel | undefined,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
+  let channelText = t('Channel #{{id}}', { id: failure.channel_id })
+  if (channel?.name && channel.id === failure.channel_id) {
+    channelText += ` (${channel.name})`
+  }
+  const parts = [
+    channelText,
+    failure.retry_index > 0
+      ? t('Retry #{{index}}', { index: failure.retry_index })
+      : t('First attempt'),
+  ]
+  // Multi-key channels only; the channel's key list numbers keys from 1.
+  if (typeof failure.multi_key_index === 'number') {
+    parts.push(t('Key #{{index}}', { index: failure.multi_key_index + 1 }))
+  }
+  parts.push(failureText(failure, t))
+  return parts.join(' · ')
+}
+
 /**
  * What content moderation did for the attempt of a log row: why it rejected
  * the request, or that it passed or let the request through after a failed
  * call. Administrators only; the server removes it for everyone else.
  */
-export function ModerationDetailsSection(props: { audit: ModerationAudit }) {
+export function ModerationDetailsSection(props: {
+  audit: ModerationAudit
+  channel?: LogChannel
+}) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const audit = props.audit
@@ -87,11 +126,8 @@ export function ModerationDetailsSection(props: { audit: ModerationAudit }) {
     audit.rule_scan_truncated === true ||
     (audit.images_skipped ?? 0) > 0 ||
     (audit.unchecked_parts ?? 0) > 0
-  let error = ''
-  if (audit.error) {
-    error = moderationLabel(MODERATION_ERROR_CLASS_LABELS, audit.error.class, t)
-    if (audit.error.status) error += ` (HTTP ${audit.error.status})`
-  }
+  const error = audit.error ? failureText(audit.error, t) : ''
+  const keyFailures = audit.key_failures ?? []
   const count = (value: number | undefined) =>
     value ? formatNumber(value, locale) : null
   // DetailRow breaks anywhere for IDs; sentences wrap between words and
@@ -151,6 +187,21 @@ export function ModerationDetailsSection(props: { audit: ModerationAudit }) {
                 </span>
               )}
             </span>
+          }
+        />
+      )}
+      {keyFailures.length > 0 && (
+        <DetailRow
+          label={t('Unusable keys')}
+          value={
+            <ul className={cn(prose, 'space-y-0.5')}>
+              {keyFailures.map((failure) => (
+                // One attempt per retry index.
+                <li key={`${failure.retry_index}-${failure.channel_id}`}>
+                  {keyFailureText(failure, props.channel, t)}
+                </li>
+              ))}
+            </ul>
           }
         />
       )}

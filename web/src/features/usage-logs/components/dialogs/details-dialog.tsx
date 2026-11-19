@@ -900,7 +900,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
 
         {/* What content moderation did on this attempt (admin only) */}
         {props.isAdmin && adminInfo?.moderation && (
-          <ModerationDetailsSection audit={adminInfo.moderation} />
+          <ModerationDetailsSection
+            audit={adminInfo.moderation}
+            channel={{ id: props.log.channel, name: props.log.channel_name }}
+          />
         )}
 
         {/* The upstream's balance error the channel hid from the user (admin only) */}

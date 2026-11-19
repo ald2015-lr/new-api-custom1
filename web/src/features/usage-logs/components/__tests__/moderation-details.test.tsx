@@ -94,6 +94,14 @@ function row(label: string): string {
   return cell.nextElementSibling?.textContent ?? ''
 }
 
+function listRow(label: string): string[] {
+  const section = moderationSection()
+  const cell = within(section).getByText(label)
+  return [...(cell.nextElementSibling?.querySelectorAll('li') ?? [])].map(
+    (item) => item.textContent ?? ''
+  )
+}
+
 afterEach(() => {
   for (const queryClient of queryClients) queryClient.clear()
   queryClients.length = 0
@@ -276,6 +284,55 @@ describe('usage log content moderation details', () => {
     expect(row('Error')).toBe('http_499_new')
   })
 
+  test('an admin sees each attempt whose key the moderation call called unusable, with 1-based key numbers', () => {
+    renderDetails(true, {
+      channel_id: 3,
+      retry_index: 2,
+      status: 'rejected',
+      source: 'unavailable',
+      error: { class: 'http_401', status: 401, message: 'Incorrect API key' },
+      elapsed_ms: 20,
+      checked_chars: 0,
+      calls: 1,
+      key_failures: [
+        { channel_id: 7, retry_index: 0, class: 'http_429_quota', status: 429 },
+        {
+          channel_id: 3,
+          retry_index: 1,
+          multi_key_index: 0,
+          class: 'http_403',
+          status: 403,
+        },
+        {
+          channel_id: 3,
+          retry_index: 2,
+          multi_key_index: 4,
+          class: 'http_401',
+        },
+      ],
+    })
+
+    // The row's own channel (#3) has a name; the other one only its id.
+    expect(listRow('Unusable keys')).toEqual([
+      'Channel #7 · First attempt · No quota on the account (HTTP 429)',
+      'Channel #3 (openai) · Retry #1 · Key #1 · Access denied (HTTP 403)',
+      'Channel #3 (openai) · Retry #2 · Key #5 · Key rejected',
+    ])
+    expect(row('Error')).toBe('Key rejected (HTTP 401)Incorrect API key')
+  })
+
+  test.each([[undefined], [[]]])(
+    'a row without key failures shows no key failure list: %j',
+    (keyFailures) => {
+      renderDetails(true, { ...flagged, key_failures: keyFailures })
+
+      expect(row('Result')).toBe('Rejected')
+      expect(
+        within(moderationSection()).queryByText('Unusable keys')
+      ).toBeNull()
+    }
+  )
+
   test('the user sees the rejection text and no moderation details', () => {
     renderDetails(false, undefined)
 
@@ -292,6 +349,9 @@ describe('usage log content moderation details', () => {
       source: 'rule',
       rule: { kind: 'custom', index: 1, name: 'Leak', type: 'keyword' },
       match: 'secret-match',
+      key_failures: [
+        { channel_id: 3, retry_index: 0, class: 'http_401', status: 401 },
+      ],
     })
 
     expect(
@@ -310,6 +370,7 @@ describe('usage log content moderation details', () => {
       'Custom rule #2: Leak · Keyword',
       'secret-match',
       'modr-42',
+      'Unusable keys',
     ]) {
       expect(screen.queryByText(text), text).toBeNull()
     }
