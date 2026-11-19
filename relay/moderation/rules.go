@@ -141,6 +141,8 @@ func compileCustomRegex(c *gin.Context, channelID int, pattern string, caseSensi
 // system text in request order, then the older user messages from the
 // newest. Each segment gives at most ruleSegmentMaxBytes and all together at
 // most ruleScanMaxBytes; a segment that does not fit keeps its head and tail.
+// The scan ends early at the first segment that the extraction's
+// normalisation budget no longer covers.
 func (ex *extraction) ruleScan() ([]scanText, bool) {
 	if ex.scanBuilt {
 		return ex.scan, ex.scanTruncated
@@ -171,7 +173,12 @@ func (ex *extraction) ruleScan() ([]scanText, bool) {
 			ex.scanTruncated = true
 			break
 		}
-		view := seg.normalized().view
+		norm := ex.normalize(seg)
+		if norm == nil {
+			ex.scanTruncated = true
+			break
+		}
+		view := norm.view
 		share := min(ruleSegmentMaxBytes, left)
 		if len(view) > share {
 			view, _ = cutHeadTail(view, share)

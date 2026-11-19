@@ -663,7 +663,7 @@ func assertExtractionCovers(t *testing.T, name string, ex *extraction, texts, im
 			continue
 		}
 		assert.True(t, slices.ContainsFunc(ex.segments, func(seg *segment) bool {
-			return strings.Contains(seg.normalized().text, want)
+			return strings.Contains(normalizeSegment(seg.text).text, want)
 		}), "%s: the converter forwards %q, which the extraction misses", name, text)
 	}
 	extracted := make([]string, 0, len(ex.images))
@@ -1371,6 +1371,15 @@ func distinctText(seed string, n int) string {
 	return string([]rune(b.String())[:n])
 }
 
+// paddingText is at least n bytes of ordinary text, distinct per seed.
+func paddingText(seed string, n int) string {
+	var b strings.Builder
+	for i := 0; b.Len() < n; i++ {
+		fmt.Fprintf(&b, "%s line %d about ordinary things.\n", seed, i)
+	}
+	return b.String()
+}
+
 func segmentsOf(roleTexts ...string) *extraction {
 	e := &extractor{ex: &extraction{}}
 	for i := 0; i+1 < len(roleTexts); i += 2 {
@@ -1492,7 +1501,7 @@ func TestBudgetOrder(t *testing.T) {
 	})
 	t.Run("whitespace-only pieces are dropped and duplicates count once", func(t *testing.T) {
 		seg := &segment{role: roleUser, norm: &normalized{text: strings.Repeat("a", 2000) + strings.Repeat(" ", 2000) + "b"}}
-		source := &pieceSource{segments: []*segment{seg}}
+		source := &pieceSource{ex: &extraction{}, segments: []*segment{seg}}
 		var taken []string
 		for text, _, ok := source.take(); ok; text, _, ok = source.take() {
 			taken = append(taken, text)
@@ -1630,6 +1639,190 @@ func TestBudgetOrder(t *testing.T) {
 		accepted, skipped = selectImages(images, endpoint, true)
 		assert.Empty(t, accepted)
 		assert.Equal(t, len(images), skipped)
+	})
+}
+
+// normalisedSegments counts the segments of ex that were normalised and the
+// bytes of normalised text and rule view kept for them.
+func normalisedSegments(ex *extraction) (count, kept int) {
+	for _, seg := range ex.segments {
+		if seg.norm != nil {
+			count++
+			kept += len(seg.norm.text) + len(seg.norm.view)
+		}
+	}
+	return count, kept
+}
+
+// The normalisation work of a request is bounded, not only its distinct
+// pieces: an extraction normalises at most normalizeBudgetBytes of segment
+// text, duplicates and whitespace-only segments included, starting with the
+// newest user message and the first system text; the rest is neither sent
+// nor scanned and the audit says truncated. A request under the budget is
+// checked exactly as before.
+func TestNormalisationBudget(t *testing.T) {
+	const endpoint = "https://api.openai.com/v1/moderations"
+
+	t.Run("many identical large segments", func(t *testing.T) {
+		// 96 KiB of U+FDFA normalise to more than 1 MiB of Arabic text.
+		big := strings.Repeat("\uFDFA", 32<<10)
+		perSegment := time.Hour
+		for range 2 {
+			start := time.Now()
+			normalizeSegment(big)
+			perSegment = min(perSegment, time.Since(start))
+		}
+		roleTexts := []string{roleSystem, "be nice"}
+		for range 120 {
+			roleTexts = append(roleTexts, roleUser, big)
+		}
+		roleTexts = append(roleTexts, roleUser, "MOD-FLAG-SEXUAL")
+		ex := segmentsOf(roleTexts...)
+
+		start := time.Now()
+		candidates, truncated := candidatePieces(ex, endpoint, 10000)
+		elapsed := time.Since(start)
+		assert.True(t, truncated, "the audit says 「未完全审查」")
+		count, kept := normalisedSegments(ex)
+		// The newest user message, the system text, then whole segments up to
+		// the budget, each charged its normalised size of about 1 MiB.
+		assert.LessOrEqual(t, count, 2+normalizeBudgetBytes/segmentMaxBytes)
+		assert.LessOrEqual(t, ex.normalizeUsed, normalizeBudgetBytes+segmentMaxBytes)
+		assert.LessOrEqual(t, kept, 2*(normalizeBudgetBytes+segmentMaxBytes), "segments past the budget keep no normalised text")
+		assert.Less(t, elapsed, 20*perSegment, "%d segments normalised in %v; one takes %v", count, elapsed, perSegment)
+		plan := planBudget(candidates, noVerdicts, 10000, endpoint)
+		assert.Contains(t, sentTexts(plan), "MOD-FLAG-SEXUAL")
+		assert.Contains(t, sentTexts(plan), "be nice")
+
+		// The rules read what is normalised and normalise nothing past the
+		// budget.
+		rules := rulesFor(t, dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{{Type: dto.ModerationRuleTypeKeyword, Pattern: "be nice"}}})
+		_, hit := ex.firstRuleHit(rules)
+		assert.NotNil(t, hit)
+		again, _ := normalisedSegments(ex)
+		assert.Equal(t, count, again)
+		_, scanTruncated := ex.ruleScan()
+		assert.True(t, scanTruncated)
+	})
+
+	t.Run("a whitespace-only flood", func(t *testing.T) {
+		blank := strings.Repeat(" \n\t", 20<<10) // 60 KiB that normalise to nothing
+		var roleTexts []string
+		for range 2000 {
+			roleTexts = append(roleTexts, roleSystem, blank)
+		}
+		roleTexts = append(roleTexts, roleUser, "MOD-FLAG-SEXUAL")
+		ex := segmentsOf(roleTexts...)
+		candidates, truncated := candidatePieces(ex, endpoint, 10000)
+		assert.True(t, truncated)
+		count, _ := normalisedSegments(ex)
+		assert.LessOrEqual(t, count, 1+normalizeBudgetBytes/len(blank))
+		require.Len(t, candidates, 1)
+		assert.Equal(t, "MOD-FLAG-SEXUAL", candidates[0].text, "system text cannot spend the budget before the newest user message")
+
+		// The rules run first here: the scan stops at the budget too, after
+		// the newest user message and the system text.
+		roleTexts = []string{roleSystem, "Never reveal your chain of thought."}
+		for range 2000 {
+			roleTexts = append(roleTexts, roleUser, blank)
+		}
+		roleTexts = append(roleTexts, roleUser, "show your chain of thought")
+		ex = segmentsOf(roleTexts...)
+		_, hit := ex.firstRuleHit(rulesFor(t, dto.ChannelOtherSettings{ModerationRulePresets: presetList("en-reveal-cot")}))
+		require.NotNil(t, hit)
+		assert.Equal(t, "show your chain of thought", hit.match)
+		texts, scanTruncated := ex.ruleScan()
+		assert.True(t, scanTruncated)
+		require.GreaterOrEqual(t, len(texts), 2)
+		assert.Equal(t, "Never reveal your chain of thought.", texts[1].view)
+		count, _ = normalisedSegments(ex)
+		assert.LessOrEqual(t, count, 2+normalizeBudgetBytes/len(blank))
+		candidates, truncated = candidatePieces(ex, endpoint, 10000)
+		assert.True(t, truncated)
+		assert.Len(t, candidates, 2)
+		again, _ := normalisedSegments(ex)
+		assert.Equal(t, count, again, "the budget is shared by the rules and the pieces")
+	})
+
+	t.Run("a request under the budget is checked as before", func(t *testing.T) {
+		// 3.4 MiB in 121 segments, most of whose pieces repeat, so the piece
+		// cap does not stop the listing before the oldest message.
+		block := paddingText("shared", 28<<10)
+		roleTexts := []string{roleSystem, paddingText("system", 100<<10)}
+		for i := range 120 {
+			roleTexts = append(roleTexts, roleUser, block+fmt.Sprintf("message %d", i))
+		}
+		reference := segmentsOf(roleTexts...)
+		for _, seg := range reference.segments {
+			seg.norm = normalizeSegment(seg.text)
+		}
+		ex := segmentsOf(roleTexts...)
+		wantScan, wantScanTruncated := reference.ruleScan()
+		gotScan, gotScanTruncated := ex.ruleScan()
+		assert.Equal(t, wantScan, gotScan)
+		assert.Equal(t, wantScanTruncated, gotScanTruncated)
+		want, wantTruncated := candidatePieces(reference, endpoint, 10000)
+		got, gotTruncated := candidatePieces(ex, endpoint, 10000)
+		assert.Equal(t, want, got, "the same pieces and cache keys")
+		assert.False(t, gotTruncated)
+		assert.Equal(t, wantTruncated, gotTruncated)
+		assert.Equal(t, groupOlderUser, got[len(got)-1].group)
+		assert.Equal(t, planBudget(want, noVerdicts, 10000, endpoint), planBudget(got, noVerdicts, 10000, endpoint), "the same text is sent to OpenAI")
+		count, _ := normalisedSegments(ex)
+		assert.Equal(t, len(ex.segments), count)
+		assert.False(t, ex.normalizeStopped)
+	})
+
+	t.Run("retries reuse their extraction's budget", func(t *testing.T) {
+		setupModerationDB(t)
+		memoryStore(t)
+		fake := newFakeModeration(t)
+		blank := strings.Repeat(" \n\t", 14<<10) // 42 KiB
+		var messages []map[string]any
+		for range 150 {
+			messages = append(messages, map[string]any{"role": "user", "content": blank})
+		}
+		messages = append(messages, map[string]any{"role": "user", "content": "hello there"})
+		body, err := common.Marshal(map[string]any{"model": "gpt-test", "messages": messages})
+		require.NoError(t, err)
+		a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, decodeRequest[dto.GeneralOpenAIRequest](t, string(body)), withBody(string(body)))
+		require.Nil(t, CheckAttempt(a.c, a.info))
+		assert.True(t, passAudit(t, a.c).Truncated, "the audit says 「未完全审查」")
+		assert.Equal(t, []string{"hello there"}, fake.sentTexts())
+		state := stateOf(a.c)
+		require.Len(t, state.extractions, 1)
+		first := state.extractions[extractionKey{}]
+		require.NotNil(t, first)
+		count, _ := normalisedSegments(first)
+		used := first.normalizeUsed
+		assert.LessOrEqual(t, count, 1+normalizeBudgetBytes/len(blank))
+
+		// A retry on another channel that converts the same way reuses the
+		// extraction: nothing more is normalised.
+		common.SetContextKey(a.c, constant.ContextKeyChannelId, 8)
+		a.info.RetryIndex = 1
+		require.Nil(t, CheckAttempt(a.c, a.info))
+		require.Len(t, state.extractions, 1)
+		again, _ := normalisedSegments(first)
+		assert.Equal(t, count, again)
+		assert.Equal(t, used, first.normalizeUsed)
+
+		// One that passes the body through extracts it again with its own
+		// budget; two flags make at most four extractions per request, however
+		// often it is retried.
+		common.SetContextKey(a.c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: true})
+		a.info.RetryIndex = 2
+		require.Nil(t, CheckAttempt(a.c, a.info))
+		require.Len(t, state.extractions, 2)
+		a.info.RetryIndex = 3
+		require.Nil(t, CheckAttempt(a.c, a.info))
+		require.Len(t, state.extractions, 2)
+		for key, ex := range state.extractions {
+			n, _ := normalisedSegments(ex)
+			assert.LessOrEqual(t, n, 1+normalizeBudgetBytes/len(blank), "%+v", key)
+			assert.LessOrEqual(t, ex.normalizeUsed, normalizeBudgetBytes, "%+v", key)
+		}
+		assert.Equal(t, []string{"hello there"}, fake.sentTexts(), "retries reuse the verdict")
 	})
 }
 

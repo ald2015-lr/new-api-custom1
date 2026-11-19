@@ -27,11 +27,20 @@ type segment struct {
 	norm  *normalized
 }
 
-func (s *segment) normalized() *normalized {
-	if s.norm == nil {
-		s.norm = normalizeSegment(s.text)
+// normalize returns seg normalised, normalising it on first use within the
+// extraction's normalisation budget (see normalizeBudgetBytes). nil means the
+// budget is spent: seg is neither checked nor scanned.
+func (ex *extraction) normalize(seg *segment) *normalized {
+	if seg.norm != nil {
+		return seg.norm
 	}
-	return s.norm
+	if ex.normalizeStopped || ex.normalizeUsed+len(seg.text) > normalizeBudgetBytes {
+		ex.normalizeStopped = true
+		return nil
+	}
+	seg.norm = normalizeSegment(seg.text)
+	ex.normalizeUsed += max(len(seg.text), len(seg.norm.text))
+	return seg.norm
 }
 
 type imageRef struct {
@@ -48,6 +57,9 @@ type extraction struct {
 	uncheckedParts int
 	unsupported    string // ModerationDetailTokenPrompt or ModerationDetailAmbiguousKeys
 	truncated      bool   // a segment was longer than segmentMaxBytes before normalisation
+
+	normalizeUsed    int  // bytes charged against normalizeBudgetBytes
+	normalizeStopped bool // a segment did not fit the budget: none after it is normalised
 
 	scan          []scanText // the rule scan, built once
 	scanBuilt     bool

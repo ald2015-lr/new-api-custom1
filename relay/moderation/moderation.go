@@ -50,7 +50,10 @@ var keyFailureClasses = []string{
 
 // requestState is the moderation work of one request that its later
 // attempts reuse: the extraction per conversion path and every verdict the
-// request obtained (keyed as the cache, http(s) images included).
+// request obtained (keyed as the cache, http(s) images included). There are
+// at most four extractions, each with its own normalisation budget, so a
+// request normalises at most four budgets of text however often it is
+// retried.
 type requestState struct {
 	extractions map[extractionKey]*extraction
 	task        *extraction

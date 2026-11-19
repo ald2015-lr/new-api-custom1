@@ -42,8 +42,10 @@ type imageCandidate struct {
 
 // pieceSource walks segments piece by piece: each segment is split from its
 // start (so a message splits the same way in every turn) and its pieces are
-// taken from the start and the end alternately.
+// taken from the start and the end alternately. It ends at the first segment
+// that the extraction's normalisation budget no longer covers.
 type pieceSource struct {
+	ex       *extraction
 	segments []*segment
 	pieces   []string
 	order    []int
@@ -64,7 +66,12 @@ func (s *pieceSource) take() (text string, fromEnd, ok bool) {
 		if len(s.segments) == 0 {
 			return "", false, false
 		}
-		s.pieces = splitRunes(s.segments[0].normalized().text, pieceMaxRunes)
+		norm := s.ex.normalize(s.segments[0])
+		if norm == nil {
+			s.segments = nil
+			return "", false, false
+		}
+		s.pieces = splitRunes(norm.text, pieceMaxRunes)
 		s.order = alternate(len(s.pieces))
 		s.next = 0
 		s.segments = s.segments[1:]
@@ -102,9 +109,11 @@ func alternate(n int) []int {
 // the budget: system text up to half the budget and half of the pieces, the
 // newest user message, the rest of the system text, then the older user
 // messages from the newest. At most maxPiecesConsidered are listed;
-// truncated reports that more existed. The first step is capped in pieces as
-// well as in runes, so many short system messages cannot use up the pieces
-// before the newest user message is listed.
+// truncated reports that more existed, or that the normalisation budget left
+// text out. The first step is capped in pieces as well as in runes, so many
+// short system messages cannot use up the pieces before the newest user
+// message is listed, and the newest user message is normalised before any
+// system text, so system text cannot use up the normalisation budget either.
 func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []*piece, truncated bool) {
 	var system, users []*segment
 	for _, seg := range ex.segments {
@@ -115,13 +124,11 @@ func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []
 		}
 	}
 	slices.Reverse(users)
-	systemSource := &pieceSource{segments: system}
-	var newestSource, olderSource *pieceSource
+	systemSource := &pieceSource{ex: ex, segments: system}
+	newestSource, olderSource := &pieceSource{ex: ex}, &pieceSource{ex: ex}
 	if len(users) > 0 {
-		newestSource = &pieceSource{segments: users[:1]}
-		olderSource = &pieceSource{segments: users[1:]}
-	} else {
-		newestSource, olderSource = &pieceSource{}, &pieceSource{}
+		ex.normalize(users[0])
+		newestSource.segments, olderSource.segments = users[:1], users[1:]
 	}
 	seen := make(map[string]bool)
 	full := false
@@ -154,7 +161,7 @@ func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []
 	drain(newestSource, groupNewestUser, -1, -1)
 	drain(systemSource, groupSystem, -1, -1)
 	drain(olderSource, groupOlderUser, -1, -1)
-	return candidates, full
+	return candidates, full || ex.normalizeStopped
 }
 
 // budgetPlan is which uncached pieces an attempt sends.

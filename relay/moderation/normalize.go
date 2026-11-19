@@ -11,6 +11,19 @@ import (
 // text keeps its first and last half (NFKC can expand text up to 18 times).
 const segmentMaxBytes = 1 << 20
 
+// normalizeBudgetBytes bounds the normalisation work of one extraction, which
+// every attempt of the request on that conversion path shares. Every segment
+// normalised, duplicates and whitespace-only ones included, is charged its
+// raw size or, when NFKC made it longer, its normalised size. A segment whose
+// raw text no longer fits is not normalised, and neither is any segment
+// after it: that text is neither sent to OpenAI nor scanned by the rules,
+// and the audit says truncated. Segments are normalised in one order, the
+// newest user message, the system text in request order, then the older
+// user messages from the newest, and each is charged at most about
+// segmentMaxBytes, so the newest user message and the first system text
+// always fit.
+const normalizeBudgetBytes = 4 << 20
+
 // normalized is a segment as content moderation sees it.
 type normalized struct {
 	text      string // sent to OpenAI and hashed
