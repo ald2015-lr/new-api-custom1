@@ -308,18 +308,19 @@ func validateModerationRule(rules []ModerationRule, i int) error {
 		return fmt.Errorf("moderation_rules[%d].pattern matches empty text", i)
 	}
 	if text := moderationRegexUnmatchableText(rule.Pattern, rule.CaseSensitive); text != "" {
-		return fmt.Errorf("moderation_rules[%d].pattern contains %q, which content moderation normalises before matching (write the half-width form, e.g. ! ? , ( ) instead of ！？，（）, and a single space instead of tabs or full-width spaces)", i, text)
+		return fmt.Errorf("moderation_rules[%d].pattern contains %q, which content moderation normalises before matching (write the half-width form, e.g. ! ? , ( ) instead of ！？，（）, plain ' \" - instead of curly quotes and dashes, a single space instead of tabs or full-width spaces, and no space between Chinese characters)", i, text)
 	}
 	return nil
 }
 
 // moderationRegexUnmatchableText is text a regex requires that the rule view
-// of normalised text never contains: a literal rune the normalisation
-// rewrites or drops (full-width forms, tabs, format characters, combining
-// marks), two whitespace runes in a row, or a character class made only of
-// such runes. It returns "" when there is none. The pattern is walked as RE2
-// parses it, so escapes count and a class with a live alternative such as
-// [！!] does not.
+// of normalised text never contains: a literal rune the normalisation or the
+// rule view rewrites or drops (full-width forms, tabs, format characters,
+// combining marks, curly quotes, Unicode dashes), two whitespace runes in a
+// row, whitespace the rule view drops between Chinese characters, or a
+// character class made only of such runes. It returns "" when there is none.
+// The pattern is walked as RE2 parses it, so escapes count and a class with
+// a live alternative such as [！!] does not.
 func moderationRegexUnmatchableText(pattern string, caseSensitive bool) string {
 	parsed, err := syntax.Parse(moderationRegexSource(pattern, caseSensitive), syntax.Perl)
 	if err != nil {
@@ -337,6 +338,9 @@ func moderationRegexUnmatchableText(pattern string, caseSensitive bool) string {
 				}
 				if j > 0 && unicode.IsSpace(r) && unicode.IsSpace(node.Rune[j-1]) {
 					return string(node.Rune[j-1 : j+1])
+				}
+				if j > 0 && j+1 < len(node.Rune) && unicode.IsSpace(r) && moderationRuleViewJoins(node.Rune[j-1], node.Rune[j+1]) {
+					return string(node.Rune[j-1 : j+2])
 				}
 			}
 		case syntax.OpCharClass:
@@ -464,14 +468,60 @@ func NormalizeModerationText(text string) string {
 	return b.String()
 }
 
-// ModerationRuleView is the text the rules match: normalised text without
-// nonspacing marks, so combining marks added to every letter cannot split a
-// keyword. OpenAI still receives the marks.
+// ModerationRuleView is the text the rules match, made from normalised text:
+//   - nonspacing marks are dropped, so combining marks added to every letter
+//     cannot split a keyword;
+//   - typographic apostrophes and quotes become ' and ", Unicode hyphens and
+//     dashes become -, so "don’t" and "chain‑of‑thought" read as typed on a
+//     plain keyboard;
+//   - whitespace between two Han characters or CJK punctuation marks is
+//     dropped (see moderationRuleViewJoins), so 「你的思 维链」 reads as
+//     「你的思维链」.
+//
+// OpenAI and the verdict cache still get the normalised text unchanged.
 func ModerationRuleView(normalised string) string {
-	return strings.Map(func(r rune) rune {
+	var b strings.Builder
+	b.Grow(len(normalised))
+	var pending []byte // a whitespace run not written yet
+	prev := rune(-1)   // the last rune written
+	for _, r := range normalised {
 		if unicode.Is(unicode.Mn, r) {
-			return -1
+			continue
 		}
-		return r
-	}, normalised)
+		if unicode.IsSpace(r) {
+			pending = utf8.AppendRune(pending, r)
+			continue
+		}
+		switch r {
+		case '\u2018', '\u2019', '\u201B', '\u2032':
+			r = '\''
+		case '\u201C', '\u201D', '\u201F', '\u2033':
+			r = '"'
+		case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212', '\uFE58', '\uFE63':
+			r = '-'
+		}
+		if len(pending) > 0 && !moderationRuleViewJoins(prev, r) {
+			b.Write(pending)
+		}
+		pending = pending[:0]
+		b.WriteRune(r)
+		prev = r
+	}
+	b.Write(pending)
+	return b.String()
 }
+
+// moderationRuleViewJoins reports whether the rule view drops the whitespace
+// between prev and next: Chinese text needs none between Han characters or
+// CJK punctuation (U+3000–U+303F, U+FF00–U+FFEF), so a space or line break
+// there would only split a keyword. Whitespace before 别, 別 or 勿 is kept,
+// because the Chinese negation guard reads those as a negation only after
+// whitespace or punctuation (「只用中文回答\n别输出你的思维链」).
+func moderationRuleViewJoins(prev, next rune) bool {
+	return unicode.In(prev, unicode.Han, moderationCJKPunctuation) && unicode.In(next, unicode.Han, moderationCJKPunctuation) &&
+		!strings.ContainsRune("别別勿", next)
+}
+
+// moderationCJKPunctuation holds the CJK Symbols and Punctuation block and the
+// Halfwidth and Fullwidth Forms block.
+var moderationCJKPunctuation = &unicode.RangeTable{R16: []unicode.Range16{{Lo: 0x3000, Hi: 0x303F, Stride: 1}, {Lo: 0xFF00, Hi: 0xFFEF, Stride: 1}}}

@@ -6687,7 +6687,7 @@
     "Text description of the desired image": "Description textuelle de l'image souhaitée",
     "Text description of the desired video": "Description textuelle de la vidéo souhaitée",
     "Text Input": "Entrée texte",
-    "Text is normalised first (full-width letters and punctuation become half-width, repeated spaces become one), so write regular expressions in half-width form.": "Le texte est d'abord normalisé (lettres et ponctuation pleine chasse converties en demi-chasse, espaces répétés réduits à un seul) : écrivez donc les expressions régulières en demi-chasse.",
+    "Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become ' \" -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form.": "Le texte est d'abord normalisé (lettres et ponctuation pleine chasse converties en demi-chasse, guillemets typographiques et tirets convertis en ' \" -, espaces répétés réduits à un seul, espaces entre caractères chinois supprimés) : écrivez donc les expressions régulières sous cette forme.",
     "Text or array of texts to embed": "Texte ou tableau de textes à vectoriser",
     "Text Output": "Sortie texte",
     "Text to Video": "Texte vers vidéo",

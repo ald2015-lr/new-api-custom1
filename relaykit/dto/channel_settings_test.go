@@ -922,7 +922,7 @@ func TestChannelOtherSettingsGeminiFreeKey(t *testing.T) {
 // with a message that names the field.
 func TestChannelOtherSettingsModeration(t *testing.T) {
 	normalised := func(text string) string {
-		return fmt.Sprintf("moderation_rules[0].pattern contains %q, which content moderation normalises before matching (write the half-width form, e.g. ! ? , ( ) instead of ！？，（）, and a single space instead of tabs or full-width spaces)", text)
+		return fmt.Sprintf("moderation_rules[0].pattern contains %q, which content moderation normalises before matching (write the half-width form, e.g. ! ? , ( ) instead of ！？，（）, plain ' \" - instead of curly quotes and dashes, a single space instead of tabs or full-width spaces, and no space between Chinese characters)", text)
 	}
 	var unset *ChannelOtherSettings
 	assert.NoError(t, unset.ValidateModeration())
@@ -1014,6 +1014,12 @@ func TestChannelOtherSettingsModeration(t *testing.T) {
 		{name: "two spaces", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("secret  plan")}}, wantErr: normalised("  ")},
 		{name: "class of full-width forms only", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("思维链[！？]")}}, wantErr: normalised("！")},
 		{name: "class with a half-width alternative", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex("思维链[！!]"), regex(`输出[^。！？!?\n]{0,10}推理`), regex(`(?i)dump\s+cot`), regex("。")}}},
+		{name: "curly apostrophe", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`don’t\s+reveal`)}}, wantErr: normalised("’")},
+		{name: "curly quote", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`“cot”`)}}, wantErr: normalised("“")},
+		{name: "Unicode dash", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`chain–of–thought`)}}, wantErr: normalised("–")},
+		{name: "space between Chinese characters", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`你的 思维链`)}}, wantErr: normalised("的 思")},
+		{name: "line break between Chinese characters", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`思维\n链`)}}, wantErr: normalised("维\n链")},
+		{name: "spaces the rule view keeps", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{regex(`回答 别输出`), regex(`输出 cot`), regex(`思维\s*链`), regex(`chain-of-thought`), regex(`don't`)}}},
 		{name: "valid rules", settings: ChannelOtherSettings{ModerationRules: []ModerationRule{{Name: "cot", Type: "keyword", Pattern: "chain of thought"}, {Type: "regex", Pattern: `(?i)reveal\s+your`, CaseSensitive: true}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
