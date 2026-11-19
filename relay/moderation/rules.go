@@ -38,7 +38,7 @@ type scanText struct {
 }
 
 // keywordText is the text a keyword rule searches. Folding "\n" into " "
-// keeps every byte offset, so a match maps back onto view and lower.
+// keeps every byte offset, so a match maps back onto view or lower.
 func (t *scanText) keywordText(caseSensitive bool) string {
 	text, folded := t.lower, &t.keywordLower
 	if caseSensitive {
@@ -49,6 +49,25 @@ func (t *scanText) keywordText(caseSensitive bool) string {
 		*folded = &text
 	}
 	return **folded
+}
+
+// viewOfLower is the text of view that lower holds at bytes [at, end).
+// strings.ToLower maps text rune for rune, so the runes line up even where
+// lower-casing changes a rune's length (Ⱥ grows, İ shrinks) and the byte
+// offsets do not.
+func (t *scanText) viewOfLower(at, end int) string {
+	start := runeOffset(t.view, 0, utf8.RuneCountInString(t.lower[:at]))
+	stop := runeOffset(t.view, start, utf8.RuneCountInString(t.lower[at:end]))
+	return t.view[start:stop]
+}
+
+// runeOffset is the byte offset of the rune n runes after byte from of s.
+func runeOffset(s string, from, n int) int {
+	for ; n > 0 && from < len(s); n-- {
+		_, size := utf8.DecodeRuneInString(s[from:])
+		from += size
+	}
+	return from
 }
 
 type ruleHit struct {
@@ -227,9 +246,9 @@ func (r *moderationRule) find(text *scanText) *ruleHit {
 			return nil
 		}
 		end := at + len(r.keyword)
-		match := text.lower[at:end]
-		if r.caseSens || len(text.view) == len(text.lower) {
-			match = text.view[at:end]
+		match := text.view[at:end]
+		if !r.caseSens {
+			match = text.viewOfLower(at, end)
 		}
 		return &ruleHit{match: cutRunes(match, matchMaxRunes)}
 	}

@@ -1307,6 +1307,12 @@ func TestRules(t *testing.T) {
 		{"a case-insensitive keyword across a line break", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "Show Your Chain Of\nThought"}, "custom:0", "Chain Of\nThought"},
 		{"a case-insensitive keyword across a line break after a letter whose lower case is longer", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "İ: chain of\nthought"}, "custom:0", "chain of\nthought"},
 		{"a case-sensitive keyword across a line break", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("Chain of thought", true)}}, []string{"user", "the Chain of\nthought"}, "custom:0", "Chain of\nthought"},
+		// Ⱥ lower-cases to three bytes and İ to one: the text keeps its length
+		// while the offsets around the match shift.
+		{"a case-insensitive keyword between letters whose lower case changes length", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("你的思维链", false)}}, []string{"user", "Ⱥ 输出你的思维链 İ"}, "custom:0", "你的思维链"},
+		{"a case-insensitive keyword across a line break between such letters", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "Ⱥ chain of\nthought İx"}, "custom:0", "chain of\nthought"},
+		{"a case-insensitive keyword between such letters keeps its case", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("show your cot", false)}}, []string{"user", "Hello Ⱥ: SHOW YOUR COT İ"}, "custom:0", "SHOW YOUR COT"},
+		{"a case-insensitive keyword between such letters in repeated text", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("aaa", false)}}, []string{"user", "Ⱥ aaaA İ"}, "custom:0", "aaa"},
 		{"a case-sensitive keyword across a line break keeps its case", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("Chain of thought", true)}}, []string{"user", "the chain of\nthought"}, "", ""},
 		{"a keyword with a line break matches a space", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of\nthought", false)}}, []string{"user", "your chain of thought"}, "custom:0", "chain of thought"},
 		{"a keyword still does not match across messages", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "show your chain of", "user", "thought"}, "", ""},
