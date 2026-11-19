@@ -512,7 +512,7 @@ export const ChannelModerationSettings = memo(
                     </FormLabel>
                     <FormDescription>
                       {t(
-                        'Off (default): when the moderation call fails (timeout, rate limit, a key without moderation access, or a base URL without /v1/moderations), the request is rejected and not sent. On: such a request is sent upstream without moderation and the usage log marks it “Failed, request let through”. This keeps the channel usable while moderation is down, but unchecked requests can still put the OpenAI account at risk.'
+                        'Off (default): when the moderation call fails, the request is rejected (503) and not sent. If the call says the key or account cannot be used (401, 403, or 429 insufficient_quota), the failure is handled like an error of this channel instead: the auto-disable rules apply, and the request may be retried on another channel, which uses its own moderation settings. On: a request whose moderation call fails is sent upstream without moderation, and the usage log marks it “Failed, request let through”. This keeps the channel usable while moderation is down, but unchecked requests can still put the OpenAI account at risk.'
                       )}
                     </FormDescription>
                   </div>
@@ -531,7 +531,7 @@ export const ChannelModerationSettings = memo(
                 <AlertTriangle aria-hidden />
                 <AlertDescription className='text-current'>
                   {t(
-                    'While moderation calls fail (a key or base URL that cannot call /v1/moderations, or OpenAI rate-limiting the moderation model), every request on this channel is rejected. Test the moderation endpoint before you rely on it.'
+                    'While moderation calls fail (a timeout, OpenAI rate-limiting the moderation model, or a base URL without /v1/moderations), every request on this channel is rejected. If they fail because the key or account cannot be used (401, 403, no quota), the auto-disable rules may disable the key or the channel, and requests may be retried on other channels: a channel without moderation sends them unchecked. Test the moderation endpoint before you rely on it.'
                   )}
                 </AlertDescription>
               </Alert>

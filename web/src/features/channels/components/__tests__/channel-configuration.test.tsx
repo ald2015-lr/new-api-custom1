@@ -4957,6 +4957,26 @@ test('an OpenAI channel shows the content moderation card with moderation off an
   ).not.toBeChecked()
 })
 
+test('with moderation on and failures rejected, the fail-open help and the warning say a key the moderation call rejects is a channel error that can move the request to a channel without moderation', async () => {
+  const { user } = await openModerationCard(
+    openAIChannel({ moderation_enabled: true })
+  )
+  const card = screen.getByRole('group', { name: 'Content moderation' })
+  const failOpen = within(card).getByRole('switch', { name: FAIL_OPEN })
+  expect(failOpen).not.toBeChecked()
+  expect(failOpen).toHaveAccessibleDescription(
+    /fails, the request is rejected \(503\) and not sent\. If the call says the key or account cannot be used \(401, 403, or 429 insufficient_quota\), the failure is handled like an error of this channel instead: the auto-disable rules apply, and the request may be retried on another channel, which uses its own moderation settings\./
+  )
+  const warning = within(card).getByRole('alert')
+  expect(warning).toHaveTextContent(/every request on this channel is rejected/)
+  expect(warning).toHaveTextContent(
+    /key or account cannot be used \(401, 403, no quota\), the auto-disable rules may disable the key or the channel, and requests may be retried on other channels: a channel without moderation sends them unchecked\./
+  )
+
+  await user.click(failOpen)
+  expect(within(card).queryByRole('alert')).not.toBeInTheDocument()
+})
+
 test('with moderation on, the category selector is named by its label and described by its help text', async () => {
   await openModerationCard(openAIChannel({ moderation_enabled: true }))
   const card = screen.getByRole('group', { name: 'Content moderation' })
