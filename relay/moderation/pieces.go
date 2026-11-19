@@ -115,20 +115,12 @@ func alternate(n int) []int {
 // message is listed, and the newest user message is normalised before any
 // system text, so system text cannot use up the normalisation budget either.
 func candidatePieces(ex *extraction, endpoint string, budget int) (candidates []*piece, truncated bool) {
-	var system, users []*segment
-	for _, seg := range ex.segments {
-		if seg.role == roleSystem {
-			system = append(system, seg)
-		} else {
-			users = append(users, seg)
-		}
-	}
-	slices.Reverse(users)
+	newest, system, older := ex.budgetOrder()
 	systemSource := &pieceSource{ex: ex, segments: system}
-	newestSource, olderSource := &pieceSource{ex: ex}, &pieceSource{ex: ex}
-	if len(users) > 0 {
-		ex.normalize(users[0])
-		newestSource.segments, olderSource.segments = users[:1], users[1:]
+	newestSource, olderSource := &pieceSource{ex: ex}, &pieceSource{ex: ex, segments: older}
+	if newest != nil {
+		ex.normalize(newest)
+		newestSource.segments = []*segment{newest}
 	}
 	seen := make(map[string]bool)
 	full := false

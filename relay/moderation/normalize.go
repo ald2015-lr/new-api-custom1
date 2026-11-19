@@ -17,11 +17,12 @@ const segmentMaxBytes = 1 << 20
 // raw size or, when NFKC made it longer, its normalised size. A segment whose
 // raw text no longer fits is not normalised, and neither is any segment
 // after it: that text is neither sent to OpenAI nor scanned by the rules,
-// and the audit says truncated. Segments are normalised in one order, the
-// newest user message, the system text in request order, then the older
-// user messages from the newest, and each is charged at most about
-// segmentMaxBytes, so the newest user message and the first system text
-// always fit.
+// and the audit says truncated. The extraction does not keep more raw text
+// than the budget either (see dropPastBudget). Segments are normalised in
+// one order, the newest user message, the system text in request order,
+// then the older user messages from the newest, and each is charged at most
+// about segmentMaxBytes, so the newest user message and the first system
+// text always fit.
 const normalizeBudgetBytes = 4 << 20
 
 // normalized is a segment as content moderation sees it.

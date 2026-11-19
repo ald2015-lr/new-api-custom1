@@ -21,10 +21,11 @@ const (
 // segment is the text of one message (its text parts joined by "\n") that
 // the attempt's upstream body will carry.
 type segment struct {
-	role  string
-	text  string
-	order int // position in request order
-	norm  *normalized
+	role    string
+	text    string
+	order   int // position in request order
+	norm    *normalized
+	dropped bool // past the normalisation budget: text is gone
 }
 
 // normalize returns seg normalised, normalising it on first use within the
@@ -34,13 +35,63 @@ func (ex *extraction) normalize(seg *segment) *normalized {
 	if seg.norm != nil {
 		return seg.norm
 	}
-	if ex.normalizeStopped || ex.normalizeUsed+len(seg.text) > normalizeBudgetBytes {
+	if seg.dropped || ex.normalizeStopped || ex.normalizeUsed+len(seg.text) > normalizeBudgetBytes {
 		ex.normalizeStopped = true
 		return nil
 	}
 	seg.norm = normalizeSegment(seg.text)
 	ex.normalizeUsed += max(len(seg.text), len(seg.norm.text))
 	return seg.norm
+}
+
+// budgetOrder is the order in which the normalisation budget, the pieces and
+// the rule scan read the segments: the newest user message, the system text
+// in request order, then the older user messages from the newest.
+func (ex *extraction) budgetOrder() (newest *segment, system, older []*segment) {
+	var users []*segment
+	for _, seg := range ex.segments {
+		if seg.role == roleSystem {
+			system = append(system, seg)
+		} else {
+			users = append(users, seg)
+		}
+	}
+	if len(users) > 0 {
+		newest, older = users[len(users)-1], users[:len(users)-1]
+		slices.Reverse(older)
+	}
+	return newest, system, older
+}
+
+// orderedSegments is every segment in budgetOrder.
+func (ex *extraction) orderedSegments() []*segment {
+	newest, system, older := ex.budgetOrder()
+	ordered := make([]*segment, 0, len(ex.segments))
+	if newest != nil {
+		ordered = append(ordered, newest)
+	}
+	ordered = append(ordered, system...)
+	return append(ordered, older...)
+}
+
+// dropPastBudget forgets the text of the segments that the normalisation
+// budget can never reach, so the request state does not keep it. normalize
+// charges each segment at least its raw size and runs in budgetOrder, so it
+// stops at or before the first segment whose raw text no longer fits after
+// the raw text of all the segments before it: that segment and every later
+// one are dropped, and normalize refuses them as it would have anyway.
+func (ex *extraction) dropPastBudget() {
+	used := 0
+	ordered := ex.orderedSegments()
+	for i, seg := range ordered {
+		if used+len(seg.text) > normalizeBudgetBytes {
+			for _, past := range ordered[i:] {
+				past.text, past.dropped = "", true
+			}
+			return
+		}
+		used += len(seg.text)
+	}
 }
 
 type imageRef struct {
@@ -164,6 +215,7 @@ func extractRequest(c *gin.Context, info *relaycommon.RelayInfo, viaResponses, p
 			}
 		}
 	}
+	e.ex.dropPastBudget()
 	return e.ex, true
 }
 

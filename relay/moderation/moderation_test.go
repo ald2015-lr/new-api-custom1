@@ -1756,6 +1756,63 @@ func TestNormalisationBudget(t *testing.T) {
 		assert.Equal(t, count, again, "the budget is shared by the rules and the pieces")
 	})
 
+	t.Run("text past the budget is not kept", func(t *testing.T) {
+		// Twelve messages of two 512 KiB text parts each: the extraction
+		// joins the parts into a copy of its own, which it would keep for
+		// the whole request. Distinct text makes the piece cap and the rule
+		// scan cap end the walk before the budget does.
+		var chatMessages, responsesItems []map[string]any
+		var roleTexts []string
+		for i := range 12 {
+			first, second := paddingText(fmt.Sprintf("first %d", i), 512<<10), paddingText(fmt.Sprintf("second %d", i), 512<<10)
+			chatMessages = append(chatMessages, map[string]any{"role": "user", "content": []map[string]any{{"type": "text", "text": first}, {"type": "text", "text": second}}})
+			responsesItems = append(responsesItems, map[string]any{"role": "user", "content": []map[string]any{{"type": "input_text", "text": first}, {"type": "input_text", "text": second}}})
+			roleTexts = append(roleTexts, roleUser, first+"\n"+second)
+		}
+		chatMessages = append(chatMessages, map[string]any{"role": "user", "content": "MOD-FLAG-SEXUAL"})
+		responsesItems = append(responsesItems, map[string]any{"role": "user", "content": "MOD-FLAG-SEXUAL"})
+		roleTexts = append(roleTexts, roleUser, "MOD-FLAG-SEXUAL")
+		chatBody, err := common.Marshal(map[string]any{"model": "gpt-test", "messages": chatMessages})
+		require.NoError(t, err)
+		responsesBody, err := common.Marshal(map[string]any{"model": "gpt-test", "input": responsesItems})
+		require.NoError(t, err)
+
+		for name, request := range map[string]dto.Request{
+			"chat":      decodeRequest[dto.GeneralOpenAIRequest](t, string(chatBody)),
+			"responses": decodeRequest[dto.OpenAIResponsesRequest](t, string(responsesBody)),
+		} {
+			t.Run(name, func(t *testing.T) {
+				ex, handled := extractRequest(nil, &relaycommon.RelayInfo{Request: request}, false, false)
+				require.True(t, handled)
+				require.Len(t, ex.segments, 13)
+				raw := 0
+				for _, seg := range ex.segments {
+					raw += len(seg.text)
+				}
+				assert.LessOrEqual(t, raw, normalizeBudgetBytes, "the raw text of the segments the budget cannot reach is dropped")
+
+				// What is checked and scanned is the same as without the drop.
+				reference := segmentsOf(roleTexts...)
+				candidates, truncated := candidatePieces(ex, endpoint, 10000)
+				wantCandidates, wantTruncated := candidatePieces(reference, endpoint, 10000)
+				assert.True(t, truncated)
+				assert.Equal(t, wantTruncated, truncated)
+				assert.Equal(t, wantCandidates, candidates)
+				require.NotEmpty(t, candidates)
+				assert.Equal(t, "MOD-FLAG-SEXUAL", candidates[0].text)
+				scan, scanTruncated := ex.ruleScan()
+				wantScan, wantScanTruncated := reference.ruleScan()
+				assert.True(t, scanTruncated)
+				assert.Equal(t, wantScanTruncated, scanTruncated)
+				assert.Equal(t, wantScan, scan)
+				count, _ := normalisedSegments(ex)
+				wantCount, _ := normalisedSegments(reference)
+				assert.Equal(t, wantCount, count)
+				assert.Equal(t, reference.normalizeUsed, ex.normalizeUsed)
+			})
+		}
+	})
+
 	t.Run("a request under the budget is checked as before", func(t *testing.T) {
 		// 3.4 MiB in 121 segments, most of whose pieces repeat, so the piece
 		// cap does not stop the listing before the oldest message.

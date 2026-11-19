@@ -166,27 +166,8 @@ func (ex *extraction) ruleScan() ([]scanText, bool) {
 		return ex.scan, ex.scanTruncated
 	}
 	ex.scanBuilt = true
-	var newest *segment
-	var system, older []*segment
-	for _, seg := range ex.segments {
-		if seg.role == roleSystem {
-			system = append(system, seg)
-			continue
-		}
-		if newest != nil {
-			older = append(older, newest)
-		}
-		newest = seg
-	}
-	slices.Reverse(older)
-	ordered := make([]*segment, 0, len(ex.segments))
-	if newest != nil {
-		ordered = append(ordered, newest)
-	}
-	ordered = append(ordered, system...)
-	ordered = append(ordered, older...)
 	left := ruleScanMaxBytes
-	for _, seg := range ordered {
+	for _, seg := range ex.orderedSegments() {
 		if left <= 0 {
 			ex.scanTruncated = true
 			break
