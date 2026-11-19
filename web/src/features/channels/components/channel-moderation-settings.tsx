@@ -585,7 +585,9 @@ export const ChannelModerationSettings = memo(
                 </FormItem>
               )}
             />
-            <div className='grid gap-4 sm:grid-cols-2'>
+            {/* items-start: a stretched field would spread its label, input
+              and help over the height of the long character limit help. */}
+            <div className='grid items-start gap-4 sm:grid-cols-2'>
               <NumberField
                 form={form}
                 name='moderation_max_chars'

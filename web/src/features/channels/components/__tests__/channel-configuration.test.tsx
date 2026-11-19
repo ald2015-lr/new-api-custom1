@@ -4987,6 +4987,33 @@ test('with moderation on, every content moderation fieldset can shrink, so the c
   for (const fieldset of fieldsets) expect(fieldset).toHaveClass('min-w-0')
 })
 
+test('with moderation on, the character limit and the timeout share a row aligned to its top, so the timeout field is not spread over the height of the long character limit help', async () => {
+  await openModerationCard(openAIChannel({ moderation_enabled: true }))
+  const card = screen.getByRole('group', { name: 'Content moderation' })
+  const maxChars = within(card).getByRole('spinbutton', {
+    name: 'Maximum characters checked per request',
+  })
+  const timeout = within(card).getByRole('spinbutton', {
+    name: 'Moderation timeout (seconds)',
+  })
+  const row = maxChars.closest('[data-slot="form-item"]')?.parentElement
+  expect(row).toBe(timeout.closest('[data-slot="form-item"]')?.parentElement)
+  // A grid stretches its items to the row height, and a stretched form item
+  // (itself a grid) spreads its label, input and help over that height.
+  expect(row).toHaveClass('items-start')
+})
+
+test('with moderation on, the custom rules help and the normalisation note are separate paragraphs, so no space is put after a Chinese full stop', async () => {
+  await openModerationCard(openAIChannel({ moderation_enabled: true }))
+  const rules = screen.getByRole('group', { name: 'Custom rules' })
+  expect(
+    within(rules).getByText(
+      'Keywords match anywhere in the text. Regular expressions use RE2 syntax (no look-around or back-references), are checked when saved and should stay simple: each one runs on up to 256 KB of every request. Up to 100 rules, at most 30 regular expressions.'
+    ).tagName
+  ).toBe('P')
+  expect(within(rules).getByText(/^Text is normalised first/).tagName).toBe('P')
+})
+
 test.each([3, 8, 57, 59, 60, 14])(
   'a channel of type %i, next to OpenAI, has no content moderation card',
   async (type) => {

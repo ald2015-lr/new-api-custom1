@@ -194,10 +194,14 @@ export function ChannelModerationRulesEditor(props: {
         <h5 id={headingId} className='text-sm font-medium'>
           {t('Custom rules')}
         </h5>
+        {/* Two paragraphs: a space between the two sentences would follow a
+          Chinese full stop. */}
         <p className='text-muted-foreground text-sm'>
           {t(
             'Keywords match anywhere in the text. Regular expressions use RE2 syntax (no look-around or back-references), are checked when saved and should stay simple: each one runs on up to 256 KB of every request. Up to 100 rules, at most 30 regular expressions.'
-          )}{' '}
+          )}
+        </p>
+        <p className='text-muted-foreground text-sm'>
           {t(
             'Text is normalised first (full-width letters and punctuation become half-width, curly quotes and dashes become \' " -, repeated spaces become one, and spaces between Chinese characters are removed), so write regular expressions in that form.'
           )}
