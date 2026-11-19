@@ -1976,6 +1976,139 @@ func TestCheckAttemptRejectsAndRecords(t *testing.T) {
 	assert.Len(t, moderationRows(t), 2)
 }
 
+// A moderation call that says the key or its OpenAI account is unusable, on
+// a channel that rejects on failure, is the attempt's channel error: it is
+// retryable, carries the answer's status and masked message, and nothing is
+// recorded until the request ends on it; then one row lists every such
+// attempt. Other failures, and fail-open channels, keep their handling.
+func TestKeyFailures(t *testing.T) {
+	memoryStore(t)
+	fake := newFakeModeration(t)
+	answers := map[string]struct {
+		status int
+		body   string
+	}{
+		"sk-dead":   {http.StatusUnauthorized, `{"error":{"message":"Incorrect API key provided: sk-dead","type":"invalid_request_error","code":"invalid_api_key"}}`},
+		"sk-banned": {http.StatusForbidden, `{"error":{"message":"This organization has been disabled.","type":"invalid_request_error"}}`},
+		"sk-broke":  {http.StatusTooManyRequests, `{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}`},
+		"sk-busy":   {http.StatusTooManyRequests, `{"error":{"message":"Rate limit reached for requests","type":"requests","code":"rate_limit_exceeded"}}`},
+		"sk-down":   {http.StatusInternalServerError, `{"error":{"message":"The server had an error","type":"server_error"}}`},
+	}
+	fake.handle = func(w http.ResponseWriter, r *http.Request, _ fakeModerationRequest) bool {
+		answer, ok := answers[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(answer.status)
+		_, _ = io.WriteString(w, answer.body)
+		return true
+	}
+	unavailable := func(t *testing.T, apiErr *types.NewAPIError) {
+		t.Helper()
+		require.NotNil(t, apiErr)
+		assert.Equal(t, types.ErrorCodeContentModerationUnavailable, apiErr.GetErrorCode())
+		assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+		assert.True(t, types.IsSkipRetryError(apiErr))
+		assert.Equal(t, "Content moderation is unavailable; the request was not sent", apiErr.Error())
+	}
+
+	for _, tc := range []struct {
+		key, class, message string
+		status              int
+	}{
+		{"sk-dead", "http_401", "Incorrect API key provided: ***", http.StatusUnauthorized},
+		{"sk-banned", "http_403", "This organization has been disabled.", http.StatusForbidden},
+		{"sk-broke", "http_429_quota", "You exceeded your current quota", http.StatusTooManyRequests},
+	} {
+		t.Run(tc.class, func(t *testing.T) {
+			setupModerationDB(t)
+			a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, chatRequest(t, "user", "hello"), withChannel(7, tc.key))
+			apiErr := CheckAttempt(a.c, a.info)
+			require.NotNil(t, apiErr)
+			assert.True(t, KeyFailed(a.c, apiErr))
+			assert.Equal(t, tc.status, apiErr.StatusCode)
+			assert.False(t, types.IsSkipRetryError(apiErr), "another channel may serve the request")
+			assert.Equal(t, "content moderation call failed: "+tc.message, apiErr.Error())
+			assert.False(t, a.info.PerformanceBusinessRejection)
+			assert.Empty(t, moderationRows(t), "nothing is recorded before the request ends")
+			audit := passAudit(t, a.c)
+			assert.Equal(t, relaycommon.ModerationStatusRejected, audit.Status, "the attempt's error row shows the check")
+			assert.Equal(t, relaycommon.ModerationSourceUnavailable, audit.Source)
+			assert.Equal(t, tc.class, audit.Error.Class)
+
+			unavailable(t, UnavailableError(a.c))
+			assert.Empty(t, moderationRows(t))
+			unavailable(t, RejectKeyFailure(a.c, a.info))
+			rows := moderationRows(t)
+			require.Len(t, rows, 1)
+			assert.Equal(t, "Rejected: content moderation unavailable", rows[0].Content)
+			assert.Equal(t, []any{map[string]any{"channel_id": float64(7), "retry_index": float64(0), "class": tc.class, "status": float64(tc.status)}}, rowAudit(t, rows[0])["key_failures"])
+			assert.NotContains(t, rows[0].Other, tc.key)
+			assert.False(t, KeyFailed(a.c, apiErr), "the request is rejected once")
+			unavailable(t, RejectKeyFailure(a.c, a.info))
+			assert.Len(t, moderationRows(t), 1)
+		})
+	}
+
+	t.Run("other failures and fail-open channels keep their handling", func(t *testing.T) {
+		setupModerationDB(t)
+		for _, key := range []string{"sk-busy", "sk-down"} {
+			a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, chatRequest(t, "user", "hello"), withChannel(7, key))
+			apiErr := CheckAttempt(a.c, a.info)
+			assert.False(t, KeyFailed(a.c, apiErr), key)
+			unavailable(t, apiErr)
+		}
+		assert.Len(t, moderationRows(t), 2, "rejected at once")
+		open := newAttempt(t, dto.ChannelOtherSettings{ModerationFailOpen: true}, fake.server.URL, chatRequest(t, "user", "hello"), withChannel(7, "sk-dead"))
+		require.Nil(t, CheckAttempt(open.c, open.info))
+		assert.Equal(t, relaycommon.ModerationStatusFailOpen, passAudit(t, open.c).Status)
+		assert.Len(t, moderationRows(t), 2)
+	})
+
+	t.Run("a later rejection lists the earlier key failures", func(t *testing.T) {
+		setupModerationDB(t)
+		a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, chatRequest(t, "user", "hello"), withChannel(7, "sk-dead"))
+		common.SetContextKey(a.c, constant.ContextKeyChannelIsMultiKey, true)
+		common.SetContextKey(a.c, constant.ContextKeyChannelMultiKeyIndex, 1)
+		a.c.Set("status_code_mapping", `{"401":"500"}`)
+		apiErr := CheckAttempt(a.c, a.info)
+		require.True(t, KeyFailed(a.c, apiErr))
+		assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode, "the channel's status code mapping applies")
+
+		withChannel(8, "sk-down")(a)
+		common.SetContextKey(a.c, constant.ContextKeyChannelIsMultiKey, false)
+		a.info.RetryIndex = 1
+		rejection := CheckAttempt(a.c, a.info)
+		assert.False(t, KeyFailed(a.c, rejection))
+		unavailable(t, rejection)
+		rows := moderationRows(t)
+		require.Len(t, rows, 1)
+		assert.Equal(t, 8, rows[0].ChannelId)
+		audit := rowAudit(t, rows[0])
+		assert.Equal(t, "http_5xx", audit["error"].(map[string]any)["class"])
+		assert.Equal(t, []any{map[string]any{"channel_id": float64(7), "retry_index": float64(0), "multi_key_index": float64(1), "class": "http_401", "status": float64(401)}}, audit["key_failures"])
+	})
+
+	t.Run("a task submission", func(t *testing.T) {
+		setupModerationDB(t)
+		a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, nil, withChannel(7, "sk-banned"))
+		a.info.InitChannelMeta(a.c)
+		a.c.Set("task_request", relaycommon.TaskSubmitReq{Prompt: "a quiet harbour"})
+		taskErr := CheckTask(a.c, a.info)
+		require.NotNil(t, taskErr)
+		assert.True(t, TaskKeyFailed(a.c, taskErr))
+		assert.False(t, taskErr.LocalError, "handled as the upstream's answer")
+		assert.Equal(t, http.StatusForbidden, taskErr.StatusCode)
+		assert.Empty(t, moderationRows(t))
+		rejection := RejectTaskKeyFailure(a.c, a.info)
+		assert.True(t, rejection.LocalError)
+		assert.Equal(t, "content_moderation_unavailable", rejection.Code)
+		assert.Equal(t, http.StatusServiceUnavailable, rejection.StatusCode)
+		assert.Len(t, moderationRows(t), 1)
+	})
+}
+
 // The channel's category filter decides; a flag wins over failures and
 // stops the other calls, whose cancellation is not a failure; a cached flag
 // rejects before any call.

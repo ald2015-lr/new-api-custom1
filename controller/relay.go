@@ -259,6 +259,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	// The last attempt's moderation call said its key or OpenAI account is
+	// unusable, and no later attempt ran.
+	moderationKeyFailed := false
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.StreamStatus = nil
@@ -272,6 +275,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		moderationKeyFailed = false
 		service.AppendUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
@@ -291,18 +295,25 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		c.Request.Body = io.NopCloser(bodyStorage)
 		// A moderated channel checks this attempt before anything is sent. A
 		// rejection is already recorded and never retried, disabled or billed
-		// (refund: the defer above).
-		if modErr := moderation.CheckAttempt(c, relayInfo); modErr != nil {
+		// (refund: the defer above). A moderation call that says the key or
+		// its OpenAI account is unusable is this channel's error instead:
+		// nothing is sent on it, and it is disabled and retried below as an
+		// upstream answer of that status would be.
+		modErr := moderation.CheckAttempt(c, relayInfo)
+		moderationKeyFailed = moderation.KeyFailed(c, modErr)
+		if modErr != nil && !moderationKeyFailed {
 			newAPIError = modErr
 			break
 		}
 
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
+		switch {
+		case moderationKeyFailed:
+			newAPIError = modErr
+		case relayFormat == types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
+		case relayFormat == types.RelayFormatClaude:
 			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
+		case relayFormat == types.RelayFormatGemini:
 			newAPIError = geminiRelayHandler(c, relayInfo)
 		default:
 			newAPIError = relayHandler(c, relayInfo)
@@ -328,6 +339,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// channel is not logged, disabled or blamed for that.
 		if !service.ClientGone(c) {
 			userErr := cmp.Or(service.MaskUpstreamQuotaError(c, newAPIError), service.DisguiseGeminiFreeKeyError(c, newAPIError))
+			if moderationKeyFailed {
+				userErr = moderation.UnavailableError(c)
+			}
 			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, userErr, relayInfo)
 		}
 
@@ -337,6 +351,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	// Every other way out of the loop decided the outcome as well.
 	keepAlive.Stop()
+	if moderationKeyFailed {
+		// No other channel served the request: the client gets the failed
+		// check's 503, recorded once, never the moderation call's answer.
+		newAPIError = moderation.RejectKeyFailure(c, relayInfo)
+	}
 
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {
@@ -647,6 +666,9 @@ func executeTaskSubmissionWith(
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	// As in the relay loop: the last attempt's moderation call said its key
+	// or OpenAI account is unusable, and no later attempt ran.
+	moderationKeyFailed := false
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		stage = "select_channel"
@@ -676,6 +698,7 @@ func executeTaskSubmissionWith(
 			}
 		}
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
+		moderationKeyFailed = false
 
 		service.AppendUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -706,6 +729,9 @@ func executeTaskSubmissionWith(
 			// channel may receive the request.
 			break
 		}
+		// Nothing was submitted, but the channel is handled as for the
+		// upstream's answer: disabled and retried.
+		moderationKeyFailed = moderation.TaskKeyFailed(c, taskErr)
 
 		taskAPIError := taskSubmissionAPIError(taskErr)
 		userErr := service.MaskUpstreamQuotaTaskError(c, taskErr)
@@ -719,6 +745,9 @@ func executeTaskSubmissionWith(
 				types.ErrOptionWithErrorCode(types.ErrorCodeGeminiFreeKeyBusy)(&spared)
 				taskAPIError = &spared
 			}
+		}
+		if moderationKeyFailed {
+			userErr = moderation.UnavailableError(c)
 		}
 		relayInfo.LastError = taskAPIError
 		decision := decideTaskRetry(c, taskErr, common.RetryTimes-retryParam.GetRetry())
@@ -745,6 +774,9 @@ func executeTaskSubmissionWith(
 		logger.LogInfo(c, retryLogStr)
 	}
 
+	if moderationKeyFailed {
+		taskErr = moderation.RejectTaskKeyFailure(c, relayInfo)
+	}
 	if taskErr != nil {
 		diagnostics.failed(stage, "task_error", taskErr, false)
 		// The upstream's balance error on a channel that hides those reaches

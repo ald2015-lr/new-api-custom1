@@ -313,8 +313,14 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		}
 		billingPrepared = true
 		// Before the payload builder, whose InitChannelMeta and model
-		// mapping must run last; a rejected event never builds a payload.
+		// mapping must run last; a rejected event never builds a payload. A
+		// locked connection cannot move to another channel, and its upstream
+		// errors never disable the channel either: a moderation call that
+		// says the key is unusable rejects the event like any failed check.
 		if apiErr = moderation.CheckAttempt(c, info); apiErr != nil {
+			if moderation.KeyFailed(c, apiErr) {
+				apiErr = moderation.RejectKeyFailure(c, info)
+			}
 			return apiErr
 		}
 		var payload []byte
@@ -328,12 +334,20 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		}
 	} else {
 		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+		// The last attempt's moderation call said its key or OpenAI account
+		// is unusable, and no later attempt ran: the event ends with the
+		// failed check's 503, recorded once.
+		moderationKeyFailed := false
 		for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
 			var channel *appmodel.Channel
 			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
 			if apiErr != nil {
+				if moderationKeyFailed {
+					return moderation.RejectKeyFailure(c, info)
+				}
 				return apiErr
 			}
+			moderationKeyFailed = false
 			service.AppendUsedChannel(c, channel.Id)
 			if info == nil {
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
@@ -352,7 +366,22 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			info.RetryIndex = retry.GetRetry()
 			policy.BeginAttempt(channel, info.UsingGroup)
 			if apiErr = moderation.CheckAttempt(c, info); apiErr != nil {
-				return apiErr
+				if !moderation.KeyFailed(c, apiErr) {
+					return apiErr
+				}
+				// Nothing is dialled on this channel; it is disabled and
+				// retried as for an upstream answer of that status.
+				moderationKeyFailed = true
+				info.LastError = apiErr
+				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
+				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
+				if !service.ClientGone(c) {
+					service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, moderation.UnavailableError(c), info)
+				}
+				if decision.Action == "retry" {
+					continue
+				}
+				return moderation.RejectKeyFailure(c, info)
 			}
 			var payload []byte
 			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
@@ -407,6 +436,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			s.startTargetReader(target)
 			apiErr = nil
 			break
+		}
+		if moderationKeyFailed {
+			return moderation.RejectKeyFailure(c, info)
 		}
 		if apiErr != nil {
 			return apiErr

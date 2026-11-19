@@ -83,6 +83,21 @@ type ModerationAudit struct {
 	ImagesSkipped     int                   `json:"images_skipped,omitempty"`
 	UncheckedParts    int                   `json:"unchecked_parts,omitempty"`     // parts seen but not extractable (files, audio, …)
 	UpstreamRequestID string                `json:"upstream_request_id,omitempty"` // x-request-id of the moderation answer
+	// The attempts of the request whose moderation call said the key or its
+	// OpenAI account is unusable; on the request's rejection row only.
+	KeyFailures []ModerationKeyFailure `json:"key_failures,omitempty"`
+}
+
+// ModerationKeyFailure is an attempt whose moderation call failed with
+// ModerationErrorClassHTTP401, ModerationErrorClassHTTP403 or
+// ModerationErrorClassHTTP429Quota on a channel that rejects on failure: the
+// relay handled it as that channel's error (disabling, retry).
+type ModerationKeyFailure struct {
+	ChannelID     int    `json:"channel_id"`
+	RetryIndex    int    `json:"retry_index"`
+	MultiKeyIndex *int   `json:"multi_key_index,omitempty"` // multi-key channels only
+	Class         string `json:"class"`
+	Status        int    `json:"status,omitempty"`
 }
 
 // ModerationAuditRule names the rule that rejected a request.

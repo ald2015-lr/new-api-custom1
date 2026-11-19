@@ -3830,7 +3830,8 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	})
 	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
 	// Every status a moderation failure or rejection carries would disable
-	// a channel if it reached the channel error path.
+	// a channel if it reached the channel error path, which only a key-level
+	// moderation failure does.
 	common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled, common.RetryTimes = true, true, 2
 	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("400,401,403,404,429,503"))
 	operation_setting.AutomaticDisableKeywordsFromString("")
@@ -3881,7 +3882,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	create("mod-rules", "sk-ok-rules", `{"moderation_enabled":true,"moderation_rule_presets":["en-reveal-cot"],"moderation_rules":[{"type":"keyword","pattern":"Forbidden-Word-X"},{"name":"plans","type":"regex","pattern":"secret\\s+plan\\d+"}]}`)
 	guarded("mod-rules")
 	failures := []struct{ suffix, class string }{
-		{"401", "http_401"}, {"403", "http_403"}, {"404", "http_404"}, {"429", "http_429_rate"}, {"quota", "http_429_quota"},
+		{"404", "http_404"}, {"429", "http_429_rate"},
 		{"500", "http_5xx"}, {"html", "decode"}, {"empty", "decode"}, {"429size", "http_429_size"}, {"slow", "timeout"}, {"image400", "image_rejected"},
 	}
 	failureChannels := map[string]model.Channel{}
@@ -3893,6 +3894,21 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		failureChannels[failure.suffix] = create("mod-fail-"+failure.suffix, "sk-mod-"+failure.suffix, settings)
 		guarded("mod-fail-" + failure.suffix)
 	}
+	// A moderation answer that says the key or its OpenAI account is
+	// unusable is the channel's error, retried under the normal rules on the
+	// next channel, which applies its own moderation settings: each such
+	// channel has a lower-priority moderated backup with a working key, and
+	// no other channel.
+	keyFailures := []struct{ suffix, class string }{{"401", "http_401"}, {"403", "http_403"}, {"quota", "http_429_quota"}}
+	keyChannels, keyBackups := map[string]model.Channel{}, map[string]model.Channel{}
+	for _, failure := range keyFailures {
+		keyChannels[failure.suffix] = create("mod-key-"+failure.suffix, "sk-mod-"+failure.suffix, on)
+		keyBackups[failure.suffix] = create("mod-key-"+failure.suffix, "sk-ok-key-backup-"+failure.suffix, on, lowPriority)
+	}
+	keyAlone := create("mod-key-alone", "sk-mod-401", on)
+	keyMulti := create("mod-key-multi", "sk-mod-401\nsk-ok-key-multi", on, func(channel *model.Channel) {
+		channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+	})
 	create("mod-fail-open", "sk-mod-500", `{"moderation_enabled":true,"moderation_fail_open":true}`)
 	create("mod-multikey", "sk-mk-1\nsk-mk-2", on, func(channel *model.Channel) {
 		channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
@@ -3943,6 +3959,9 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	}
 	soraChannel := create("sora-2", "sk-ok-sora", on)
 	create("sora-2-pro", "sk-mod-500", on)
+	soraKey := create("sora-2-key", "sk-mod-403", on)
+	create("sora-2-key", "sk-ok-sora-key-backup", on, lowPriority)
+	create("sora-2-dead", "sk-mod-quota", on)
 	guarded("sora-2")
 	guarded("sora-2-pro")
 	chatToResponses := create("mod-c2r", "sk-ok-c2r", on)
@@ -4215,6 +4234,146 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
 		})
 	}
+
+	rowsOfType := func(rows []*model.Log, logType int) []*model.Log {
+		var found []*model.Log
+		for _, row := range rows {
+			if row.Type == logType {
+				found = append(found, row)
+			}
+		}
+		return found
+	}
+	// keyFailureRow checks the error row of an attempt that a key-level
+	// moderation failure ended: the user reads the failed check's message,
+	// administrators the moderation answer and the check.
+	keyFailureRow := func(t *testing.T, row *model.Log, channelID int, class string, status int) {
+		t.Helper()
+		assert.Equal(t, channelID, row.ChannelId)
+		assert.Equal(t, "status_code=503, Content moderation is unavailable; the request was not sent", row.Content)
+		other := otherOf(t, row)
+		assert.Equal(t, "content_moderation_unavailable", other["error_code"])
+		adminInfo := adminOf(t, other)
+		assert.Equal(t, float64(status), adminInfo["upstream_status_code"])
+		assert.Contains(t, adminInfo["upstream_error"], fmt.Sprintf("status_code=%d, content moderation call failed: ", status))
+		assert.Equal(t, class, auditOf(t, other)["error"].(map[string]any)["class"])
+		assert.NotContains(t, row.Other, "sk-mod-", "never the key")
+	}
+	for _, failure := range keyFailures {
+		t.Run("a key-level moderation failure is the channel's error and fails over: "+failure.suffix, func(t *testing.T) {
+			mark := upstream.mark()
+			recorder := chat("mod-key-"+failure.suffix, userMessage(unique("clean text for an unusable key")))
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			calls := upstream.since(mark, "")
+			require.Len(t, calls, 3)
+			backupKey := "Bearer " + keyBackups[failure.suffix].Key
+			assert.Equal(t, []string{"/v1/moderations", "/v1/moderations", "/v1/chat/completions"}, []string{calls[0].Path, calls[1].Path, calls[2].Path})
+			assert.Equal(t, []string{"Bearer sk-mod-" + failure.suffix, backupKey, backupKey}, []string{calls[0].Authorization, calls[1].Authorization, calls[2].Authorization},
+				"only the check went out with the unusable key")
+			assert.Empty(t, leak.since(0, ""), "an unmoderated channel received the request")
+			audit := consumeAudit(t, recorder)
+			assert.Equal(t, "passed", audit["status"])
+			assert.Equal(t, float64(keyBackups[failure.suffix].Id), audit["channel_id"])
+
+			rows := rowsOf(t, requestID(recorder))
+			assert.Empty(t, rowsOfType(rows, model.LogTypeModeration), "a request another channel served is not rejected")
+			errorRows := rowsOfType(rows, model.LogTypeError)
+			require.Len(t, errorRows, 1)
+			status := http.StatusUnauthorized
+			switch failure.suffix {
+			case "403":
+				status = http.StatusForbidden
+			case "quota":
+				status = http.StatusTooManyRequests
+			}
+			keyFailureRow(t, errorRows[0], keyChannels[failure.suffix].Id, failure.class, status)
+			view := userView(t, requestID(recorder))
+			assert.NotContains(t, view, "content moderation call failed")
+			assert.NotContains(t, view, "sk-mod-")
+			events, _ := adminOf(t, otherOf(t, errorRows[0]))["request_policy"].([]any)
+			require.NotEmpty(t, events)
+			last := events[len(events)-1].(map[string]any)
+			assert.Equal(t, "retry", last["decision"].(map[string]any)["action"])
+			assert.Equal(t, "channel_disable_requested", last["health"])
+			assert.Eventually(t, func() bool {
+				stored, err := model.GetChannelById(keyChannels[failure.suffix].Id, true)
+				return err == nil && stored.Status == common.ChannelStatusAutoDisabled
+			}, 5*time.Second, 10*time.Millisecond, "the status code disables the channel")
+		})
+	}
+
+	t.Run("a key-level moderation failure that no other channel serves answers 503 with one moderation row", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := chat("mod-key-alone", userMessage(unique("clean text, no other channel")))
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		assert.Equal(t, apiError{Message: "Content moderation is unavailable; the request was not sent (request id: " + requestID(recorder) + ")", Type: "new_api_error", Code: "content_moderation_unavailable"}, errorOf(t, recorder))
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+		checks := upstream.since(mark, "/v1/moderations")
+		require.NotEmpty(t, checks)
+
+		rows := rowsOf(t, requestID(recorder))
+		rejected := rowsOfType(rows, model.LogTypeModeration)
+		require.Len(t, rejected, 1, "one moderation row for the request")
+		assert.Equal(t, rejected[0], rows[len(rows)-1])
+		errorRows := rowsOfType(rows, model.LogTypeError)
+		require.Len(t, errorRows, len(checks), "one error row per attempt")
+		for _, row := range errorRows {
+			keyFailureRow(t, row, keyAlone.Id, "http_401", http.StatusUnauthorized)
+		}
+		other := otherOf(t, rejected[0])
+		audit := auditOf(t, other)
+		assert.Equal(t, "unavailable", audit["source"])
+		assert.Equal(t, "http_401", audit["error"].(map[string]any)["class"])
+		attempts, _ := audit["key_failures"].([]any)
+		require.Len(t, attempts, len(checks))
+		for i, attempt := range attempts {
+			assert.Equal(t, map[string]any{"channel_id": float64(keyAlone.Id), "retry_index": float64(i), "class": "http_401", "status": float64(http.StatusUnauthorized)}, attempt)
+		}
+		assert.NotContains(t, rejected[0].Other, "sk-mod-")
+		events, _ := adminOf(t, other)["request_policy"].([]any)
+		require.NotEmpty(t, events)
+		assert.Equal(t, map[string]any{"action": "stop", "reason": "local_rejection", "source": "channel"}, events[len(events)-1].(map[string]any)["decision"])
+		assert.Eventually(t, func() bool {
+			stored, err := model.GetChannelById(keyAlone.Id, true)
+			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("a key-level moderation failure on a multi-key channel disables only that key", func(t *testing.T) {
+		// Without a retry, so that no key selection saves the channel while
+		// the key is being disabled.
+		common.RetryTimes = 0
+		t.Cleanup(func() { common.RetryTimes = 2 })
+		mark := upstream.mark()
+		recorder := chat("mod-key-multi", userMessage(unique("clean multi-key text")))
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
+		require.Len(t, rejected, 1)
+		other := otherOf(t, rejected[0])
+		assert.Equal(t, []any{map[string]any{"channel_id": float64(keyMulti.Id), "retry_index": float64(0), "multi_key_index": float64(0), "class": "http_401", "status": float64(http.StatusUnauthorized)}},
+			auditOf(t, other)["key_failures"], "the polling mode starts with the first key")
+		assert.Eventually(t, func() bool {
+			stored, err := model.GetChannelById(keyMulti.Id, true)
+			return err == nil && stored.ChannelInfo.MultiKeyStatusList[0] == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond, "the key is disabled")
+		for range 2 {
+			recorder = chat("mod-key-multi", userMessage(unique("clean multi-key text")))
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		}
+		var keys []string
+		for _, call := range upstream.since(mark, "") {
+			keys = append(keys, call.Path+" "+call.Authorization)
+		}
+		assert.Equal(t, []string{
+			"/v1/moderations Bearer sk-mod-401",
+			"/v1/moderations Bearer sk-ok-key-multi", "/v1/chat/completions Bearer sk-ok-key-multi",
+			"/v1/moderations Bearer sk-ok-key-multi", "/v1/chat/completions Bearer sk-ok-key-multi",
+		}, keys, "the disabled key is not used again")
+		stored, err := model.GetChannelById(keyMulti.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+		assert.NotEqual(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1])
+	})
 
 	t.Run("a fail-open channel forwards on a moderation failure and audits it", func(t *testing.T) {
 		recorder := chat("mod-fail-open", userMessage(unique("clean text, fail open")))
@@ -4739,5 +4898,44 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		require.Len(t, calls, 1)
 		assert.Equal(t, "Bearer "+soraChannel.Key, calls[0].Authorization)
 		assert.Equal(t, tasksBefore+1, countTasks())
+	})
+
+	t.Run("a key-level moderation failure on a Sora task is the channel's error", func(t *testing.T) {
+		mark := upstream.mark()
+		recorder := post("/v1/videos", `{"model":"sora-2-key","prompt":"`+unique("a quiet harbour at dawn")+`","seconds":"4","size":"720x1280"}`)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		calls := upstream.since(mark, "/v1/videos")
+		require.Len(t, calls, 1)
+		assert.Equal(t, "Bearer sk-ok-sora-key-backup", calls[0].Authorization, "submitted on the next channel")
+		rows := rowsOf(t, requestID(recorder))
+		assert.Empty(t, rowsOfType(rows, model.LogTypeModeration))
+		errorRows := rowsOfType(rows, model.LogTypeError)
+		require.Len(t, errorRows, 1)
+		keyFailureRow(t, errorRows[0], soraKey.Id, "http_403", http.StatusForbidden)
+		assert.Eventually(t, func() bool {
+			stored, err := model.GetChannelById(soraKey.Id, true)
+			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
+		}, 5*time.Second, 10*time.Millisecond)
+
+		before := quota(t)
+		mark = upstream.mark()
+		recorder = post("/v1/videos", `{"model":"sora-2-dead","prompt":"`+unique("a quiet harbour at dusk")+`","seconds":"4","size":"720x1280"}`)
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		var answer struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &answer))
+		assert.Equal(t, "content_moderation_unavailable", answer.Code)
+		assert.Equal(t, "Content moderation is unavailable; the request was not sent (request id: "+requestID(recorder)+")", answer.Message)
+		assert.Empty(t, upstream.since(mark, "/v1/videos"))
+		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
+		require.Len(t, rejected, 1)
+		attempts, _ := auditOf(t, otherOf(t, rejected[0]))["key_failures"].([]any)
+		require.NotEmpty(t, attempts)
+		for _, attempt := range attempts {
+			assert.Equal(t, "http_429_quota", attempt.(map[string]any)["class"])
+		}
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
 	})
 }

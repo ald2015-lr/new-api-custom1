@@ -2,7 +2,11 @@
 // content moderation (the channel's moderation_* settings) before anything
 // is sent upstream: the channel's keyword and regex rules, then OpenAI's
 // moderation model with the attempt's own key. A rejected request is never
-// forwarded, retried or billed, and is recorded as a moderation log row.
+// forwarded, retried or billed, and is recorded as a moderation log row. A
+// moderation call that says the attempt's key or OpenAI account is unusable
+// is the exception: on a channel that rejects on failure the relay handles
+// it as that channel's error (disabling, retry) and rejects the request only
+// when no later attempt serves it.
 package moderation
 
 import (
@@ -38,6 +42,12 @@ const maxParallelCalls = 4
 // probeText is the harmless text the probe sends.
 const probeText = "new-api moderation probe: the quick brown fox jumps over the lazy dog"
 
+// keyFailureClasses are the failures that say the attempt's key or its OpenAI
+// account is unusable, which every later call with that key repeats.
+var keyFailureClasses = []string{
+	relaycommon.ModerationErrorClassHTTP401, relaycommon.ModerationErrorClassHTTP403, relaycommon.ModerationErrorClassHTTP429Quota,
+}
+
 // requestState is the moderation work of one request that its later
 // attempts reuse: the extraction per conversion path and every verdict the
 // request obtained (keyed as the cache, http(s) images included).
@@ -45,6 +55,19 @@ type requestState struct {
 	extractions map[extractionKey]*extraction
 	task        *extraction
 	verdicts    map[string]Verdict
+	keyFailures []relaycommon.ModerationKeyFailure // every attempt that ended on one
+	keyFailure  *keyFailure                        // the latest, until the request is rejected for it
+}
+
+// keyFailure is an attempt whose moderation call said its key or OpenAI
+// account is unusable: err (taskErr for a task submission) is what the relay
+// handles as the channel's error, and audit is the rejection the request ends
+// with when no later attempt serves it.
+type keyFailure struct {
+	err     *types.NewAPIError
+	taskErr *taskdto.TaskError
+	audit   *relaycommon.ModerationAudit
+	started time.Time
 }
 
 // extractionKey is what an extraction depends on besides the request: a
@@ -76,8 +99,10 @@ func moderated(c *gin.Context) bool {
 
 // CheckAttempt moderates the attempt that is about to be sent on the channel
 // currently in the context (HTTP relay loop and Responses WebSocket). nil
-// means send. A non-nil error was already recorded (policy event, moderation
-// log row, server line) and must end the request without retry.
+// means send. A non-nil error for which KeyFailed is false was already
+// recorded (policy event, moderation log row, server line) and must end the
+// request without retry. One for which KeyFailed is true was not sent either:
+// see KeyFailed.
 func CheckAttempt(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
 	if !moderated(c) {
 		return nil
@@ -136,8 +161,67 @@ func CheckTask(c *gin.Context, info *relaycommon.RelayInfo) *taskdto.TaskError {
 		return nil
 	}
 	taskErr := service.TaskErrorFromAPIError(apiErr)
+	if failure := state.keyFailure; failure != nil && failure.err == apiErr {
+		// The channel's error, as an upstream's answer would be.
+		failure.taskErr = taskErr
+		return taskErr
+	}
 	taskErr.LocalError = true
 	return taskErr
+}
+
+// KeyFailed reports whether err, returned by CheckAttempt, says that the
+// attempt's key or its OpenAI account is unusable (an HTTP 401, 403 or
+// insufficient-quota 429 answer on a channel that rejects on failure). Nothing
+// was sent and nothing recorded yet: the caller handles err as the channel's
+// error, with automatic disabling and retry as for an upstream answer of that
+// status and message, and tells the user UnavailableError instead. When no
+// later attempt runs, RejectKeyFailure ends the request.
+func KeyFailed(c *gin.Context, err *types.NewAPIError) bool {
+	failure := lastKeyFailure(c)
+	return err != nil && failure != nil && failure.err == err
+}
+
+// TaskKeyFailed is KeyFailed for an error that CheckTask returned.
+func TaskKeyFailed(c *gin.Context, taskErr *taskdto.TaskError) bool {
+	failure := lastKeyFailure(c)
+	return taskErr != nil && failure != nil && failure.taskErr == taskErr
+}
+
+// UnavailableError is what the user is told about an attempt that KeyFailed:
+// the generic answer to a failed check, without the upstream's text.
+func UnavailableError(c *gin.Context) *types.NewAPIError {
+	return types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgModerationUnavailable)), types.ErrorCodeContentModerationUnavailable,
+		http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+}
+
+// RejectKeyFailure ends a request whose last attempt KeyFailed and that no
+// other channel served: it records the rejection once (policy event,
+// moderation log row with every key failure of the request, server line) and
+// returns the 503 the client gets. info is the request's relay info, still
+// on that attempt's channel.
+func RejectKeyFailure(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+	failure := lastKeyFailure(c)
+	if failure == nil {
+		return UnavailableError(c)
+	}
+	stateOf(c).keyFailure = nil
+	return reject(c, info, failure.audit, failure.started, types.ErrorCodeContentModerationUnavailable)
+}
+
+// RejectTaskKeyFailure is RejectKeyFailure for a task submission.
+func RejectTaskKeyFailure(c *gin.Context, info *relaycommon.RelayInfo) *taskdto.TaskError {
+	taskErr := service.TaskErrorFromAPIError(RejectKeyFailure(c, info))
+	taskErr.LocalError = true
+	return taskErr
+}
+
+func lastKeyFailure(c *gin.Context) *keyFailure {
+	state, ok := common.GetContextKeyType[*requestState](c, constant.ContextKeyModerationState)
+	if !ok || state == nil {
+		return nil
+	}
+	return state.keyFailure
 }
 
 // skipsModeration lists the requests that carry nothing to moderate or that
@@ -189,6 +273,8 @@ func check(c *gin.Context, info *relaycommon.RelayInfo, ex *extraction, state *r
 	case outcome.clientGone:
 		return types.NewErrorWithStatusCode(fmt.Errorf("content moderation: %w", context.Canceled), types.ErrorCodeContentModerationUnavailable,
 			http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+	case audit.Error != nil && !settings.ModerationFailOpen && slices.Contains(keyFailureClasses, audit.Error.Class):
+		return recordKeyFailure(c, info, state, audit, started)
 	case audit.Error != nil && !settings.ModerationFailOpen:
 		audit.Source = relaycommon.ModerationSourceUnavailable
 		return reject(c, info, audit, started, types.ErrorCodeContentModerationUnavailable)
@@ -201,6 +287,29 @@ func check(c *gin.Context, info *relaycommon.RelayInfo, ex *extraction, state *r
 	audit.ElapsedMs = time.Since(started).Milliseconds()
 	common.SetContextKey(c, constant.ContextKeyModerationAudit, audit)
 	return nil
+}
+
+// recordKeyFailure keeps an attempt whose moderation call said its key or
+// OpenAI account is unusable and returns the error the relay handles as the
+// channel's: the moderation answer's status (after the channel's status code
+// mapping) and masked message, retryable, never shown to the user.
+func recordKeyFailure(c *gin.Context, info *relaycommon.RelayInfo, state *requestState, audit *relaycommon.ModerationAudit, started time.Time) *types.NewAPIError {
+	audit.Status, audit.Source = relaycommon.ModerationStatusRejected, relaycommon.ModerationSourceUnavailable
+	audit.ElapsedMs = time.Since(started).Milliseconds()
+	attempt := relaycommon.ModerationKeyFailure{ChannelID: info.ChannelId, RetryIndex: info.RetryIndex, Class: audit.Error.Class, Status: audit.Error.Status}
+	if info.ChannelIsMultiKey {
+		attempt.MultiKeyIndex = common.GetPointer(info.ChannelMultiKeyIndex)
+	}
+	state.keyFailures = append(state.keyFailures, attempt)
+	apiErr := types.WithOpenAIError(types.OpenAIError{
+		Message: "content moderation call failed: " + audit.Error.Message,
+		Code:    string(types.ErrorCodeBadResponseStatusCode),
+	}, audit.Error.Status)
+	service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
+	state.keyFailure = &keyFailure{err: apiErr, audit: audit, started: started}
+	// The attempt's error log row shows what moderation did.
+	common.SetContextKey(c, constant.ContextKeyModerationAudit, audit)
+	return apiErr
 }
 
 type moderationOutcome struct {
@@ -482,6 +591,9 @@ func reject(c *gin.Context, info *relaycommon.RelayInfo, audit *relaycommon.Mode
 
 	audit.Status = relaycommon.ModerationStatusRejected
 	audit.ElapsedMs = time.Since(started).Milliseconds()
+	if state, ok := common.GetContextKeyType[*requestState](c, constant.ContextKeyModerationState); ok && state != nil {
+		audit.KeyFailures = state.keyFailures
+	}
 	other := model.NewLogOther()
 	other.SetPublic("request_path", requestPath(c, info))
 	other.SetPublic("error_code", string(code))
