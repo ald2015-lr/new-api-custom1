@@ -5283,7 +5283,10 @@ test.each([
       full
     )
     expect(put).not.toHaveBeenCalled()
-  }
+  },
+  // Rendering 101 rule rows takes about 12 s on its own, close to the
+  // default 20 s limit on a busy machine.
+  60_000
 )
 
 test('turning moderation off puts refused limits and new regular expressions back to their saved values, so the channel still saves', async () => {
