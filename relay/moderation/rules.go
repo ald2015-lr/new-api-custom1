@@ -245,9 +245,13 @@ func (r *moderationRule) find(text *scanText) *ruleHit {
 		if at < 0 {
 			return nil
 		}
+		// A case-insensitive hit is an offset into the lower-case text, which
+		// can be longer or shorter than the text: map it back to the text.
 		end := at + len(r.keyword)
-		match := text.view[at:end]
-		if !r.caseSens {
+		var match string
+		if r.caseSens {
+			match = text.view[at:end]
+		} else {
 			match = text.viewOfLower(at, end)
 		}
 		return &ruleHit{match: cutRunes(match, matchMaxRunes)}
