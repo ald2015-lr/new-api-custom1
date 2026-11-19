@@ -68,6 +68,7 @@ import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
+import { LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import {
   parseLogOther,
@@ -1288,10 +1289,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {/* Admin billing mode indicator for non-consume */}
+        {/* Admin billing mode indicator for non-consume; a moderation row's
+          request was never sent upstream */}
         {props.isAdmin &&
           !isConsume &&
           props.log.type !== 6 &&
+          props.log.type !== LOG_TYPE_ENUM.MODERATION &&
           other?.admin_info && (
             <DetailRow
               label={t('Billing Path')}

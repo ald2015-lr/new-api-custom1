@@ -94,6 +94,9 @@ export function ModerationDetailsSection(props: { audit: ModerationAudit }) {
   }
   const count = (value: number | undefined) =>
     value ? formatNumber(value, locale) : null
+  // DetailRow breaks anywhere for IDs; sentences wrap between words and
+  // break a word only when it does not fit on a line.
+  const prose = 'break-normal wrap-anywhere'
 
   return (
     <DetailSection
@@ -117,13 +120,21 @@ export function ModerationDetailsSection(props: { audit: ModerationAudit }) {
           value={moderationLabel(MODERATION_DETAIL_LABELS, audit.detail, t)}
         />
       )}
-      {categories && <DetailRow label={t('Categories')} value={categories} />}
+      {categories && (
+        <DetailRow
+          label={t('Categories')}
+          value={<span className={prose}>{categories}</span>}
+        />
+      )}
       {scores && <DetailRow label={t('Scores')} value={scores} mono />}
       {inputTypes && (
         <DetailRow label={t('Input types')} value={inputTypes} mono />
       )}
       {audit.rule && (
-        <DetailRow label={t('Rule')} value={ruleText(audit.rule, t)} />
+        <DetailRow
+          label={t('Rule')}
+          value={<span className={prose}>{ruleText(audit.rule, t)}</span>}
+        />
       )}
       {audit.match && (
         <DetailRow label={t('Matched text')} value={audit.match} mono />
@@ -132,14 +143,14 @@ export function ModerationDetailsSection(props: { audit: ModerationAudit }) {
         <DetailRow
           label={t('Error')}
           value={
-            <>
+            <span className={prose}>
               {error}
               {audit.error.message && (
                 <span className='text-muted-foreground block'>
                   {audit.error.message}
                 </span>
               )}
-            </>
+            </span>
           }
         />
       )}

@@ -164,6 +164,37 @@ describe('usage log content moderation details', () => {
     }
   )
 
+  test('rule, category and error texts wrap between words, not inside a word, and long ones still fit', () => {
+    renderDetails(true, {
+      ...flagged,
+      rule: { kind: 'preset', id: 'en-reveal-cot', type: 'regex' },
+      error: {
+        class: 'http_500',
+        status: 500,
+        message: 'The server had an error',
+      },
+    })
+    const section = moderationSection()
+
+    // The detail rows break anywhere (word-break: break-all) for IDs; prose
+    // must not be cut as in "(Englis" / "h)".
+    for (const text of [
+      "Built-in rule: Asks for the model's chain of thought (English) · Regular expression",
+      'Sexual, Violence / graphic',
+      'The server had an error',
+    ]) {
+      const value = within(section).getByText(text).closest('.wrap-anywhere')
+      expect(value, text).toHaveClass('break-normal')
+    }
+  })
+
+  test('a moderation row shows no billing path, because its request was never sent upstream', () => {
+    renderDetails(true, flagged)
+
+    expect(row('Result')).toBe('Rejected')
+    expect(screen.queryByText('Billing Path')).toBeNull()
+  })
+
   test('a consume row whose moderation call failed shows it was let through and why', () => {
     renderDetails(
       true,
