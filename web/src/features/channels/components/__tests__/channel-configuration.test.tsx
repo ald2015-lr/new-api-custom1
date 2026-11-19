@@ -4957,7 +4957,7 @@ test('an OpenAI channel shows the content moderation card with moderation off an
   ).not.toBeChecked()
 })
 
-test('with moderation on and failures rejected, the fail-open help and the warning say a key the moderation call rejects is a channel error that can move the request to a channel without moderation', async () => {
+test('with moderation on and failures rejected, the fail-open help and the warning say a key the moderation call rejects is a channel error that can move the request to a channel without moderation, still answers 503 without another attempt, and only rejects on a connected Responses WebSocket', async () => {
   const { user } = await openModerationCard(
     openAIChannel({ moderation_enabled: true })
   )
@@ -4965,7 +4965,7 @@ test('with moderation on and failures rejected, the fail-open help and the warni
   const failOpen = within(card).getByRole('switch', { name: FAIL_OPEN })
   expect(failOpen).not.toBeChecked()
   expect(failOpen).toHaveAccessibleDescription(
-    /fails, the request is rejected \(503\) and not sent\. If the call says the key or account cannot be used \(401, 403, or 429 insufficient_quota\), the failure is handled like an error of this channel instead: the auto-disable rules apply, and the request may be retried on another channel, which uses its own moderation settings\./
+    /fails, the request is rejected \(503\) and not sent\. If the call says the key or account cannot be used \(401, 403, or 429 insufficient_quota\), the failure is also handled like an error of this channel: the auto-disable rules apply, and the request may be retried on another channel, which uses its own moderation settings; if it is not retried, or its last retry fails this way too, the client still gets the 503\. A Responses WebSocket already connected to this channel only rejects that request\. On: .* the usage log marks it “Failed, request let through” \(Sora task logs do not carry this mark\)\./
   )
   const warning = within(card).getByRole('alert')
   expect(warning).toHaveTextContent(/every request on this channel is rejected/)

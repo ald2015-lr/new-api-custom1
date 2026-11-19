@@ -512,7 +512,7 @@ export const ChannelModerationSettings = memo(
                     </FormLabel>
                     <FormDescription>
                       {t(
-                        'Off (default): when the moderation call fails, the request is rejected (503) and not sent. If the call says the key or account cannot be used (401, 403, or 429 insufficient_quota), the failure is handled like an error of this channel instead: the auto-disable rules apply, and the request may be retried on another channel, which uses its own moderation settings. On: a request whose moderation call fails is sent upstream without moderation, and the usage log marks it “Failed, request let through”. This keeps the channel usable while moderation is down, but unchecked requests can still put the OpenAI account at risk.'
+                        'Off (default): when the moderation call fails, the request is rejected (503) and not sent. If the call says the key or account cannot be used (401, 403, or 429 insufficient_quota), the failure is also handled like an error of this channel: the auto-disable rules apply, and the request may be retried on another channel, which uses its own moderation settings; if it is not retried, or its last retry fails this way too, the client still gets the 503. A Responses WebSocket already connected to this channel only rejects that request. On: a request whose moderation call fails is sent upstream without moderation, and the usage log marks it “Failed, request let through” (Sora task logs do not carry this mark). This keeps the channel usable while moderation is down, but unchecked requests can still put the OpenAI account at risk.'
                       )}
                     </FormDescription>
                   </div>
