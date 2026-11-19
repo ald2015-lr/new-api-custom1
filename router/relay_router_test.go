@@ -3906,6 +3906,10 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		keyBackups[failure.suffix] = create("mod-key-"+failure.suffix, "sk-ok-key-backup-"+failure.suffix, on, lowPriority)
 	}
 	keyAlone := create("mod-key-alone", "sk-mod-401", on)
+	// A key-level failure whose retry reaches a moderated backup whose own
+	// upstream then fails.
+	keyThenBroken := create("mod-key-then-500", "sk-mod-401", on)
+	create("mod-key-then-500", "sk-chat-500", on, noAutoBan, lowPriority)
 	keyMulti := create("mod-key-multi", "sk-mod-401\nsk-ok-key-multi", on, func(channel *model.Channel) {
 		channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
 	})
@@ -4337,6 +4341,26 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			stored, err := model.GetChannelById(keyAlone.Id, true)
 			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
 		}, 5*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("a key-level moderation failure whose retry meets an upstream error answers with that error and no moderation row", func(t *testing.T) {
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = 2 })
+		mark := upstream.mark()
+		recorder := chat("mod-key-then-500", userMessage(unique("clean text, broken backup")))
+		require.Equal(t, http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), "upstream broke", "the backup's own error")
+		assert.NotContains(t, recorder.Body.String(), "content_moderation_unavailable")
+		chats := upstream.since(mark, "/v1/chat/completions")
+		require.Len(t, chats, 1)
+		assert.Equal(t, "Bearer sk-chat-500", chats[0].Authorization, "sent on the backup")
+
+		rows := rowsOf(t, requestID(recorder))
+		assert.Empty(t, rowsOfType(rows, model.LogTypeModeration), "a request that was sent is not a moderation rejection")
+		errorRows := rowsOfType(rows, model.LogTypeError)
+		require.Len(t, errorRows, 2, "one error row per attempt")
+		keyFailureRow(t, errorRows[0], keyThenBroken.Id, "http_401", http.StatusUnauthorized)
+		assert.NotEqual(t, keyThenBroken.Id, errorRows[1].ChannelId)
 	})
 
 	t.Run("a key-level moderation failure on a multi-key channel disables only that key", func(t *testing.T) {
