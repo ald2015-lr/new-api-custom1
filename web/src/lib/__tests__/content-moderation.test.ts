@@ -33,6 +33,7 @@ import {
   type ModerationAudit,
   type ModerationAuditError,
   type ModerationAuditRule,
+  type ModerationKeyFailure,
   type ModerationProbeResult,
 } from '../content-moderation'
 
@@ -51,12 +52,25 @@ function goStringConstants(source: string, prefix: string): string[] {
   ].map(([, value]) => value)
 }
 
-function goJsonTags(source: string, type: string): string[] {
-  const body =
+function goStructBody(source: string, type: string): string {
+  return (
     source.match(
       new RegExp(`type ${type} struct \\{([\\s\\S]*?)\\n\\}`)
     )?.[1] ?? ''
-  return [...body.matchAll(/json:"([^",]+)/g)].map(([, tag]) => tag).sort()
+  )
+}
+
+function goJsonTags(source: string, type: string): string[] {
+  return [...goStructBody(source, type).matchAll(/json:"([^",]+)/g)]
+    .map(([, tag]) => tag)
+    .sort()
+}
+
+// The JSON tags without omitempty: the fields the server always sends.
+function goRequiredJsonTags(source: string, type: string): string[] {
+  return [...goStructBody(source, type).matchAll(/json:"([^",]+)"/g)]
+    .map(([, tag]) => tag)
+    .sort()
 }
 
 const keysOf = (value: object) => Object.keys(value).sort()
@@ -74,6 +88,21 @@ const AUDIT_ERROR = {
   status: 429,
   message: 'Rate limit reached',
 } satisfies ModerationAuditError
+
+const AUDIT_KEY_FAILURE = {
+  channel_id: 3,
+  retry_index: 0,
+  multi_key_index: 1,
+  class: 'http_401',
+  status: 401,
+} satisfies ModerationKeyFailure
+
+// Only the fields the server always sends: the rest must be optional.
+const AUDIT_KEY_FAILURE_REQUIRED = {
+  channel_id: 3,
+  retry_index: 0,
+  class: 'http_429_quota',
+} satisfies ModerationKeyFailure
 
 const AUDIT = {
   channel_id: 3,
@@ -100,6 +129,7 @@ const AUDIT = {
   images_skipped: 1,
   unchecked_parts: 1,
   upstream_request_id: 'req_1',
+  key_failures: [AUDIT_KEY_FAILURE],
 } satisfies ModerationAudit
 
 const PROBE = {
@@ -206,6 +236,12 @@ describe('content moderation audit and probe', () => {
     )
     expect(goJsonTags(audit(), 'ModerationAuditError')).toEqual(
       keysOf(AUDIT_ERROR)
+    )
+    expect(goJsonTags(audit(), 'ModerationKeyFailure')).toEqual(
+      keysOf(AUDIT_KEY_FAILURE)
+    )
+    expect(goRequiredJsonTags(audit(), 'ModerationKeyFailure')).toEqual(
+      keysOf(AUDIT_KEY_FAILURE_REQUIRED)
     )
   })
 

@@ -288,6 +288,22 @@ export interface ModerationAuditError {
   message?: string
 }
 
+/**
+ * An attempt whose moderation call said the key or its OpenAI account is
+ * unusable (http_401, http_403, http_429_quota) on a channel that rejects on
+ * failure: the server handled it as that channel's error (auto-disable,
+ * retry on another channel).
+ */
+export interface ModerationKeyFailure {
+  channel_id: number
+  /** 0 for the first attempt. */
+  retry_index: number
+  /** The key's 0-based index; multi-key channels only. */
+  multi_key_index?: number
+  class: string
+  status?: number
+}
+
 /** What moderation did for one attempt (admin_info.moderation of a log row). */
 export interface ModerationAudit {
   channel_id: number
@@ -315,6 +331,8 @@ export interface ModerationAudit {
   images_skipped?: number
   unchecked_parts?: number
   upstream_request_id?: string
+  /** The request's attempts that failed this way; on its rejection row only. */
+  key_failures?: ModerationKeyFailure[]
 }
 
 /** The answer of POST /api/channel/:id/moderation_test. */
