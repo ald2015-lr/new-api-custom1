@@ -93,8 +93,12 @@ type ModerationAudit struct {
 // ModerationErrorClassHTTP429Quota on a channel that rejects on failure: the
 // relay handled it as that channel's error (disabling, retry).
 type ModerationKeyFailure struct {
-	ChannelID     int    `json:"channel_id"`
-	RetryIndex    int    `json:"retry_index"`
+	ChannelID  int `json:"channel_id"`
+	RetryIndex int `json:"retry_index"`
+	// Attempt is the attempt's 1-based place in the request's retry chain
+	// (admin_info.use_channel). Unlike RetryIndex, which starts again at 0
+	// when auto cross-group retry moves to the next group, it never repeats.
+	Attempt       int    `json:"attempt"`
 	MultiKeyIndex *int   `json:"multi_key_index,omitempty"` // multi-key channels only
 	Class         string `json:"class"`
 	Status        int    `json:"status,omitempty"`

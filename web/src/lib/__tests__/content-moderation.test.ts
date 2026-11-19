@@ -92,6 +92,7 @@ const AUDIT_ERROR = {
 const AUDIT_KEY_FAILURE = {
   channel_id: 3,
   retry_index: 0,
+  attempt: 1,
   multi_key_index: 1,
   class: 'http_401',
   status: 401,
@@ -101,6 +102,7 @@ const AUDIT_KEY_FAILURE = {
 const AUDIT_KEY_FAILURE_REQUIRED = {
   channel_id: 3,
   retry_index: 0,
+  attempt: 1,
   class: 'http_429_quota',
 } satisfies ModerationKeyFailure
 

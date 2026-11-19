@@ -2382,7 +2382,7 @@ func TestKeyFailures(t *testing.T) {
 			rows := moderationRows(t)
 			require.Len(t, rows, 1)
 			assert.Equal(t, "Rejected: content moderation unavailable", rows[0].Content)
-			assert.Equal(t, []any{map[string]any{"channel_id": float64(7), "retry_index": float64(0), "class": tc.class, "status": float64(tc.status)}}, rowAudit(t, rows[0])["key_failures"])
+			assert.Equal(t, []any{map[string]any{"channel_id": float64(7), "retry_index": float64(0), "attempt": float64(1), "class": tc.class, "status": float64(tc.status)}}, rowAudit(t, rows[0])["key_failures"])
 			assert.NotContains(t, rows[0].Other, tc.key)
 			assert.False(t, KeyFailed(a.c, apiErr), "the request is rejected once")
 			unavailable(t, RejectKeyFailure(a.c, a.info))
@@ -2426,7 +2426,28 @@ func TestKeyFailures(t *testing.T) {
 		assert.Equal(t, 8, rows[0].ChannelId)
 		audit := rowAudit(t, rows[0])
 		assert.Equal(t, "http_5xx", audit["error"].(map[string]any)["class"])
-		assert.Equal(t, []any{map[string]any{"channel_id": float64(7), "retry_index": float64(0), "multi_key_index": float64(1), "class": "http_401", "status": float64(401)}}, audit["key_failures"])
+		assert.Equal(t, []any{map[string]any{"channel_id": float64(7), "retry_index": float64(0), "attempt": float64(1), "multi_key_index": float64(1), "class": "http_401", "status": float64(401)}}, audit["key_failures"])
+	})
+
+	t.Run("each key failure is numbered by its place in the retry chain", func(t *testing.T) {
+		// Under auto cross-group retry the retry index starts again at 0 in
+		// the next group; the attempt number counts the channels the request
+		// has used so far, as the log's retry chain does.
+		setupModerationDB(t)
+		a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, chatRequest(t, "user", "hello"), withChannel(7, "sk-dead"))
+		a.c.Set("use_channel", []string{"7", "7"})
+		a.info.RetryIndex = 1
+		require.True(t, KeyFailed(a.c, CheckAttempt(a.c, a.info)))
+		a.c.Set("use_channel", []string{"7", "7", "7"})
+		a.info.RetryIndex = 0
+		require.True(t, KeyFailed(a.c, CheckAttempt(a.c, a.info)))
+		unavailable(t, RejectKeyFailure(a.c, a.info))
+		rows := moderationRows(t)
+		require.Len(t, rows, 1)
+		assert.Equal(t, []any{
+			map[string]any{"channel_id": float64(7), "retry_index": float64(1), "attempt": float64(2), "class": "http_401", "status": float64(401)},
+			map[string]any{"channel_id": float64(7), "retry_index": float64(0), "attempt": float64(3), "class": "http_401", "status": float64(401)},
+		}, rowAudit(t, rows[0])["key_failures"])
 	})
 
 	t.Run("a task submission", func(t *testing.T) {

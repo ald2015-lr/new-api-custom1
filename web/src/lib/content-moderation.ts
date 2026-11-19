@@ -296,8 +296,16 @@ export interface ModerationAuditError {
  */
 export interface ModerationKeyFailure {
   channel_id: number
-  /** 0 for the first attempt. */
+  /**
+   * 0 for the first attempt; starts again at 0 when auto cross-group retry
+   * moves to the next group.
+   */
   retry_index: number
+  /**
+   * The attempt's 1-based place in the request's retry chain, which never
+   * repeats; missing on rows written before the server sent it.
+   */
+  attempt?: number
   /** The key's 0-based index; multi-key channels only. */
   multi_key_index?: number
   class: string

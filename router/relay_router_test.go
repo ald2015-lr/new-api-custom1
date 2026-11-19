@@ -3906,6 +3906,11 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		keyBackups[failure.suffix] = create("mod-key-"+failure.suffix, "sk-ok-key-backup-"+failure.suffix, on, lowPriority)
 	}
 	keyAlone := create("mod-key-alone", "sk-mod-401", on)
+	// The only channel of both groups of an auto token with cross-group
+	// retry, whose retry counter starts again in the second group.
+	keyCross := create("mod-key-cross", "sk-mod-401", on, noAutoBan, func(channel *model.Channel) { channel.Group = "default,vip" })
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: keyCross.Id, Model: "mod-key-cross", Group: "vip", Enabled: true, Priority: keyCross.Priority}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "modautokey", Name: "mod-auto-token", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, Group: "auto", CrossGroupRetry: true}).Error)
 	// A key-level failure whose retry reaches a moderated backup whose own
 	// upstream then fails.
 	keyThenBroken := create("mod-key-then-500", "sk-mod-401", on)
@@ -4331,7 +4336,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		attempts, _ := audit["key_failures"].([]any)
 		require.Len(t, attempts, len(checks))
 		for i, attempt := range attempts {
-			assert.Equal(t, map[string]any{"channel_id": float64(keyAlone.Id), "retry_index": float64(i), "class": "http_401", "status": float64(http.StatusUnauthorized)}, attempt)
+			assert.Equal(t, map[string]any{"channel_id": float64(keyAlone.Id), "retry_index": float64(i), "attempt": float64(i + 1), "class": "http_401", "status": float64(http.StatusUnauthorized)}, attempt)
 		}
 		assert.NotContains(t, rejected[0].Other, "sk-mod-")
 		events, _ := adminOf(t, other)["request_policy"].([]any)
@@ -4341,6 +4346,46 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 			stored, err := model.GetChannelById(keyAlone.Id, true)
 			return err == nil && stored.Status == common.ChannelStatusAutoDisabled
 		}, 5*time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("key-level moderation failures under auto cross-group retry are numbered by attempt", func(t *testing.T) {
+		// One retry per group: the second group starts its retry counter at
+		// 0 again, so the retry index repeats while the attempt number does
+		// not.
+		common.RetryTimes = 1
+		previousUsable, previousAuto := setting.UserUsableGroups2JSONString(), setting.AutoGroups2JsonString()
+		t.Cleanup(func() {
+			common.RetryTimes = 2
+			require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsable))
+			require.NoError(t, setting.UpdateAutoGroupsByJsonString(previousAuto))
+		})
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP","auto":"Auto"}`))
+		require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["vip","default"]`))
+		mark := upstream.mark()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mod-key-cross","messages":`+userMessage(unique("clean text, two groups"))+`}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer modautokey")
+		engine.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		assert.Empty(t, upstream.since(mark, "/v1/chat/completions"))
+		require.Len(t, upstream.since(mark, "/v1/moderations"), 4, "two attempts in each group")
+
+		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
+		require.Len(t, rejected, 1)
+		var got []map[string]any
+		attempts, _ := auditOf(t, otherOf(t, rejected[0]))["key_failures"].([]any)
+		for _, attempt := range attempts {
+			entry := attempt.(map[string]any)
+			assert.Equal(t, float64(keyCross.Id), entry["channel_id"])
+			got = append(got, map[string]any{"retry_index": entry["retry_index"], "attempt": entry["attempt"]})
+		}
+		assert.Equal(t, []map[string]any{
+			{"retry_index": float64(0), "attempt": float64(1)},
+			{"retry_index": float64(1), "attempt": float64(2)},
+			{"retry_index": float64(0), "attempt": float64(3)},
+			{"retry_index": float64(1), "attempt": float64(4)},
+		}, got, "the retry index starts again in the second group; the attempt number does not")
 	})
 
 	t.Run("a key-level moderation failure whose retry meets an upstream error answers with that error and no moderation row", func(t *testing.T) {
@@ -4374,7 +4419,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		rejected := rowsOfType(rowsOf(t, requestID(recorder)), model.LogTypeModeration)
 		require.Len(t, rejected, 1)
 		other := otherOf(t, rejected[0])
-		assert.Equal(t, []any{map[string]any{"channel_id": float64(keyMulti.Id), "retry_index": float64(0), "multi_key_index": float64(0), "class": "http_401", "status": float64(http.StatusUnauthorized)}},
+		assert.Equal(t, []any{map[string]any{"channel_id": float64(keyMulti.Id), "retry_index": float64(0), "attempt": float64(1), "multi_key_index": float64(0), "class": "http_401", "status": float64(http.StatusUnauthorized)}},
 			auditOf(t, other)["key_failures"], "the polling mode starts with the first key")
 		assert.Eventually(t, func() bool {
 			stored, err := model.GetChannelById(keyMulti.Id, true)
@@ -4964,6 +5009,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		for i, attempt := range attempts {
 			assert.Equal(t, "http_429_quota", attempt.(map[string]any)["class"])
 			assert.Equal(t, float64(i), attempt.(map[string]any)["retry_index"], "each attempt has its own retry index")
+			assert.Equal(t, float64(i+1), attempt.(map[string]any)["attempt"], "and its own place in the retry chain")
 		}
 		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
 	})

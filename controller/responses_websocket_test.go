@@ -2172,7 +2172,7 @@ func TestResponsesWebSocketModerationKeyFailures(t *testing.T) {
 				return other.AdminInfo.Moderation.KeyFailures
 			}
 			failure := func(retryIndex, keyIndex int) map[string]any {
-				return map[string]any{"channel_id": float64(fixture.channel.Id), "retry_index": float64(retryIndex), "multi_key_index": float64(keyIndex), "class": "http_401", "status": float64(http.StatusUnauthorized)}
+				return map[string]any{"channel_id": float64(fixture.channel.Id), "retry_index": float64(retryIndex), "attempt": float64(1), "multi_key_index": float64(keyIndex), "class": "http_401", "status": float64(http.StatusUnauthorized)}
 			}
 			if tc.retries > 0 {
 				require.Len(t, rejected, 1, "the event another key served is not rejected")

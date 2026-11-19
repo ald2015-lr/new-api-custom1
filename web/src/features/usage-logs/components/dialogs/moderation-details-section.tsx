@@ -85,11 +85,14 @@ function keyFailureText(
   if (channel?.name && channel.id === failure.channel_id) {
     channelText += ` (${channel.name})`
   }
+  // The attempt's place in the request's retry chain. Rows written before
+  // the server sent it number the attempts by their retry index, which only
+  // repeats under auto cross-group retry.
   const parts = [
     channelText,
-    failure.retry_index > 0
-      ? t('Retry #{{index}}', { index: failure.retry_index })
-      : t('First attempt'),
+    t('Attempt #{{index}}', {
+      index: failure.attempt ?? failure.retry_index + 1,
+    }),
   ]
   // Multi-key channels only; the channel's key list numbers keys from 1.
   if (typeof failure.multi_key_index === 'number') {
@@ -195,9 +198,11 @@ export function ModerationDetailsSection(props: {
           label={t('Unusable keys')}
           value={
             <ul className={cn(prose, 'space-y-0.5')}>
-              {keyFailures.map((failure) => (
-                // One attempt per retry index.
-                <li key={`${failure.retry_index}-${failure.channel_id}`}>
+              {keyFailures.map((failure, index) => (
+                <li
+                  // eslint-disable-next-line react/no-array-index-key -- The attempts never change order, and rows written before they were numbered can repeat every other field.
+                  key={`${index}-${failure.channel_id}`}
+                >
                   {keyFailureText(failure, props.channel, t)}
                 </li>
               ))}

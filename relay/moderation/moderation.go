@@ -299,7 +299,15 @@ func check(c *gin.Context, info *relaycommon.RelayInfo, ex *extraction, state *r
 func recordKeyFailure(c *gin.Context, info *relaycommon.RelayInfo, state *requestState, audit *relaycommon.ModerationAudit, started time.Time) *types.NewAPIError {
 	audit.Status, audit.Source = relaycommon.ModerationStatusRejected, relaycommon.ModerationSourceUnavailable
 	audit.ElapsedMs = time.Since(started).Milliseconds()
-	attempt := relaycommon.ModerationKeyFailure{ChannelID: info.ChannelId, RetryIndex: info.RetryIndex, Class: audit.Error.Class, Status: audit.Error.Status}
+	// Every attempt but a locked Responses WebSocket's has appended its
+	// channel to use_channel before it is checked.
+	attempt := relaycommon.ModerationKeyFailure{
+		ChannelID:  info.ChannelId,
+		RetryIndex: info.RetryIndex,
+		Attempt:    max(len(c.GetStringSlice("use_channel")), 1),
+		Class:      audit.Error.Class,
+		Status:     audit.Error.Status,
+	}
 	if info.ChannelIsMultiKey {
 		attempt.MultiKeyIndex = common.GetPointer(info.ChannelMultiKeyIndex)
 	}

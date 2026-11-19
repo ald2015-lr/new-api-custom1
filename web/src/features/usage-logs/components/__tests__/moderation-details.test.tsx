@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { ModerationAudit } from '@/lib/content-moderation'
 
@@ -295,10 +295,17 @@ describe('usage log content moderation details', () => {
       checked_chars: 0,
       calls: 1,
       key_failures: [
-        { channel_id: 7, retry_index: 0, class: 'http_429_quota', status: 429 },
+        {
+          channel_id: 7,
+          retry_index: 0,
+          attempt: 1,
+          class: 'http_429_quota',
+          status: 429,
+        },
         {
           channel_id: 3,
           retry_index: 1,
+          attempt: 2,
           multi_key_index: 0,
           class: 'http_403',
           status: 403,
@@ -306,6 +313,7 @@ describe('usage log content moderation details', () => {
         {
           channel_id: 3,
           retry_index: 2,
+          attempt: 3,
           multi_key_index: 4,
           class: 'http_401',
         },
@@ -314,11 +322,64 @@ describe('usage log content moderation details', () => {
 
     // The row's own channel (#3) has a name; the other one only its id.
     expect(listRow('Unusable keys')).toEqual([
-      'Channel #7 · First attempt · No quota on the account (HTTP 429)',
-      'Channel #3 (openai) · Retry #1 · Key #1 · Access denied (HTTP 403)',
-      'Channel #3 (openai) · Retry #2 · Key #5 · Key rejected',
+      'Channel #7 · Attempt #1 · No quota on the account (HTTP 429)',
+      'Channel #3 (openai) · Attempt #2 · Key #1 · Access denied (HTTP 403)',
+      'Channel #3 (openai) · Attempt #3 · Key #5 · Key rejected',
     ])
     expect(row('Error')).toBe('Key rejected (HTTP 401)Incorrect API key')
+  })
+
+  test('attempts whose retry index repeats under auto cross-group retry are told apart by their attempt number', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // One channel in both groups, one retry per group: the retry index
+      // starts again at 0 in the second group.
+      renderDetails(true, {
+        channel_id: 3,
+        retry_index: 1,
+        status: 'rejected',
+        source: 'unavailable',
+        error: { class: 'http_401', status: 401 },
+        elapsed_ms: 20,
+        checked_chars: 0,
+        calls: 1,
+        key_failures: [0, 1, 0, 1].map((retryIndex, index) => ({
+          channel_id: 3,
+          retry_index: retryIndex,
+          attempt: index + 1,
+          class: 'http_401',
+          status: 401,
+        })),
+      })
+
+      expect(listRow('Unusable keys')).toEqual([
+        'Channel #3 (openai) · Attempt #1 · Key rejected (HTTP 401)',
+        'Channel #3 (openai) · Attempt #2 · Key rejected (HTTP 401)',
+        'Channel #3 (openai) · Attempt #3 · Key rejected (HTTP 401)',
+        'Channel #3 (openai) · Attempt #4 · Key rejected (HTTP 401)',
+      ])
+      const duplicateKeys = errors.mock.calls.filter((call) =>
+        call.some((arg) => String(arg).includes('same key'))
+      )
+      expect(duplicateKeys).toEqual([])
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  test('a row written before attempts were numbered counts them from the retry index', () => {
+    renderDetails(true, {
+      ...flagged,
+      key_failures: [
+        { channel_id: 7, retry_index: 0, class: 'http_401', status: 401 },
+        { channel_id: 7, retry_index: 1, class: 'http_401', status: 401 },
+      ],
+    })
+
+    expect(listRow('Unusable keys')).toEqual([
+      'Channel #7 · Attempt #1 · Key rejected (HTTP 401)',
+      'Channel #7 · Attempt #2 · Key rejected (HTTP 401)',
+    ])
   })
 
   test.each([[undefined], [[]]])(
