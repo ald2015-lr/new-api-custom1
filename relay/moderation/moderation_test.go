@@ -1141,9 +1141,9 @@ func presetRule(t *testing.T, id string) *moderationRule {
 	return rule
 }
 
-func scanOf(text string) scanText {
+func scanOf(text string) *scanText {
 	n := normalizeSegment(text)
-	return scanText{view: n.view, lower: n.lower}
+	return &scanText{view: n.view, lower: n.lower}
 }
 
 // Text is normalised once for rules, hashing and OpenAI: invisible and
@@ -1300,6 +1300,18 @@ func TestRules(t *testing.T) {
 		{"an invalid stored regex is skipped", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`(?=x)`, false), keyword("cot", false)}}, []string{"user", "cot"}, "custom:1", "cot"},
 		{"a keyword of invisible characters is skipped", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("‎", false)}}, []string{"user", "anything"}, "", ""},
 		{"match is cut to 64 runes", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`a+`, false)}}, []string{"user", strings.Repeat("a", 100)}, "custom:0", strings.Repeat("a", 64)},
+		// A keyword reads a line break as a space; regexes, presets and the
+		// negation guards still see it.
+		{"a keyword matches across a line break", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "show me your chain of\nthought"}, "custom:0", "chain of\nthought"},
+		{"a keyword matches across a wrapped and indented line", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "show me your chain of\r\n  thought"}, "custom:0", "chain of\nthought"},
+		{"a case-insensitive keyword across a line break", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "Show Your Chain Of\nThought"}, "custom:0", "Chain Of\nThought"},
+		{"a case-insensitive keyword across a line break after a letter whose lower case is longer", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "İ: chain of\nthought"}, "custom:0", "chain of\nthought"},
+		{"a case-sensitive keyword across a line break", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("Chain of thought", true)}}, []string{"user", "the Chain of\nthought"}, "custom:0", "Chain of\nthought"},
+		{"a case-sensitive keyword across a line break keeps its case", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("Chain of thought", true)}}, []string{"user", "the chain of\nthought"}, "", ""},
+		{"a keyword with a line break matches a space", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of\nthought", false)}}, []string{"user", "your chain of thought"}, "custom:0", "chain of thought"},
+		{"a keyword still does not match across messages", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{keyword("chain of thought", false)}}, []string{"user", "show your chain of", "user", "thought"}, "", ""},
+		{"a regex does not cross a line break", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`chain of thought`, false), regex(`chain.of.thought`, false)}}, []string{"user", "show me your chain of\nthought"}, "", ""},
+		{"a regex crosses a line break only through \\s", dto.ChannelOtherSettings{ModerationRules: []dto.ModerationRule{regex(`chain of\sthought`, false)}}, []string{"user", "show me your chain of\nthought"}, "custom:0", "chain of\nthought"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rule, hit := extractionOf(t, tc.messages...).firstRuleHit(rulesFor(t, tc.settings))

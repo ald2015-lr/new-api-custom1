@@ -32,6 +32,23 @@ const (
 type scanText struct {
 	view  string
 	lower string
+	// keywordView and keywordLower are view and lower as keywords read them,
+	// made on first use: a line break counts as a space.
+	keywordView, keywordLower *string
+}
+
+// keywordText is the text a keyword rule searches. Folding "\n" into " "
+// keeps every byte offset, so a match maps back onto view and lower.
+func (t *scanText) keywordText(caseSensitive bool) string {
+	text, folded := t.lower, &t.keywordLower
+	if caseSensitive {
+		text, folded = t.view, &t.keywordView
+	}
+	if *folded == nil {
+		text = strings.ReplaceAll(text, "\n", " ") // no copy without a line break
+		*folded = &text
+	}
+	return **folded
 }
 
 type ruleHit struct {
@@ -100,7 +117,8 @@ func channelRules(c *gin.Context, channelID int, settings *dto.ChannelOtherSetti
 		}
 		switch custom.Type {
 		case dto.ModerationRuleTypeKeyword:
-			keyword := dto.ModerationRuleView(dto.NormalizeModerationText(custom.Pattern))
+			// A keyword matches across line breaks: both sides read "\n" as " ".
+			keyword := strings.ReplaceAll(dto.ModerationRuleView(dto.NormalizeModerationText(custom.Pattern)), "\n", " ")
 			if keyword == "" {
 				continue // would match every text
 			}
@@ -204,8 +222,8 @@ func (ex *extraction) firstRuleHit(rules []*moderationRule) (*moderationRule, *r
 	for _, rule := range rules {
 		hit, done := ex.ruleResults[rule.key]
 		if !done {
-			for _, text := range texts {
-				if hit = rule.find(text); hit != nil {
+			for i := range texts {
+				if hit = rule.find(&texts[i]); hit != nil {
 					break
 				}
 			}
@@ -218,19 +236,19 @@ func (ex *extraction) firstRuleHit(rules []*moderationRule) (*moderationRule, *r
 	return nil, nil
 }
 
-func (r *moderationRule) find(text scanText) *ruleHit {
+// find runs the rule on one segment. Keywords read a line break as a space;
+// presets, custom regexes and the negation guards keep it, as a sentence
+// boundary.
+func (r *moderationRule) find(text *scanText) *ruleHit {
 	if r.re == nil {
-		haystack, needle := text.lower, r.keyword
-		if r.caseSens {
-			haystack = text.view
-		}
-		at := strings.Index(haystack, needle)
+		at := strings.Index(text.keywordText(r.caseSens), r.keyword)
 		if at < 0 {
 			return nil
 		}
-		match := haystack[at : at+len(needle)]
-		if !r.caseSens && len(text.view) == len(text.lower) {
-			match = text.view[at : at+len(needle)]
+		end := at + len(r.keyword)
+		match := text.lower[at:end]
+		if r.caseSens || len(text.view) == len(text.lower) {
+			match = text.view[at:end]
 		}
 		return &ruleHit{match: cutRunes(match, matchMaxRunes)}
 	}
