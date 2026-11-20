@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1752,4 +1753,95 @@ func performAdminUserGet(t *testing.T, path string, viewer model.User) string {
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
 	return recorder.Body.String()
+}
+
+// unlock_login clears the login lock of an account and of its names, and
+// the reset email limit of its address, behind the role rule and the
+// step-up proof of every manage action. It is audited and leaves the
+// account row and its sessions alone. Root may unlock itself.
+func TestManageUserUnlockLogin(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	t.Cleanup(middleware.UseAuthGuardForTest(time.Now))
+	previousMax, previousLockout, previousLimit := common.LoginLockoutMaxFailures, common.LoginLockoutEnabled, common.PasswordResetEmailLimitEnabled
+	common.LoginLockoutMaxFailures, common.LoginLockoutEnabled, common.PasswordResetEmailLimitEnabled = 3, true, true
+	t.Cleanup(func() {
+		common.LoginLockoutMaxFailures, common.LoginLockoutEnabled, common.PasswordResetEmailLimitEnabled = previousMax, previousLockout, previousLimit
+	})
+	ctx := context.Background()
+	lock := func(userID int, name string) {
+		for range 3 {
+			attempt, wait := middleware.BeginLoginAttempt(ctx, middleware.LoginLockSubjects(userID, name))
+			require.NotNil(t, attempt)
+			require.Zero(t, wait)
+			attempt.Fail(ctx)
+		}
+	}
+	locked := func(subjects []string) bool {
+		attempt, wait := middleware.BeginLoginAttempt(ctx, subjects)
+		attempt.Release(ctx)
+		return wait > 0
+	}
+	now := time.Now().Unix()
+	target := model.User{Username: "unlock-target", Email: "Unlock@Example.com", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "unlock-target"}
+	require.NoError(t, db.Create(&target).Error)
+	require.NoError(t, db.Create(&model.UserSession{SID: "unlock-target-session", UserID: target.Id, Version: 1, UserAuthVersion: 1,
+		Status: model.UserSessionStatusActive, RefreshHash: "refresh-hash", LoginMethod: "password", LastActiveAt: now, ExpiresAt: now + 3600}).Error)
+	lock(target.Id, "unlock-target")
+	lock(0, "unlock@example.com")
+	require.Nil(t, middleware.TakePasswordResetEmail(ctx, "unlock@example.com"))
+	require.NotNil(t, middleware.TakePasswordResetEmail(ctx, "unlock@example.com"))
+	body := fmt.Sprintf(`{"id":%d,"action":"unlock_login"}`, target.Id)
+
+	identity, proof := manageUserProof(t, db, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"unlock_login"}`, target.Id))})
+	recorder := performVerifiedManageUserRequest(t, body, identity, "")
+	assert.Contains(t, recorder.Body.String(), `"code":"SECURITY_PROOF_REQUIRED"`)
+	assert.True(t, locked(middleware.LoginLockSubjects(target.Id, "")))
+
+	// An admin may not unlock an admin or root.
+	for _, role := range []int{common.RoleAdminUser, common.RoleRootUser} {
+		other := model.User{Username: fmt.Sprintf("unlock-role-%d", role), Password: "password", Role: role, Status: common.UserStatusEnabled,
+			Group: "default", AuthVersion: 1, AffCode: fmt.Sprintf("unlock-role-%d", role)}
+		require.NoError(t, db.Create(&other).Error)
+		recorder = adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":"unlock_login"}`, other.Id), "", service.AuthIdentity{UserID: 9998}, common.RoleAdminUser, nil, ManageUser)
+		assert.Contains(t, recorder.Body.String(), "No permission to update users of same or higher permission level")
+	}
+
+	recorder = performVerifiedManageUserRequest(t, body, identity, proof)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	for _, subjects := range [][]string{middleware.LoginLockSubjects(target.Id, ""), middleware.LoginLockSubjects(0, "unlock-target"), middleware.LoginLockSubjects(0, "unlock@example.com")} {
+		assert.False(t, locked(subjects), subjects)
+	}
+	assert.Nil(t, middleware.TakePasswordResetEmail(ctx, "unlock@example.com"), "the reset email limit of the address is cleared too")
+	var audit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.login_unlock").First(&audit).Error)
+	assert.Equal(t, model.AuditCategoryOperation, audit.Category)
+	assert.Equal(t, identity.UserID, audit.UserId)
+	assert.Equal(t, fmt.Sprintf("Cleared the login lock of user unlock-target (ID: %d)", target.Id), audit.Content)
+	params, err := common.Marshal(audit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.JSONEq(t, fmt.Sprintf(`{"username":"unlock-target","id":%d,"target_user_id":%d,"verification_method":"password","was_locked":true}`, target.Id, target.Id), string(params))
+	var stored model.User
+	require.NoError(t, db.First(&stored, target.Id).Error)
+	assert.EqualValues(t, 1, stored.AuthVersion, "unlocking does not end sessions")
+	var session model.UserSession
+	require.NoError(t, db.First(&session, "sid = ?", "unlock-target-session").Error)
+	assert.Equal(t, model.UserSessionStatusActive, session.Status)
+
+	// Root unlocks itself with a proof from its session.
+	lock(identity.UserID, "root-operator")
+	require.True(t, locked(middleware.LoginLockSubjects(identity.UserID, "")))
+	binding, err := service.BindVerificationOperation(service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"unlock_login"}`, identity.UserID))})
+	require.NoError(t, err)
+	selfProof, _, err := service.IssueSecurityProof(identity, service.VerificationMethodPassword, binding)
+	require.NoError(t, err)
+	recorder = performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"unlock_login"}`, identity.UserID), identity, selfProof)
+	require.Contains(t, recorder.Body.String(), `"success":true`, recorder.Body.String())
+	assert.False(t, locked(middleware.LoginLockSubjects(identity.UserID, "root-operator")))
+	var selfAudit model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "user.login_unlock").Order("id desc").First(&selfAudit).Error)
+	params, err = common.Marshal(selfAudit.Other.Op.Params)
+	require.NoError(t, err)
+	assert.Contains(t, string(params), `"was_locked":true`)
+	assert.NotContains(t, string(params), "target_user_id", "the operator is the target")
 }

@@ -161,3 +161,76 @@ func writePasswordResetLimited(c *gin.Context, refusal *middleware.PasswordReset
 	}
 	common.ApiErrorStatus(c, http.StatusOK, message, gin.H{"code": refusal.Code, "wait_seconds": refusal.WaitSeconds})
 }
+
+// accountID is the id of the account a login names, 0 for none.
+func accountID(user *model.User) int {
+	if user == nil {
+		return 0
+	}
+	return user.Id
+}
+
+// writeLoginLocked answers a password login (or its two-factor step)
+// refused by the login lockout: HTTP 200, LOGIN_LOCKED, the seconds and the
+// whole minutes to wait. The answer is the same for known and unknown names.
+func writeLoginLocked(c *gin.Context, waitSeconds int64) {
+	minutes := max((waitSeconds+59)/60, 1)
+	message := common.NewMessage("Too many failed sign-in attempts. Please try again in {{minutes}} minutes or reset your password.", map[string]any{"minutes": minutes})
+	common.ApiErrorStatus(c, http.StatusOK, message, gin.H{"code": middleware.LoginLockedCode, "wait_seconds": waitSeconds})
+}
+
+// loginFailure is one refused password login.
+type loginFailure struct {
+	account     *model.User
+	looked      bool   // the account was looked up already (account nil: no account)
+	identifier  string // the typed username or email, trimmed
+	reason      string // invalid_credentials, disabled, locked, captcha_failed, invalid_request
+	code        string // captcha_failed only
+	waitSeconds int64  // while a lock is in effect
+	lockStarted bool   // this failure started the lock
+}
+
+// recordLoginFailureAudit writes the user.login_failed row of a refused
+// password login. A row about an account belongs to it, so the console shows
+// which account was attacked and rows about root stay root-only; refusals
+// before the lookup (captcha, request) look the account up for that only.
+// The identifier is kept as typed when it names an account or is an email
+// address, else masked for all but root.
+func recordLoginFailureAudit(c *gin.Context, failure loginFailure) {
+	account := failure.account
+	if !failure.looked && account == nil && failure.identifier != "" {
+		account, _ = model.FindPasswordLoginUser(failure.identifier)
+	}
+	params := map[string]any{"method": "password", "reason": failure.reason}
+	other := model.AuditOther{LoginMethod: "password", UserAgent: c.Request.UserAgent()}
+	newAuditTypedValue(failure.identifier, auditIdentifierMaxRunes, account != nil).apply("identifier", params, &other)
+	if failure.waitSeconds > 0 {
+		params["wait_seconds"] = failure.waitSeconds
+	}
+	if failure.lockStarted {
+		params["lock_started"] = true
+	}
+	if failure.code != "" {
+		params["code"] = failure.code
+	}
+	recordAuthGuardAudit(c, account, "user.login_failed", params, other, false)
+}
+
+// recordLogin2FAFailureAudit writes the user.login_2fa_failed row of a
+// refused two-factor step: reason invalid_code, twofa_locked or locked.
+func recordLogin2FAFailureAudit(c *gin.Context, userID int, loginMethod string, reason string, waitSeconds int64, lockStarted bool) {
+	account, err := model.GetUserById(userID, false)
+	if err != nil {
+		// The role is unknown, so the row stays root-only.
+		account = &model.User{Id: userID}
+	}
+	params := map[string]any{"method": loginMethod, "reason": reason}
+	if waitSeconds > 0 {
+		params["wait_seconds"] = waitSeconds
+	}
+	if lockStarted {
+		params["lock_started"] = true
+	}
+	other := model.AuditOther{LoginMethod: loginMethod, UserAgent: c.Request.UserAgent()}
+	recordAuthGuardAudit(c, account, "user.login_2fa_failed", params, other, false)
+}

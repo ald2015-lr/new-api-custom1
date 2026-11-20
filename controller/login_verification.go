@@ -2,10 +2,12 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	passkeysvc "github.com/QuantumNous/new-api/service/passkey"
@@ -31,9 +33,44 @@ func VerifyLogin(c *gin.Context) {
 		writeSecurityOperationError(c, service.ErrProofMethod)
 		return
 	}
-	bundle, migration, err := service.VerifyLoginCode(request.FlowToken, request.Code, c.ClientIP(), c.Request.UserAgent())
+	verification, err := service.RequireLoginVerification(request.FlowToken, service.VerificationMethodTwoFA)
 	if err != nil {
 		writeSecurityOperationError(c, err)
+		return
+	}
+	// In a password login flow, wrong codes count toward the login lockout of
+	// the account and the lock applies to this step too. Flows after a
+	// passkey or third-party login keep only the two-factor lock.
+	ctx := c.Request.Context()
+	userID, loginMethod := verification.State.UserID, verification.LoginMethod()
+	var attempt *middleware.LoginAttempt
+	if loginMethod == "password" {
+		var wait int64
+		attempt, wait = middleware.BeginLoginAttempt(ctx, middleware.LoginLockSubjects(userID, ""))
+		if wait > 0 {
+			writeLoginLocked(c, wait)
+			recordLogin2FAFailureAudit(c, userID, loginMethod, "locked", wait, false)
+			return
+		}
+		defer attempt.Release(ctx)
+	}
+	bundle, migration, err := service.CompleteLoginCode(request.FlowToken, verification, request.Code, c.ClientIP(), c.Request.UserAgent())
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrVerificationFailed):
+			lockSeconds, started := attempt.Fail(ctx)
+			if lockSeconds > 0 {
+				writeLoginLocked(c, lockSeconds)
+			} else {
+				writeSecurityOperationError(c, err)
+			}
+			recordLogin2FAFailureAudit(c, userID, loginMethod, "invalid_code", lockSeconds, started)
+		case errors.Is(err, service.ErrVerificationLocked):
+			writeSecurityOperationError(c, err)
+			recordLogin2FAFailureAudit(c, userID, loginMethod, "twofa_locked", 0, false)
+		default:
+			writeSecurityOperationError(c, err)
+		}
 		return
 	}
 	completeVerifiedLoginResponse(c, bundle, service.VerificationMethodTwoFA, migration)

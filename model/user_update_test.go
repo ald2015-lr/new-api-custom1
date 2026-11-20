@@ -623,3 +623,68 @@ func TestValidateAuthSessionWithTxChecksAccessTokenIdentity(t *testing.T) {
 		})
 	}
 }
+
+// A password login finds its account by username or email, checks the
+// password against a dummy hash when there is no account or no password,
+// and tells a disabled account with the right password apart (for the
+// audit only; the client sees the same answer).
+func TestPasswordLoginLookupAndPasswordCheck(t *testing.T) {
+	setupUserUpdateTestState(t)
+	hash, err := common.Password2Hash("RightPassword123")
+	require.NoError(t, err)
+	enabled := User{Username: "login-enabled", Password: hash, Email: "enabled@example.com", AffCode: "login-enabled", Status: common.UserStatusEnabled}
+	disabled := User{Username: "login-disabled", Password: hash, Email: "disabled@example.com", AffCode: "login-disabled", Status: common.UserStatusDisabled}
+	noPassword := User{Username: "login-nopass", AffCode: "login-nopass", Status: common.UserStatusEnabled}
+	for _, user := range []*User{&enabled, &disabled, &noPassword} {
+		require.NoError(t, DB.Create(user).Error)
+	}
+
+	for _, identifier := range []string{"login-enabled", " enabled@example.com "} {
+		found, err := FindPasswordLoginUser(identifier)
+		require.NoError(t, err)
+		require.NotNil(t, found, identifier)
+		assert.Equal(t, enabled.Id, found.Id)
+	}
+	found, err := FindPasswordLoginUser("nobody")
+	assert.NoError(t, err)
+	assert.Nil(t, found)
+	_, err = FindPasswordLoginUser("  ")
+	assert.ErrorIs(t, err, ErrUserEmptyCredentials)
+
+	var missing *User
+	assert.ErrorIs(t, missing.CheckLoginPassword("RightPassword123"), ErrInvalidCredentials)
+	assert.NoError(t, enabled.CheckLoginPassword("RightPassword123"))
+	assert.ErrorIs(t, enabled.CheckLoginPassword("WrongPassword123"), ErrInvalidCredentials)
+	assert.ErrorIs(t, noPassword.CheckLoginPassword(""), ErrInvalidCredentials)
+	assert.ErrorIs(t, noPassword.CheckLoginPassword("RightPassword123"), ErrInvalidCredentials)
+	assert.ErrorIs(t, disabled.CheckLoginPassword("RightPassword123"), ErrLoginUserDisabled)
+	assert.ErrorIs(t, disabled.CheckLoginPassword("WrongPassword123"), ErrInvalidCredentials)
+
+	// ValidateAndFill keeps its contract: a disabled account is invalid credentials.
+	login := User{Username: "login-disabled", Password: "RightPassword123"}
+	assert.ErrorIs(t, login.ValidateAndFill(), ErrInvalidCredentials)
+	login = User{Username: "enabled@example.com", Password: "RightPassword123"}
+	require.NoError(t, login.ValidateAndFill())
+	assert.Equal(t, enabled.Id, login.Id)
+}
+
+// The reset lookup keeps only the account whose stored address equals the
+// typed one; ResetUserPasswordByEmailUser returns that account.
+func TestPasswordResetFindsTheExactAddress(t *testing.T) {
+	setupUserUpdateTestState(t)
+	require.NoError(t, DB.Create(&User{Username: "exact", Password: "old", Email: "Exact@Example.com", AffCode: "exact", Status: common.UserStatusEnabled}).Error)
+
+	user, err := GetUniqueUserByEmail(" EXACT@example.com ")
+	require.NoError(t, err)
+	assert.Equal(t, "exact", user.Username)
+	for _, variant := range []string{"exäct@example.com", "ｅxact@example.com"} {
+		_, err = GetUniqueUserByEmail(variant)
+		assert.ErrorIs(t, err, ErrEmailNotFound, variant)
+	}
+
+	reset, err := ResetUserPasswordByEmailUser("exact@example.com", "NewPassword123")
+	require.NoError(t, err)
+	assert.Equal(t, "exact", reset.Username)
+	_, err = ResetUserPasswordByEmailUser("exäct@example.com", "NewPassword123")
+	assert.ErrorIs(t, err, ErrEmailNotFound)
+}

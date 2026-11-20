@@ -50,53 +50,87 @@ func GetPasswordEncryptionKey(c *gin.Context) {
 	})
 }
 
+// Login signs in with a username or email and a password. In order: the
+// captcha (while LoginCaptchaEnabled), the request, the login lockout of the
+// typed name and of the account it names (one failure slot is reserved
+// before the password is checked), then the password. Only wrong passwords
+// count toward the lockout. Every refused attempt writes one audit row.
 func Login(c *gin.Context) {
 	if !common.PasswordLoginEnabled {
 		common.ApiErrorT(c, "Password login has been disabled by administrator")
 		return
 	}
+	ctx := c.Request.Context()
 	var loginRequest LoginRequest
-	err := common.DecodeJson(c.Request.Body, &loginRequest)
-	if err != nil {
+	decodeErr := common.DecodeJson(c.Request.Body, &loginRequest)
+	identifier := strings.TrimSpace(loginRequest.Username)
+	if common.LoginCaptchaEnabled {
+		if code := middleware.CheckRequestCaptcha(c); code != "" {
+			middleware.WriteCaptchaRefusal(c, code)
+			recordLoginFailureAudit(c, loginFailure{identifier: identifier, reason: "captcha_failed", code: code})
+			return
+		}
+	}
+	if decodeErr != nil {
 		common.ApiErrorT(c, "Invalid parameters")
+		recordLoginFailureAudit(c, loginFailure{identifier: identifier, reason: "invalid_request"})
 		return
 	}
-	username := loginRequest.Username
 	password := loginRequest.Password
 	if common.PasswordLoginEncryptionEnabled {
 		if loginRequest.PasswordEncrypted == "" || loginRequest.EncryptionKeyID == "" {
 			common.ApiErrorT(c, "Invalid parameters")
+			recordLoginFailureAudit(c, loginFailure{identifier: identifier, reason: "invalid_request"})
 			return
 		}
+		var err error
 		password, err = common.DecryptPassword(loginRequest.PasswordEncrypted, loginRequest.EncryptionKeyID)
 		if err != nil {
 			common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
+			recordLoginFailureAudit(c, loginFailure{identifier: identifier, reason: "invalid_request"})
 			return
 		}
 	}
-	if username == "" || password == "" {
+	if identifier == "" || password == "" {
 		common.ApiErrorT(c, "Invalid parameters")
+		recordLoginFailureAudit(c, loginFailure{identifier: identifier, reason: "invalid_request"})
 		return
 	}
-	user := model.User{
-		Username: username,
-		Password: password,
-	}
-	err = user.ValidateAndFill()
+	user, err := model.FindPasswordLoginUser(identifier)
 	if err != nil {
-		switch {
-		case errors.Is(err, model.ErrDatabase):
-			common.SysLog(common.LogText("Login database error for user %s: %v", username, err))
-			common.ApiErrorT(c, "Database error, please contact the administrator")
-		case errors.Is(err, model.ErrUserEmptyCredentials):
-			common.ApiErrorT(c, "Invalid parameters")
-		default:
+		common.SysLog(common.LogText("Login database error for user %s: %v", loginRequest.Username, err))
+		common.ApiErrorT(c, "Database error, please contact the administrator")
+		return
+	}
+	attempt, wait := middleware.BeginLoginAttempt(ctx, middleware.LoginLockSubjects(accountID(user), identifier))
+	if wait > 0 {
+		writeLoginLocked(c, wait)
+		recordLoginFailureAudit(c, loginFailure{account: user, identifier: identifier, reason: "locked", waitSeconds: wait, looked: true})
+		return
+	}
+	defer attempt.Release(ctx)
+	switch err := user.CheckLoginPassword(password); {
+	case err == nil:
+		// The right password is not a failure; a completed login clears the
+		// counter (writeLoginResponse).
+		attempt.Release(ctx)
+	case errors.Is(err, model.ErrLoginUserDisabled):
+		common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
+		recordLoginFailureAudit(c, loginFailure{account: user, identifier: identifier, reason: "disabled", looked: true})
+		return
+	default:
+		lockSeconds, started := attempt.Fail(ctx)
+		if lockSeconds > 0 {
+			writeLoginLocked(c, lockSeconds)
+		} else {
 			common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
 		}
+		recordLoginFailureAudit(c, loginFailure{account: user, identifier: identifier, reason: "invalid_credentials",
+			waitSeconds: lockSeconds, lockStarted: started, looked: true})
 		return
 	}
 
-	setupLogin(&user, nil, c)
+	setupLogin(user, nil, c)
 }
 
 // loginMethodFromContext 根据请求路径推导登录方式，用于登录审计日志。
@@ -125,7 +159,8 @@ func loginMethodFromContext(c *gin.Context) string {
 	}
 }
 
-// recordLoginAudit 记录登录成功审计日志（对所有用户启用，仅记录成功，不记录失败）。
+// recordLoginAudit 记录登录成功审计日志（对所有用户启用）。登录失败由
+// recordLoginFailureAudit / recordLogin2FAFailureAudit 记录（controller/auth_guard.go）。
 func recordLoginAudit(user *model.User, c *gin.Context) {
 	method := loginMethodFromContext(c)
 	ip := c.ClientIP()
@@ -216,6 +251,11 @@ func writeLoginResponse(c *gin.Context, user *model.User, bundle *service.AuthBu
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
 	setAuthNoStore(c)
 	recordLoginAudit(user, c)
+	if bundle.Session.LoginMethod == "password" {
+		// A completed password login (after two-factor verification, if any)
+		// ends the failure count of the account and of its names.
+		middleware.ClearLoginLockout(c.Request.Context(), user.Id, user.Username, user.Email)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,
@@ -1372,6 +1412,7 @@ func ManageUser(c *gin.Context) {
 			common.ApiErrorT(c, "This user is not a deputy admin")
 			return
 		}
+	case "unlock_login":
 	default:
 		common.ApiErrorT(c, "Invalid parameters")
 		return
@@ -1379,6 +1420,27 @@ func ManageUser(c *gin.Context) {
 
 	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserManage, service.AdminUserManageContext{UserID: user.Id, Action: req.Action})
 	if authorization == nil {
+		return
+	}
+	if req.Action == "unlock_login" {
+		// Clears the login lock and failure counts of the account and its
+		// names, and the reset email limit of its address. The account row and
+		// its sessions are not touched.
+		wasLocked := middleware.ClearLoginLockout(c.Request.Context(), user.Id, user.Username, user.Email)
+		if user.Email != "" {
+			middleware.ClearPasswordResetEmailLimit(c.Request.Context(), model.NormalizeEmail(user.Email))
+		}
+		recordManageAuditFor(c, user.Id, "user.login_unlock", map[string]any{
+			"username":            user.Username,
+			"id":                  user.Id,
+			"verification_method": authorization.Method,
+			"was_locked":          wasLocked,
+		})
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "",
+			"data":    model.User{Role: user.Role, Status: user.Status},
+		})
 		return
 	}
 	if req.Action == "enable" {

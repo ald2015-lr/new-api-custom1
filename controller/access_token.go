@@ -349,7 +349,8 @@ func GetAuditLogs(c *gin.Context) {
 		common.ApiErrorMsg(c, "Invalid audit pagination")
 		return
 	}
-	filter := model.AuditLogFilter{Username: c.Query("username"), Category: c.Query("category"), TokenRef: c.Query("token_ref"), ExcludeTokenRef: c.Query("exclude_token_ref"), RequestId: c.Query("request_id")}
+	filter := model.AuditLogFilter{Username: c.Query("username"), Category: c.Query("category"), TokenRef: c.Query("token_ref"), ExcludeTokenRef: c.Query("exclude_token_ref"), RequestId: c.Query("request_id"),
+		Action: c.Query("action"), Ip: c.Query("ip"), Email: model.NormalizeEmail(c.Query("email"))}
 	viewerRole := c.GetInt("role")
 	if c.FullPath() == "/api/audit/self" {
 		filter.UserId = c.GetInt("id")
@@ -359,7 +360,9 @@ func GetAuditLogs(c *gin.Context) {
 	if c.FullPath() == "/api/audit" && !authz.Can(c.GetInt("id"), viewerRole, authz.BillingRead) {
 		filter.ExcludeRecharge = true
 	}
-	if !model.ValidAuditCategory(filter.Category) || !model.ValidTokenFingerprint(filter.TokenRef) || !model.ValidTokenFingerprint(filter.ExcludeTokenRef) {
+	if !model.ValidAuditCategory(filter.Category) || !model.ValidTokenFingerprint(filter.TokenRef) || !model.ValidTokenFingerprint(filter.ExcludeTokenRef) ||
+		(filter.Action != "" && !model.ValidAuditAction(filter.Action)) || (filter.Ip != "" && !model.ValidAuditIP(filter.Ip)) ||
+		(filter.Email != "" && (common.Validate.Var(filter.Email, "required,email") != nil || utf8.RuneCountInString(filter.Email) > 254)) {
 		common.ApiErrorMsg(c, "Invalid audit filters")
 		return
 	}
