@@ -102,7 +102,11 @@ func Login(c *gin.Context) {
 		common.ApiErrorT(c, "Database error, please contact the administrator")
 		return
 	}
-	attempt, wait := middleware.BeginLoginAttempt(ctx, middleware.LoginLockSubjects(accountID(user), identifier))
+	userID := 0
+	if user != nil {
+		userID = user.Id
+	}
+	attempt, wait := middleware.BeginLoginAttempt(ctx, middleware.LoginLockSubjects(userID, identifier))
 	if wait > 0 {
 		writeLoginLocked(c, wait)
 		recordLoginFailureAudit(c, loginFailure{account: user, identifier: identifier, reason: "locked", waitSeconds: wait, looked: true})

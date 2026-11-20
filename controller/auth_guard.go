@@ -64,16 +64,6 @@ func (typed auditTypedValue) apply(key string, params map[string]any, other *mod
 	other.RootInfo = model.AuditFields{key: typed.raw}
 }
 
-// auditAccountFields returns the owner of a sign-in or password reset row:
-// the account when the row names one, else no user with the common user role
-// (a valid role, so administrators see the row).
-func auditAccountFields(user *model.User) (int, string, int) {
-	if user == nil || user.Id <= 0 {
-		return 0, "", common.RoleCommonUser
-	}
-	return user.Id, user.Username, user.Role
-}
-
 // lookupResetAccount returns the account with exactly this address, or nil.
 func lookupResetAccount(email string) *model.User {
 	if common.Validate.Var(email, "required,email") != nil {
@@ -141,12 +131,15 @@ func recordPasswordResetAudit(c *gin.Context, email string, user *model.User, re
 	recordAuthGuardAudit(c, user, action, params, other, reason == "")
 }
 
+// recordAuthGuardAudit writes a login-category row of this feature. The row
+// belongs to the account when it names one, else to no user with the common
+// user role (a valid role, so administrators see the row).
 func recordAuthGuardAudit(c *gin.Context, user *model.User, action string, params map[string]any, other model.AuditOther, success bool) {
-	userID, username, role := auditAccountFields(user)
-	model.RecordLoginAudit(c, model.LoginAuditEntry{
-		UserId: userID, Username: username, ActorRole: role,
-		Action: action, Content: auditContentEN(action, params), Params: params, Other: other, Success: success,
-	})
+	entry := model.LoginAuditEntry{ActorRole: common.RoleCommonUser, Action: action, Content: auditContentEN(action, params), Params: params, Other: other, Success: success}
+	if user != nil && user.Id > 0 {
+		entry.UserId, entry.Username, entry.ActorRole = user.Id, user.Username, user.Role
+	}
+	model.RecordLoginAudit(c, entry)
 }
 
 // writePasswordResetLimited answers a reset email request the per-email
@@ -160,14 +153,6 @@ func writePasswordResetLimited(c *gin.Context, refusal *middleware.PasswordReset
 		message = common.NewMessage("Too many password reset emails were requested for this address in the last 24 hours. Please try again later or contact the administrator. Emails already sent can take a few minutes to arrive and may be in your spam folder. If you get several, use the newest one: earlier links stop working.")
 	}
 	common.ApiErrorStatus(c, http.StatusOK, message, gin.H{"code": refusal.Code, "wait_seconds": refusal.WaitSeconds})
-}
-
-// accountID is the id of the account a login names, 0 for none.
-func accountID(user *model.User) int {
-	if user == nil {
-		return 0
-	}
-	return user.Id
 }
 
 // writeLoginLocked answers a password login (or its two-factor step)

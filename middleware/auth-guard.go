@@ -76,14 +76,6 @@ func passwordResetEmailLimit() (cooldown time.Duration, dailyMax int) {
 	return time.Duration(seconds) * time.Second, dailyMax
 }
 
-// loginLockoutLimit returns the clamped failure count and the window, which
-// is also the lock duration.
-func loginLockoutLimit() (maxFailures int, window time.Duration) {
-	maxFailures = min(max(common.LoginLockoutMaxFailures, operation_setting.LoginLockoutMinFailures), operation_setting.LoginLockoutMaxFailuresLimit)
-	minutes := min(max(common.LoginLockoutMinutes, 1), operation_setting.LoginLockoutMaxMinutes)
-	return maxFailures, time.Duration(minutes) * time.Minute
-}
-
 // PasswordResetEmailCooldownSeconds is the clamped cooldown while the reset
 // email limit is on, else 0 (for /api/status).
 func PasswordResetEmailCooldownSeconds() int64 {
@@ -150,18 +142,6 @@ func LoginLockSubjects(userID int, identifier string) []string {
 	}
 	if userID > 0 {
 		subjects = append(subjects, "u:"+strconv.Itoa(userID))
-	}
-	return subjects
-}
-
-// loginLockClearSubjects returns the account counter and the counters of the
-// names that sign in to it.
-func loginLockClearSubjects(userID int, names []string) []string {
-	subjects := LoginLockSubjects(userID, "")
-	for _, name := range names {
-		if strings.TrimSpace(name) != "" {
-			subjects = append(subjects, LoginLockSubjects(0, name)...)
-		}
 	}
 	return subjects
 }
@@ -332,14 +312,6 @@ func loginLockKeys(subjects []string) []string {
 	return keys
 }
 
-func loginFailKeys(subjects []string) []string {
-	keys := make([]string, 0, len(subjects))
-	for _, subject := range subjects {
-		keys = append(keys, authGuardRedisPrefix+"login:fail:"+subject)
-	}
-	return keys
-}
-
 // LoginAttempt is one password (or 2FA code) check that holds a reserved
 // failure slot on every subject. Exactly one of Fail or Release ends it; its
 // methods are nil-safe and idempotent, so callers may defer Release right
@@ -365,7 +337,9 @@ func BeginLoginAttempt(ctx context.Context, subjects []string) (*LoginAttempt, i
 	if !common.LoginLockoutEnabled || len(subjects) == 0 {
 		return nil, 0
 	}
-	maxFailures, window := loginLockoutLimit()
+	// The settings are clamped; the window is also the lock duration.
+	maxFailures := min(max(common.LoginLockoutMaxFailures, operation_setting.LoginLockoutMinFailures), operation_setting.LoginLockoutMaxFailuresLimit)
+	window := time.Duration(min(max(common.LoginLockoutMinutes, 1), operation_setting.LoginLockoutMaxMinutes)) * time.Minute
 	attempt := &LoginAttempt{subjects: subjects, member: common.GetUUID(), maxFailures: maxFailures, window: window}
 	now := authGuardNow().UnixMilli()
 	if common.RedisEnabled && common.RDB != nil {
@@ -433,8 +407,12 @@ func (a *LoginAttempt) Release(ctx context.Context) {
 	}
 	a.done = true
 	if a.inRedis {
+		keys := make([]string, 0, len(a.subjects))
+		for _, subject := range a.subjects {
+			keys = append(keys, authGuardRedisPrefix+"login:fail:"+subject)
+		}
 		storeCtx, cancel := authGuardStoreContext(ctx)
-		err := common.RDB.Eval(storeCtx, loginReleaseScript, loginFailKeys(a.subjects), a.member).Err()
+		err := common.RDB.Eval(storeCtx, loginReleaseScript, keys, a.member).Err()
 		cancel()
 		if err != nil {
 			authGuardRedisFailed(ctx, "login release", err)
@@ -449,7 +427,10 @@ func (a *LoginAttempt) Release(ctx context.Context) {
 // even while the lockout is off, and always clears the in-memory store too:
 // a node may have counted there during a Redis outage.
 func ClearLoginLockout(ctx context.Context, userID int, names ...string) (wasLocked bool) {
-	subjects := loginLockClearSubjects(userID, names)
+	subjects := LoginLockSubjects(userID, "")
+	for _, name := range names {
+		subjects = append(subjects, LoginLockSubjects(0, name)...)
+	}
 	if len(subjects) == 0 {
 		return false
 	}
