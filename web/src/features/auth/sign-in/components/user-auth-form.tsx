@@ -238,6 +238,10 @@ export function UserAuthForm({
         handleServerError(createServerError(res, loginFailedMessage))
       }
     } catch (error: unknown) {
+      // handleLoginResult throws for a reply the page cannot follow (an
+      // expired or malformed challenge): the page stays, and the server has
+      // spent the captcha it was sent.
+      signedIn = false
       outcome = error
       if (!showLoginLock(error, data.username)) {
         handleServerError(AuthOperationError.from(error, loginFailedMessage))

@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -154,7 +154,17 @@ afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
   localStorage.clear()
   vi.useRealTimers()
+  delete window.turnstile
 })
+
+/** Moves the clock by ms and lets the waits on the page catch up. */
+function advanceClock(ms: number) {
+  const now = Date.now() + ms
+  vi.spyOn(Date, 'now').mockReturnValue(now)
+  act(() => {
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+}
 
 it('shows no captcha and fetches none while the reset captcha is off', async () => {
   const user = userEvent.setup()
@@ -282,7 +292,7 @@ it('holds the button for the address the daily limit refused, whatever its case 
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })
 
-it('keeps the spam folder note after a sent email clears the form and waits for the server cooldown', async () => {
+it('keeps the spam folder note after a sent email clears the form, and waits for the server cooldown only for that address', async () => {
   const user = userEvent.setup()
   const success = vi.spyOn(toast, 'success')
   mockGet()
@@ -298,11 +308,99 @@ it('keeps the spam folder note after a sent email clears the form and waits for 
   expect(await screen.findByRole('alert')).toHaveTextContent(sentNote)
   expect(screen.getByLabelText('Email')).toHaveValue('')
   expect(
-    screen.getByRole('button', { name: /Resend \(1(19|20)s\)/ })
+    screen.getByRole('button', { name: /Resend \((29|30)s\)/ })
   ).toBeDisabled()
   expect(success).toHaveBeenCalledWith(
     'Reset email sent, please check your inbox'
   )
+
+  // The same address, whatever its case or spaces, waits for the server.
+  await findCaptchaImage(2)
+  await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '7')
+  const email = screen.getByLabelText('Email')
+  await user.type(email, '  USER@Example.com ')
+  expect(
+    screen.getByRole('button', { name: /Resend \(1(19|20)s\)/ })
+  ).toBeDisabled()
+
+  // Another address only waits the short wait.
+  advanceClock(31_000)
+  expect(
+    screen.getByRole('button', { name: /Resend \(8[89]s\)/ })
+  ).toBeDisabled()
+  await user.clear(email)
+  await user.type(email, 'other@example.com')
+  expect(screen.getByRole('button', { name: /Send reset email/ })).toBeEnabled()
+})
+
+it('drops the cooldown notice once its wait has passed and keeps the delivery hint', async () => {
+  const user = userEvent.setup()
+  mockGet()
+  resetReplies = [async () => cooldownReply(95)]
+  await renderForm({ password_reset_captcha: true })
+  await findCaptchaImage(1)
+  await requestReset(user, 'user@example.com')
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Please wait 95 seconds'
+  )
+
+  advanceClock(85_000)
+  expect(
+    screen.getByRole('button', { name: /Resend \((9|10)s\)/ })
+  ).toBeDisabled()
+
+  advanceClock(11_000)
+  await waitFor(() =>
+    expect(screen.getByRole('alert')).not.toHaveTextContent('95 seconds')
+  )
+  expect(screen.getByRole('alert')).toHaveTextContent(sentNote)
+  await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '7')
+  expect(screen.getByRole('button', { name: /Send reset email/ })).toBeEnabled()
+})
+
+it('sends a new Turnstile token with every request', async () => {
+  const user = userEvent.setup()
+  let widgets = 0
+  const renderWidget = vi.fn(
+    (_element: HTMLElement, options: Record<string, unknown>) => {
+      widgets += 1
+      const callback = options.callback as (token: string) => void
+      callback(`turnstile-${widgets}`)
+    }
+  )
+  window.turnstile = { render: renderWidget }
+  const get = mockGet()
+  resetReplies = [
+    async () => ({
+      data: {
+        success: false,
+        code: 'CAPTCHA_INVALID',
+        message: 'Captcha is incorrect or has expired. Please try a new one.',
+        message_key:
+          'Captcha is incorrect or has expired. Please try a new one.',
+      },
+    }),
+    async () => ({ data: { success: true, message: '' } }),
+  ]
+  await renderForm({
+    password_reset_captcha: true,
+    turnstile_check: true,
+    turnstile_site_key: 'site-key',
+  })
+  await findCaptchaImage(1)
+
+  await requestReset(user, 'user@example.com', '99')
+  await findCaptchaImage(2)
+  await user.type(screen.getByRole('textbox', { name: 'Captcha' }), '12')
+  await user.click(screen.getByRole('button', { name: /Send reset email/ }))
+
+  await waitFor(() => expect(resetRequests(get)).toHaveLength(2))
+  expect(resetRequests(get).map((params) => params.turnstile)).toEqual([
+    'turnstile-1',
+    'turnstile-2',
+  ])
+  // A new widget after each request, and none on other renders.
+  expect(renderWidget).toHaveBeenCalledTimes(3)
 })
 
 it('clears the note when the address is edited', async () => {

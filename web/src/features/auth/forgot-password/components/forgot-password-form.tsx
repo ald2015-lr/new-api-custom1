@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { ArrowRight, Info, Loader2, TriangleAlert } from 'lucide-react'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -84,8 +84,17 @@ export function ForgotPasswordForm({
     setTurnstileToken,
     validateTurnstile,
   } = useTurnstile()
-  // The wait before another email: after a sent one, or a cooldown refusal.
+  const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0)
+  // Stable, so the widget is not rendered again on every render.
+  const clearTurnstileToken = useCallback(
+    () => setTurnstileToken(''),
+    [setTurnstileToken]
+  )
+  // The short wait after a sent email, whatever address is typed next.
   const resendWait = useWaitDeadline()
+  // The server's cooldown, which holds only the address it counted.
+  const addressWait = useWaitDeadline()
+  const [heldAddress, setHeldAddress] = useState<string | null>(null)
   // The wait of a daily limit refusal; it holds the refused address only.
   const dailyWait = useWaitDeadline()
 
@@ -99,6 +108,14 @@ export function ForgotPasswordForm({
     dailyWait.active &&
     dailyLimit !== null &&
     sameResetAddress(email ?? '', dailyLimit.address)
+  const addressHeld =
+    addressWait.active &&
+    heldAddress !== null &&
+    sameResetAddress(email ?? '', heldAddress)
+  const waitSeconds = Math.max(
+    resendWait.secondsLeft,
+    addressHeld ? addressWait.secondsLeft : 0
+  )
 
   /** Shows a cooldown or daily limit refusal; false for other answers. */
   function showLimit(outcome: unknown, address: string): boolean {
@@ -111,7 +128,8 @@ export function ForgotPasswordForm({
     }
     const message = refusal.message
     if (refusal.code === PASSWORD_RESET_EMAIL_COOLDOWN) {
-      resendWait.start(refusal.waitSeconds)
+      addressWait.start(refusal.waitSeconds)
+      setHeldAddress(address)
       setNotice({ kind: 'cooldown', message })
       return true
     }
@@ -130,6 +148,12 @@ export function ForgotPasswordForm({
     if (!validateTurnstile()) return
     if (!captcha.validate()) return
     const captchaParams = captcha.params
+    // The server spends a Turnstile token once it has checked it.
+    const submittedTurnstileToken = turnstileToken
+    if (isTurnstileEnabled) {
+      setTurnstileToken('')
+      setTurnstileWidgetKey((current) => current + 1)
+    }
 
     setNotice(null)
     setIsLoading(true)
@@ -137,18 +161,15 @@ export function ForgotPasswordForm({
     try {
       const res = await sendPasswordResetEmail(
         data.email,
-        turnstileToken,
+        submittedTurnstileToken,
         captchaParams
       )
       outcome = res
       if (res?.success) {
         form.reset()
-        resendWait.start(
-          Math.max(
-            PASSWORD_RESET_COUNTDOWN,
-            status?.password_reset_email_cooldown ?? 0
-          )
-        )
+        resendWait.start(PASSWORD_RESET_COUNTDOWN)
+        addressWait.start(status?.password_reset_email_cooldown ?? 0)
+        setHeldAddress(data.email)
         setNotice({ kind: 'sent' })
         toast.success(t('Reset email sent, please check your inbox'))
       } else if (!showLimit(res, data.email)) {
@@ -206,19 +227,21 @@ export function ForgotPasswordForm({
           className='mt-2'
           disabled={
             isLoading ||
-            resendWait.active ||
+            waitSeconds > 0 ||
             addressLimited ||
             !turnstileReady ||
             !captcha.ready
           }
         >
-          {resendWait.active
-            ? t('Resend ({{seconds}}s)', { seconds: resendWait.secondsLeft })
+          {waitSeconds > 0
+            ? t('Resend ({{seconds}}s)', { seconds: waitSeconds })
             : t('Send reset email')}
           {isLoading ? <Loader2 className='animate-spin' /> : <ArrowRight />}
         </Button>
 
-        {notice?.kind === 'sent' && (
+        {/* After a cooldown has run out, only its delivery hint stays. */}
+        {(notice?.kind === 'sent' ||
+          (notice?.kind === 'cooldown' && !addressHeld)) && (
           <Alert className='mt-2'>
             <Info aria-hidden='true' />
             <AlertDescription>
@@ -229,7 +252,8 @@ export function ForgotPasswordForm({
           </Alert>
         )}
 
-        {notice?.kind === 'cooldown' && (
+        {/* The countdown stays on the button, outside the alert. */}
+        {notice?.kind === 'cooldown' && addressHeld && (
           <Alert className='mt-2'>
             <TriangleAlert aria-hidden='true' />
             <AlertDescription>{serverText(t, notice.message)}</AlertDescription>
@@ -254,8 +278,10 @@ export function ForgotPasswordForm({
         {isTurnstileEnabled && (
           <div className='mt-2'>
             <Turnstile
+              key={turnstileWidgetKey}
               siteKey={turnstileSiteKey}
               onVerify={setTurnstileToken}
+              onExpire={clearTurnstileToken}
             />
           </div>
         )}

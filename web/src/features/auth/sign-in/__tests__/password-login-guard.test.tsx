@@ -34,9 +34,15 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import i18next from 'i18next'
 import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest'
 
+import { formatWait } from '@/features/auth/lib/auth-guard'
+import ja from '@/i18n/locales/ja.json'
+import vietnamese from '@/i18n/locales/vi.json'
+import zhTW from '@/i18n/locales/zh-TW.json'
+import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
 
 import type { SystemStatus } from '../../types'
@@ -241,6 +247,46 @@ it('sends the captcha with the login and shows a new one after a failed attempt'
   )
 })
 
+it('shows a new captcha when a successful login reply cannot be followed', async () => {
+  const user = userEvent.setup()
+  const error = vi.spyOn(toast, 'error')
+  mockGet()
+  const post = mockLogin()
+  loginReplies = [
+    async () => ({
+      data: {
+        success: true,
+        data: {
+          require_verification: true,
+          flow_token: 'flow',
+          expires_at: Math.floor(Date.now() / 1000) - 60,
+          methods: [{ method: '2fa', available: true }],
+        },
+      },
+    }),
+    async () => wrongPasswordReply,
+  ]
+  await renderSignIn({ login_captcha: true })
+
+  await fillLogin(user, 'alice', '12')
+  await user.click(screen.getByRole('button', { name: 'Sign in' }))
+
+  await waitFor(() =>
+    expect(error).toHaveBeenCalledWith(
+      'Login flow expired. Please sign in again.'
+    )
+  )
+  await findCaptchaImage(2)
+  expect(screen.getByRole('textbox', { name: 'Captcha' })).toHaveValue('')
+  await fillLogin(user, 'alice', '7')
+  await user.click(screen.getByRole('button', { name: 'Sign in' }))
+  await waitFor(() => expect(post).toHaveBeenCalledTimes(2))
+  expect(loginRequests(post)[1].params).toMatchObject({
+    captcha_id: 'captcha-2',
+    captcha: '7',
+  })
+})
+
 it('loads the captcha when autofilled fields are submitted, focuses its answer and sends nothing until it is answered', async () => {
   const user = userEvent.setup()
   const error = vi.spyOn(toast, 'error')
@@ -331,6 +377,28 @@ it('clears the lock once its wait has passed', async () => {
   expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled()
   expect(screen.queryByText(/^Try again in/)).not.toBeInTheDocument()
 })
+
+// formatWait gives m:ss, which these languages would read as a clock time
+// if the wording put "after" behind it.
+it.each([
+  ['zh', zh.translation, '还需等待 15:00'],
+  ['zh-TW', zhTW.translation, '還需等待 15:00'],
+  ['ja', ja.translation, 'あと 15:00 で再試行できます'],
+  ['vi', vietnamese.translation, 'Thời gian chờ còn lại: 15:00'],
+])(
+  'words the lock countdown in %s as a time left',
+  async (locale, translation, expected) => {
+    const i18n = i18next.createInstance()
+    await i18n.init({
+      lng: locale,
+      resources: { [locale]: { translation } },
+      interpolation: { escapeValue: false },
+    })
+    expect(i18n.t('Try again in {{time}}', { time: formatWait(900) })).toBe(
+      expected
+    )
+  }
+)
 
 it('re-reads the status and shows a loaded captcha when the server requires one the page did not know about', async () => {
   const user = userEvent.setup()

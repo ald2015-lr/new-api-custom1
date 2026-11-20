@@ -437,7 +437,7 @@ export function BotProtectionSection({
             name='LoginLockoutEnabled'
             label={t('Login lockout')}
             description={t(
-              'After too many wrong passwords for one account or one typed name, password login is refused for a while, even with the right password. A password reset through the email link or "Unlock login" in user management ends it early. Passkey and third-party login are not locked, so a passkey bound to the administrator account (with passkey login enabled) is the way in while it is locked. Two-factor authentication stops a guessed password but does not lift a lock.'
+              'After too many wrong passwords for one account or one typed name, password login is refused for a while, even with the right password. A completed sign-in by any method (for example with a passkey), a password reset through the email link or "Unlock login" in user management ends it early. Passkey and third-party login are not locked, so a passkey bound to the administrator account (with passkey login enabled) is the way in while it is locked. Two-factor authentication stops a guessed password but does not lift a lock.'
             )}
           />
 
