@@ -399,7 +399,7 @@ func (a *LoginAttempt) Fail(ctx context.Context) (lockSeconds int64, started boo
 }
 
 // Release removes the reservation: the check was not a counted failure (the
-// right password, a disabled account, or a request that ended before the
+// right password of an enabled account, or a request that ended before the
 // check).
 func (a *LoginAttempt) Release(ctx context.Context) {
 	if a == nil || a.done {

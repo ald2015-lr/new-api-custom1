@@ -53,8 +53,9 @@ func GetPasswordEncryptionKey(c *gin.Context) {
 // Login signs in with a username or email and a password. In order: the
 // captcha (while LoginCaptchaEnabled), the request, the login lockout of the
 // typed name and of the account it names (one failure slot is reserved
-// before the password is checked), then the password. Only wrong passwords
-// count toward the lockout. Every refused attempt writes one audit row.
+// before the password is checked), then the password. Wrong passwords, and
+// any password of a disabled account, count toward the lockout. Every
+// refused attempt writes one audit row.
 func Login(c *gin.Context) {
 	if !common.PasswordLoginEnabled {
 		common.ApiErrorT(c, "Password login has been disabled by administrator")
@@ -119,8 +120,16 @@ func Login(c *gin.Context) {
 		// counter (writeLoginResponse).
 		attempt.Release(ctx)
 	case errors.Is(err, model.ErrLoginUserDisabled):
-		common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
-		recordLoginFailureAudit(c, loginFailure{account: user, identifier: identifier, reason: "disabled", looked: true})
+		// Counted like a wrong password, so the moment the lock starts does
+		// not reveal whether a disabled account's password is right.
+		lockSeconds, started := attempt.Fail(ctx)
+		if lockSeconds > 0 {
+			writeLoginLocked(c, lockSeconds)
+		} else {
+			common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
+		}
+		recordLoginFailureAudit(c, loginFailure{account: user, identifier: identifier, reason: "disabled",
+			waitSeconds: lockSeconds, lockStarted: started, looked: true})
 		return
 	default:
 		lockSeconds, started := attempt.Fail(ctx)
@@ -255,11 +264,10 @@ func writeLoginResponse(c *gin.Context, user *model.User, bundle *service.AuthBu
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
 	setAuthNoStore(c)
 	recordLoginAudit(user, c)
-	if bundle.Session.LoginMethod == "password" {
-		// A completed password login (after two-factor verification, if any)
-		// ends the failure count of the account and of its names.
-		middleware.ClearLoginLockout(c.Request.Context(), user.Id, user.Username, user.Email)
-	}
+	// Any completed login (password after two-factor verification, if any;
+	// passkey; third-party) ends the failure count and the lock of the
+	// account and of its names.
+	middleware.ClearLoginLockout(c.Request.Context(), user.Id, user.Username, user.Email)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,

@@ -48,9 +48,9 @@ var auditContentTemplates = map[string]string{
 	"option.update":             "Updated system setting ${key}",
 	"user.register":             "Registered a new account via ${method}",
 
-	"user.password_reset_request": "Password reset email request for ${email}: ${outcome}",
-	"user.password_reset":         "Reset the password through the email link for ${email}",
-	"user.password_reset_failed":  "Password reset through the email link failed for ${email}: ${reason}",
+	"user.password_reset_request": model.PasswordResetRequestContent + "${email}: ${outcome}",
+	"user.password_reset":         model.PasswordResetContent + "${email}",
+	"user.password_reset_failed":  model.PasswordResetFailedContent + "${email}: ${reason}",
 	"user.login_failed":           "Failed login via ${method} as ${identifier}: ${reason}",
 	"user.login_2fa_failed":       "Failed two-factor verification at login via ${method}: ${reason}",
 	"user.login_unlock":           "Cleared the login lock of user ${username} (ID: ${id})",

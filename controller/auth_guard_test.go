@@ -226,10 +226,10 @@ func TestPasswordResetRequestOrderOutcomesAndAudit(t *testing.T) {
 	response = env.requestReset("not-an-address", solvedCaptcha())
 	assert.JSONEq(t, `{"success":false,"message":"Invalid parameters","message_key":"Invalid parameters"}`, response.Body.String())
 	row = lastAuthGuardAudit(t, "user.password_reset_request")
-	assert.Equal(t, map[string]any{"email": "no…", "outcome": "invalid_email", "identifier_length": float64(14)}, row.Params)
+	assert.Equal(t, map[string]any{"email": "…", "outcome": "invalid_email", "identifier_length": float64(14)}, row.Params)
 	assert.Equal(t, map[string]any{"email": "not-an-address"}, row.RootInfo)
 	assert.Zero(t, row.UserId)
-	assert.Equal(t, "Password reset email request for no…: invalid_email", row.Content)
+	assert.Equal(t, "Password reset email request for …: invalid_email", row.Content)
 
 	// A registered address: one mail, a "sent" row owned by the account.
 	registered := env.requestReset("Bob@Example.com ", solvedCaptcha())
@@ -565,18 +565,26 @@ func TestLoginLockoutSharesOneCounterAndIsEnumerationSafe(t *testing.T) {
 	assert.Equal(t, known.Body.String(), unknown.Body.String())
 	row = lastAuthGuardAudit(t, "user.login_failed")
 	assert.Zero(t, row.UserId)
-	assert.Equal(t, "gh…", row.Params["identifier"])
+	assert.Equal(t, "…", row.Params["identifier"])
 	env.advance(30 * time.Second)
 	assert.JSONEq(t, loginLockedJSON(870), env.login("ghost", "wrong-4", "").Body.String())
 
-	// A disabled account with the right password: the generic answer, audited, not counted.
+	// A disabled account with the right password: the generic answer,
+	// audited, and counted like a wrong password, so the moment the lock
+	// starts does not reveal whether the password is right.
 	frank := createAuthGuardUser(t, env.db, "lock-frank", "frank@example.com", common.RoleCommonUser)
 	require.NoError(t, env.db.Model(frank).Update("status", common.UserStatusDisabled).Error)
-	for range 4 {
+	for range 2 {
 		assert.JSONEq(t, loginGenericJSON, env.login("lock-frank", authGuardTestPassword, "").Body.String())
 	}
-	assert.Equal(t, "disabled", lastAuthGuardAudit(t, "user.login_failed").Params["reason"])
-	assert.Equal(t, frank.Id, lastAuthGuardAudit(t, "user.login_failed").UserId)
+	row = lastAuthGuardAudit(t, "user.login_failed")
+	assert.Equal(t, map[string]any{"method": "password", "identifier": "lock-frank", "reason": "disabled"}, row.Params)
+	assert.Equal(t, frank.Id, row.UserId)
+	assert.JSONEq(t, loginLockedJSON(900), env.login("lock-frank", authGuardTestPassword, "").Body.String())
+	row = lastAuthGuardAudit(t, "user.login_failed")
+	assert.Equal(t, map[string]any{"method": "password", "identifier": "lock-frank", "reason": "disabled", "wait_seconds": float64(900), "lock_started": true}, row.Params)
+	assert.JSONEq(t, loginLockedJSON(900), env.login("lock-frank", "wrong", "").Body.String())
+	assert.Equal(t, "locked", lastAuthGuardAudit(t, "user.login_failed").Params["reason"])
 
 	// A completed login clears the count.
 	createAuthGuardUser(t, env.db, "lock-gina", "gina@example.com", common.RoleCommonUser)
@@ -606,7 +614,7 @@ func TestLoginLockoutSharesOneCounterAndIsEnumerationSafe(t *testing.T) {
 	long := strings.Repeat("é", 70)
 	env.login("  "+long+"  ", "wrong", "")
 	row = lastAuthGuardAudit(t, "user.login_failed")
-	assert.Equal(t, "éé…", row.Params["identifier"])
+	assert.Equal(t, "…", row.Params["identifier"])
 	assert.Equal(t, float64(70), row.Params["identifier_length"])
 	assert.Equal(t, strings.Repeat("é", 64), row.RootInfo["identifier"])
 	env.login("  lock-gina ", "wrong", "")
@@ -707,7 +715,8 @@ func TestLoginTwoFactorFailuresCountInPasswordFlows(t *testing.T) {
 	}
 	assert.Equal(t, "LOGIN_LOCKED", gjsonCode(t, env.verifyCode("/api/user/login/verify", token, "not-a-code")), "the refused step was not counted: 5 + 5 failures lock")
 
-	// A flow after a third-party login is neither counted nor locked.
+	// A flow after a third-party login is neither counted nor locked, and
+	// completing it clears the password lock like any completed login.
 	require.NoError(t, env.db.Model(&model.TwoFA{}).Where("id = ?", factor.Id).Updates(map[string]any{"failed_attempts": 0, "locked_until": nil}).Error)
 	pending, err := service.StartLoginVerification(jane, "oauth:github", nil)
 	require.NoError(t, err)
@@ -715,7 +724,8 @@ func TestLoginTwoFactorFailuresCountInPasswordFlows(t *testing.T) {
 	assert.Equal(t, map[string]any{"method": "oauth:github", "reason": "invalid_code"}, lastAuthGuardAudit(t, "user.login_2fa_failed").Params)
 	response := env.verifyCode("/api/user/login/verify", pending.FlowToken, rightCode())
 	require.True(t, loginSucceeded(t, response), response.Body.String())
-	assert.Equal(t, "LOGIN_LOCKED", gjsonCode(t, env.login("twofa-jane", authGuardTestPassword, "")), "a third-party login does not clear the password lock")
+	response = env.login("twofa-jane", authGuardTestPassword, "")
+	assert.Contains(t, response.Body.String(), `"require_verification":true`, "a completed third-party login clears the password lock too")
 
 	// The right password alone does not clear the count; a completed login does.
 	resetFactor()
@@ -737,7 +747,9 @@ func TestLoginTwoFactorFailuresCountInPasswordFlows(t *testing.T) {
 	}
 }
 
-// Passkey and third-party logins neither check nor clear the password lock.
+// Passkey and third-party logins do not check the password lock. Like any
+// completed login, a completed one clears it; a third-party login still
+// waiting for its verification step does not.
 func TestPasskeyAndOAuthLoginIgnoreTheLock(t *testing.T) {
 	user, _ := setupSecurityEnrollmentTest(t)
 	previousMax := common.LoginLockoutMaxFailures
@@ -751,6 +763,20 @@ func TestPasskeyAndOAuthLoginIgnoreTheLock(t *testing.T) {
 		login("wrong-password")
 	}
 	require.Equal(t, "LOGIN_LOCKED", gjsonCode(t, login("enrollment-password")))
+
+	// A third-party login reaches its verification step (the passkey).
+	const slug = "auth-guard-oauth"
+	oauth.Register(slug, &boundLoginOAuthProvider{userID: user.Id})
+	t.Cleanup(func() { oauth.Unregister(slug) })
+	token, _, err := model.CreateAuthFlow(model.AuthFlowCreate{Purpose: model.AuthFlowPurposeOAuth, Provider: slug, Intent: model.AuthFlowIntentLogin, Payload: `{}`, ExpiresAt: time.Now().Add(time.Minute)})
+	require.NoError(t, err)
+	oauthRouter := gin.New()
+	oauthRouter.GET("/api/oauth/:provider", HandleOAuth)
+	response := httptest.NewRecorder()
+	oauthRouter.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/oauth/"+slug+"?state="+token+"&code=provider-code", nil))
+	assert.Contains(t, response.Body.String(), `"require_verification":true`, response.Body.String())
+
+	assert.Equal(t, "LOGIN_LOCKED", gjsonCode(t, login("enrollment-password")), "an unfinished login leaves the lock")
 
 	// A primary passkey login.
 	begin := securityEnrollmentRequest(http.MethodPost, "/api/user/passkey/login/begin", "", "", service.AuthIdentity{}, PasskeyLoginBegin)
@@ -772,23 +798,13 @@ func TestPasskeyAndOAuthLoginIgnoreTheLock(t *testing.T) {
 	require.NoError(t, err)
 	passkeyRouter := gin.New()
 	passkeyRouter.POST("/api/user/passkey/login/finish", PasskeyLoginFinish)
-	response := httptest.NewRecorder()
+	response = httptest.NewRecorder()
 	passkeyRouter.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/user/passkey/login/finish", strings.NewReader(string(body))))
 	assert.Contains(t, response.Body.String(), `"access_token"`, response.Body.String())
 
-	// A third-party login reaches its verification step (the passkey).
-	const slug = "auth-guard-oauth"
-	oauth.Register(slug, &boundLoginOAuthProvider{userID: user.Id})
-	t.Cleanup(func() { oauth.Unregister(slug) })
-	token, _, err := model.CreateAuthFlow(model.AuthFlowCreate{Purpose: model.AuthFlowPurposeOAuth, Provider: slug, Intent: model.AuthFlowIntentLogin, Payload: `{}`, ExpiresAt: time.Now().Add(time.Minute)})
-	require.NoError(t, err)
-	oauthRouter := gin.New()
-	oauthRouter.GET("/api/oauth/:provider", HandleOAuth)
-	response = httptest.NewRecorder()
-	oauthRouter.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/oauth/"+slug+"?state="+token+"&code=provider-code", nil))
-	assert.Contains(t, response.Body.String(), `"require_verification":true`, response.Body.String())
-
-	assert.Equal(t, "LOGIN_LOCKED", gjsonCode(t, login("enrollment-password")), "the password lock stays")
+	unlocked := login("enrollment-password")
+	assert.NotContains(t, unlocked.Body.String(), "LOGIN_LOCKED", "the completed passkey login cleared the lock")
+	assert.Contains(t, unlocked.Body.String(), `"require_verification":true`, unlocked.Body.String())
 }
 
 type auditListResponse struct {
@@ -843,6 +859,12 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	}
 	env.request(http.MethodPost, "/api/user/reset", `{"email":"kim@example.com","token":"wrong"}`)
 	env.request(http.MethodPost, "/api/user/reset", `{"email":"kim_x@example.com","token":"wrong"}`)
+	// A valid quoted address that contains kim's address: written without a
+	// captcha, and must not show up under kim's address.
+	common.PasswordResetCaptchaEnabled = true
+	env.requestReset(`"x for kim@example.com: sent"@evil.com`, "")
+	common.PasswordResetCaptchaEnabled = false
+	require.Equal(t, "captcha_failed", lastAuthGuardAudit(t, "user.password_reset_request").Params["outcome"])
 
 	all := env.audits(t, "/api/audit?action=user.login_failed", root)
 	require.True(t, all.Success, all.Message)
@@ -858,17 +880,18 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	var found bool
 	for _, item := range masked.Data.Items {
 		switch item.Other.Op.Params["identifier"] {
-		case "S3…":
+		case "…":
 			found = true
 			assert.Equal(t, float64(11), item.Other.Op.Params["identifier_length"])
 			assert.Zero(t, item.UserId)
+			assert.Equal(t, "Failed login via password as …: invalid_credentials", item.Content, "no part of the typed value")
 		case "nobody@example.com":
 			assert.NotContains(t, item.Other.Op.Params, "identifier_length", "an email address is kept as typed")
 		}
 	}
 	assert.True(t, found)
 	for _, item := range all.Data.Items {
-		if item.Other.Op.Params["identifier"] == "S3…" {
+		if item.Other.Op.Params["identifier"] == "…" {
 			assert.Equal(t, map[string]any{"identifier": "S3cret!pass"}, item.Other.RootInfo)
 		}
 	}
@@ -885,7 +908,7 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	assert.Equal(t, 1, byIP.Data.Total)
 	assert.Equal(t, "198.51.100.9", byIP.Data.Items[0].Ip)
 	byEmail := env.audits(t, "/api/audit?email=KIM@example.com", root)
-	assert.Equal(t, 2, byEmail.Data.Total, "kim's reset request and failed reset, not jimkim or kim_x")
+	assert.Equal(t, 2, byEmail.Data.Total, "kim's reset request and failed reset, not jimkim, kim_x or the quoted address")
 	for _, item := range byEmail.Data.Items {
 		assert.Equal(t, "kim@example.com", item.Other.Op.Params["email"])
 	}

@@ -81,10 +81,17 @@ type AuditLogFilter struct {
 	Email           string // normalised address: the password reset events about it
 }
 
-// PasswordResetAuditActions are the audit actions about one email address
-// that the email filter finds. Their contents name the normalised address
-// after "for " and before ":" or at the end.
-var PasswordResetAuditActions = []string{"user.password_reset_request", "user.password_reset", "user.password_reset_failed"}
+// The contents of the password reset rows (the actions the email filter
+// finds) are one of these texts, the normalised address, then ": " and the
+// outcome or reason (nothing after the address for user.password_reset);
+// controller/audit.go builds them from these. The filter matches the start
+// of the content, so text inside a crafted address cannot make a row match
+// another address.
+const (
+	PasswordResetRequestContent = "Password reset email request for "
+	PasswordResetContent        = "Reset the password through the email link for "
+	PasswordResetFailedContent  = "Password reset through the email link failed for "
+)
 
 func AccessTokenFingerprint(token string) string {
 	// PostgreSQL returns CHAR(32) tokens padded with spaces. Normalize that
@@ -217,11 +224,14 @@ func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*Audit
 		query = query.Where("ip = ?", filter.Ip)
 	}
 	if filter.Email != "" {
-		condition, escaped := "(content LIKE ? ESCAPE '!' OR content LIKE ? ESCAPE '!')", escapeLikeLiteral(filter.Email, "!")
+		like, escaped := "content LIKE ? ESCAPE '!'", escapeLikeLiteral(filter.Email, "!")
 		if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-			condition, escaped = "(content LIKE ? OR content LIKE ?)", escapeLikeLiteral(filter.Email, `\`)
+			like, escaped = "content LIKE ?", escapeLikeLiteral(filter.Email, `\`)
 		}
-		query = query.Where("action IN ?", PasswordResetAuditActions).Where(condition, "% for "+escaped+":%", "% for "+escaped)
+		query = query.Where("((action = ? AND "+like+") OR (action = ? AND content = ?) OR (action = ? AND "+like+"))",
+			"user.password_reset_request", PasswordResetRequestContent+escaped+": %",
+			"user.password_reset", PasswordResetContent+filter.Email,
+			"user.password_reset_failed", PasswordResetFailedContent+escaped+": %")
 	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {

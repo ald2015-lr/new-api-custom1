@@ -21,9 +21,9 @@ const (
 // auditTypedValue is a login name or an email address a client typed, as an
 // audit row keeps it. Users sometimes type their password into the name box,
 // and such a value matches no account, so a value that names no account and
-// is not an email address is masked for every viewer but root: the row keeps
-// its first two runes and its length, and the raw value goes to the
-// root-only part of the row.
+// is not an email address is masked for every viewer but root: params and
+// content show only "…" and its length (no part of the value), and the raw
+// value goes to the root-only part of the row.
 type auditTypedValue struct {
 	value  string // what params and content show
 	raw    string // the value before masking; set only when masked
@@ -40,17 +40,7 @@ func newAuditTypedValue(typed string, maxRunes int, matchesAccount bool) auditTy
 	if typed == "" || matchesAccount || isEmail {
 		return auditTypedValue{value: typed}
 	}
-	return auditTypedValue{value: maskAuditIdentifier(typed), raw: typed, length: length}
-}
-
-// maskAuditIdentifier keeps the first two runes of a value; values of two
-// runes or fewer become "…".
-func maskAuditIdentifier(value string) string {
-	runes := []rune(value)
-	if len(runes) <= 2 {
-		return "…"
-	}
-	return string(runes[:2]) + "…"
+	return auditTypedValue{value: "…", raw: typed, length: length}
 }
 
 // apply stores the value under key in params and, when masked, its length in
