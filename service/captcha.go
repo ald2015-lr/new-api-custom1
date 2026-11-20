@@ -29,16 +29,20 @@ import (
 	"golang.org/x/image/vector"
 )
 
-// The registration captcha is an arithmetic challenge rendered as a PNG. It
-// only slows automated sign-ups down: each image allows a single guess, and
-// the per-network registration limits do the rest.
+// The arithmetic captcha of the registration, forgot password and password
+// login pages is a challenge rendered as a PNG. It only slows automated
+// requests down: each image allows a single guess, and the per-network
+// limits do the rest.
 const (
 	// CaptchaTTL is how long an issued captcha can be answered.
 	CaptchaTTL = 5 * time.Minute
 
-	captchaRedisKeyPrefix   = "new-api:captcha:v1:"
-	captchaRedisTimeout     = 2 * time.Second
-	captchaMemoryMaxEntries = 10000
+	captchaRedisKeyPrefix = "new-api:captcha:v1:"
+	captchaRedisTimeout   = 2 * time.Second
+	// captchaMemoryMaxEntries bounds the pending answers kept without Redis
+	// (about 20 MB at most); every password login needs one while the login
+	// captcha is on.
+	captchaMemoryMaxEntries = 100000
 	captchaMaxAnswerDigits  = 3
 
 	// The image is twice its 120x40 display size so it stays sharp on HiDPI

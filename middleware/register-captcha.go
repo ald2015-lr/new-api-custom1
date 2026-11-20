@@ -23,18 +23,43 @@ func RegisterCaptchaCheck(skipWhenEmailVerified bool) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		captchaID := c.Query("captcha_id")
-		answer := c.Query("captcha")
-		if captchaID == "" || strings.TrimSpace(answer) == "" {
-			common.ApiErrorStatus(c, http.StatusOK, common.NewMessage("Please complete the captcha."), gin.H{"code": "CAPTCHA_REQUIRED"})
-			c.Abort()
-			return
-		}
-		if !service.VerifyCaptcha(captchaID, answer) {
-			common.ApiErrorStatus(c, http.StatusOK, common.NewMessage("Captcha is incorrect or has expired. Please try a new one."), gin.H{"code": "CAPTCHA_INVALID"})
-			c.Abort()
+		if code := CheckRequestCaptcha(c); code != "" {
+			WriteCaptchaRefusal(c, code)
 			return
 		}
 		c.Next()
 	}
+}
+
+// Codes of the captcha refusals.
+const (
+	CaptchaRequiredCode = "CAPTCHA_REQUIRED"
+	CaptchaInvalidCode  = "CAPTCHA_INVALID"
+)
+
+// CheckRequestCaptcha checks the arithmetic captcha of the request (query
+// parameters captcha_id and captcha) and uses it up. It returns "" when it is
+// solved, otherwise CAPTCHA_REQUIRED or CAPTCHA_INVALID. The registration,
+// forgot password and password login pages share the same captchas.
+func CheckRequestCaptcha(c *gin.Context) string {
+	captchaID := c.Query("captcha_id")
+	answer := c.Query("captcha")
+	if captchaID == "" || strings.TrimSpace(answer) == "" {
+		return CaptchaRequiredCode
+	}
+	if !service.VerifyCaptcha(captchaID, answer) {
+		return CaptchaInvalidCode
+	}
+	return ""
+}
+
+// WriteCaptchaRefusal answers a request whose captcha check failed (HTTP 200,
+// success false, the code) and aborts the chain.
+func WriteCaptchaRefusal(c *gin.Context, code string) {
+	message := common.NewMessage("Captcha is incorrect or has expired. Please try a new one.")
+	if code == CaptchaRequiredCode {
+		message = common.NewMessage("Please complete the captcha.")
+	}
+	common.ApiErrorStatus(c, http.StatusOK, message, gin.H{"code": code})
+	c.Abort()
 }

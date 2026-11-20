@@ -127,21 +127,60 @@ func RejectRegisterAttempt(c *gin.Context, retryAfter int64) {
 	registerAttemptLimit.reject(c, retryAfter)
 }
 
-// CaptchaRateLimit limits captcha images per client network (CP) while the
-// per-network registration limit is on, in the registration window: at least
-// CaptchaRateLimitMinNum images, and CaptchaRateLimitPerRegistration for each
-// registration the network may submit. While that limit is off (the default,
-// see common.RegisterIPRateLimitEnabled) captcha images are not limited, so
-// this limit alone cannot close registration for every visitor behind a
-// proxy the server does not trust.
+// CaptchaImagesPerCriticalRequest is the room for one request the critical
+// rate limit lets an IP make on the sign-in and sign-up pages: the image it
+// answers, the one shown after a refusal, and one loaded but never submitted
+// (an expired image, a page left early).
+const CaptchaImagesPerCriticalRequest = 3
+
+// captchaImageLimit returns the captcha images a client network may load per
+// window (in seconds); ok is false when images are not limited.
+//
+// While the per-network registration limit is on: at least
+// CaptchaRateLimitMinNum images and CaptchaRateLimitPerRegistration for each
+// registration the network may submit in the registration window, plus
+// CaptchaImagesPerCriticalRequest for each request the critical rate limit
+// allows in that window while the login or password reset captcha is on.
+//
+// While it is off: CaptchaImagesPerCriticalRequest per request the critical
+// rate limit allows (at least CaptchaRateLimitMinNum), per critical window,
+// while any captcha is on, so a flood of images cannot evict the challenges
+// users are answering. With the critical rate limit off as well, images are
+// not limited: the server may then sit behind a proxy it does not trust,
+// where every visitor has the proxy's address and any per-IP image limit
+// would close sign-in for the whole site.
+func captchaImageLimit() (maxImages int, window int64, ok bool) {
+	signIn := common.LoginCaptchaEnabled || common.PasswordResetCaptchaEnabled
+	criticalNum, criticalWindow := common.CriticalRateLimitNum, common.CriticalRateLimitDuration
+	if criticalNum <= 0 {
+		criticalNum = 20
+	}
+	if criticalWindow <= 0 {
+		criticalWindow = 20 * 60
+	}
+	if common.RegisterIPRateLimitEnabled {
+		maxRequests, registerWindow := registerLimitWindow()
+		maxImages = max(CaptchaRateLimitMinNum, CaptchaRateLimitPerRegistration*maxRequests)
+		if signIn {
+			maxImages += CaptchaImagesPerCriticalRequest * criticalNum * int((registerWindow+criticalWindow-1)/criticalWindow)
+		}
+		return maxImages, registerWindow, true
+	}
+	if common.CriticalRateLimitEnable && (common.RegisterCaptchaEnabled || signIn) {
+		return max(CaptchaRateLimitMinNum, CaptchaImagesPerCriticalRequest*criticalNum), criticalWindow, true
+	}
+	return 0, 0, false
+}
+
+// CaptchaRateLimit limits captcha images per client network (CP) as
+// captchaImageLimit says. The settings are read on every request.
 func CaptchaRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !common.RegisterIPRateLimitEnabled {
+		maxImages, window, ok := captchaImageLimit()
+		if !ok {
 			c.Next()
 			return
 		}
-		maxRequests, window := registerLimitWindow()
-		maxImages := max(CaptchaRateLimitMinNum, CaptchaRateLimitPerRegistration*maxRequests)
 		allowed, retryAfter := takeClientNetworkLimit(c, CaptchaRateLimitMark, maxImages, window)
 		if !allowed {
 			writeClientNetworkRateLimited(c, retryAfter, common.NewMessage("Too many captcha requests. Please try again later."))

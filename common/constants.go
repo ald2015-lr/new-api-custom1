@@ -91,6 +91,24 @@ var RegisterIPRateLimitEnabled = false
 var RegisterIPRateLimitNum = 5
 var RegisterIPRateLimitMinutes = 15
 
+// Password reset and login anti-abuse settings, stored under option keys of
+// the same names and shown in the same settings card as the registration
+// protections. PasswordResetCaptchaEnabled and LoginCaptchaEnabled ask for
+// the arithmetic image captcha on the forgot password page and on every
+// password login. PasswordResetEmailLimit* allow one reset email per address
+// per cooldown and at most the daily maximum in any 24 hours. LoginLockout*
+// refuse password login for an account (or a typed name) for
+// LoginLockoutMinutes after LoginLockoutMaxFailures wrong passwords within
+// that many minutes. All are on by default and none depends on Turnstile.
+var PasswordResetCaptchaEnabled = true
+var PasswordResetEmailLimitEnabled = true
+var PasswordResetEmailCooldownSeconds = 120
+var PasswordResetEmailDailyMax = 5
+var LoginCaptchaEnabled = true
+var LoginLockoutEnabled = true
+var LoginLockoutMaxFailures = 10
+var LoginLockoutMinutes = 15
+
 var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
 var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
 var EmailDomainWhitelist = []string{

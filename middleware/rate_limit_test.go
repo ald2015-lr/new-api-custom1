@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -537,10 +538,25 @@ func TestRegisterRateLimitShortenedWindowAppliesAtOnce(t *testing.T) {
 	}
 }
 
-// The captcha image limit (CP) follows the per-network registration limit:
-// nothing is limited or counted while that is off, otherwise a network gets
-// max(30, 6 × RegisterIPRateLimitNum) images per RegisterIPRateLimitMinutes.
-// The settings are read on every request.
+// useCaptchaBudgetSettings sets the switches the captcha image limit reads:
+// the three captchas and the critical rate limit (per window in seconds).
+func useCaptchaBudgetSettings(t *testing.T, registerCaptcha, loginCaptcha, resetCaptcha, critical bool, criticalNum int, criticalWindow int64) {
+	t.Helper()
+	previous := []any{common.RegisterCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordResetCaptchaEnabled,
+		common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration}
+	common.RegisterCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordResetCaptchaEnabled = registerCaptcha, loginCaptcha, resetCaptcha
+	common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = critical, criticalNum, criticalWindow
+	t.Cleanup(func() {
+		common.RegisterCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordResetCaptchaEnabled = previous[0].(bool), previous[1].(bool), previous[2].(bool)
+		common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = previous[3].(bool), previous[4].(int), previous[5].(int64)
+	})
+}
+
+// The captcha image limit (CP) follows the per-network registration limit
+// while only the registration captcha is on and the critical rate limit is
+// off: nothing is limited or counted while that is off, otherwise a network
+// gets max(30, 6 × RegisterIPRateLimitNum) images per
+// RegisterIPRateLimitMinutes. The settings are read on every request.
 func TestCaptchaRateLimitFollowsTheRegistrationLimit(t *testing.T) {
 	for _, backend := range []struct{ name, network, other string }{
 		{"redis", "192.0.2.94", "198.51.100.94"}, {"memory", "192.0.2.95", "198.51.100.95"},
@@ -553,6 +569,7 @@ func TestCaptchaRateLimitFollowsTheRegistrationLimit(t *testing.T) {
 				useMemoryRateLimitBackend(t)
 			}
 			useRegisterRateLimit(t, false, 1, 1)
+			useCaptchaBudgetSettings(t, true, false, false, false, 20, 1200)
 			router := newRegisterLimitRouter(t)
 			captcha := func(network string) *httptest.ResponseRecorder {
 				return performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", network+":4321")
@@ -602,4 +619,504 @@ func TestCaptchaRateLimitFollowsTheRegistrationLimit(t *testing.T) {
 			assert.Equal(t, http.StatusNoContent, captcha(backend.network).Code, "turning the registration limit off lifts the captcha limit at once")
 		})
 	}
+}
+
+// With the default settings and any captcha on, a network may load three
+// captcha images for each request the critical rate limit allows: 60 per 20
+// minutes while the registration limit is off, 30 + 3 × 20 per registration
+// window while it is on. Without the critical rate limit, and with every
+// captcha off, the registration-off case stays unlimited.
+func TestCaptchaRateLimitBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	useMemoryRateLimitBackend(t)
+	useRegisterRateLimit(t, false, 5, 15)
+	useCaptchaBudgetSettings(t, false, true, false, true, 20, 1200)
+	router := newRegisterLimitRouter(t)
+	captcha := func(remoteAddr string) *httptest.ResponseRecorder {
+		return performRegisterLimitRequest(router, http.MethodGet, "/api/captcha", remoteAddr)
+	}
+	drain := func(remoteAddr string, allowed int) {
+		t.Helper()
+		for i := range allowed {
+			require.Equal(t, http.StatusNoContent, captcha(remoteAddr).Code, "image %d", i+1)
+		}
+		limited := captcha(remoteAddr)
+		require.Equal(t, http.StatusTooManyRequests, limited.Code)
+		assert.Equal(t, "Too many captcha requests. Please try again later.", gjsonMessage(t, limited))
+	}
+
+	// Registration limit off, critical limit on, login captcha on: 60 per 20 minutes.
+	drain("[2001:db8:60::1]:4321", 3*20)
+	assert.Equal(t, http.StatusTooManyRequests, captcha("[2001:db8:60::ffff]:4321").Code, "one /64 shares one budget")
+	retryAfter, err := strconv.Atoi(captcha("[2001:db8:60::2]:4321").Header().Get("Retry-After"))
+	require.NoError(t, err)
+	assert.InDelta(t, 1200, retryAfter, 1)
+
+	// The critical rate limit off: unlimited, as before.
+	common.CriticalRateLimitEnable = false
+	for range 100 {
+		require.Equal(t, http.StatusNoContent, captcha("192.0.2.160:4321").Code)
+	}
+	// Every captcha off: unlimited.
+	common.CriticalRateLimitEnable, common.LoginCaptchaEnabled = true, false
+	for range 100 {
+		require.Equal(t, http.StatusNoContent, captcha("192.0.2.161:4321").Code)
+	}
+	// The registration captcha alone counts too.
+	common.RegisterCaptchaEnabled = true
+	drain("192.0.2.162:4321", 60)
+
+	// Registration limit on (5 per 15 minutes) with a sign-in captcha on:
+	// 30 + 3 × 20 × 1 images per 15 minutes.
+	common.RegisterIPRateLimitEnabled, common.PasswordResetCaptchaEnabled = true, true
+	drain("192.0.2.163:4321", 90)
+	// Both sign-in captchas off: the unchanged registration budget.
+	common.LoginCaptchaEnabled, common.PasswordResetCaptchaEnabled = false, false
+	drain("192.0.2.164:4321", CaptchaRateLimitMinNum)
+}
+
+func gjsonMessage(t *testing.T, recorder *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Message string `json:"message"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &body))
+	return body.Message
+}
+
+// useAuthGuardClock replaces the clock of the password reset limit and the
+// login lockout; the test moves it by assigning *now.
+func useAuthGuardClock(t *testing.T) *time.Time {
+	t.Helper()
+	previous := authGuardNow
+	now := time.Date(2026, 11, 20, 8, 0, 0, 0, time.UTC)
+	authGuardNow = func() time.Time { return now }
+	t.Cleanup(func() { authGuardNow = previous })
+	return &now
+}
+
+// useFreshAuthGuardMemory gives the test empty in-memory stores.
+func useFreshAuthGuardMemory(t *testing.T) {
+	t.Helper()
+	previousReset, previousLogin := passwordResetMemory, loginLockMemory
+	passwordResetMemory, loginLockMemory = newAuthGuardMemory(authGuardMemoryMaxEntries), newAuthGuardMemory(authGuardMemoryMaxEntries)
+	t.Cleanup(func() { passwordResetMemory, loginLockMemory = previousReset, previousLogin })
+}
+
+func useAuthGuardSettings(t *testing.T, resetLimit bool, cooldownSeconds, dailyMax int, lockout bool, maxFailures, minutes int) {
+	t.Helper()
+	previousReset, previousCooldown, previousDaily := common.PasswordResetEmailLimitEnabled, common.PasswordResetEmailCooldownSeconds, common.PasswordResetEmailDailyMax
+	previousLockout, previousMax, previousMinutes := common.LoginLockoutEnabled, common.LoginLockoutMaxFailures, common.LoginLockoutMinutes
+	common.PasswordResetEmailLimitEnabled, common.PasswordResetEmailCooldownSeconds, common.PasswordResetEmailDailyMax = resetLimit, cooldownSeconds, dailyMax
+	common.LoginLockoutEnabled, common.LoginLockoutMaxFailures, common.LoginLockoutMinutes = lockout, maxFailures, minutes
+	t.Cleanup(func() {
+		common.PasswordResetEmailLimitEnabled, common.PasswordResetEmailCooldownSeconds, common.PasswordResetEmailDailyMax = previousReset, previousCooldown, previousDaily
+		common.LoginLockoutEnabled, common.LoginLockoutMaxFailures, common.LoginLockoutMinutes = previousLockout, previousMax, previousMinutes
+	})
+}
+
+// useAuthGuardBackend runs the test on miniredis ("redis") or on the
+// in-memory store ("memory"); it returns the miniredis server or nil.
+func useAuthGuardBackend(t *testing.T, backend string) *miniredis.Miniredis {
+	t.Helper()
+	useFreshAuthGuardMemory(t)
+	if backend == "redis" {
+		redisServer, _ := useRateLimitMiniRedis(t)
+		return redisServer
+	}
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+	return nil
+}
+
+// assertNoRawValueInKeys checks that no Redis key name carries one of the
+// given values in clear text.
+func assertNoRawValueInKeys(t *testing.T, redisServer *miniredis.Miniredis, values ...string) {
+	t.Helper()
+	for _, key := range redisServer.Keys() {
+		for _, value := range values {
+			assert.NotContains(t, strings.ToLower(key), strings.ToLower(value), "key %s", key)
+		}
+	}
+}
+
+// One rolling 24-hour log per address: a cooldown between two admitted
+// requests, at most the daily maximum in any 24 hours, the daily maximum
+// reported first, and refusals never recorded.
+func TestPasswordResetEmailLimitCooldownAndRollingDay(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		t.Run(backend, func(t *testing.T) {
+			redisServer := useAuthGuardBackend(t, backend)
+			now := useAuthGuardClock(t)
+			useAuthGuardSettings(t, true, 120, 5, true, 10, 15)
+			ctx := context.Background()
+			const email = "owner@example.com"
+			start := *now
+			at := func(offset time.Duration) { *now = start.Add(offset) }
+			subject := passwordResetEmailSubject(email)
+			key := authGuardRedisPrefix + "reset:" + subject
+			admitted := func() int {
+				if redisServer != nil {
+					members, err := redisServer.ZMembers(key)
+					require.NoError(t, err)
+					return len(members)
+				}
+				entry := passwordResetMemory.lookup(subject)
+				if entry == nil {
+					return 0
+				}
+				return len(entry.marks)
+			}
+
+			assert.Nil(t, TakePasswordResetEmail(ctx, email))
+			at(10 * time.Second)
+			assert.Equal(t, &PasswordResetEmailRefusal{Code: PasswordResetEmailCooldownCode, WaitSeconds: 110}, TakePasswordResetEmail(ctx, email))
+			at(119*time.Second + 500*time.Millisecond)
+			assert.Equal(t, &PasswordResetEmailRefusal{Code: PasswordResetEmailCooldownCode, WaitSeconds: 1}, TakePasswordResetEmail(ctx, email), "waits round up")
+			assert.Equal(t, 1, admitted(), "refused requests are not recorded")
+			for i := 1; i < 5; i++ {
+				at(time.Duration(i) * 120 * time.Second)
+				require.Nil(t, TakePasswordResetEmail(ctx, email), "request %d", i+1)
+			}
+			at(490 * time.Second)
+			assert.Equal(t, &PasswordResetEmailRefusal{Code: PasswordResetEmailDailyLimitCode, WaitSeconds: 86400 - 490}, TakePasswordResetEmail(ctx, email), "the daily maximum is reported before the cooldown")
+			at(600 * time.Second)
+			assert.Equal(t, &PasswordResetEmailRefusal{Code: PasswordResetEmailDailyLimitCode, WaitSeconds: 86400 - 600}, TakePasswordResetEmail(ctx, email))
+			assert.Equal(t, 5, admitted())
+
+			// Rolling, not a calendar day: the first request leaves the window after 24 hours.
+			at(24*time.Hour - time.Millisecond)
+			assert.Equal(t, PasswordResetEmailDailyLimitCode, TakePasswordResetEmail(ctx, email).Code)
+			at(24 * time.Hour)
+			assert.Nil(t, TakePasswordResetEmail(ctx, email))
+			assert.Equal(t, 5, admitted())
+
+			// A lowered maximum waits for the entry at index count-max.
+			common.PasswordResetEmailDailyMax = 2
+			at(24*time.Hour + 200*time.Second)
+			assert.Equal(t, &PasswordResetEmailRefusal{Code: PasswordResetEmailDailyLimitCode, WaitSeconds: 480 + 86400 - 86600}, TakePasswordResetEmail(ctx, email))
+
+			// Other addresses have their own log; the limit off admits and records nothing.
+			assert.Nil(t, TakePasswordResetEmail(ctx, "other@example.com"))
+			common.PasswordResetEmailLimitEnabled = false
+			for range 3 {
+				assert.Nil(t, TakePasswordResetEmail(ctx, "free@example.com"))
+			}
+			assert.Equal(t, int64(0), PasswordResetEmailCooldownSeconds())
+			common.PasswordResetEmailLimitEnabled = true
+			assert.Equal(t, int64(120), PasswordResetEmailCooldownSeconds())
+			if redisServer != nil {
+				assert.True(t, redisServer.Exists(key))
+				assert.Equal(t, 24*time.Hour, redisServer.TTL(key))
+				assert.False(t, redisServer.Exists(authGuardRedisPrefix+"reset:"+passwordResetEmailSubject("free@example.com")))
+				assert.Len(t, redisServer.Keys(), 2)
+				assertNoRawValueInKeys(t, redisServer, "owner", "example.com", "other")
+			} else {
+				assert.Nil(t, passwordResetMemory.lookup(passwordResetEmailSubject("free@example.com")))
+			}
+
+			// Clearing forgets the address.
+			ClearPasswordResetEmailLimit(ctx, email)
+			assert.Nil(t, TakePasswordResetEmail(ctx, email))
+		})
+	}
+}
+
+func TestPasswordResetEmailLimitIsAtomic(t *testing.T) {
+	useAuthGuardBackend(t, "redis")
+	useAuthGuardClock(t)
+	useAuthGuardSettings(t, true, 120, 5, true, 10, 15)
+	var admitted atomic.Int32
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			if TakePasswordResetEmail(context.Background(), "race@example.com") == nil {
+				admitted.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), admitted.Load())
+}
+
+// The lockout counts failed checks per subject in a rolling window and
+// locks every subject that reaches the maximum, for as long as the window.
+func TestLoginLockoutCountsLocksAndClears(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		t.Run(backend, func(t *testing.T) {
+			redisServer := useAuthGuardBackend(t, backend)
+			now := useAuthGuardClock(t)
+			useAuthGuardSettings(t, true, 120, 5, true, 3, 1)
+			ctx := context.Background()
+			fail := func(subjects []string) (int64, bool) {
+				t.Helper()
+				attempt, wait := BeginLoginAttempt(ctx, subjects)
+				require.NotNil(t, attempt)
+				require.Zero(t, wait)
+				return attempt.Fail(ctx)
+			}
+			x := LoginLockSubjects(0, "x")
+			for range 2 {
+				lockSeconds, started := fail(x)
+				assert.Zero(t, lockSeconds)
+				assert.False(t, started)
+			}
+			lockSeconds, started := fail(x)
+			assert.Equal(t, int64(60), lockSeconds, "the failure that reaches the maximum locks at once")
+			assert.True(t, started)
+			attempt, wait := BeginLoginAttempt(ctx, x)
+			assert.Nil(t, attempt)
+			assert.Equal(t, int64(60), wait)
+			*now = now.Add(10 * time.Second)
+			_, wait = BeginLoginAttempt(ctx, x)
+			assert.Equal(t, int64(50), wait, "a refused attempt is not counted and does not extend the lock")
+
+			// An account locked through one name is locked for every name.
+			for range 3 {
+				fail(LoginLockSubjects(7, "y"))
+			}
+			attempt, wait = BeginLoginAttempt(ctx, LoginLockSubjects(7, "z"))
+			assert.Nil(t, attempt)
+			assert.Equal(t, int64(60), wait)
+
+			// After the lock the count starts again.
+			*now = now.Add(51 * time.Second)
+			for range 2 {
+				lockSeconds, _ = fail(x)
+				assert.Zero(t, lockSeconds)
+			}
+			// Failures older than the window drop out.
+			*now = now.Add(61 * time.Second)
+			lockSeconds, started = fail(x)
+			assert.Zero(t, lockSeconds)
+			assert.False(t, started)
+
+			// Released checks are not failures; Release after Fail does nothing.
+			for range 5 {
+				attempt, wait = BeginLoginAttempt(ctx, LoginLockSubjects(0, "released"))
+				require.NotNil(t, attempt)
+				require.Zero(t, wait)
+				attempt.Release(ctx)
+				attempt.Release(ctx)
+			}
+			attempt, _ = BeginLoginAttempt(ctx, LoginLockSubjects(0, "released"))
+			lockSeconds, _ = attempt.Fail(ctx)
+			attempt.Release(ctx)
+			assert.Zero(t, lockSeconds)
+			var nilAttempt *LoginAttempt
+			nilAttempt.Release(ctx)
+			lockSeconds, started = nilAttempt.Fail(ctx)
+			assert.Zero(t, lockSeconds)
+			assert.False(t, started)
+
+			// Clearing an account clears its names too.
+			for range 3 {
+				fail(LoginLockSubjects(8, "Alice"))
+			}
+			for range 2 {
+				fail(LoginLockSubjects(0, "a@x.com"))
+			}
+			assert.True(t, ClearLoginLockout(ctx, 8, "Alice", "a@x.com"))
+			for _, subjects := range [][]string{LoginLockSubjects(8, ""), LoginLockSubjects(0, "alice")} {
+				attempt, wait = BeginLoginAttempt(ctx, subjects)
+				assert.NotNil(t, attempt)
+				assert.Zero(t, wait)
+				attempt.Release(ctx)
+			}
+			lockSeconds, _ = fail(LoginLockSubjects(0, "a@x.com"))
+			assert.Zero(t, lockSeconds, "the failures of the email name were cleared")
+			assert.False(t, ClearLoginLockout(ctx, 8, "Alice"))
+
+			// The lockout off counts nothing; clearing still works.
+			for range 3 {
+				fail(LoginLockSubjects(7, "y"))
+			}
+			common.LoginLockoutEnabled = false
+			var keysBefore int
+			if redisServer != nil {
+				keysBefore = len(redisServer.Keys())
+			}
+			for range 5 {
+				attempt, wait = BeginLoginAttempt(ctx, LoginLockSubjects(9, "off"))
+				assert.Nil(t, attempt)
+				assert.Zero(t, wait)
+			}
+			if redisServer != nil {
+				assert.Len(t, redisServer.Keys(), keysBefore)
+			}
+			assert.True(t, ClearLoginLockout(ctx, 7, "y"))
+			common.LoginLockoutEnabled = true
+			attempt, wait = BeginLoginAttempt(ctx, LoginLockSubjects(7, "y"))
+			assert.NotNil(t, attempt)
+			assert.Zero(t, wait)
+			if redisServer != nil {
+				assertNoRawValueInKeys(t, redisServer, "alice", "a@x.com", "released")
+			}
+		})
+	}
+}
+
+// Every check holds a slot, so a burst cannot have more than the maximum of
+// password checks in flight or failed per window, whatever the concurrency.
+func TestLoginLockoutReservationsBoundConcurrentChecks(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		t.Run(backend, func(t *testing.T) {
+			useAuthGuardBackend(t, backend)
+			useAuthGuardClock(t)
+			useAuthGuardSettings(t, true, 120, 5, true, 10, 15)
+			ctx := context.Background()
+			subjects := LoginLockSubjects(1, "root")
+			attempts := make(chan *LoginAttempt, 50)
+			var refused atomic.Int32
+			var wg sync.WaitGroup
+			for range 50 {
+				wg.Go(func() {
+					attempt, wait := BeginLoginAttempt(ctx, subjects)
+					if attempt != nil {
+						attempts <- attempt
+					} else if wait > 0 {
+						refused.Add(1)
+					}
+				})
+			}
+			wg.Wait()
+			close(attempts)
+			admitted := make([]*LoginAttempt, 0, 10)
+			for attempt := range attempts {
+				admitted = append(admitted, attempt)
+			}
+			assert.Len(t, admitted, 10)
+			assert.Equal(t, int32(40), refused.Load())
+
+			var started atomic.Int32
+			for _, attempt := range admitted {
+				wg.Go(func() {
+					if lockSeconds, lockStarted := attempt.Fail(ctx); lockStarted {
+						started.Add(1)
+					} else {
+						assert.Positive(t, lockSeconds)
+					}
+				})
+			}
+			wg.Wait()
+			assert.Equal(t, int32(1), started.Load())
+			for _, subject := range subjects {
+				attempt, wait := BeginLoginAttempt(ctx, []string{subject})
+				assert.Nil(t, attempt, subject)
+				assert.Equal(t, int64(15*60), wait, subject)
+			}
+		})
+	}
+}
+
+func TestLoginLockSubjectsFoldNames(t *testing.T) {
+	assert.Equal(t, []string{"u:7"}, LoginLockSubjects(7, ""))
+	assert.Empty(t, LoginLockSubjects(0, "  "))
+	assert.Empty(t, LoginLockSubjects(0, ""))
+	alice := LoginLockSubjects(0, "Alice")
+	require.Len(t, alice, 1)
+	assert.True(t, strings.HasPrefix(alice[0], "n:"))
+	assert.NotContains(t, alice[0], "lice")
+	for _, variant := range []string{"alice", " ALICE ", "alicé", "ａｌｉｃｅ", "ÄLICE"} {
+		assert.Equal(t, alice, LoginLockSubjects(0, variant), variant)
+	}
+	assert.NotEqual(t, alice, LoginLockSubjects(0, "bob"))
+	assert.Equal(t, append(append([]string{}, alice...), "u:3"), LoginLockSubjects(3, "Alice"))
+}
+
+// A failing Redis never refuses or breaks a request: the same call uses the
+// in-memory store. A Redis reservation whose Fail cannot reach Redis stays
+// in Redis as a failure.
+func TestAuthGuardFallsBackToMemoryWhenRedisFails(t *testing.T) {
+	redisServer, redisClient := useRateLimitMiniRedis(t)
+	useFreshAuthGuardMemory(t)
+	useAuthGuardClock(t)
+	useAuthGuardSettings(t, true, 120, 5, true, 3, 15)
+	ctx := context.Background()
+
+	healthy, wait := BeginLoginAttempt(ctx, LoginLockSubjects(5, "kept"))
+	require.NotNil(t, healthy)
+	require.Zero(t, wait)
+	require.NoError(t, redisClient.Close())
+	lockSeconds, started := healthy.Fail(ctx)
+	assert.Zero(t, lockSeconds)
+	assert.False(t, started)
+	members, err := redisServer.ZMembers(authGuardRedisPrefix + "login:fail:u:5")
+	require.NoError(t, err)
+	assert.Len(t, members, 1, "the reservation stays counted")
+
+	assert.Nil(t, TakePasswordResetEmail(ctx, "down@example.com"))
+	assert.Equal(t, PasswordResetEmailCooldownCode, TakePasswordResetEmail(ctx, "down@example.com").Code)
+	for range 3 {
+		attempt, wait := BeginLoginAttempt(ctx, LoginLockSubjects(6, "down"))
+		require.NotNil(t, attempt)
+		require.Zero(t, wait)
+		lockSeconds, started = attempt.Fail(ctx)
+	}
+	assert.Equal(t, int64(15*60), lockSeconds)
+	assert.True(t, started)
+	attempt, wait := BeginLoginAttempt(ctx, LoginLockSubjects(6, ""))
+	assert.Nil(t, attempt)
+	assert.Equal(t, int64(15*60), wait)
+	released, _ := BeginLoginAttempt(ctx, LoginLockSubjects(0, "released"))
+	require.NotNil(t, released)
+	released.Release(ctx)
+	assert.True(t, ClearLoginLockout(ctx, 6, "down"))
+	attempt, wait = BeginLoginAttempt(ctx, LoginLockSubjects(6, "down"))
+	assert.NotNil(t, attempt)
+	assert.Zero(t, wait)
+	ClearPasswordResetEmailLimit(ctx, "down@example.com")
+	assert.Nil(t, TakePasswordResetEmail(ctx, "down@example.com"))
+}
+
+// The in-memory store keeps at most its limit of name and address entries:
+// expired ones go first, then the least recently updated one, but never one
+// with an active lock (a new name is left untracked instead). Account
+// entries are never evicted; expired ones are swept as the map grows.
+func TestAuthGuardMemoryStoreBoundsAndPins(t *testing.T) {
+	store := newAuthGuardMemory(3)
+	const window = int64(60_000)
+	now := int64(1_000_000)
+	begin := func(subjects ...string) {
+		t.Helper()
+		require.Zero(t, store.beginLogin(subjects, common.GetUUID(), now, window, 3))
+	}
+	lock := func(subject string) {
+		t.Helper()
+		for range 3 {
+			begin(subject)
+		}
+		_, started := store.failLogin([]string{subject}, now, window, 3, now+window)
+		require.True(t, started)
+	}
+
+	begin("n:a")
+	now += 1000
+	begin("n:b")
+	begin("n:c")
+	begin("u:7")
+	now += window - 500 // n:a expired, n:b and n:c not yet
+	begin("n:d")
+	assert.Nil(t, store.lookup("n:a"), "an expired entry is dropped first")
+	assert.NotNil(t, store.lookup("n:b"))
+	begin("n:e")
+	assert.Nil(t, store.lookup("n:b"), "the least recently updated entry is evicted next")
+	assert.Len(t, store.bounded, 3)
+
+	now += window + 1000 // everything expired
+	lock("n:l1")
+	lock("n:l2")
+	lock("n:l3")
+	begin("n:new")
+	assert.Nil(t, store.lookup("n:new"), "a full store of active locks does not track a new name")
+	for _, subject := range []string{"n:l1", "n:l2", "n:l3"} {
+		assert.Positive(t, store.beginLogin([]string{subject}, common.GetUUID(), now, window, 3), "locks are never evicted")
+	}
+	assert.NotNil(t, store.lookup("u:7"), "account entries are never evicted")
+
+	store.sweepAt = 1
+	begin("u:8")
+	assert.Nil(t, store.lookup("u:7"), "expired account entries are swept")
+	assert.NotNil(t, store.lookup("u:8"))
 }
