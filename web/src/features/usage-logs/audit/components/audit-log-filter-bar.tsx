@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { Table } from '@tanstack/react-table'
+import { useId } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Combobox } from '@/components/ui/combobox'
@@ -27,6 +28,11 @@ import {
   LogsFilterInput,
   LogsFilterToolbar,
 } from '../../components/logs-filter-toolbar'
+import {
+  AUTH_AUDIT_EVENTS,
+  isAuditEmailFilter,
+  isAuditIpFilter,
+} from '../../lib/auth-audit'
 import type { AuditFilters, AuditLog } from '../api'
 
 function AuditFilterSelect(props: {
@@ -65,6 +71,7 @@ export function AuditLogFilterBar(props: {
   onReset: () => void
 }) {
   const { t } = useTranslation()
+  const emailHintId = useId()
   const dateFilter = (
     <LogsFilterField wide>
       <CompactDateTimeRangePicker
@@ -181,12 +188,70 @@ export function AuditLogFilterBar(props: {
             />
           </LogsFilterField>
         )}
+        {props.scope === 'all' && !props.accessOnly && (
+          <>
+            <AuditFilterSelect
+              label={t('Event')}
+              value={props.filters.action ?? 'all'}
+              options={[
+                { value: 'all', label: t('All events') },
+                ...AUTH_AUDIT_EVENTS.map((event) => ({
+                  value: event.value,
+                  label: t(event.labelKey),
+                })),
+              ]}
+              onChange={(value) =>
+                props.onChange({ action: value === 'all' ? undefined : value })
+              }
+            />
+            <LogsFilterField>
+              <LogsFilterInput
+                aria-label={t('IP address')}
+                placeholder={t('IP address')}
+                value={props.filters.ip ?? ''}
+                // A partial address is not applied until it is complete.
+                aria-invalid={
+                  !!props.filters.ip && !isAuditIpFilter(props.filters.ip)
+                }
+                onChange={(event) =>
+                  props.onChange({ ip: event.target.value || undefined })
+                }
+              />
+            </LogsFilterField>
+            <LogsFilterField>
+              <LogsFilterInput
+                aria-label={t('Email')}
+                aria-describedby={emailHintId}
+                placeholder={t('Email')}
+                value={props.filters.email ?? ''}
+                aria-invalid={
+                  !!props.filters.email &&
+                  !isAuditEmailFilter(props.filters.email)
+                }
+                onChange={(event) =>
+                  props.onChange({ email: event.target.value || undefined })
+                }
+              />
+              <p
+                id={emailHintId}
+                className='text-muted-foreground mt-1 text-xs leading-4'
+              >
+                {t(
+                  'Finds password reset events for this address. For failed sign-ins, use the username or IP filter.'
+                )}
+              </p>
+            </LogsFilterField>
+          </>
+        )}
       </>
     ) : undefined
   const advancedCount = [
     props.filters.token_ref,
     props.filters.request_id,
     props.filters.username,
+    props.filters.action,
+    props.filters.ip,
+    props.filters.email,
   ].filter(Boolean).length
   const filterCount =
     advancedCount +

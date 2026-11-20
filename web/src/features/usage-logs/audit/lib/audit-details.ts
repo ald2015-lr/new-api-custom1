@@ -23,6 +23,7 @@ import type { PermissionResourceDef } from '@/lib/admin-permissions'
 import dayjs from '@/lib/dayjs'
 import { ROLE } from '@/lib/roles'
 
+import { authAuditValueLabel } from '../../lib/auth-audit'
 import { renderAuditContent } from '../../lib/format'
 import { buildQuotaAuditOperation } from '../../lib/quota-audit-operation'
 import type { LogOtherData } from '../../types'
@@ -202,6 +203,26 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Invited Users')
     case 'kind':
       return t('Type')
+    case 'email':
+      return t('Email')
+    case 'outcome':
+      return t('Outcome')
+    case 'detail':
+      return t('Detail')
+    case 'reason':
+      return t('Reason')
+    case 'identifier':
+      return t('Username or Email')
+    case 'identifier_length':
+      return t('Identifier length')
+    case 'wait_seconds':
+      return t('Wait (seconds)')
+    case 'lock_started':
+      return t('Lock started')
+    case 'was_locked':
+      return t('Was locked')
+    case 'code':
+      return t('Error code')
     default:
       return key
   }
@@ -546,6 +567,18 @@ export function buildAuditDetails(
   if (action === 'user.invite_abuse_ban' && typeof params.kind === 'string') {
     params.kind = params.kind === 'inviter' ? t('Inviter') : t('Invitee')
   }
+  const lockStarted = params.lock_started === true
+  for (const key of ['outcome', 'reason', 'detail']) {
+    if (key in params) {
+      params[key] = authAuditValueLabel(
+        action,
+        key,
+        params[key],
+        t,
+        lockStarted
+      )
+    }
+  }
   if (typeof params.verification_method === 'string') {
     params.verification_method = loginMethodLabel(params.verification_method, t)
   }
@@ -600,6 +633,16 @@ export function buildAuditDetails(
   for (const [key, value] of Object.entries(params)) {
     fields.push({ label: auditFieldLabel(key, t), value })
   }
+  // The server sends root_info to root only: the raw name or address of a
+  // failed sign-in or reset that the params keep masked.
+  const rootInfo = isAuditDetailObject(metadata.root_info)
+    ? { ...metadata.root_info }
+    : null
+  for (const key of ['identifier', 'email']) {
+    if (typeof rootInfo?.[key] !== 'string') continue
+    fields.push({ label: t('Typed value (root only)'), value: rootInfo[key] })
+    delete rootInfo[key]
+  }
   if (
     typeof metadata.login_method === 'string' &&
     params.method === undefined
@@ -616,6 +659,8 @@ export function buildAuditDetails(
   delete extra.audit_info
   delete extra.login_method
   delete extra.user_agent
+  delete extra.root_info
+  if (rootInfo && Object.keys(rootInfo).length) extra.root_info = rootInfo
   const adminExtra = { ...admin }
   for (const key of [
     'admin_id',

@@ -31,6 +31,7 @@ const ACTION_MESSAGES: Record<ManageUserAction, string> = {
   set_admin: 'User set as full admin successfully',
   delete: 'User deleted successfully',
   add_quota: 'Quota adjusted successfully',
+  unlock_login: 'Login lock cleared',
 }
 
 /**

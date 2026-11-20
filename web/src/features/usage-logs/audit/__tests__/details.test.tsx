@@ -31,7 +31,7 @@ import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import type { ReactElement } from 'react'
 import { I18nextProvider } from 'react-i18next'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import zh from '@/i18n/locales/zh.json'
 import type { PermissionResourceDef } from '@/lib/admin-permissions'
@@ -1098,4 +1098,334 @@ it('does not load scope labels for other records', async () => {
   const get = vi.spyOn(api, 'get')
   await openDetails()
   expect(get).not.toHaveBeenCalled()
+})
+
+describe('password reset and sign-in protection events', () => {
+  async function englishT() {
+    const i18n = createInstance()
+    await i18n.init({ lng: 'en', resources: {}, nsSeparator: false })
+    return i18n.t
+  }
+
+  function authEntry(
+    action: string,
+    params: Record<string, unknown>,
+    other: Record<string, unknown> = {}
+  ): AuditLog {
+    return {
+      ...entry,
+      user_id: 0,
+      username: '',
+      actor_role: 1,
+      category: 'login',
+      action,
+      content: '',
+      success: false,
+      other: { op: { action, params }, ...other },
+    }
+  }
+
+  const reset = 'user.password_reset_request'
+  const address = { email: 'user@example.com' }
+
+  it.each([
+    [
+      reset,
+      { ...address, outcome: 'sent' },
+      'Password reset request for user@example.com: email sent',
+    ],
+    [
+      reset,
+      { ...address, outcome: 'not_registered' },
+      'Password reset request for user@example.com: no account uses this address',
+    ],
+    [
+      reset,
+      { ...address, outcome: 'send_failed', detail: 'smtp_error' },
+      'Password reset request for user@example.com: email could not be sent',
+    ],
+    [
+      reset,
+      { ...address, outcome: 'cooldown', wait_seconds: 95 },
+      'Password reset request for user@example.com: requested again too soon',
+    ],
+    [
+      reset,
+      { ...address, outcome: 'daily_limit', wait_seconds: 51234 },
+      'Password reset request for user@example.com: daily limit reached',
+    ],
+    [
+      reset,
+      { ...address, outcome: 'captcha_failed', code: 'CAPTCHA_INVALID' },
+      'Password reset request for user@example.com: captcha missing or incorrect',
+    ],
+    [
+      reset,
+      { email: 'no…', outcome: 'invalid_email', identifier_length: 9 },
+      'Password reset request for no… (9 characters): invalid email address',
+    ],
+    [
+      reset,
+      { email: '', outcome: 'captcha_failed', code: 'CAPTCHA_REQUIRED' },
+      'Password reset request: captcha missing or incorrect',
+    ],
+    ['user.password_reset', address, 'Password reset through the email link'],
+    [
+      'user.password_reset_failed',
+      { ...address, reason: 'invalid_link' },
+      'Password reset through the email link failed: invalid or expired link',
+    ],
+    [
+      'user.password_reset_failed',
+      { email: '', reason: 'invalid_request' },
+      'Password reset through the email link failed: invalid request',
+    ],
+    [
+      'user.password_reset_failed',
+      { ...address, reason: 'server_error' },
+      'Password reset through the email link failed: server error',
+    ],
+    [
+      'user.login_failed',
+      {
+        method: 'password',
+        identifier: 'alice',
+        reason: 'invalid_credentials',
+      },
+      'Failed login as alice: wrong username or password',
+    ],
+    [
+      'user.login_failed',
+      {
+        method: 'password',
+        identifier: 'alice',
+        reason: 'invalid_credentials',
+        wait_seconds: 900,
+        lock_started: true,
+      },
+      'Failed login as alice: wrong username or password, sign-in now locked',
+    ],
+    [
+      'user.login_failed',
+      { method: 'password', identifier: 'alice', reason: 'disabled' },
+      'Failed login as alice: account disabled',
+    ],
+    [
+      'user.login_failed',
+      {
+        method: 'password',
+        identifier: 'alice',
+        reason: 'locked',
+        wait_seconds: 840,
+      },
+      'Failed login as alice: too many failed attempts, sign-in locked',
+    ],
+    [
+      'user.login_failed',
+      {
+        method: 'password',
+        identifier: 'alice',
+        reason: 'captcha_failed',
+        code: 'CAPTCHA_INVALID',
+      },
+      'Failed login as alice: captcha missing or incorrect',
+    ],
+    [
+      'user.login_failed',
+      {
+        method: 'password',
+        identifier: 'S3…',
+        identifier_length: 11,
+        reason: 'invalid_credentials',
+      },
+      'Failed login as S3… (11 characters): wrong username or password',
+    ],
+    [
+      'user.login_failed',
+      { method: 'password', identifier: '', reason: 'invalid_request' },
+      'Failed login: invalid request',
+    ],
+    [
+      'user.login_2fa_failed',
+      { method: 'password', reason: 'invalid_code' },
+      'Failed two-factor verification at login: wrong code',
+    ],
+    [
+      'user.login_2fa_failed',
+      { method: 'oauth:github', reason: 'twofa_locked' },
+      'Failed two-factor verification at login: two-factor authentication temporarily locked',
+    ],
+    [
+      'user.login_2fa_failed',
+      { method: 'password', reason: 'locked', wait_seconds: 600 },
+      'Failed two-factor verification at login: too many failed attempts, sign-in locked',
+    ],
+    [
+      'user.login_unlock',
+      { username: 'alice', id: 7, was_locked: true },
+      'Cleared the login lock of user alice (ID: 7)',
+    ],
+  ])('summarizes %s with %j', async (action, params, summary) => {
+    const detail = buildAuditDetails(
+      authEntry(action, params),
+      await englishT()
+    )
+
+    expect(detail.summary).toBe(summary)
+  })
+
+  it('labels the params of a failed sign-in and translates its reason', async () => {
+    const detail = buildAuditDetails(
+      authEntry('user.login_failed', {
+        method: 'password',
+        identifier: 'S3…',
+        identifier_length: 11,
+        reason: 'invalid_credentials',
+        wait_seconds: 900,
+        lock_started: true,
+      }),
+      await englishT()
+    )
+
+    expect(detail.fields).toEqual([
+      { label: 'Authentication Method', value: 'Password' },
+      { label: 'Username or Email', value: 'S3…' },
+      { label: 'Identifier length', value: 11 },
+      {
+        label: 'Reason',
+        value: 'wrong username or password, sign-in now locked',
+      },
+      { label: 'Wait (seconds)', value: 900 },
+      { label: 'Lock started', value: true },
+    ])
+    expect(JSON.stringify(detail)).not.toContain('invalid_credentials')
+  })
+
+  it('labels the params of a failed reset email and translates its outcome and detail', async () => {
+    const detail = buildAuditDetails(
+      authEntry(reset, {
+        ...address,
+        outcome: 'send_failed',
+        detail: 'email_ambiguous',
+      }),
+      await englishT()
+    )
+
+    expect(detail.fields).toEqual([
+      { label: 'Email', value: 'user@example.com' },
+      { label: 'Outcome', value: 'email could not be sent' },
+      { label: 'Detail', value: 'email matches several accounts' },
+    ])
+  })
+
+  it('labels the refusal code, the unlock result and the lookup failure', async () => {
+    const t = await englishT()
+    expect(
+      buildAuditDetails(
+        authEntry(reset, {
+          ...address,
+          outcome: 'captcha_failed',
+          code: 'CAPTCHA_REQUIRED',
+        }),
+        t
+      ).fields
+    ).toContainEqual({ label: 'Error code', value: 'CAPTCHA_REQUIRED' })
+    expect(
+      buildAuditDetails(
+        authEntry(reset, {
+          ...address,
+          outcome: 'send_failed',
+          detail: 'lookup_error',
+        }),
+        t
+      ).fields
+    ).toContainEqual({ label: 'Detail', value: 'account lookup failed' })
+    const unlock = buildAuditDetails(
+      authEntry('user.login_unlock', {
+        username: 'alice',
+        id: 7,
+        was_locked: false,
+      }),
+      t
+    )
+    expect(unlock.target).toBe('alice (ID: 7)')
+    expect(unlock.fields).toContainEqual({ label: 'Was locked', value: false })
+  })
+
+  it('shows root the typed value kept out of the masked params, once', async () => {
+    const detail = buildAuditDetails(
+      authEntry(
+        'user.login_failed',
+        {
+          method: 'password',
+          identifier: 'S3…',
+          identifier_length: 11,
+          reason: 'invalid_credentials',
+        },
+        { root_info: { identifier: 'S3cretPass1' } }
+      ),
+      await englishT()
+    )
+
+    expect(detail.fields).toContainEqual({
+      label: 'Typed value (root only)',
+      value: 'S3cretPass1',
+    })
+    expect(detail.extra).not.toHaveProperty('root_info')
+  })
+
+  it('shows root the typed address of a refused reset request', async () => {
+    const detail = buildAuditDetails(
+      authEntry(
+        reset,
+        { email: 'no…', identifier_length: 9, outcome: 'invalid_email' },
+        { root_info: { email: 'not-an-at' } }
+      ),
+      await englishT()
+    )
+
+    expect(detail.fields).toContainEqual({
+      label: 'Typed value (root only)',
+      value: 'not-an-at',
+    })
+  })
+
+  it('shows no typed value to viewers who do not receive it', async () => {
+    const { dialog } = await openDetails(
+      authEntry('user.login_failed', {
+        method: 'password',
+        identifier: 'S3…',
+        identifier_length: 11,
+        reason: 'invalid_credentials',
+      })
+    )
+
+    expect(
+      within(dialog).queryByText('Typed value (root only)')
+    ).not.toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent('invalid_credentials')
+    expect(
+      within(dialog).getAllByText(
+        'Failed login as S3… (11 characters): wrong username or password'
+      ).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('shows a failed sign-in that started a lock in Chinese', async () => {
+    const i18n = createInstance()
+    await i18n.init({ lng: 'zh', resources: { zh } })
+    const detail = buildAuditDetails(
+      authEntry('user.login_failed', {
+        method: 'password',
+        identifier: 'alice',
+        reason: 'invalid_credentials',
+        lock_started: true,
+      }),
+      i18n.t
+    )
+
+    expect(detail.summary).toBe(
+      '以 alice 登录失败：用户名或密码错误，已锁定密码登录'
+    )
+  })
 })

@@ -53,6 +53,12 @@ export interface AuditFilters {
   exclude_token_ref?: string
   username?: string
   request_id?: string
+  /** Exact event, such as `user.login_failed` */
+  action?: string
+  /** Exact client IP */
+  ip?: string
+  /** Password reset events of this address */
+  email?: string
 }
 export async function getAuditLogs(
   scope: 'all' | 'self',

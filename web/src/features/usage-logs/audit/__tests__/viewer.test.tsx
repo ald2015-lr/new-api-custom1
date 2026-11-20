@@ -810,3 +810,98 @@ it('mobile access history keeps pagination visible and puts result filters in a 
     }
   }
 })
+
+function renderConsoleViewer() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <AuditLogViewer scope='all' />
+    </QueryClientProvider>
+  )
+}
+
+it('filters the console audit log by sign-in event, client IP and reset email and counts them as advanced filters', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { items: [], total: 0 } },
+  })
+  renderConsoleViewer()
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: 'Expand' }))
+
+  await user.click(screen.getByRole('combobox', { name: 'Event' }))
+  await user.click(await screen.findByRole('option', { name: 'Failed logins' }))
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/audit', {
+      params: expect.objectContaining({ action: 'user.login_failed', p: 1 }),
+    })
+  )
+
+  fireEvent.change(screen.getByRole('textbox', { name: 'IP address' }), {
+    target: { value: '203.0.113.7' },
+  })
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/audit', {
+      params: expect.objectContaining({
+        action: 'user.login_failed',
+        ip: '203.0.113.7',
+      }),
+    })
+  )
+
+  const email = screen.getByRole('textbox', { name: 'Email' })
+  expect(email).toHaveAccessibleDescription(
+    'Finds password reset events for this address. For failed sign-ins, use the username or IP filter.'
+  )
+  fireEvent.change(email, { target: { value: 'user@example.com' } })
+  await waitFor(() =>
+    expect(get).toHaveBeenLastCalledWith('/api/audit', {
+      params: expect.objectContaining({ email: 'user@example.com' }),
+    })
+  )
+  expect(screen.getByRole('button', { name: /Collapse/ })).toHaveTextContent(
+    '3'
+  )
+})
+
+it.each([
+  ['IP address', '203.0.11', 'ip'],
+  ['IP address', '2001:db8::zz', 'ip'],
+  ['Email', 'user@example', 'email'],
+])(
+  'does not send the partial %s %s while it is typed',
+  async (name, value, param) => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: { items: [], total: 0 } },
+    })
+    renderConsoleViewer()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Expand' }))
+    const input = screen.getByRole('textbox', { name })
+
+    fireEvent.change(input, { target: { value } })
+
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    for (const [, config] of get.mock.calls) {
+      const params = config?.params as Record<string, unknown> | undefined
+      expect(params?.[param]).toBeUndefined()
+    }
+  }
+)
+
+it('offers the sign-in event filters only on the console audit log', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { items: [], total: 0 } },
+  })
+  renderViewer('all')
+  await userEvent.click(screen.getByRole('button', { name: 'Expand' }))
+
+  expect(
+    screen.queryByRole('combobox', { name: 'Event' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('textbox', { name: 'IP address' })
+  ).not.toBeInTheDocument()
+})
