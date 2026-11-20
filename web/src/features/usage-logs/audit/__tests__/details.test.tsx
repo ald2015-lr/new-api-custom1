@@ -33,6 +33,12 @@ import type { ReactElement } from 'react'
 import { I18nextProvider } from 'react-i18next'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import en from '@/i18n/locales/en.json'
+import fr from '@/i18n/locales/fr.json'
+import ja from '@/i18n/locales/ja.json'
+import ru from '@/i18n/locales/ru.json'
+import viLocale from '@/i18n/locales/vi.json'
+import zhTW from '@/i18n/locales/zh-TW.json'
 import zh from '@/i18n/locales/zh.json'
 import type { PermissionResourceDef } from '@/lib/admin-permissions'
 import { api } from '@/lib/api'
@@ -1161,8 +1167,13 @@ describe('password reset and sign-in protection events', () => {
     ],
     [
       reset,
-      { email: 'no…', outcome: 'invalid_email', identifier_length: 9 },
-      'Password reset request for no… (9 characters): invalid email address',
+      {
+        email: '…',
+        outcome: 'invalid_email',
+        identifier_length: 9,
+        identifier_fingerprint: '5be0c2d1',
+      },
+      'Password reset request for … (9 characters): invalid email address',
     ],
     [
       reset,
@@ -1234,11 +1245,12 @@ describe('password reset and sign-in protection events', () => {
       'user.login_failed',
       {
         method: 'password',
-        identifier: 'S3…',
+        identifier: '…',
         identifier_length: 11,
+        identifier_fingerprint: '3f9a0c1e',
         reason: 'invalid_credentials',
       },
-      'Failed login as S3… (11 characters): wrong username or password',
+      'Failed login as … (11 characters): wrong username or password',
     ],
     [
       'user.login_failed',
@@ -1278,8 +1290,9 @@ describe('password reset and sign-in protection events', () => {
     const detail = buildAuditDetails(
       authEntry('user.login_failed', {
         method: 'password',
-        identifier: 'S3…',
+        identifier: '…',
         identifier_length: 11,
+        identifier_fingerprint: '3f9a0c1e',
         reason: 'invalid_credentials',
         wait_seconds: 900,
         lock_started: true,
@@ -1289,8 +1302,9 @@ describe('password reset and sign-in protection events', () => {
 
     expect(detail.fields).toEqual([
       { label: 'Authentication Method', value: 'Password' },
-      { label: 'Username or Email', value: 'S3…' },
+      { label: 'Username or Email', value: '…' },
       { label: 'Identifier length', value: 11 },
+      { label: 'Identifier fingerprint', value: '3f9a0c1e' },
       {
         label: 'Reason',
         value: 'wrong username or password, sign-in now locked',
@@ -1352,61 +1366,119 @@ describe('password reset and sign-in protection events', () => {
     expect(unlock.fields).toContainEqual({ label: 'Was locked', value: false })
   })
 
-  it('shows root the typed value kept out of the masked params, once', async () => {
+  it('labels the fingerprint of a reset input that is not an address', async () => {
     const detail = buildAuditDetails(
+      authEntry('user.password_reset_failed', {
+        email: '…',
+        identifier_length: 9,
+        identifier_fingerprint: '5be0c2d1',
+        reason: 'invalid_link',
+      }),
+      await englishT()
+    )
+
+    expect(detail.fields).toEqual([
+      { label: 'Email', value: '…' },
+      { label: 'Identifier length', value: 9 },
+      { label: 'Identifier fingerprint', value: '5be0c2d1' },
+      { label: 'Reason', value: 'invalid or expired link' },
+    ])
+  })
+
+  it.each([
+    ['en', en, 'Identifier fingerprint'],
+    ['zh', zh, '输入内容指纹'],
+    ['zh-TW', zhTW, '輸入內容指紋'],
+    ['fr', fr, 'Empreinte de la saisie'],
+    ['ja', ja, '入力内容のフィンガープリント'],
+    ['ru', ru, 'Отпечаток введённого значения'],
+    ['vi', viLocale, 'Dấu vân tay nội dung đã nhập'],
+  ] as const)(
+    'labels the fingerprint in %s',
+    async (locale, resources, label) => {
+      const i18n = createInstance()
+      await i18n.init({
+        lng: locale,
+        fallbackLng: false,
+        resources: { [locale]: resources },
+      })
+      const detail = buildAuditDetails(
+        authEntry('user.login_failed', {
+          method: 'password',
+          identifier: '…',
+          identifier_length: 11,
+          identifier_fingerprint: '3f9a0c1e',
+          reason: 'invalid_credentials',
+        }),
+        i18n.t
+      )
+
+      expect(detail.fields).toContainEqual({ label, value: '3f9a0c1e' })
+    }
+  )
+
+  it('does not show a typed value that an older row kept for root, and keeps other root info', async () => {
+    const t = await englishT()
+    const signIn = buildAuditDetails(
       authEntry(
         'user.login_failed',
         {
           method: 'password',
-          identifier: 'S3…',
+          identifier: '…',
           identifier_length: 11,
           reason: 'invalid_credentials',
         },
-        { root_info: { identifier: 'S3cretPass1' } }
+        { root_info: { identifier: 'S3cretPass1', node_name: 'node-a' } }
       ),
-      await englishT()
+      t
     )
-
-    expect(detail.fields).toContainEqual({
-      label: 'Typed value (root only)',
-      value: 'S3cretPass1',
-    })
-    expect(detail.extra).not.toHaveProperty('root_info')
-  })
-
-  it('shows root the typed address of a refused reset request', async () => {
-    const detail = buildAuditDetails(
+    const resetRow = buildAuditDetails(
       authEntry(
         reset,
-        { email: 'no…', identifier_length: 9, outcome: 'invalid_email' },
+        { email: '…', identifier_length: 9, outcome: 'invalid_email' },
         { root_info: { email: 'not-an-at' } }
       ),
-      await englishT()
+      t
+    )
+    const other = buildAuditDetails(
+      {
+        ...entry,
+        other: { ...entry.other, root_info: { node_name: 'node-b' } },
+      },
+      t
     )
 
-    expect(detail.fields).toContainEqual({
-      label: 'Typed value (root only)',
-      value: 'not-an-at',
-    })
+    expect(JSON.stringify(signIn)).not.toContain('S3cretPass1')
+    expect(signIn.extra.root_info).toEqual({ node_name: 'node-a' })
+    expect(JSON.stringify(resetRow)).not.toContain('not-an-at')
+    expect(resetRow.extra).not.toHaveProperty('root_info')
+    expect(other.extra.root_info).toEqual({ node_name: 'node-b' })
   })
 
-  it('shows no typed value to viewers who do not receive it', async () => {
+  it('shows the length and fingerprint of a typed value, never the value', async () => {
     const { dialog } = await openDetails(
-      authEntry('user.login_failed', {
-        method: 'password',
-        identifier: 'S3…',
-        identifier_length: 11,
-        reason: 'invalid_credentials',
-      })
+      authEntry(
+        'user.login_failed',
+        {
+          method: 'password',
+          identifier: '…',
+          identifier_length: 11,
+          identifier_fingerprint: '3f9a0c1e',
+          reason: 'invalid_credentials',
+        },
+        { root_info: { identifier: 'S3cretPass1' } }
+      )
     )
 
     expect(
-      within(dialog).queryByText('Typed value (root only)')
-    ).not.toBeInTheDocument()
+      within(dialog).getByText('Identifier fingerprint')
+    ).toBeInTheDocument()
+    expect(within(dialog).getByText('3f9a0c1e')).toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent('S3cretPass1')
     expect(dialog).not.toHaveTextContent('invalid_credentials')
     expect(
       within(dialog).getAllByText(
-        'Failed login as S3… (11 characters): wrong username or password'
+        'Failed login as … (11 characters): wrong username or password'
       ).length
     ).toBeGreaterThan(0)
   })

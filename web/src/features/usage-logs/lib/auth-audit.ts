@@ -150,9 +150,9 @@ export function isAuditEmailFilter(value: string): boolean {
 }
 
 /**
- * A typed name or address the server stored masked (it matched no account
- * and is no address, so it may be a password typed in the wrong box): its
- * first characters and its length. Unmasked values are shown as stored.
+ * A typed name or address the server did not store (it matched no account
+ * and is no address, so it may be a password typed in the wrong box): "…"
+ * and its length. Other values are shown as stored.
  */
 export function authAuditTypedValue(
   value: unknown,

@@ -215,6 +215,8 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Username or Email')
     case 'identifier_length':
       return t('Identifier length')
+    case 'identifier_fingerprint':
+      return t('Identifier fingerprint')
     case 'wait_seconds':
       return t('Wait (seconds)')
     case 'lock_started':
@@ -633,16 +635,6 @@ export function buildAuditDetails(
   for (const [key, value] of Object.entries(params)) {
     fields.push({ label: auditFieldLabel(key, t), value })
   }
-  // The server sends root_info to root only: the raw name or address of a
-  // failed sign-in or reset that the params keep masked.
-  const rootInfo = isAuditDetailObject(metadata.root_info)
-    ? { ...metadata.root_info }
-    : null
-  for (const key of ['identifier', 'email']) {
-    if (typeof rootInfo?.[key] !== 'string') continue
-    fields.push({ label: t('Typed value (root only)'), value: rootInfo[key] })
-    delete rootInfo[key]
-  }
   if (
     typeof metadata.login_method === 'string' &&
     params.method === undefined
@@ -659,8 +651,19 @@ export function buildAuditDetails(
   delete extra.audit_info
   delete extra.login_method
   delete extra.user_agent
-  delete extra.root_info
-  if (rootInfo && Object.keys(rootInfo).length) extra.root_info = rootInfo
+  // root_info (sent to root only) stays in the extra data, except a typed
+  // name or address that older rows of failed sign-ins and resets kept
+  // there: the server no longer stores it, and it is not shown.
+  if (
+    isAuditDetailObject(metadata.root_info) &&
+    (action === 'user.login_failed' || action.startsWith('user.password_reset'))
+  ) {
+    const rootInfo = { ...metadata.root_info }
+    delete rootInfo.identifier
+    delete rootInfo.email
+    if (Object.keys(rootInfo).length) extra.root_info = rootInfo
+    else delete extra.root_info
+  }
   const adminExtra = { ...admin }
   for (const key of [
     'admin_id',

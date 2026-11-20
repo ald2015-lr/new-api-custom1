@@ -132,7 +132,7 @@
   "Loaded %d custom OAuth providers": "已加载 %d 个自定义 OAuth 提供商",
   "Loaded custom OAuth provider: %s (%s)": "已加载自定义 OAuth 提供商: %s (%s)",
   "Local:": "本机地址:",
-  "Login database error for user %s: %v": "用户 %s 登录时数据库出错: %v",
+  "Login database error (identifier fingerprint %s): %v": "登录时数据库出错（输入内容指纹 %s）: %v",
   "Midjourney action uses origin channel: id=%s, base_url=%s": "Midjourney 后续操作使用原任务所在的渠道: id=%s, base_url=%s",
   "Midjourney refund succeeded but clearing the quota failed, task %s: %s": "Midjourney 退款成功但清除 quota 失败 task %s: %s",
   "Midjourney task response ignored: unknown mj_id=%s": "上游返回了未知的 Midjourney 任务 mj_id=%s，已忽略",

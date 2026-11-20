@@ -99,7 +99,9 @@ func Login(c *gin.Context) {
 	}
 	user, err := model.FindPasswordLoginUser(identifier)
 	if err != nil {
-		common.SysLog(common.LogText("Login database error for user %s: %v", loginRequest.Username, err))
+		// The typed name may be a password, so the log has only its
+		// fingerprint, as the audit rows of unknown names do.
+		common.SysLog(common.LogText("Login database error (identifier fingerprint %s): %v", auditIdentifierFingerprint(identifier), err))
 		common.ApiErrorT(c, "Database error, please contact the administrator")
 		return
 	}

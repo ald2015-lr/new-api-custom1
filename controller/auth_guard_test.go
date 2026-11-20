@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -222,12 +223,13 @@ func TestPasswordResetRequestOrderOutcomesAndAudit(t *testing.T) {
 	assert.JSONEq(t, `{"success":false,"code":"CAPTCHA_INVALID","message":"Captcha is incorrect or has expired. Please try a new one.","message_key":"Captcha is incorrect or has expired. Please try a new one."}`, response.Body.String())
 	assert.Equal(t, "CAPTCHA_INVALID", lastAuthGuardAudit(t, "user.password_reset_request").Params["code"])
 
-	// An invalid address: unchanged answer, the typed value masked for all but root.
+	// An invalid address: unchanged answer, the typed value not stored.
 	response = env.requestReset("not-an-address", solvedCaptcha())
 	assert.JSONEq(t, `{"success":false,"message":"Invalid parameters","message_key":"Invalid parameters"}`, response.Body.String())
 	row = lastAuthGuardAudit(t, "user.password_reset_request")
-	assert.Equal(t, map[string]any{"email": "…", "outcome": "invalid_email", "identifier_length": float64(14)}, row.Params)
-	assert.Equal(t, map[string]any{"email": "not-an-address"}, row.RootInfo)
+	assert.Equal(t, map[string]any{"email": "…", "outcome": "invalid_email", "identifier_length": float64(14),
+		"identifier_fingerprint": auditIdentifierFingerprint("not-an-address")}, row.Params)
+	assert.Nil(t, row.RootInfo)
 	assert.Zero(t, row.UserId)
 	assert.Equal(t, "Password reset email request for …: invalid_email", row.Content)
 
@@ -610,15 +612,46 @@ func TestLoginLockoutSharesOneCounterAndIsEnumerationSafe(t *testing.T) {
 	env.login("lock-hank", "wrong", "")
 	assert.Equal(t, "LOGIN_LOCKED", gjsonCode(t, env.login("lock-hank", "wrong", "")), "two failures before and one after the pending logins lock")
 
-	// The identifier is stored trimmed and cut to 64 runes.
+	// An unknown name is not stored; its length and fingerprint are of the
+	// whole trimmed value.
 	long := strings.Repeat("é", 70)
 	env.login("  "+long+"  ", "wrong", "")
 	row = lastAuthGuardAudit(t, "user.login_failed")
 	assert.Equal(t, "…", row.Params["identifier"])
 	assert.Equal(t, float64(70), row.Params["identifier_length"])
-	assert.Equal(t, strings.Repeat("é", 64), row.RootInfo["identifier"])
+	assert.Equal(t, auditIdentifierFingerprint(long), row.Params["identifier_fingerprint"])
+	assert.Nil(t, row.RootInfo)
+	// An email address is stored trimmed and cut to 64 runes.
+	address := strings.Repeat("a", 60) + "@" + strings.Repeat("b", 20) + ".com"
+	env.login(" "+address+" ", "wrong", "")
+	row = lastAuthGuardAudit(t, "user.login_failed")
+	assert.Equal(t, address[:64], row.Params["identifier"])
+	assert.NotContains(t, row.Params, "identifier_fingerprint")
 	env.login("  lock-gina ", "wrong", "")
 	assert.Equal(t, "lock-gina", lastAuthGuardAudit(t, "user.login_failed").Params["identifier"])
+}
+
+// A database error on the account lookup is logged with the fingerprint of
+// the typed name, never the name, which may be a password.
+func TestLoginLookupErrorLogsNoTypedName(t *testing.T) {
+	env := setupAuthGuardTest(t)
+	common.LoginCaptchaEnabled = false
+	var output bytes.Buffer
+	common.LogWriterMu.Lock()
+	previous := gin.DefaultWriter
+	gin.DefaultWriter = &output
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter = previous
+		common.LogWriterMu.Unlock()
+	})
+	require.NoError(t, env.db.Migrator().DropTable(&model.User{}))
+
+	response := env.login(" S3cret!pass ", "wrong", "")
+	assert.Contains(t, response.Body.String(), "Database error, please contact the administrator")
+	assert.Contains(t, output.String(), "Login database error (identifier fingerprint "+auditIdentifierFingerprint("S3cret!pass")+"): ")
+	assert.NotContains(t, output.String(), "S3cret!pass")
 }
 
 // Concurrent wrong passwords for one account: at most the maximum of them
@@ -838,8 +871,8 @@ func (env *authGuardTest) audits(t *testing.T, path string, viewer *model.User) 
 
 // The new rows follow the visibility of the login rows: rows about root are
 // root-only, anonymous rows are visible to administrators, and typed values
-// that name no account are masked for everyone but root. The console can
-// filter them by action, IP and reset address.
+// that name no account and are not addresses are not stored, for any viewer.
+// The console can filter them by action, IP and reset address.
 func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	env := setupAuthGuardTest(t)
 	root := createAuthGuardUser(t, env.db, "root", "root@example.com", common.RoleRootUser)
@@ -849,6 +882,8 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	env.login("root", authGuardTestPassword, "") // captcha missing: a row about root
 	common.LoginCaptchaEnabled, common.PasswordResetCaptchaEnabled = false, false
 	env.login("S3cret!pass", "wrong", "")
+	env.login("  S3cret!pass ", "wrong", "") // the same value
+	env.login("S3cret!pasS", "wrong", "")    // another value
 	env.login("nobody@example.com", "wrong", "")
 	env.login("audit-kim", "wrong", "")
 	env.ip = "198.51.100.9"
@@ -859,6 +894,9 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	}
 	env.request(http.MethodPost, "/api/user/reset", `{"email":"kim@example.com","token":"wrong"}`)
 	env.request(http.MethodPost, "/api/user/reset", `{"email":"kim_x@example.com","token":"wrong"}`)
+	// Reset inputs that are not addresses: not stored either.
+	env.requestReset("S3cret!pass", "")
+	env.request(http.MethodPost, "/api/user/reset", `{"email":"S3cret!pass","token":"wrong"}`)
 	// A valid quoted address that contains kim's address: written without a
 	// captcha, and must not show up under kim's address.
 	common.PasswordResetCaptchaEnabled = true
@@ -866,11 +904,53 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	common.PasswordResetCaptchaEnabled = false
 	require.Equal(t, "captcha_failed", lastAuthGuardAudit(t, "user.password_reset_request").Params["outcome"])
 
+	// A value that names no account and is not an address is nowhere in the
+	// stored rows: not in params, content or any part of other (root_info
+	// included). The rows keep "…", its length and its fingerprint: 8 hex
+	// characters, the same for the same value and different for another.
+	var stored []model.AuditLog
+	require.NoError(t, model.LOG_DB.Order("id asc").Find(&stored).Error)
+	for _, row := range stored {
+		encoded, err := common.Marshal(row)
+		require.NoError(t, err)
+		assert.NotContains(t, strings.ToLower(string(encoded)), "s3cret!pas", "row %d (%s)", row.Id, row.Action)
+		assert.Nil(t, row.Other.RootInfo, "row %d (%s)", row.Id, row.Action)
+	}
+	fingerprint := regexp.MustCompile(`^[0-9a-f]{8}$`)
+	var loginPrints []any
+	for _, row := range authGuardAudits(t, "user.login_failed") {
+		switch row.Params["identifier"] {
+		case "…":
+			assert.Equal(t, float64(11), row.Params["identifier_length"])
+			assert.Regexp(t, fingerprint, row.Params["identifier_fingerprint"])
+			assert.Equal(t, "Failed login via password as …: invalid_credentials", row.Content)
+			loginPrints = append(loginPrints, row.Params["identifier_fingerprint"])
+		case "nobody@example.com", "audit-kim", "root":
+			assert.NotContains(t, row.Params, "identifier_length", "a matched name or an email address is kept as typed")
+			assert.NotContains(t, row.Params, "identifier_fingerprint", "a matched name or an email address is kept as typed")
+		default:
+			t.Errorf("unexpected identifier %v", row.Params["identifier"])
+		}
+	}
+	require.Len(t, loginPrints, 3)
+	assert.Equal(t, loginPrints[0], loginPrints[1], "the same value")
+	assert.NotEqual(t, loginPrints[0], loginPrints[2], "another value")
+	requests := authGuardAudits(t, "user.password_reset_request")
+	request, failed := requests[4], lastAuthGuardAudit(t, "user.password_reset_failed")
+	for _, row := range []authGuardAudit{request, failed} {
+		assert.Equal(t, "…", row.Params["email"], row.Action)
+		assert.Equal(t, float64(11), row.Params["identifier_length"], row.Action)
+		assert.Regexp(t, fingerprint, row.Params["identifier_fingerprint"], row.Action)
+	}
+	assert.Equal(t, request.Params["identifier_fingerprint"], failed.Params["identifier_fingerprint"], "the same reset input")
+	assert.Equal(t, "kim@example.com", requests[0].Params["email"], "a valid address is kept as typed")
+	assert.NotContains(t, requests[0].Params, "identifier_fingerprint")
+
 	all := env.audits(t, "/api/audit?action=user.login_failed", root)
 	require.True(t, all.Success, all.Message)
-	assert.Equal(t, 5, all.Data.Total)
+	assert.Equal(t, 7, all.Data.Total)
 	adminView := env.audits(t, "/api/audit?action=user.login_failed", admin)
-	assert.Equal(t, 4, adminView.Data.Total, "the captcha row about root is root-only")
+	assert.Equal(t, 6, adminView.Data.Total, "the captcha row about root is root-only")
 	for _, item := range adminView.Data.Items {
 		assert.NotEqual(t, root.Id, item.UserId)
 		assert.Nil(t, item.Other.RootInfo)
@@ -879,21 +959,16 @@ func TestAuthGuardAuditVisibilityMaskingAndFilters(t *testing.T) {
 	masked := env.audits(t, "/api/audit?action=user.login_failed&username=", admin)
 	var found bool
 	for _, item := range masked.Data.Items {
-		switch item.Other.Op.Params["identifier"] {
-		case "…":
+		if item.Other.Op.Params["identifier"] == "…" {
 			found = true
 			assert.Equal(t, float64(11), item.Other.Op.Params["identifier_length"])
+			assert.Regexp(t, fingerprint, item.Other.Op.Params["identifier_fingerprint"])
 			assert.Zero(t, item.UserId)
-			assert.Equal(t, "Failed login via password as …: invalid_credentials", item.Content, "no part of the typed value")
-		case "nobody@example.com":
-			assert.NotContains(t, item.Other.Op.Params, "identifier_length", "an email address is kept as typed")
 		}
 	}
 	assert.True(t, found)
 	for _, item := range all.Data.Items {
-		if item.Other.Op.Params["identifier"] == "…" {
-			assert.Equal(t, map[string]any{"identifier": "S3cret!pass"}, item.Other.RootInfo)
-		}
+		assert.Nil(t, item.Other.RootInfo, "root gets no typed value either")
 	}
 
 	// The user's own view shows the rows about the account, without root info.

@@ -232,7 +232,7 @@ type LoginAuditEntry struct {
 	Username, Ip      string
 	Action, Content   string
 	Params            map[string]any
-	Other             AuditOther // RootInfo carries raw values hidden from non-root viewers
+	Other             AuditOther // RootInfo is sent to root viewers only
 	Success           bool
 }
 

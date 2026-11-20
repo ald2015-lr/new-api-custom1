@@ -21,37 +21,43 @@ const (
 // auditTypedValue is a login name or an email address a client typed, as an
 // audit row keeps it. Users sometimes type their password into the name box,
 // and such a value matches no account, so a value that names no account and
-// is not an email address is masked for every viewer but root: params and
-// content show only "…" and its length (no part of the value), and the raw
-// value goes to the root-only part of the row.
+// is not an email address is not stored at all: the row keeps "…", its
+// length and its fingerprint (auditIdentifierFingerprint), which links
+// repeated attempts with the same value without revealing it.
 type auditTypedValue struct {
-	value  string // what params and content show
-	raw    string // the value before masking; set only when masked
-	length int    // runes of the trimmed value; set only when masked
+	value       string // what params and content show
+	length      int    // runes of the trimmed value; set only when masked
+	fingerprint string // set only when masked
 }
 
 func newAuditTypedValue(typed string, maxRunes int, matchesAccount bool) auditTypedValue {
 	typed = strings.TrimSpace(typed)
-	length := utf8.RuneCountInString(typed)
-	isEmail := common.Validate.Var(typed, "email") == nil
-	if length > maxRunes {
+	if typed != "" && !matchesAccount && common.Validate.Var(typed, "email") != nil {
+		return auditTypedValue{value: "…", length: utf8.RuneCountInString(typed), fingerprint: auditIdentifierFingerprint(typed)}
+	}
+	if utf8.RuneCountInString(typed) > maxRunes {
 		typed = string([]rune(typed)[:maxRunes])
 	}
-	if typed == "" || matchesAccount || isEmail {
-		return auditTypedValue{value: typed}
-	}
-	return auditTypedValue{value: "…", raw: typed, length: length}
+	return auditTypedValue{value: typed}
 }
 
-// apply stores the value under key in params and, when masked, its length in
-// params and the raw value in the root-only part of the row.
-func (typed auditTypedValue) apply(key string, params map[string]any, other *model.AuditOther) {
+// auditIdentifierFingerprint returns the first 8 hex characters of the
+// HMAC-SHA256 of a trimmed typed value, keyed with CryptoSecret: the same
+// value gives the same fingerprint while the secret stays the same, and
+// without the secret the fingerprint tells nothing about the value.
+func auditIdentifierFingerprint(trimmed string) string {
+	return common.GenerateHMACWithKey([]byte("audit-identifier-v1:"+common.CryptoSecret), trimmed)[:8]
+}
+
+// apply stores the value under key in params and, when masked, its length
+// and fingerprint.
+func (typed auditTypedValue) apply(key string, params map[string]any) {
 	params[key] = typed.value
-	if typed.raw == "" {
+	if typed.fingerprint == "" {
 		return
 	}
 	params["identifier_length"] = typed.length
-	other.RootInfo = model.AuditFields{key: typed.raw}
+	params["identifier_fingerprint"] = typed.fingerprint
 }
 
 // lookupResetAccount returns the account with exactly this address, or nil.
@@ -88,7 +94,7 @@ func (request *passwordResetRequest) record(c *gin.Context) {
 	}
 	params := map[string]any{"outcome": request.outcome}
 	other := model.AuditOther{UserAgent: c.Request.UserAgent()}
-	newAuditTypedValue(request.email, auditEmailMaxRunes, isAddress).apply("email", params, &other)
+	newAuditTypedValue(request.email, auditEmailMaxRunes, isAddress).apply("email", params)
 	if request.detail != "" {
 		params["detail"] = request.detail
 	}
@@ -112,7 +118,7 @@ func recordPasswordResetAudit(c *gin.Context, email string, user *model.User, re
 	}
 	params := map[string]any{}
 	other := model.AuditOther{UserAgent: c.Request.UserAgent()}
-	newAuditTypedValue(email, auditEmailMaxRunes, isAddress).apply("email", params, &other)
+	newAuditTypedValue(email, auditEmailMaxRunes, isAddress).apply("email", params)
 	action := "user.password_reset"
 	if reason != "" {
 		action = "user.password_reset_failed"
@@ -170,7 +176,7 @@ type loginFailure struct {
 // which account was attacked and rows about root stay root-only; refusals
 // before the lookup (captcha, request) look the account up for that only.
 // The identifier is kept as typed when it names an account or is an email
-// address, else masked for all but root.
+// address; any other value is not stored (newAuditTypedValue).
 func recordLoginFailureAudit(c *gin.Context, failure loginFailure) {
 	account := failure.account
 	if !failure.looked && account == nil && failure.identifier != "" {
@@ -178,7 +184,7 @@ func recordLoginFailureAudit(c *gin.Context, failure loginFailure) {
 	}
 	params := map[string]any{"method": "password", "reason": failure.reason}
 	other := model.AuditOther{LoginMethod: "password", UserAgent: c.Request.UserAgent()}
-	newAuditTypedValue(failure.identifier, auditIdentifierMaxRunes, account != nil).apply("identifier", params, &other)
+	newAuditTypedValue(failure.identifier, auditIdentifierMaxRunes, account != nil).apply("identifier", params)
 	if failure.waitSeconds > 0 {
 		params["wait_seconds"] = failure.waitSeconds
 	}
