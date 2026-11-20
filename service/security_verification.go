@@ -51,8 +51,9 @@ const (
 
 // adminUserManageActions are the ManageUser actions that change a user's
 // status, role or admin kind (set_deputy / set_admin convert between full and
-// deputy admin). Quota adjustments are not gated and deletion has its own scope.
-var adminUserManageActions = []string{"disable", "enable", "promote", "demote", "set_deputy", "set_admin"}
+// deputy admin), and unlock_login, which clears the login lock of the user.
+// Quota adjustments are not gated and deletion has its own scope.
+var adminUserManageActions = []string{"disable", "enable", "promote", "demote", "set_deputy", "set_admin", "unlock_login"}
 
 var (
 	ErrVerificationFailed         = errors.New("Verification failed. Please try again.")

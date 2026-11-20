@@ -27,6 +27,7 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useEffect } from 'react'
+import { toast } from 'sonner'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -529,4 +530,68 @@ it('an admin with billing read resets the password of a user with a proof bound 
     }),
     expect.anything()
   )
+})
+
+it('unlocks the login of a user from the row menu with a proof bound to the user and action', async () => {
+  const success = vi.spyOn(toast, 'success')
+  const proof = mockVerification('admin.user.manage', 'manage-proof')
+  const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+    if (url === '/api/verify') return proof
+    if (url === '/api/user/manage') {
+      return { data: { success: true, data: { role: 1, status: 1 } } }
+    }
+    throw new Error(`Unexpected POST ${url}`)
+  })
+  await openRowMenu(adminViewer('admin'), target)
+
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Unlock login' }))
+  expect(
+    await screen.findByRole('dialog', { name: 'Verify to unlock login' })
+  ).toBeInTheDocument()
+  await completeTwoFactorVerification()
+
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/user/manage',
+      { id: 2, action: 'unlock_login' },
+      expect.objectContaining({
+        headers: { 'X-Security-Proof': 'manage-proof' },
+        singleUseAuthorization: true,
+      })
+    )
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'admin.user.manage',
+      context: { user_id: 2, action: 'unlock_login' },
+    }),
+    expect.anything()
+  )
+  await waitFor(() =>
+    expect(success).toHaveBeenCalledWith('Login lock cleared')
+  )
+})
+
+it.each([
+  ['a full admin', fullAdminTarget],
+  ['a deputy admin', deputyTarget],
+])('an admin is not offered to unlock the login of %s', async (_kind, row) => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(adminViewer('admin'), row)
+
+  expect(
+    screen.queryByRole('menuitem', { name: 'Unlock login' })
+  ).not.toBeInTheDocument()
+})
+
+it.each([
+  ['its own root account', { ...target, id: 1, role: 100 }],
+  ['another root account', { ...target, role: 100 }],
+  ['an admin', fullAdminTarget],
+])('root is offered to unlock the login of %s', async (_kind, row) => {
+  mockVerification('admin.user.manage', 'manage-proof')
+  await openRowMenu(rootViewer, row)
+
+  expect(screen.getByRole('menuitem', { name: 'Unlock login' })).toBeVisible()
 })

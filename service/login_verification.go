@@ -127,10 +127,25 @@ func requireLoginVerificationMethod(state *model.UserVerificationState, method s
 	return ErrProofMethod
 }
 
+// LoginMethod is the primary login method of the flow, for example
+// "password" or "oauth:github".
+func (verification *LoginVerification) LoginMethod() string {
+	return verification.payload.LoginMethod
+}
+
 func VerifyLoginCode(token, code, ip, userAgent string) (*AuthBundle, *LegacyGitHubMigration, error) {
 	verification, err := RequireLoginVerification(token, VerificationMethodTwoFA)
 	if err != nil {
 		return nil, nil, err
+	}
+	return CompleteLoginCode(token, verification, code, ip, userAgent)
+}
+
+// CompleteLoginCode checks the two-factor code of a flow that
+// RequireLoginVerification returned and completes the login.
+func CompleteLoginCode(token string, verification *LoginVerification, code, ip, userAgent string) (*AuthBundle, *LegacyGitHubMigration, error) {
+	if verification == nil || verification.State == nil {
+		return nil, nil, model.ErrAuthFlowInvalid
 	}
 	twoFA, err := model.GetTwoFAByUserId(verification.State.UserID)
 	if err != nil {

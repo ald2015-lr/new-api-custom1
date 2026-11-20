@@ -30,9 +30,15 @@ import type { RegisterCaptchaState } from '../hooks/use-register-captcha'
 type RegisterCaptchaFieldProps = {
   captcha: RegisterCaptchaState
   disabled?: boolean
+  /**
+   * Load the first challenge when the answer is focused, for a page that
+   * does not load it on mount. Pages that do keep a failed load failed until
+   * the image is clicked, so the focus does not retry a refused request.
+   */
+  loadOnFocus?: boolean
 }
 
-/** Answer input, image and refresh control of the registration captcha. */
+/** Answer input, image and refresh control of the arithmetic captcha. */
 export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
   const { t } = useTranslation()
   const inputId = useId()
@@ -78,7 +84,10 @@ export function RegisterCaptchaField(props: RegisterCaptchaFieldProps) {
           placeholder={t('Enter the result')}
           value={props.captcha.answer}
           onChange={(event) => props.captcha.setAnswer(event.target.value)}
-          onFocus={() => props.captcha.refreshIfExpired()}
+          onFocus={() => {
+            if (props.loadOnFocus && props.captcha.ensureLoaded(true)) return
+            props.captcha.refreshIfExpired()
+          }}
           // Nothing typed while a new image loads can belong to it.
           disabled={props.disabled || isLoading}
           className='h-10 min-w-0 flex-1'

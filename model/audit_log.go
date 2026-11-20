@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -75,7 +76,22 @@ type AuditLogFilter struct {
 	StartTimestamp  int64
 	EndTimestamp    int64
 	Success         *bool
+	Action          string // exact action
+	Ip              string // exact client IP
+	Email           string // normalised address: the password reset events about it
 }
+
+// The contents of the password reset rows (the actions the email filter
+// finds) are one of these texts, the normalised address, then ": " and the
+// outcome or reason (nothing after the address for user.password_reset);
+// controller/audit.go builds them from these. The filter matches the start
+// of the content, so text inside a crafted address cannot make a row match
+// another address.
+const (
+	PasswordResetRequestContent = "Password reset email request for "
+	PasswordResetContent        = "Reset the password through the email link for "
+	PasswordResetFailedContent  = "Password reset through the email link failed for "
+)
 
 func AccessTokenFingerprint(token string) string {
 	// PostgreSQL returns CHAR(32) tokens padded with spaces. Normalize that
@@ -124,7 +140,7 @@ func RecordAuditLog(c *gin.Context, entry AuditLog) {
 		logger.LogError(ctx, common.LogText("audit actor role unavailable (request_id=%s, actor_role=%d)", entry.RequestId, entry.ActorRole))
 		entry.ActorRole = 0 // Unknown actors remain visible to root only.
 	}
-	if entry.Username == "" {
+	if entry.Username == "" && entry.UserId > 0 {
 		entry.Username, _ = GetUsernameById(entry.UserId, false)
 	}
 	ua := []rune(entry.UserAgent)
@@ -200,6 +216,22 @@ func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*Audit
 	}
 	if filter.Success != nil {
 		query = query.Where("success = ?", *filter.Success)
+	}
+	if filter.Action != "" {
+		query = query.Where("action = ?", filter.Action)
+	}
+	if filter.Ip != "" {
+		query = query.Where("ip = ?", filter.Ip)
+	}
+	if filter.Email != "" {
+		like, escaped := "content LIKE ? ESCAPE '!'", escapeLikeLiteral(filter.Email, "!")
+		if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+			like, escaped = "content LIKE ?", escapeLikeLiteral(filter.Email, `\`)
+		}
+		query = query.Where("((action = ? AND "+like+") OR (action = ? AND content = ?) OR (action = ? AND "+like+"))",
+			"user.password_reset_request", PasswordResetRequestContent+escaped+": %",
+			"user.password_reset", PasswordResetContent+filter.Email,
+			"user.password_reset_failed", PasswordResetFailedContent+escaped+": %")
 	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -289,6 +321,26 @@ func MigrateAuditLogs() error {
 
 func ValidAuditCategory(category string) bool {
 	return category == "" || category == AuditCategoryLogin || category == AuditCategorySecurity || category == AuditCategoryOperation || category == AuditCategoryAccessToken
+}
+
+// ValidAuditAction accepts an audit action filter: 1 to 128 characters of
+// lower-case letters, digits, '_', '.' and ':'.
+func ValidAuditAction(action string) bool {
+	if action == "" || len(action) > 128 {
+		return false
+	}
+	return strings.Trim(action, "abcdefghijklmnopqrstuvwxyz0123456789_.:") == ""
+}
+
+// ValidAuditIP accepts an IP address filter.
+func ValidAuditIP(ip string) bool {
+	return len(ip) <= 64 && net.ParseIP(ip) != nil
+}
+
+// escapeLikeLiteral escapes value for a LIKE pattern with the given escape
+// character, so it matches only itself.
+func escapeLikeLiteral(value string, escape string) string {
+	return strings.NewReplacer(escape, escape+escape, "%", escape+"%", "_", escape+"_").Replace(value)
 }
 
 func ValidTokenFingerprint(value string) bool {

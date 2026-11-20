@@ -20,7 +20,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { Link } from '@tanstack/react-router'
 import { Loader2, LogIn, KeyRound } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import type { z } from 'zod'
@@ -28,6 +28,7 @@ import type { z } from 'zod'
 import { Dialog } from '@/components/dialog'
 import { PasswordInput } from '@/components/password-input'
 import { Turnstile } from '@/components/turnstile'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -42,9 +43,22 @@ import { Label } from '@/components/ui/label'
 import { login, wechatLoginByCode } from '@/features/auth/api'
 import { LegalConsent } from '@/features/auth/components/legal-consent'
 import { OAuthProviders } from '@/features/auth/components/oauth-providers'
+import { RegisterCaptchaField } from '@/features/auth/components/register-captcha-field'
 import { loginFormSchema } from '@/features/auth/constants'
 import { useAuthRedirect } from '@/features/auth/hooks/use-auth-redirect'
+import { useRegisterCaptcha } from '@/features/auth/hooks/use-register-captcha'
 import { useTurnstile } from '@/features/auth/hooks/use-turnstile'
+import { useWaitDeadline } from '@/features/auth/hooks/use-wait-deadline'
+import {
+  CAPTCHA_INVALID,
+  CAPTCHA_REQUIRED,
+  formatWait,
+  LOGIN_LOCKED,
+  readAuthGuardRefusal,
+  sameLoginName,
+  serverText,
+  type ServerText,
+} from '@/features/auth/lib/auth-guard'
 import { beginPasskeyLogin, finishPasskeyLogin } from '@/features/auth/passkey'
 import {
   requestPasskeyAssertion,
@@ -59,6 +73,9 @@ import { isPasskeySupported as detectPasskeySupport } from '@/lib/passkey'
 import { AuthOperationError } from '@/lib/secure-verification'
 import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+
+/** A password login refused for too many failures, for one typed name. */
+type LoginLock = { username: string; message: ServerText }
 
 export function UserAuthForm({
   className,
@@ -80,6 +97,10 @@ export function UserAuthForm({
   const [isWeChatDialogOpen, setIsWeChatDialogOpen] = useState(false)
   const [isWeChatSubmitting, setIsWeChatSubmitting] = useState(false)
   const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0)
+  const [loginLock, setLoginLock] = useState<LoginLock | null>(null)
+  // Set when the server asked for a captcha the page did not show yet.
+  const [captchaWanted, setCaptchaWanted] = useState(false)
+  const lockWait = useWaitDeadline()
   const legalConsentErrorMessage = t('Please agree to the legal terms first')
   const loginFailedMessage = t('Login failed')
 
@@ -103,6 +124,12 @@ export function UserAuthForm({
     validateTurnstile,
   } = useTurnstile()
   const { handleLoginResult } = useAuthRedirect()
+  // Loaded only for a password login, never on mount.
+  const captcha = useRegisterCaptcha({
+    statusKey: 'login_captcha',
+    autoLoad: false,
+  })
+  const { enabled: captchaEnabled, ensureLoaded: ensureCaptchaLoaded } = captcha
 
   const hasUserAgreement = Boolean(status?.user_agreement_enabled)
   const hasPrivacyPolicy = Boolean(status?.privacy_policy_enabled)
@@ -144,6 +171,19 @@ export function UserAuthForm({
       password: '',
     },
   })
+  const username = useWatch({ control: form.control, name: 'username' })
+  // The lock holds the name it was reported for; another name may sign in.
+  const locked =
+    lockWait.active &&
+    loginLock !== null &&
+    sameLoginName(username ?? '', loginLock.username)
+
+  useEffect(() => {
+    // The refreshed status now shows the captcha: load its first image.
+    if (!captchaWanted || !captchaEnabled) return
+    setCaptchaWanted(false)
+    ensureCaptchaLoaded()
+  }, [captchaWanted, captchaEnabled, ensureCaptchaLoaded])
 
   const wechatQrCodeUrl = useMemo(() => {
     return (
@@ -166,6 +206,8 @@ export function UserAuthForm({
     }
 
     if (!validateTurnstile()) return
+    if (!captcha.validate()) return
+    const captchaParams = captcha.params
 
     const submittedTurnstileToken = turnstileToken
     if (isTurnstileEnabled) {
@@ -174,27 +216,65 @@ export function UserAuthForm({
     }
 
     setIsLoading(true)
+    let outcome: unknown
+    let signedIn = false
     try {
       const res = await login({
         username: data.username,
         password: data.password,
         turnstile: submittedTurnstileToken,
         passwordEncryptionEnabled: passwordLoginEncryptionEnabled,
+        captcha: captchaParams,
       })
+      outcome = res
 
       if (res.success) {
+        signedIn = true
         form.setValue('password', '')
         if (await handleLoginResult(res.data, redirectTo)) {
           toast.success(t('Welcome back!'))
         }
-      } else {
+      } else if (!showLoginLock(res, data.username)) {
         handleServerError(createServerError(res, loginFailedMessage))
       }
     } catch (error: unknown) {
-      handleServerError(AuthOperationError.from(error, loginFailedMessage))
+      // handleLoginResult throws for a reply the page cannot follow (an
+      // expired or malformed challenge): the page stays, and the server has
+      // spent the captcha it was sent.
+      signedIn = false
+      outcome = error
+      if (!showLoginLock(error, data.username)) {
+        handleServerError(AuthOperationError.from(error, loginFailedMessage))
+      }
     } finally {
       setIsLoading(false)
+      if (!signedIn) settleCaptcha(outcome, Boolean(captchaParams))
     }
+  }
+
+  /** Shows a lock refusal for the typed name; false for other answers. */
+  function showLoginLock(outcome: unknown, name: string): boolean {
+    const refusal = readAuthGuardRefusal(outcome)
+    if (refusal?.code !== LOGIN_LOCKED) return false
+    lockWait.start(refusal.waitSeconds)
+    setLoginLock({ username: name, message: refusal.message })
+    return true
+  }
+
+  /** A new captcha after every failed attempt (P8), none during a lock. */
+  function settleCaptcha(outcome: unknown, sentCaptcha: boolean) {
+    const code = readAuthGuardRefusal(outcome)?.code
+    if (code === LOGIN_LOCKED) {
+      // No attempt can follow for a while: drop the spent challenge instead
+      // of spending an image on one that would expire unused.
+      captcha.handleRequestSettled(outcome, false)
+      captcha.discard()
+      return
+    }
+    if (code === CAPTCHA_REQUIRED || code === CAPTCHA_INVALID) {
+      setCaptchaWanted(true)
+    }
+    captcha.handleRequestSettled(outcome, sentCaptcha)
   }
 
   const handleOpenWeChatDialog = () => {
@@ -363,6 +443,7 @@ export function UserAuthForm({
                     <Input
                       placeholder={t('Enter your username or email')}
                       {...field}
+                      onFocus={() => ensureCaptchaLoaded()}
                     />
                   </FormControl>
                   <FormMessage />
@@ -381,6 +462,7 @@ export function UserAuthForm({
                     <PasswordInput
                       placeholder={t('Enter password')}
                       {...field}
+                      onFocus={() => ensureCaptchaLoaded()}
                     />
                   </FormControl>
                   <FormMessage />
@@ -394,11 +476,41 @@ export function UserAuthForm({
               )}
             />
 
+            {captchaEnabled && (
+              <RegisterCaptchaField
+                captcha={captcha}
+                disabled={isLoading}
+                loadOnFocus
+              />
+            )}
+
+            {locked && (
+              <div className='grid gap-1'>
+                <Alert variant='destructive'>
+                  <AlertDescription>
+                    <p>{serverText(t, loginLock.message)}</p>
+                    <Link
+                      to='/forgot-password'
+                      className='font-medium hover:opacity-75'
+                    >
+                      {t('Forgot password?')}
+                    </Link>
+                  </AlertDescription>
+                </Alert>
+                {/* Outside the alert, so the message is read out once. */}
+                <p aria-live='off' className='text-muted-foreground text-sm'>
+                  {t('Try again in {{time}}', {
+                    time: formatWait(lockWait.secondsLeft),
+                  })}
+                </p>
+              </div>
+            )}
+
             {/* Submit Button */}
             <Button
               type='submit'
               className='mt-2 w-full justify-center gap-2'
-              disabled={isLoading}
+              disabled={isLoading || locked}
             >
               {isLoading ? <Loader2 className='animate-spin' /> : <LogIn />}
               {t('Sign in')}

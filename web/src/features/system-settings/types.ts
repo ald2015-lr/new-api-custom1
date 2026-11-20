@@ -200,6 +200,17 @@ export type AuthSettings = {
   RegisterIPRateLimitEnabled: boolean
   RegisterIPRateLimitNum: number
   RegisterIPRateLimitMinutes: number
+  PasswordResetCaptchaEnabled: boolean
+  PasswordResetEmailLimitEnabled: boolean
+  /** Seconds between two reset emails to one address */
+  PasswordResetEmailCooldownSeconds: number
+  /** Reset emails per address in a rolling 24 hours */
+  PasswordResetEmailDailyMax: number
+  LoginCaptchaEnabled: boolean
+  LoginLockoutEnabled: boolean
+  LoginLockoutMaxFailures: number
+  /** Lock duration, also the window in which failures are counted */
+  LoginLockoutMinutes: number
   InviteAbuseBanEnabled: boolean
   InviteAbuseBanThreshold: number
   /** Raw quota of used redemption codes that counts as a recharge */

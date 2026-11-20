@@ -26,6 +26,7 @@ import {
 } from '@tanstack/react-router'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -273,4 +274,59 @@ it('rejects submission after the five-minute challenge deadline without sending 
   )
   expect(post).not.toHaveBeenCalled()
   expect(useAuthStore.getState().auth.user).toBeNull()
+})
+
+it('ends the flow on a locked password login and reports the lock on the sign-in page', async () => {
+  const error = vi.spyOn(toast, 'error')
+  const post = vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: false,
+      code: 'LOGIN_LOCKED',
+      wait_seconds: 840,
+      message:
+        'Too many failed sign-in attempts. Please try again in 14 minutes or reset your password.',
+      message_key:
+        'Too many failed sign-in attempts. Please try again in {{minutes}} minutes or reset your password.',
+      message_params: { minutes: 14 },
+    },
+  })
+  const { router } = renderLoginVerification()
+  const user = userEvent.setup()
+  await user.type(
+    await screen.findByLabelText('Authenticator code or backup code'),
+    '123456'
+  )
+  await user.click(screen.getByRole('button', { name: 'Verify' }))
+
+  await waitFor(() => expect(router.state.location.pathname).toBe('/sign-in'))
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(error).toHaveBeenCalledWith(
+    'Too many failed sign-in attempts. Please try again in 14 minutes or reset your password.'
+  )
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(useAuthStore.getState().auth.user).toBeNull()
+})
+
+it('keeps a wrong code in the dialog to try again', async () => {
+  const error = vi.spyOn(toast, 'error')
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: false,
+      code: 'SECURITY_VERIFICATION_FAILED',
+      message: 'Verification failed. Please try again.',
+    },
+  })
+  const { router } = renderLoginVerification()
+  const user = userEvent.setup()
+  await user.type(
+    await screen.findByLabelText('Authenticator code or backup code'),
+    '123456'
+  )
+  await user.click(screen.getByRole('button', { name: 'Verify' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Verification failed. Please try again.'
+  )
+  expect(router.state.location.pathname).toBe('/otp')
+  expect(error).not.toHaveBeenCalled()
 })

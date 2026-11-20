@@ -314,3 +314,95 @@ func TestRegisterProtectionOptionsValidateAndApply(t *testing.T) {
 	assert.Equal(t, 30, common.RegisterIPRateLimitMinutes)
 	assert.Equal(t, "30", common.OptionMap["RegisterIPRateLimitMinutes"])
 }
+
+// The password reset and login protections are on by default, validated
+// before they are saved and applied at once.
+func TestPasswordResetAndLoginProtectionOptionsValidateAndApply(t *testing.T) {
+	assert.True(t, common.PasswordResetCaptchaEnabled)
+	assert.True(t, common.PasswordResetEmailLimitEnabled)
+	assert.Equal(t, 120, common.PasswordResetEmailCooldownSeconds)
+	assert.Equal(t, 5, common.PasswordResetEmailDailyMax)
+	assert.True(t, common.LoginCaptchaEnabled)
+	assert.True(t, common.LoginLockoutEnabled)
+	assert.Equal(t, 10, common.LoginLockoutMaxFailures)
+	assert.Equal(t, 15, common.LoginLockoutMinutes)
+
+	const (
+		boolMessage     = "Value must be true or false"
+		cooldownMessage = "Password reset email cooldown must be an integer between 30 and 3600 seconds"
+		dailyMessage    = "Password reset email limit must be an integer between 1 and 100 per day"
+		failureMessage  = "Login lockout failure count must be an integer between 3 and 100"
+		minutesMessage  = "Login lockout duration must be an integer between 1 and 1440 minutes"
+	)
+	invalid := []struct{ key, value, message string }{
+		{"PasswordResetCaptchaEnabled", "yes", boolMessage},
+		{"PasswordResetEmailLimitEnabled", "", boolMessage},
+		{"LoginCaptchaEnabled", "1", boolMessage},
+		{"LoginLockoutEnabled", "TRUE", boolMessage},
+		{"PasswordResetEmailCooldownSeconds", "29", cooldownMessage},
+		{"PasswordResetEmailCooldownSeconds", "3601", cooldownMessage},
+		{"PasswordResetEmailCooldownSeconds", "1.5", cooldownMessage},
+		{"PasswordResetEmailDailyMax", "0", dailyMessage},
+		{"PasswordResetEmailDailyMax", "101", dailyMessage},
+		{"PasswordResetEmailDailyMax", "", dailyMessage},
+		{"LoginLockoutMaxFailures", "2", failureMessage},
+		{"LoginLockoutMaxFailures", "101", failureMessage},
+		{"LoginLockoutMaxFailures", "ten", failureMessage},
+		{"LoginLockoutMinutes", "0", minutesMessage},
+		{"LoginLockoutMinutes", "1441", minutesMessage},
+		{"LoginLockoutMinutes", "15m", minutesMessage},
+	}
+	for _, tc := range invalid {
+		assert.EqualError(t, validateOptionValue(tc.key, tc.value), tc.message, "%s=%q", tc.key, tc.value)
+	}
+	for key, values := range map[string][]string{
+		"PasswordResetCaptchaEnabled":       {"true", "false"},
+		"PasswordResetEmailLimitEnabled":    {"true", "false"},
+		"LoginCaptchaEnabled":               {"true", "false"},
+		"LoginLockoutEnabled":               {"true", "false"},
+		"PasswordResetEmailCooldownSeconds": {"30", "120", "3600"},
+		"PasswordResetEmailDailyMax":        {"1", "5", "100"},
+		"LoginLockoutMaxFailures":           {"3", "10", "100"},
+		"LoginLockoutMinutes":               {"1", "15", "1440"},
+	} {
+		for _, value := range values {
+			assert.NoError(t, validateOptionValue(key, value), "%s=%q", key, value)
+		}
+	}
+
+	previous := []any{common.PasswordResetCaptchaEnabled, common.PasswordResetEmailLimitEnabled, common.PasswordResetEmailCooldownSeconds,
+		common.PasswordResetEmailDailyMax, common.LoginCaptchaEnabled, common.LoginLockoutEnabled, common.LoginLockoutMaxFailures, common.LoginLockoutMinutes}
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	t.Cleanup(func() {
+		common.OptionMap = originalMap
+		common.PasswordResetCaptchaEnabled, common.PasswordResetEmailLimitEnabled = previous[0].(bool), previous[1].(bool)
+		common.PasswordResetEmailCooldownSeconds, common.PasswordResetEmailDailyMax = previous[2].(int), previous[3].(int)
+		common.LoginCaptchaEnabled, common.LoginLockoutEnabled = previous[4].(bool), previous[5].(bool)
+		common.LoginLockoutMaxFailures, common.LoginLockoutMinutes = previous[6].(int), previous[7].(int)
+	})
+	saved := map[string]string{
+		"PasswordResetCaptchaEnabled":       "false",
+		"PasswordResetEmailLimitEnabled":    "false",
+		"PasswordResetEmailCooldownSeconds": "300",
+		"PasswordResetEmailDailyMax":        "3",
+		"LoginCaptchaEnabled":               "false",
+		"LoginLockoutEnabled":               "false",
+		"LoginLockoutMaxFailures":           "20",
+		"LoginLockoutMinutes":               "60",
+	}
+	for key, value := range saved {
+		require.NoError(t, updateOptionMap(key, value))
+	}
+	assert.False(t, common.PasswordResetCaptchaEnabled)
+	assert.False(t, common.PasswordResetEmailLimitEnabled)
+	assert.Equal(t, 300, common.PasswordResetEmailCooldownSeconds)
+	assert.Equal(t, 3, common.PasswordResetEmailDailyMax)
+	assert.False(t, common.LoginCaptchaEnabled)
+	assert.False(t, common.LoginLockoutEnabled)
+	assert.Equal(t, 20, common.LoginLockoutMaxFailures)
+	assert.Equal(t, 60, common.LoginLockoutMinutes)
+	for key, value := range saved {
+		assert.Equal(t, value, common.OptionMap[key], key)
+	}
+}

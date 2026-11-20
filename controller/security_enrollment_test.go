@@ -91,12 +91,18 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
 	common.PasswordLoginEncryptionEnabled = false
 	common.RedisEnabled = false
 	common.SessionSecret = "security-enrollment-test-secret"
+	// These tests sign in without the login captcha, with an empty login lockout.
+	previousLoginCaptcha := common.LoginCaptchaEnabled
+	common.LoginCaptchaEnabled = false
+	restoreAuthGuard := middleware.UseAuthGuardForTest(time.Now)
 	*system_setting.GetPasskeySettings() = system_setting.PasskeySettings{Enabled: true, RPID: "example.com", Origins: "https://example.com", RPDisplayName: "new-api"}
 	t.Cleanup(func() {
 		model.DB, model.LOG_DB = previousDB, previousLogDB
 		common.SetDatabaseTypes(previousMain, previousLog)
 		common.RedisEnabled, common.SessionSecret = previousRedis, previousSecret
 		common.PasswordLoginEncryptionEnabled = previousEncryption
+		common.LoginCaptchaEnabled = previousLoginCaptcha
+		restoreAuthGuard()
 		*system_setting.GetPasskeySettings() = previousSettings
 		connection, err := db.DB()
 		if err == nil {

@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -1195,6 +1196,81 @@ func TestRegistrationRoutesCountNetworkLimitsFirst(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code)
 	assert.Contains(t, response.Body.String(), `"captcha_id":"`)
 	assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
+}
+
+// The forgot password and password login routes keep their order: the
+// critical rate limit, then Turnstile (only while an administrator turned it
+// on), then the handler, which checks the captcha and writes the audit row.
+// A request the rate limit or Turnstile refuses writes no row and leaves
+// its captcha unused. The two-factor step asks for no captcha.
+func TestPasswordResetAndLoginRouteOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.AuditLog{}))
+	model.DB, model.LOG_DB = database, database
+	previousRedis, previousTurnstile := common.RedisEnabled, common.TurnstileCheckEnabled
+	previousCritical, previousNum, previousDuration := common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration
+	previousResetCaptcha, previousLoginCaptcha, previousPasswordLogin := common.PasswordResetCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordLoginEnabled
+	common.RedisEnabled, common.TurnstileCheckEnabled = false, false
+	common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = true, 3, 1200
+	common.PasswordResetCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordLoginEnabled = true, true, true
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.RedisEnabled, common.TurnstileCheckEnabled = previousRedis, previousTurnstile
+		common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = previousCritical, previousNum, previousDuration
+		common.PasswordResetCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordLoginEnabled = previousResetCaptcha, previousLoginCaptcha, previousPasswordLogin
+	})
+	outer := gin.New()
+	SetApiRouter(outer)
+	network := common.GetUUID()
+	perform := func(remoteAddr string, method string, path string, body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = remoteAddr
+		outer.ServeHTTP(recorder, request)
+		return recorder
+	}
+	auditRows := func() int64 {
+		var count int64
+		require.NoError(t, database.Model(&model.AuditLog{}).Count(&count).Error)
+		return count
+	}
+	// Addresses of their own, so earlier runs in this process have not counted.
+	first := fmt.Sprintf("[2001:db8:%s:%s::1]:4321", network[:4], network[4:8])
+	second := fmt.Sprintf("[2001:db8:%s:%s::2]:4321", network[:4], network[4:8])
+
+	response := perform(first, http.MethodGet, "/api/reset_password?email=router@example.com", "")
+	assert.Contains(t, response.Body.String(), `"code":"CAPTCHA_REQUIRED"`)
+	response = perform(first, http.MethodPost, "/api/user/login", `{"username":"router-user","password":"router-password"}`)
+	assert.Contains(t, response.Body.String(), `"code":"CAPTCHA_REQUIRED"`)
+	assert.EqualValues(t, 2, auditRows(), "the handler was reached and wrote its rows")
+	response = perform(first, http.MethodPost, "/api/user/login/2fa", `{}`)
+	assert.Contains(t, response.Body.String(), `"message":"Invalid parameters"`, "the two-factor step asks for no captcha")
+
+	// The fourth request of the address is refused by the critical rate limit,
+	// before its captcha is checked: no row, and the captcha stays usable.
+	captchaID := service.IssueCaptchaForTest(5)
+	response = perform(first, http.MethodGet, "/api/reset_password?email=router@example.com&captcha_id="+captchaID+"&captcha=5", "")
+	assert.Equal(t, http.StatusTooManyRequests, response.Code)
+	assert.NotContains(t, response.Body.String(), `"code"`)
+	assert.EqualValues(t, 2, auditRows())
+	assert.True(t, service.VerifyCaptcha(captchaID, "5"), "the refused request did not use the captcha")
+
+	// Turnstile, when an administrator turns it on, runs before the captcha.
+	common.TurnstileCheckEnabled = true
+	captchaID = service.IssueCaptchaForTest(5)
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/reset_password?email=router@example.com&captcha_id=" + captchaID + "&captcha=5", ""},
+		{http.MethodPost, "/api/user/login?captcha_id=" + captchaID + "&captcha=5", `{"username":"router-user","password":"router-password"}`},
+	} {
+		response = perform(second, request.method, request.path, request.body)
+		assert.Contains(t, response.Body.String(), "Turnstile token is empty")
+	}
+	assert.EqualValues(t, 2, auditRows())
+	assert.True(t, service.VerifyCaptcha(captchaID, "5"))
 }
 
 // The client IP diagnostic of the registration limit is a root-only option

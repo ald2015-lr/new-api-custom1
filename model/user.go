@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -1229,30 +1230,79 @@ func deleteUserAuthenticationData(tx *gorm.DB, userId int) error {
 
 // ValidateAndFill check password & user status
 func (user *User) ValidateAndFill() (err error) {
-	// When querying with struct, GORM will only query with non-zero fields,
-	// that means if your field's value is 0, '', false or other zero values,
-	// it won't be used to build query conditions
 	password := user.Password
 	username := strings.TrimSpace(user.Username)
 	if username == "" || password == "" {
 		return ErrUserEmptyCredentials
 	}
-	// find by username or email
-	err = DB.Where("username = ? OR email = ?", username, username).First(user).Error
+	found, err := FindPasswordLoginUser(username)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrInvalidCredentials
-		}
-		return fmt.Errorf("%w: %v", ErrDatabase, err)
+		return err
 	}
-	if user.Password == "" {
+	if found == nil {
 		return ErrInvalidCredentials
 	}
-	okay := common.ValidatePasswordAndHash(password, user.Password)
-	if !okay || user.Status != common.UserStatusEnabled {
+	*user = *found
+	if err := user.CheckLoginPassword(password); err != nil {
 		return ErrInvalidCredentials
 	}
 	return nil
+}
+
+// FindPasswordLoginUser returns the account a password login names by
+// username or email, nil when none does.
+func FindPasswordLoginUser(identifier string) (*User, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil, ErrUserEmptyCredentials
+	}
+	var user User
+	err := DB.Where("username = ? OR email = ?", identifier, identifier).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
+	}
+	return &user, nil
+}
+
+// CheckLoginPassword checks the password of a password login. It returns
+// ErrInvalidCredentials for a nil user, an unset or a wrong password, and
+// ErrLoginUserDisabled when the password is right but the account is not
+// enabled. A nil user or an unset password is compared with a dummy hash
+// first, so every answer costs one password hash comparison and the time
+// does not tell whether the account exists.
+func (user *User) CheckLoginPassword(password string) error {
+	if user == nil || user.Password == "" {
+		common.ValidatePasswordAndHash(password, loginDummyPasswordHash())
+		return ErrInvalidCredentials
+	}
+	if !common.ValidatePasswordAndHash(password, user.Password) {
+		return ErrInvalidCredentials
+	}
+	if user.Status != common.UserStatusEnabled {
+		return ErrLoginUserDisabled
+	}
+	return nil
+}
+
+// loginDummyPassword is the hash of a random password, made at first use
+// with the same algorithm as new account passwords.
+var loginDummyPassword struct {
+	once sync.Once
+	hash string
+}
+
+func loginDummyPasswordHash() string {
+	loginDummyPassword.once.Do(func() {
+		hash, err := common.HashAccountPassword(common.GetRandomString(32))
+		if err != nil {
+			hash, _ = common.Password2Hash(common.GetRandomString(32))
+		}
+		loginDummyPassword.hash = hash
+	})
+	return loginDummyPassword.hash
 }
 
 func (user *User) FillUserById() error {
@@ -1319,14 +1369,24 @@ func IsEmailAlreadyTaken(email string) bool {
 	return err == nil && count > 0
 }
 
+// GetUniqueUserByEmail returns the only account whose stored address equals
+// the given one after NormalizeEmail. A database collation may also match
+// variants (accents, full-width letters); those are not the account's
+// address, so they are dropped and never receive its reset link.
 func GetUniqueUserByEmail(email string) (*User, error) {
 	email = NormalizeEmail(email)
 	if email == "" {
 		return nil, ErrEmailNotFound
 	}
-	var users []User
-	if err := DB.Where("LOWER(email) = ?", email).Limit(2).Find(&users).Error; err != nil {
+	var candidates []User
+	if err := DB.Where("LOWER(email) = ?", email).Limit(10).Find(&candidates).Error; err != nil {
 		return nil, err
+	}
+	users := candidates[:0]
+	for _, user := range candidates {
+		if NormalizeEmail(user.Email) == email {
+			users = append(users, user)
+		}
 	}
 	switch len(users) {
 	case 0:
@@ -1364,16 +1424,23 @@ func IsTelegramIdAlreadyTaken(telegramId string) bool {
 }
 
 func ResetUserPasswordByEmail(email string, password string) error {
+	_, err := ResetUserPasswordByEmailUser(email, password)
+	return err
+}
+
+// ResetUserPasswordByEmailUser sets the password of the account with this
+// address, revokes its sessions and returns the account.
+func ResetUserPasswordByEmailUser(email string, password string) (*User, error) {
 	if email == "" || password == "" {
-		return common.NewMessage("Email or password is empty!")
+		return nil, common.NewMessage("Email or password is empty!")
 	}
 	user, err := GetUniqueUserByEmail(email)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hashedPassword, err := common.HashAccountPassword(password)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = DB.Transaction(func(tx *gorm.DB) error {
 		if _, err := IncrementUserAuthVersionWithTx(tx, user.Id); err != nil {
@@ -1381,13 +1448,15 @@ func ResetUserPasswordByEmail(email string, password string) error {
 		}
 		return tx.Model(&User{}).Where("id = ?", user.Id).Update("password", hashedPassword).Error
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	if err := PublishUserAuthCache(user.Id); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = RevokeAllUserSessions(user.Id, "password_reset")
-	return err
+	if _, err = RevokeAllUserSessions(user.Id, "password_reset"); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func IsAdmin(userId int) bool {

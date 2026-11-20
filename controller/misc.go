@@ -72,6 +72,8 @@ func GetStatus(c *gin.Context) {
 		"turnstile_site_key":          common.TurnstileSiteKey,
 		"register_captcha":            common.RegisterCaptchaEnabled,
 		"email_qq_numeric_only":       common.EmailQQNumericOnlyEnabled,
+		"password_reset_captcha":      common.PasswordResetCaptchaEnabled,
+		"login_captcha":               common.LoginCaptchaEnabled,
 		"docs_link":                   operation_setting.GetGeneralSetting().DocsLink,
 		"quota_per_unit":              common.QuotaPerUnit,
 		// 兼容旧前端：保留 display_in_currency，同时提供新的 quota_display_type
@@ -79,6 +81,8 @@ func GetStatus(c *gin.Context) {
 		"quota_display_type":            operation_setting.GetQuotaDisplayType(),
 		"custom_currency_symbol":        operation_setting.GetGeneralSetting().CustomCurrencySymbol,
 		"custom_currency_exchange_rate": operation_setting.GetGeneralSetting().CustomCurrencyExchangeRate,
+		// Seconds between two reset emails for one address; 0 while the limit is off.
+		"password_reset_email_cooldown": middleware.PasswordResetEmailCooldownSeconds(),
 		"enable_batch_update":           common.BatchUpdateEnabled,
 		"enable_drawing":                common.DrawingEnabled,
 		"enable_task":                   common.TaskEnabled,
@@ -283,13 +287,41 @@ func SendEmailVerification(c *gin.Context) {
 	return
 }
 
+// SendPasswordResetEmail mails a reset link when the address belongs to an
+// account. In order: the captcha (while PasswordResetCaptchaEnabled), the
+// address, the per-email limit (while PasswordResetEmailLimitEnabled; every
+// admitted request counts, registered or not), then the lookup and the mail.
+// An admitted request answers success whether or not the address is
+// registered. Every request writes one audit row with the outcome.
 func SendPasswordResetEmail(c *gin.Context) {
 	email := model.NormalizeEmail(c.Query("email"))
+	request := passwordResetRequest{email: email}
+	defer request.record(c)
+
+	if common.PasswordResetCaptchaEnabled {
+		if code := middleware.CheckRequestCaptcha(c); code != "" {
+			middleware.WriteCaptchaRefusal(c, code)
+			request.outcome, request.code = "captcha_failed", code
+			return
+		}
+	}
 	if err := common.Validate.Var(email, "required,email"); err != nil {
 		common.ApiErrorT(c, "Invalid parameters")
+		request.outcome = "invalid_email"
 		return
 	}
-	if user, err := model.GetUniqueUserByEmail(email); err == nil {
+	if refusal := middleware.TakePasswordResetEmail(c.Request.Context(), email); refusal != nil {
+		writePasswordResetLimited(c, refusal)
+		request.outcome, request.code, request.waitSeconds = "cooldown", refusal.Code, refusal.WaitSeconds
+		if refusal.Code == middleware.PasswordResetEmailDailyLimitCode {
+			request.outcome = "daily_limit"
+		}
+		return
+	}
+	user, err := model.GetUniqueUserByEmail(email)
+	switch {
+	case err == nil:
+		request.user, request.outcome = user, "sent"
 		code := common.GenerateVerificationCode(0)
 		common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
 		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
@@ -308,12 +340,18 @@ func SendPasswordResetEmail(c *gin.Context) {
 			i18n.Translate(lang, i18n.MsgEmailPasswordResetLink, linkParams),
 			i18n.Translate(lang, i18n.MsgEmailPasswordResetLinkFallback, linkParams),
 			i18n.Translate(lang, i18n.MsgEmailPasswordResetValidity, map[string]any{"Minutes": common.VerificationValidMinutes}))
-		err := common.SendEmail(subject, email, content)
-		if err != nil {
+		if err := common.SendEmail(subject, email, content); err != nil {
 			logger.LogError(c.Request.Context(), common.LogText("failed to send password reset email to %s: %s", email, err.Error()))
+			request.outcome, request.detail = "send_failed", "smtp_error"
 		}
-	} else if err != nil && !errors.Is(err, model.ErrEmailNotFound) {
+	case errors.Is(err, model.ErrEmailNotFound):
+		request.outcome = "not_registered"
+	default:
 		logger.LogWarn(c.Request.Context(), common.LogText("skip password reset email for %s: %s", email, err.Error()))
+		request.outcome, request.detail = "send_failed", "lookup_error"
+		if errors.Is(err, model.ErrEmailAmbiguous) {
+			request.detail = "email_ambiguous"
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -326,37 +364,45 @@ type PasswordResetRequest struct {
 	Token string `json:"token"`
 }
 
+// ResetPassword completes a reset through the email link. Each request
+// writes one audit row; success also ends the login lock of the account.
 func ResetPassword(c *gin.Context) {
 	var req PasswordResetRequest
 	err := json.NewDecoder(c.Request.Body).Decode(&req)
 	if err != nil {
 		common.ApiError(c, err)
+		recordPasswordResetAudit(c, model.NormalizeEmail(req.Email), nil, "invalid_request")
 		return
 	}
 	req.Email = model.NormalizeEmail(req.Email)
 	if req.Email == "" || req.Token == "" {
 		common.ApiErrorT(c, "Invalid parameters")
+		recordPasswordResetAudit(c, req.Email, nil, "invalid_request")
 		return
 	}
 	if !common.VerifyCodeWithKey(req.Email, req.Token, common.PasswordResetPurpose) {
 		common.ApiErrorT(c, "Password reset link is invalid or has expired")
+		recordPasswordResetAudit(c, req.Email, nil, "invalid_link")
 		return
 	}
 	password := common.GenerateVerificationCode(12)
-	err = model.ResetUserPasswordByEmail(req.Email, password)
+	user, err := model.ResetUserPasswordByEmailUser(req.Email, password)
 	if err != nil {
 		if errors.Is(err, model.ErrEmailNotFound) || errors.Is(err, model.ErrEmailAmbiguous) {
 			common.ApiErrorT(c, "Password reset link is invalid or has expired")
+			recordPasswordResetAudit(c, req.Email, nil, "invalid_link")
 			return
 		}
 		common.ApiError(c, err)
+		recordPasswordResetAudit(c, req.Email, nil, "server_error")
 		return
 	}
 	common.DeleteKey(req.Email, common.PasswordResetPurpose)
+	middleware.ClearLoginLockout(c.Request.Context(), user.Id, user.Username, user.Email)
+	recordPasswordResetAudit(c, req.Email, user, "")
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    password,
 	})
-	return
 }

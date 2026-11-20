@@ -413,8 +413,16 @@ func TestRegisterCaptchaAndStatusFlags(t *testing.T) {
 	assert.True(t, strings.HasPrefix(captcha.Data.Image, "data:image/png;base64,"))
 	assert.Equal(t, 300, captcha.Data.ExpiresIn)
 
+	previousResetCaptcha, previousLoginCaptcha := common.PasswordResetCaptchaEnabled, common.LoginCaptchaEnabled
+	previousResetLimit, previousCooldown := common.PasswordResetEmailLimitEnabled, common.PasswordResetEmailCooldownSeconds
+	t.Cleanup(func() {
+		common.PasswordResetCaptchaEnabled, common.LoginCaptchaEnabled = previousResetCaptcha, previousLoginCaptcha
+		common.PasswordResetEmailLimitEnabled, common.PasswordResetEmailCooldownSeconds = previousResetLimit, previousCooldown
+	})
+	common.PasswordResetEmailCooldownSeconds = 300
 	for _, enabled := range []bool{false, true} {
 		common.RegisterCaptchaEnabled, common.EmailQQNumericOnlyEnabled = enabled, enabled
+		common.PasswordResetCaptchaEnabled, common.LoginCaptchaEnabled, common.PasswordResetEmailLimitEnabled = enabled, !enabled, enabled
 		recorder = httptest.NewRecorder()
 		context, _ := gin.CreateTestContext(recorder)
 		context.Request = httptest.NewRequest(http.MethodGet, "/api/status", nil)
@@ -425,5 +433,12 @@ func TestRegisterCaptchaAndStatusFlags(t *testing.T) {
 		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &status))
 		assert.Equal(t, enabled, status.Data["register_captcha"])
 		assert.Equal(t, enabled, status.Data["email_qq_numeric_only"])
+		assert.Equal(t, enabled, status.Data["password_reset_captcha"])
+		assert.Equal(t, !enabled, status.Data["login_captcha"])
+		cooldown := float64(0)
+		if enabled {
+			cooldown = 300
+		}
+		assert.Equal(t, cooldown, status.Data["password_reset_email_cooldown"], "seconds between two reset emails, 0 while the limit is off")
 	}
 }

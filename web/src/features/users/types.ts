@@ -148,6 +148,7 @@ export type ManageUserAction =
   | 'disable'
   | 'delete'
   | 'add_quota'
+  | 'unlock_login'
 
 export type QuotaAdjustMode = 'add' | 'subtract' | 'override'
 

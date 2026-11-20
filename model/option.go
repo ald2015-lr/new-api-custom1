@@ -54,6 +54,14 @@ func InitOptionMap() {
 	common.OptionMap["RegisterIPRateLimitEnabled"] = strconv.FormatBool(common.RegisterIPRateLimitEnabled)
 	common.OptionMap["RegisterIPRateLimitNum"] = strconv.Itoa(common.RegisterIPRateLimitNum)
 	common.OptionMap["RegisterIPRateLimitMinutes"] = strconv.Itoa(common.RegisterIPRateLimitMinutes)
+	common.OptionMap["PasswordResetCaptchaEnabled"] = strconv.FormatBool(common.PasswordResetCaptchaEnabled)
+	common.OptionMap["PasswordResetEmailLimitEnabled"] = strconv.FormatBool(common.PasswordResetEmailLimitEnabled)
+	common.OptionMap["PasswordResetEmailCooldownSeconds"] = strconv.Itoa(common.PasswordResetEmailCooldownSeconds)
+	common.OptionMap["PasswordResetEmailDailyMax"] = strconv.Itoa(common.PasswordResetEmailDailyMax)
+	common.OptionMap["LoginCaptchaEnabled"] = strconv.FormatBool(common.LoginCaptchaEnabled)
+	common.OptionMap["LoginLockoutEnabled"] = strconv.FormatBool(common.LoginLockoutEnabled)
+	common.OptionMap["LoginLockoutMaxFailures"] = strconv.Itoa(common.LoginLockoutMaxFailures)
+	common.OptionMap["LoginLockoutMinutes"] = strconv.Itoa(common.LoginLockoutMinutes)
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
@@ -463,6 +471,14 @@ func updateOptionMap(key string, value string) (err error) {
 			common.EmailQQNumericOnlyEnabled = boolValue
 		case "RegisterIPRateLimitEnabled":
 			common.RegisterIPRateLimitEnabled = boolValue
+		case "PasswordResetCaptchaEnabled":
+			common.PasswordResetCaptchaEnabled = boolValue
+		case "PasswordResetEmailLimitEnabled":
+			common.PasswordResetEmailLimitEnabled = boolValue
+		case "LoginCaptchaEnabled":
+			common.LoginCaptchaEnabled = boolValue
+		case "LoginLockoutEnabled":
+			common.LoginLockoutEnabled = boolValue
 		case "EmailDomainRestrictionEnabled":
 			common.EmailDomainRestrictionEnabled = boolValue
 		case "EmailAliasRestrictionEnabled":
@@ -689,6 +705,14 @@ func updateOptionMap(key string, value string) (err error) {
 		common.RegisterIPRateLimitNum, _ = strconv.Atoi(value)
 	case "RegisterIPRateLimitMinutes":
 		common.RegisterIPRateLimitMinutes, _ = strconv.Atoi(value)
+	case "PasswordResetEmailCooldownSeconds":
+		common.PasswordResetEmailCooldownSeconds, _ = strconv.Atoi(value)
+	case "PasswordResetEmailDailyMax":
+		common.PasswordResetEmailDailyMax, _ = strconv.Atoi(value)
+	case "LoginLockoutMaxFailures":
+		common.LoginLockoutMaxFailures, _ = strconv.Atoi(value)
+	case "LoginLockoutMinutes":
+		common.LoginLockoutMinutes, _ = strconv.Atoi(value)
 	case "QuotaForNewUser":
 		common.QuotaForNewUser, _ = strconv.Atoi(value)
 	case "QuotaForInviter":

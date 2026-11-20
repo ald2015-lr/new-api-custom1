@@ -23,6 +23,7 @@ import type { PermissionResourceDef } from '@/lib/admin-permissions'
 import dayjs from '@/lib/dayjs'
 import { ROLE } from '@/lib/roles'
 
+import { authAuditValueLabel } from '../../lib/auth-audit'
 import { renderAuditContent } from '../../lib/format'
 import { buildQuotaAuditOperation } from '../../lib/quota-audit-operation'
 import type { LogOtherData } from '../../types'
@@ -202,6 +203,28 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('Invited Users')
     case 'kind':
       return t('Type')
+    case 'email':
+      return t('Email')
+    case 'outcome':
+      return t('Outcome')
+    case 'detail':
+      return t('Detail')
+    case 'reason':
+      return t('Reason')
+    case 'identifier':
+      return t('Username or Email')
+    case 'identifier_length':
+      return t('Identifier length')
+    case 'identifier_fingerprint':
+      return t('Identifier fingerprint')
+    case 'wait_seconds':
+      return t('Wait (seconds)')
+    case 'lock_started':
+      return t('Lock started')
+    case 'was_locked':
+      return t('Was locked')
+    case 'code':
+      return t('Error code')
     default:
       return key
   }
@@ -546,6 +569,18 @@ export function buildAuditDetails(
   if (action === 'user.invite_abuse_ban' && typeof params.kind === 'string') {
     params.kind = params.kind === 'inviter' ? t('Inviter') : t('Invitee')
   }
+  const lockStarted = params.lock_started === true
+  for (const key of ['outcome', 'reason', 'detail']) {
+    if (key in params) {
+      params[key] = authAuditValueLabel(
+        action,
+        key,
+        params[key],
+        t,
+        lockStarted
+      )
+    }
+  }
   if (typeof params.verification_method === 'string') {
     params.verification_method = loginMethodLabel(params.verification_method, t)
   }
@@ -616,6 +651,19 @@ export function buildAuditDetails(
   delete extra.audit_info
   delete extra.login_method
   delete extra.user_agent
+  // root_info (sent to root only) stays in the extra data, except a typed
+  // name or address that older rows of failed sign-ins and resets kept
+  // there: the server no longer stores it, and it is not shown.
+  if (
+    isAuditDetailObject(metadata.root_info) &&
+    (action === 'user.login_failed' || action.startsWith('user.password_reset'))
+  ) {
+    const rootInfo = { ...metadata.root_info }
+    delete rootInfo.identifier
+    delete rootInfo.email
+    if (Object.keys(rootInfo).length) extra.root_info = rootInfo
+    else delete extra.root_info
+  }
   const adminExtra = { ...admin }
   for (const key of [
     'admin_id',

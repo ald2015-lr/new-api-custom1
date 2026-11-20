@@ -30,6 +30,7 @@ import {
   CreditCard,
   ShieldCheck,
   UserCog,
+  LockOpen,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -79,6 +80,7 @@ const MANAGE_ACTION_TITLES: Record<AdminUserManageAction, string> = {
   demote: 'Verify to demote user',
   set_deputy: 'Verify to set deputy admin',
   set_admin: 'Verify to set full admin',
+  unlock_login: 'Verify to unlock login',
 }
 
 interface DataTableRowActionsProps {
@@ -203,6 +205,9 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   // Only root promotes users or creates and converts deputy admins (the
   // server enforces it too).
   const viewerIsRoot = currentUser?.role === ROLE.SUPER_ADMIN
+  // Root unlocks anyone, itself included; an admin only users below it (the
+  // server enforces it too).
+  const canUnlockLogin = viewerIsRoot || (currentUser?.role ?? 0) > user.role
   // User subscriptions are recharge information (prices, free plan grants).
   const canManageSubscriptions = hasPermission(
     currentUser,
@@ -258,6 +263,15 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             {t('Disable')}
             <DropdownMenuShortcut>
               <PowerOff size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
+
+        {canUnlockLogin && (
+          <DropdownMenuItem onClick={() => handleManage('unlock_login')}>
+            {t('Unlock login')}
+            <DropdownMenuShortcut>
+              <LockOpen size={16} />
             </DropdownMenuShortcut>
           </DropdownMenuItem>
         )}
