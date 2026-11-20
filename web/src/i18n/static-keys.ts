@@ -1001,6 +1001,10 @@ export const STATIC_I18N_KEYS = [
   'Registered via {{method}}, invited by user ID {{inviter_id}}',
   'Disabled automatically for invite abuse: {{invite_count}} invited users and none of them has recharged',
   'Disabled automatically for invite abuse: the {{invite_count}} users invited by user ID {{inviter_id}} have not recharged',
+  // Password reset and login protection: server messages (message_key).
+  'A password reset email was requested for this address recently. Please wait {{seconds}} seconds and try again. The email can take a few minutes to arrive and may be in your spam folder. If you get several, use the newest one: earlier links stop working.',
+  'Too many password reset emails were requested for this address in the last 24 hours. Please try again later or contact the administrator. Emails already sent can take a few minutes to arrive and may be in your spam folder. If you get several, use the newest one: earlier links stop working.',
+  'Too many failed sign-in attempts. Please try again in {{minutes}} minutes or reset your password.',
   // Deputy admin errors returned by the users API.
   'Deputy admins cannot hold recharge permissions',
   'This user is already a deputy admin',

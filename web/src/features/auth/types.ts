@@ -29,6 +29,8 @@ export interface LoginPayload {
   password: string
   turnstile?: string
   passwordEncryptionEnabled?: boolean
+  /** Login captcha, sent as query parameters like `turnstile`. */
+  captcha?: RegisterCaptchaParams
 }
 
 export interface TwoFAPayload {
@@ -66,6 +68,7 @@ export interface RegisterCaptcha {
 export interface PasswordResetPayload {
   email: string
   turnstile?: string
+  captcha?: RegisterCaptchaParams
 }
 
 export interface EmailVerificationPayload {
@@ -153,6 +156,9 @@ export interface SystemStatus {
     password_login_encryption_enabled?: boolean
     password_register_enabled?: boolean
     register_captcha?: boolean
+    password_reset_captcha?: boolean
+    login_captcha?: boolean
+    password_reset_email_cooldown?: number
     email_qq_numeric_only?: boolean
     custom_oauth_providers?: CustomOAuthProviderInfo[]
     [key: string]: unknown
@@ -203,6 +209,12 @@ export interface SystemStatus {
   password_register_enabled?: boolean
   /** Sign-up requires the arithmetic image captcha */
   register_captcha?: boolean
+  /** The forgot password page requires the arithmetic image captcha */
+  password_reset_captcha?: boolean
+  /** Every password login requires the arithmetic image captcha */
+  login_captcha?: boolean
+  /** Seconds between two reset emails to one address; 0 while unlimited */
+  password_reset_email_cooldown?: number
   /** qq.com sign-up addresses must use the numeric QQ number */
   email_qq_numeric_only?: boolean
   custom_oauth_providers?: CustomOAuthProviderInfo[]
