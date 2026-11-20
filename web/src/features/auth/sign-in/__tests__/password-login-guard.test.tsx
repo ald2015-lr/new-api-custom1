@@ -396,9 +396,11 @@ it('starts a passkey login without loading or asking for the captcha', async () 
     value: { get: vi.fn() },
   })
   onTestFinished(() => {
-    if (credentials)
+    if (credentials) {
       Object.defineProperty(navigator, 'credentials', credentials)
-    else Reflect.deleteProperty(navigator, 'credentials')
+    } else {
+      Reflect.deleteProperty(navigator, 'credentials')
+    }
   })
   const get = mockGet()
   const post = vi.spyOn(api, 'post').mockResolvedValue({
