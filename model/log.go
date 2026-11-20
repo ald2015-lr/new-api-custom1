@@ -217,12 +217,32 @@ func RecordLogWithAdminInfo(userId int, logType int, content string, adminInfo *
 // content 为英文兜底文本（用于导出）；action+params 供前端本地化渲染。
 // other 包含 login_method、user_agent 等结构化信息。
 func RecordLoginLog(userId, actorRole int, username string, content string, ip string, action string, params map[string]any, other AuditOther, request ...*gin.Context) {
-	other.Op = &AuditOperation{Action: action, Params: params}
 	var c *gin.Context
 	if len(request) > 0 {
 		c = request[0]
 	}
-	RecordAuditLog(c, AuditLog{UserId: userId, Username: username, ActorRole: actorRole, Category: AuditCategoryLogin, Action: action, Content: content, Ip: ip, Other: other, Success: true})
+	RecordLoginAudit(c, LoginAuditEntry{UserId: userId, ActorRole: actorRole, Username: username, Ip: ip, Action: action, Content: content, Params: params, Other: other, Success: true})
+}
+
+// LoginAuditEntry is one login-category audit row: a sign-in, a sign-up, a
+// refused sign-in or a password reset event. UserId is 0 for a row that
+// names no account.
+type LoginAuditEntry struct {
+	UserId, ActorRole int
+	Username, Ip      string
+	Action, Content   string
+	Params            map[string]any
+	Other             AuditOther // RootInfo carries raw values hidden from non-root viewers
+	Success           bool
+}
+
+// RecordLoginAudit writes a login-category row; Success is false for
+// refusals. The request fills IP, user agent and request id.
+func RecordLoginAudit(c *gin.Context, entry LoginAuditEntry) {
+	other := entry.Other
+	other.Op = &AuditOperation{Action: entry.Action, Params: entry.Params}
+	RecordAuditLog(c, AuditLog{UserId: entry.UserId, Username: entry.Username, ActorRole: entry.ActorRole, Category: AuditCategoryLogin,
+		Action: entry.Action, Content: entry.Content, Ip: entry.Ip, Other: other, Success: entry.Success})
 }
 
 // RecordOperationAuditLog writes new operation/security events to the audit table.

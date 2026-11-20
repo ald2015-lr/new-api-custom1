@@ -1319,14 +1319,24 @@ func IsEmailAlreadyTaken(email string) bool {
 	return err == nil && count > 0
 }
 
+// GetUniqueUserByEmail returns the only account whose stored address equals
+// the given one after NormalizeEmail. A database collation may also match
+// variants (accents, full-width letters); those are not the account's
+// address, so they are dropped and never receive its reset link.
 func GetUniqueUserByEmail(email string) (*User, error) {
 	email = NormalizeEmail(email)
 	if email == "" {
 		return nil, ErrEmailNotFound
 	}
-	var users []User
-	if err := DB.Where("LOWER(email) = ?", email).Limit(2).Find(&users).Error; err != nil {
+	var candidates []User
+	if err := DB.Where("LOWER(email) = ?", email).Limit(10).Find(&candidates).Error; err != nil {
 		return nil, err
+	}
+	users := candidates[:0]
+	for _, user := range candidates {
+		if NormalizeEmail(user.Email) == email {
+			users = append(users, user)
+		}
 	}
 	switch len(users) {
 	case 0:
@@ -1364,16 +1374,23 @@ func IsTelegramIdAlreadyTaken(telegramId string) bool {
 }
 
 func ResetUserPasswordByEmail(email string, password string) error {
+	_, err := ResetUserPasswordByEmailUser(email, password)
+	return err
+}
+
+// ResetUserPasswordByEmailUser sets the password of the account with this
+// address, revokes its sessions and returns the account.
+func ResetUserPasswordByEmailUser(email string, password string) (*User, error) {
 	if email == "" || password == "" {
-		return common.NewMessage("Email or password is empty!")
+		return nil, common.NewMessage("Email or password is empty!")
 	}
 	user, err := GetUniqueUserByEmail(email)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	hashedPassword, err := common.HashAccountPassword(password)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = DB.Transaction(func(tx *gorm.DB) error {
 		if _, err := IncrementUserAuthVersionWithTx(tx, user.Id); err != nil {
@@ -1381,13 +1398,15 @@ func ResetUserPasswordByEmail(email string, password string) error {
 		}
 		return tx.Model(&User{}).Where("id = ?", user.Id).Update("password", hashedPassword).Error
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	if err := PublishUserAuthCache(user.Id); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = RevokeAllUserSessions(user.Id, "password_reset")
-	return err
+	if _, err = RevokeAllUserSessions(user.Id, "password_reset"); err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func IsAdmin(userId int) bool {

@@ -49,6 +49,17 @@ var (
 	loginLockMemory     = newAuthGuardMemory(authGuardMemoryMaxEntries)
 )
 
+// UseAuthGuardForTest gives tests in other packages empty in-memory stores
+// and the clock now. The returned function restores the previous state.
+func UseAuthGuardForTest(now func() time.Time) (restore func()) {
+	previousNow, previousReset, previousLogin := authGuardNow, passwordResetMemory, loginLockMemory
+	authGuardNow = now
+	passwordResetMemory, loginLockMemory = newAuthGuardMemory(authGuardMemoryMaxEntries), newAuthGuardMemory(authGuardMemoryMaxEntries)
+	return func() {
+		authGuardNow, passwordResetMemory, loginLockMemory = previousNow, previousReset, previousLogin
+	}
+}
+
 // PasswordResetEmailRefusal says why the per-email limit refused a request
 // and how long to wait (whole seconds, at least 1).
 type PasswordResetEmailRefusal struct {

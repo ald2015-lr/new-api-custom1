@@ -124,7 +124,7 @@ func RecordAuditLog(c *gin.Context, entry AuditLog) {
 		logger.LogError(ctx, common.LogText("audit actor role unavailable (request_id=%s, actor_role=%d)", entry.RequestId, entry.ActorRole))
 		entry.ActorRole = 0 // Unknown actors remain visible to root only.
 	}
-	if entry.Username == "" {
+	if entry.Username == "" && entry.UserId > 0 {
 		entry.Username, _ = GetUsernameById(entry.UserId, false)
 	}
 	ua := []rune(entry.UserAgent)
