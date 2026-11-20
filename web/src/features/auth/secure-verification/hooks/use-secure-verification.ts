@@ -324,6 +324,15 @@ export function useSecureVerification() {
           cancel()
           return
         }
+        if (current.kind === 'login' && failure.code === 'LOGIN_LOCKED') {
+          // Password login of the account is locked for longer than the
+          // flow lives, so no code can finish it: end the flow and let the
+          // page report the lock and return to sign-in.
+          pending.current = null
+          dispatch({ type: 'reset' })
+          current.reject(failure)
+          return
+        }
         dispatch({ type: 'error', error: failure.message })
       } finally {
         current.submitting = false

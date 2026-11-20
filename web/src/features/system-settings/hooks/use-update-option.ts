@@ -54,6 +54,10 @@ const STATUS_RELATED_KEYS = new Set([
   'QuotaRemindEnabled',
   'QuotaRemindThreshold',
   'RegisterCaptchaEnabled',
+  'PasswordResetCaptchaEnabled',
+  'LoginCaptchaEnabled',
+  'PasswordResetEmailLimitEnabled',
+  'PasswordResetEmailCooldownSeconds',
   'EmailQQNumericOnlyEnabled',
 ])
 

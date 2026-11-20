@@ -68,13 +68,21 @@ export async function login(payload: LoginPayload): Promise<LoginResponse> {
     } else {
       passwordFields = { password: payload.password }
     }
+    // Turnstile and the captcha travel in the query string, not in the body.
     const res = await api.post<LoginResponse>(
-      `/api/user/login?turnstile=${turnstile}`,
+      '/api/user/login',
       {
         username: payload.username,
         ...passwordFields,
       },
-      { skipAuthRefresh: true }
+      {
+        params: {
+          turnstile,
+          captcha_id: payload.captcha?.captcha_id,
+          captcha: payload.captcha?.captcha,
+        },
+        skipAuthRefresh: true,
+      }
     )
     if (payload.passwordEncryptionEnabled && !res.data?.success) {
       clearPasswordEncryptionCache()
@@ -153,10 +161,16 @@ export async function logout(): Promise<ApiResponse> {
 // Send password reset email
 export async function sendPasswordResetEmail(
   email: string,
-  turnstile?: string
+  turnstile?: string,
+  captcha?: RegisterCaptchaParams
 ): Promise<ApiResponse> {
   const res = await api.get('/api/reset_password', {
-    params: { email, turnstile },
+    params: {
+      email,
+      turnstile,
+      captcha_id: captcha?.captcha_id,
+      captcha: captcha?.captcha,
+    },
   })
   return res.data
 }

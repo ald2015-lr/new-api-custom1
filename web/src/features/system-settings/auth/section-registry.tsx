@@ -117,6 +117,16 @@ const AUTH_SECTIONS = [
           RegisterIPRateLimitEnabled: settings.RegisterIPRateLimitEnabled,
           RegisterIPRateLimitNum: settings.RegisterIPRateLimitNum,
           RegisterIPRateLimitMinutes: settings.RegisterIPRateLimitMinutes,
+          PasswordResetCaptchaEnabled: settings.PasswordResetCaptchaEnabled,
+          PasswordResetEmailLimitEnabled:
+            settings.PasswordResetEmailLimitEnabled,
+          PasswordResetEmailCooldownSeconds:
+            settings.PasswordResetEmailCooldownSeconds,
+          PasswordResetEmailDailyMax: settings.PasswordResetEmailDailyMax,
+          LoginCaptchaEnabled: settings.LoginCaptchaEnabled,
+          LoginLockoutEnabled: settings.LoginLockoutEnabled,
+          LoginLockoutMaxFailures: settings.LoginLockoutMaxFailures,
+          LoginLockoutMinutes: settings.LoginLockoutMinutes,
         }}
       />
     ),

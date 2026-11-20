@@ -28,6 +28,7 @@ import { translateServerText } from '@/lib/server-error-message'
 
 import type { UsageLog } from '../data/schema'
 import type { LogOtherData } from '../types'
+import { authAuditTypedValue, authAuditValueLabel } from './auth-audit'
 import { buildQuotaAuditOperation } from './quota-audit-operation'
 
 export { normalizeTierLabel }
@@ -478,6 +479,18 @@ const AUDIT_TEMPLATES: Record<string, string> = {
   // Disabled by the invite abuse rule as the inviter; see the invitee wording below.
   'user.invite_abuse_ban':
     'Disabled automatically for invite abuse: {{invite_count}} invited users and none of them has recharged',
+  // Password reset and sign-in protection; the wordings without an address
+  // or a typed name are picked below.
+  'user.password_reset_request':
+    'Password reset request for {{email}}: {{outcome}}',
+  'user.password_reset': 'Password reset through the email link',
+  'user.password_reset_failed':
+    'Password reset through the email link failed: {{reason}}',
+  'user.login_failed': 'Failed login as {{identifier}}: {{reason}}',
+  'user.login_2fa_failed':
+    'Failed two-factor verification at login: {{reason}}',
+  'user.login_unlock':
+    'Cleared the login lock of user {{username}} (ID: {{id}})',
   // User management
   'user.create': 'Created user {{username}} (role {{role}})',
   'user.update': 'Updated user {{username}} (ID: {{id}})',
@@ -638,6 +651,10 @@ export function renderAuditContent(
   ) {
     template =
       'Disabled automatically for invite abuse: the {{invite_count}} users invited by user ID {{inviter_id}} have not recharged'
+  } else if (op.action === 'user.password_reset_request' && !op.params?.email) {
+    template = 'Password reset request: {{outcome}}'
+  } else if (op.action === 'user.login_failed' && !op.params?.identifier) {
+    template = 'Failed login: {{reason}}'
   }
   if (!template) return null
   const quotaOperation = buildQuotaAuditOperation(
@@ -649,6 +666,31 @@ export function renderAuditContent(
   if (quotaOperation) {
     return `${quotaOperation.summary} · ${quotaOperation.description}`
   }
-  const params = { ...op.params }
+  const params: Record<string, unknown> = { ...op.params }
+  const lockStarted = params.lock_started === true
+  for (const key of ['outcome', 'reason', 'detail']) {
+    if (key in params) {
+      params[key] = authAuditValueLabel(
+        op.action,
+        key,
+        params[key],
+        t,
+        lockStarted
+      )
+    }
+  }
+  if (op.action === 'user.login_failed') {
+    params.identifier = authAuditTypedValue(
+      params.identifier,
+      params.identifier_length,
+      t
+    )
+  } else if (op.action.startsWith('user.password_reset')) {
+    params.email = authAuditTypedValue(
+      params.email,
+      params.identifier_length,
+      t
+    )
+  }
   return t(template, params)
 }

@@ -27,6 +27,7 @@ import { Button } from '@/components/ui/button'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { isAuditEmailFilter, isAuditIpFilter } from '../../lib/auth-audit'
 import { getAuditLogs, type AuditFilters, type AuditLog } from '../api'
 import { useAuditLogColumns } from './audit-log-columns'
 import { AuditLogFilterBar } from './audit-log-filter-bar'
@@ -47,6 +48,13 @@ export function AuditLogViewer(props: {
   const defaultTokenScope = props.defaultTokenScope ?? 'all'
   const [tokenScope, setTokenScope] = useState<string>(defaultTokenScope)
   const params = { ...filters }
+  // The server refuses a partial address: send it once it is complete.
+  params.ip =
+    filters.ip && isAuditIpFilter(filters.ip) ? filters.ip.trim() : undefined
+  params.email =
+    filters.email && isAuditEmailFilter(filters.email)
+      ? filters.email.trim()
+      : undefined
   if (props.accessOnly) params.category = 'access_token'
   if (tokenScope === 'current') params.token_ref = props.currentTokenRef
   if (tokenScope === 'historical') {

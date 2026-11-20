@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, type ChangeEvent, type ReactNode } from 'react'
-import { useForm, type Resolver } from 'react-hook-form'
+import { useForm, type Control, type Resolver } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import * as z from 'zod'
 
@@ -63,6 +63,30 @@ const botProtectionSchema = z.object({
     1440,
     'Registration rate limit window must be an integer between 1 and 1440 minutes'
   ),
+  PasswordResetCaptchaEnabled: z.boolean(),
+  PasswordResetEmailLimitEnabled: z.boolean(),
+  PasswordResetEmailCooldownSeconds: integerRangeSchema(
+    30,
+    3600,
+    'Password reset email cooldown must be an integer between 30 and 3600 seconds'
+  ),
+  PasswordResetEmailDailyMax: integerRangeSchema(
+    1,
+    100,
+    'Password reset email limit must be an integer between 1 and 100 per day'
+  ),
+  LoginCaptchaEnabled: z.boolean(),
+  LoginLockoutEnabled: z.boolean(),
+  LoginLockoutMaxFailures: integerRangeSchema(
+    3,
+    100,
+    'Login lockout failure count must be an integer between 3 and 100'
+  ),
+  LoginLockoutMinutes: integerRangeSchema(
+    1,
+    1440,
+    'Login lockout duration must be an integer between 1 and 1440 minutes'
+  ),
 })
 
 type BotProtectionFormValues = z.infer<typeof botProtectionSchema>
@@ -71,16 +95,101 @@ type BotProtectionFormValues = z.infer<typeof botProtectionSchema>
 const ENABLE_LAST_KEYS = new Set([
   'TurnstileCheckEnabled',
   'RegisterIPRateLimitEnabled',
+  'PasswordResetEmailLimitEnabled',
+  'LoginLockoutEnabled',
 ])
 
 type BotProtectionSectionProps = {
   defaultValues: BotProtectionFormValues
 }
 
+type SwitchName =
+  | 'TurnstileCheckEnabled'
+  | 'RegisterCaptchaEnabled'
+  | 'RegisterIPRateLimitEnabled'
+  | 'PasswordResetCaptchaEnabled'
+  | 'PasswordResetEmailLimitEnabled'
+  | 'LoginCaptchaEnabled'
+  | 'LoginLockoutEnabled'
+
+type NumberName =
+  | 'RegisterIPRateLimitNum'
+  | 'RegisterIPRateLimitMinutes'
+  | 'PasswordResetEmailCooldownSeconds'
+  | 'PasswordResetEmailDailyMax'
+  | 'LoginLockoutMaxFailures'
+  | 'LoginLockoutMinutes'
+
 /** An emptied number input stays empty instead of becoming NaN. */
 function numberInputValue(event: ChangeEvent<HTMLInputElement>): number | '' {
   const value = event.currentTarget.valueAsNumber
   return Number.isNaN(value) ? '' : value
+}
+
+/** A protection switch with what it does under its name. */
+function ProtectionSwitch(props: {
+  control: Control<BotProtectionFormValues>
+  name: SwitchName
+  label: string
+  description: string
+}) {
+  return (
+    <FormField
+      control={props.control}
+      name={props.name}
+      render={({ field }) => (
+        <SettingsSwitchItem>
+          <SettingsSwitchContent>
+            <FormLabel>{props.label}</FormLabel>
+            <FormDescription>{props.description}</FormDescription>
+          </SettingsSwitchContent>
+          <FormControl>
+            <Switch checked={field.value} onCheckedChange={field.onChange} />
+          </FormControl>
+        </SettingsSwitchItem>
+      )}
+    />
+  )
+}
+
+/**
+ * A whole number setting. Top-aligned, so both inputs of a row line up
+ * whatever the length of their descriptions.
+ */
+function ProtectionNumberInput(props: {
+  control: Control<BotProtectionFormValues>
+  name: NumberName
+  label: string
+  description: string
+  min: number
+  max: number
+}) {
+  return (
+    <FormField
+      control={props.control}
+      name={props.name}
+      render={({ field }) => (
+        <FormItem className='self-start'>
+          <FormLabel>{props.label}</FormLabel>
+          <FormControl>
+            <Input
+              type='number'
+              min={props.min}
+              max={props.max}
+              step={1}
+              value={field.value ?? ''}
+              onChange={(event) => field.onChange(numberInputValue(event))}
+              name={field.name}
+              onBlur={field.onBlur}
+              ref={field.ref}
+            />
+          </FormControl>
+          <FormDescription>{props.description}</FormDescription>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
 }
 
 /**
@@ -188,26 +297,12 @@ export function BotProtectionSection({
             onSave={form.handleSubmit(onSubmit)}
             isSaving={updateOption.isPending}
           />
-          <FormField
+          <ProtectionSwitch
             control={form.control}
             name='TurnstileCheckEnabled'
-            render={({ field }) => (
-              <SettingsSwitchItem>
-                <SettingsSwitchContent>
-                  <FormLabel>{t('Enable Turnstile')}</FormLabel>
-                  <FormDescription>
-                    {t(
-                      'Protect login and registration with Cloudflare Turnstile'
-                    )}
-                  </FormDescription>
-                </SettingsSwitchContent>
-                <FormControl>
-                  <Switch
-                    checked={field.value}
-                    onCheckedChange={field.onChange}
-                  />
-                </FormControl>
-              </SettingsSwitchItem>
+            label={t('Enable Turnstile')}
+            description={t(
+              'Optional. Cloudflare Turnstile often fails to load for visitors in mainland China, so do not rely on it there: the arithmetic captchas, the reset email limit and the login lockout below work without it.'
             )}
           />
 
@@ -248,117 +343,125 @@ export function BotProtectionSection({
             )}
           />
 
-          <FormField
+          <ProtectionSwitch
             control={form.control}
             name='RegisterCaptchaEnabled'
-            render={({ field }) => (
-              <SettingsSwitchItem>
-                <SettingsSwitchContent>
-                  <FormLabel>{t('Registration captcha')}</FormLabel>
-                  <FormDescription>
-                    {t(
-                      'Ask for an arithmetic image captcha before a registration email code is sent, or when registering if email verification is off.'
-                    )}
-                  </FormDescription>
-                </SettingsSwitchContent>
-                <FormControl>
-                  <Switch
-                    checked={field.value}
-                    onCheckedChange={field.onChange}
-                  />
-                </FormControl>
-              </SettingsSwitchItem>
+            label={t('Registration captcha')}
+            description={t(
+              'Ask for an arithmetic image captcha before a registration email code is sent, or when registering if email verification is off.'
             )}
           />
 
-          <FormField
+          <ProtectionSwitch
             control={form.control}
             name='RegisterIPRateLimitEnabled'
-            render={({ field }) => (
-              <SettingsSwitchItem>
-                <SettingsSwitchContent>
-                  <FormLabel>{t('Registration IP rate limit')}</FormLabel>
-                  <FormDescription>
-                    {t(
-                      'Limits registration submissions and registration email code requests per IP, counted separately. New accounts created through third-party login count as registrations. Client IPs are only correct behind a properly configured reverse proxy and TRUSTED_PROXIES.'
-                    )}
-                  </FormDescription>
-                </SettingsSwitchContent>
-                <FormControl>
-                  <Switch
-                    checked={field.value}
-                    onCheckedChange={field.onChange}
-                  />
-                </FormControl>
-              </SettingsSwitchItem>
+            label={t('Registration IP rate limit')}
+            description={t(
+              'Limits registration submissions and registration email code requests per IP, counted separately. New accounts created through third-party login count as registrations. Client IPs are only correct behind a properly configured reverse proxy and TRUSTED_PROXIES.'
             )}
           />
 
-          {/* Top-aligned, so both inputs of this row line up whatever the
-              length of their descriptions. */}
-          <FormField
+          <ProtectionNumberInput
             control={form.control}
             name='RegisterIPRateLimitNum'
-            render={({ field }) => (
-              <FormItem className='self-start'>
-                <FormLabel>{t('Requests per IP')}</FormLabel>
-                <FormControl>
-                  <Input
-                    type='number'
-                    min={1}
-                    max={1000}
-                    step={1}
-                    value={field.value ?? ''}
-                    onChange={(event) =>
-                      field.onChange(numberInputValue(event))
-                    }
-                    name={field.name}
-                    onBlur={field.onBlur}
-                    ref={field.ref}
-                  />
-                </FormControl>
-                <FormDescription>
-                  {t(
-                    'Allowed in each time window, for registrations and for email codes alike'
-                  )}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
+            label={t('Requests per IP')}
+            description={t(
+              'Allowed in each time window, for registrations and for email codes alike'
             )}
+            min={1}
+            max={1000}
           />
 
-          <FormField
+          <ProtectionNumberInput
             control={form.control}
             name='RegisterIPRateLimitMinutes'
-            render={({ field }) => (
-              <FormItem className='self-start'>
-                <FormLabel>{t('Time window (minutes)')}</FormLabel>
-                <FormControl>
-                  <Input
-                    type='number'
-                    min={1}
-                    max={1440}
-                    step={1}
-                    value={field.value ?? ''}
-                    onChange={(event) =>
-                      field.onChange(numberInputValue(event))
-                    }
-                    name={field.name}
-                    onBlur={field.onBlur}
-                    ref={field.ref}
-                  />
-                </FormControl>
-                <FormDescription>
-                  {t(
-                    'Captcha images are limited in the same window too: six times the requests per IP, at least 30'
-                  )}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
+            label={t('Time window (minutes)')}
+            description={t(
+              "Captcha images are limited per IP too. While this limit is on: six times the requests per IP in this window (at least 30), plus three for each request the server's critical rate limit allows while the login or password reset captcha is on. While it is off and any captcha is on: three images per such request (60 per 20 minutes by default)."
             )}
+            min={1}
+            max={1440}
           />
 
           <ClientIpDiagnostic />
+
+          <ProtectionSwitch
+            control={form.control}
+            name='PasswordResetCaptchaEnabled'
+            label={t('Password reset captcha')}
+            description={t(
+              'Ask for an arithmetic image captcha on the forgot password page before a reset email is sent.'
+            )}
+          />
+
+          <ProtectionSwitch
+            control={form.control}
+            name='PasswordResetEmailLimitEnabled'
+            label={t('Password reset email limit')}
+            description={t(
+              'Per email address, whether or not an account uses it: at most one reset email per cooldown and at most the daily maximum in any 24 hours. Refused requests send nothing and do not count. Anyone can use up an address\'s daily emails; its owner then waits, or an administrator clears it with "Unlock login".'
+            )}
+          />
+
+          <ProtectionNumberInput
+            control={form.control}
+            name='PasswordResetEmailCooldownSeconds'
+            label={t('Cooldown (seconds)')}
+            description={t(
+              'Time between two reset emails to one address, 30 to 3600'
+            )}
+            min={30}
+            max={3600}
+          />
+
+          <ProtectionNumberInput
+            control={form.control}
+            name='PasswordResetEmailDailyMax'
+            label={t('Emails per address in 24 hours')}
+            description={t('Counted over a rolling 24 hours, 1 to 100')}
+            min={1}
+            max={100}
+          />
+
+          <ProtectionSwitch
+            control={form.control}
+            name='LoginCaptchaEnabled'
+            label={t('Login captcha')}
+            description={t(
+              'Ask for an arithmetic image captcha on every password login. Scripts and apps that sign in with a username and password through the API stop working while it is on; API keys are not affected.'
+            )}
+          />
+
+          <ProtectionSwitch
+            control={form.control}
+            name='LoginLockoutEnabled'
+            label={t('Login lockout')}
+            description={t(
+              'After too many wrong passwords for one account or one typed name, password login is refused for a while, even with the right password. A password reset through the email link or "Unlock login" in user management ends it early. Passkey and third-party login are not locked, so a passkey bound to the administrator account (with passkey login enabled) is the way in while it is locked. Two-factor authentication stops a guessed password but does not lift a lock.'
+            )}
+          />
+
+          <ProtectionNumberInput
+            control={form.control}
+            name='LoginLockoutMaxFailures'
+            label={t('Failed attempts before locking')}
+            description={t(
+              'Wrong passwords counted within the lock duration, 3 to 100'
+            )}
+            min={3}
+            max={100}
+          />
+
+          <ProtectionNumberInput
+            control={form.control}
+            name='LoginLockoutMinutes'
+            label={t('Lock duration (minutes)')}
+            description={t(
+              'Also the window in which failures are counted, 1 to 1440'
+            )}
+            min={1}
+            max={1440}
+          />
         </SettingsForm>
       </Form>
     </SettingsSection>

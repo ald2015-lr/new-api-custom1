@@ -45,7 +45,17 @@ const defaults = {
   RegisterIPRateLimitEnabled: false,
   RegisterIPRateLimitNum: 5,
   RegisterIPRateLimitMinutes: 15,
+  PasswordResetCaptchaEnabled: true,
+  PasswordResetEmailLimitEnabled: true,
+  PasswordResetEmailCooldownSeconds: 120,
+  PasswordResetEmailDailyMax: 5,
+  LoginCaptchaEnabled: true,
+  LoginLockoutEnabled: true,
+  LoginLockoutMaxFailures: 10,
+  LoginLockoutMinutes: 15,
 }
+
+let sectionDefaults: typeof defaults = defaults
 
 function mockClientIp(body: Record<string, unknown>) {
   return vi.spyOn(api, 'get').mockImplementation(async (url) => {
@@ -67,14 +77,15 @@ function Fixture() {
       <QueryClientProvider client={client}>
         <div ref={setContainer} />
         <SettingsPageProvider actionsContainer={container}>
-          <BotProtectionSection defaultValues={defaults} />
+          <BotProtectionSection defaultValues={sectionDefaults} />
         </SettingsPageProvider>
       </QueryClientProvider>
     </I18nextProvider>
   )
 }
 
-async function renderSettings() {
+async function renderSettings(values: Partial<typeof defaults> = {}) {
+  sectionDefaults = { ...defaults, ...values }
   const route = createRootRoute({ component: Fixture })
   const router = createRouter({
     routeTree: route,
@@ -90,6 +101,8 @@ beforeEach(async () => {
     lng: 'en',
     fallbackLng: 'en',
     resources: { en: { translation: {} }, zh },
+    // As in the app: keys are English sentences that may contain colons.
+    nsSeparator: false,
     interpolation: { escapeValue: false },
   })
   vi.spyOn(api, 'put').mockResolvedValue({ data: { success: true } })
@@ -273,7 +286,191 @@ describe('Registration protection settings', () => {
     expect(
       screen.getByRole('spinbutton', { name: 'Time window (minutes)' })
     ).toHaveAccessibleDescription(
-      'Captcha images are limited in the same window too: six times the requests per IP, at least 30'
+      "Captcha images are limited per IP too. While this limit is on: six times the requests per IP in this window (at least 30), plus three for each request the server's critical rate limit allows while the login or password reset captcha is on. While it is off and any captcha is on: three images per such request (60 per 20 minutes by default)."
+    )
+  })
+})
+
+describe('Password reset and login protection settings', () => {
+  function savedKeys(put: { mock: { calls: unknown[][] } }) {
+    return put.mock.calls.map((call) => call[1] as UpdateOptionRequest)
+  }
+
+  it('shows the captchas, the reset email limit and the login lockout with their saved values', async () => {
+    await renderSettings()
+
+    for (const name of [
+      'Password reset captcha',
+      'Password reset email limit',
+      'Login captcha',
+      'Login lockout',
+    ]) {
+      expect(screen.getByRole('switch', { name })).toBeChecked()
+    }
+    expect(
+      screen.getByRole('spinbutton', { name: 'Cooldown (seconds)' })
+    ).toHaveValue(120)
+    expect(
+      screen.getByRole('spinbutton', { name: 'Emails per address in 24 hours' })
+    ).toHaveValue(5)
+    expect(
+      screen.getByRole('spinbutton', { name: 'Failed attempts before locking' })
+    ).toHaveValue(10)
+    expect(
+      screen.getByRole('spinbutton', { name: 'Lock duration (minutes)' })
+    ).toHaveValue(15)
+  })
+
+  it.each([
+    [
+      'Cooldown (seconds)',
+      '29',
+      'Password reset email cooldown must be an integer between 30 and 3600 seconds',
+    ],
+    [
+      'Cooldown (seconds)',
+      '3601',
+      'Password reset email cooldown must be an integer between 30 and 3600 seconds',
+    ],
+    [
+      'Emails per address in 24 hours',
+      '0',
+      'Password reset email limit must be an integer between 1 and 100 per day',
+    ],
+    [
+      'Emails per address in 24 hours',
+      '101',
+      'Password reset email limit must be an integer between 1 and 100 per day',
+    ],
+    [
+      'Failed attempts before locking',
+      '2',
+      'Login lockout failure count must be an integer between 3 and 100',
+    ],
+    [
+      'Failed attempts before locking',
+      '101',
+      'Login lockout failure count must be an integer between 3 and 100',
+    ],
+    [
+      'Lock duration (minutes)',
+      '0',
+      'Login lockout duration must be an integer between 1 and 1440 minutes',
+    ],
+    [
+      'Lock duration (minutes)',
+      '1441',
+      'Login lockout duration must be an integer between 1 and 1440 minutes',
+    ],
+  ])('refuses %s set to %s and saves nothing', async (name, value, message) => {
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    await renderSettings()
+    const input = screen.getByRole('spinbutton', { name })
+
+    await user.clear(input)
+    await user.type(input, value)
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('saves the cooldown, daily maximum and lockout numbers before turning the limit and the lockout on', async () => {
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    await renderSettings({
+      PasswordResetEmailLimitEnabled: false,
+      LoginLockoutEnabled: false,
+    })
+
+    await user.click(screen.getByRole('switch', { name: 'Login lockout' }))
+    await user.click(
+      screen.getByRole('switch', { name: 'Password reset email limit' })
+    )
+    for (const [name, value] of [
+      ['Cooldown (seconds)', '300'],
+      ['Emails per address in 24 hours', '3'],
+      ['Failed attempts before locking', '5'],
+      ['Lock duration (minutes)', '30'],
+    ]) {
+      const input = screen.getByRole('spinbutton', { name })
+      await user.clear(input)
+      await user.type(input, value)
+    }
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(6))
+    expect(savedKeys(put)).toEqual([
+      { key: 'PasswordResetEmailCooldownSeconds', value: 300 },
+      { key: 'PasswordResetEmailDailyMax', value: 3 },
+      { key: 'LoginLockoutMaxFailures', value: 5 },
+      { key: 'LoginLockoutMinutes', value: 30 },
+      { key: 'PasswordResetEmailLimitEnabled', value: true },
+      { key: 'LoginLockoutEnabled', value: true },
+    ])
+  })
+
+  it.each([
+    ['Password reset captcha', 'PasswordResetCaptchaEnabled'],
+    ['Login captcha', 'LoginCaptchaEnabled'],
+  ])(
+    'saves turning the %s off and drops the cached sign-in status',
+    async (name, key) => {
+      const put = vi.spyOn(api, 'put')
+      const user = userEvent.setup()
+      localStorage.setItem(
+        'status',
+        JSON.stringify({ password_reset_captcha: true, login_captcha: true })
+      )
+      await renderSettings()
+
+      await user.click(screen.getByRole('switch', { name }))
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+      await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+      expect(savedKeys(put)).toEqual([{ key, value: false }])
+      await waitFor(() => expect(localStorage.getItem('status')).toBeNull())
+    }
+  )
+
+  it('presents Turnstile as optional because it often fails to load in mainland China', async () => {
+    await renderSettings()
+
+    expect(
+      screen.getByRole('switch', { name: 'Enable Turnstile' })
+    ).toHaveAccessibleDescription(
+      'Optional. Cloudflare Turnstile often fails to load for visitors in mainland China, so do not rely on it there: the arithmetic captchas, the reset email limit and the login lockout below work without it.'
+    )
+    expect(
+      screen.queryByText(
+        'Protect login and registration with Cloudflare Turnstile'
+      )
+    ).not.toBeInTheDocument()
+  })
+
+  it('says that two-factor authentication does not lift a login lock and names the ways out', async () => {
+    await renderSettings()
+
+    const lockout = screen.getByRole('switch', { name: 'Login lockout' })
+    expect(lockout).toHaveAccessibleDescription(
+      expect.stringContaining(
+        'Two-factor authentication stops a guessed password but does not lift a lock.'
+      )
+    )
+    expect(lockout).toHaveAccessibleDescription(
+      expect.stringContaining('"Unlock login" in user management')
+    )
+  })
+
+  it('says that password logins through the API stop working while the login captcha is on', async () => {
+    await renderSettings()
+
+    expect(
+      screen.getByRole('switch', { name: 'Login captcha' })
+    ).toHaveAccessibleDescription(
+      'Ask for an arithmetic image captcha on every password login. Scripts and apps that sign in with a username and password through the API stop working while it is on; API keys are not affected.'
     )
   })
 })

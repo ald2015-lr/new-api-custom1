@@ -52,8 +52,26 @@ export function clientCaptchaLifetimeMs(seconds: number): number {
   return Math.max(seconds - 10, seconds / 2) * 1000
 }
 
+/** The `/api/status` switch of each page that uses the captcha. */
+export type CaptchaStatusKey =
+  | 'register_captcha'
+  | 'password_reset_captcha'
+  | 'login_captcha'
+
+export type RegisterCaptchaOptions = {
+  /** The status switch that turns the captcha on; sign-up by default. */
+  statusKey?: CaptchaStatusKey
+  /**
+   * Fetch a challenge as soon as the captcha is on. Off on the sign-in page,
+   * which loads one only for a password login (`ensureLoaded`), so visitors
+   * who use a passkey or third-party login spend no captcha image.
+   */
+  autoLoad?: boolean
+}
+
 /**
- * The arithmetic image captcha of the sign-up page.
+ * The arithmetic image captcha of the sign-up, sign-in and forgot password
+ * pages.
  *
  * A challenge is single use: the server deletes it on every check, right or
  * wrong, so a new one is fetched after each request that carried it. Nothing
@@ -61,16 +79,21 @@ export function clientCaptchaLifetimeMs(seconds: number): number {
  * as expired; its successor is fetched when the user comes back to the field
  * or submits, so an idle page does not use up the network's captcha budget.
  */
-export function useRegisterCaptcha() {
+export function useRegisterCaptcha(options: RegisterCaptchaOptions = {}) {
   const { status } = useStatus()
   const queryClient = useQueryClient()
-  const enabled = Boolean(status?.register_captcha)
+  const statusKey = options.statusKey ?? 'register_captcha'
+  const autoLoad = options.autoLoad ?? true
+  const enabled = Boolean(status?.[statusKey])
   const [challenge, setChallenge] = useState<RegisterCaptcha | null>(null)
   const [answer, setAnswer] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [expired, setExpired] = useState(false)
   // Only the newest request may update the state; older answers are stale.
   const latestRequest = useRef(0)
+  // Set while the newest request is out, for calls made before the render
+  // that shows it, such as two focus events in a row.
+  const loadingRef = useRef(false)
   // Wall-clock expiry, for a timer that fires late in a sleeping tab.
   const expiresAt = useRef(Number.POSITIVE_INFINITY)
   // False once the page is gone: a reply that arrives later must not fetch
@@ -91,6 +114,7 @@ export function useRegisterCaptcha() {
     setAnswer('')
     setExpired(false)
     setIsLoading(true)
+    loadingRef.current = true
     try {
       const res = await getRegisterCaptcha()
       if (request !== latestRequest.current) return
@@ -113,7 +137,10 @@ export function useRegisterCaptcha() {
         AuthOperationError.from(error, i18next.t('Failed to load the captcha'))
       )
     } finally {
-      if (request === latestRequest.current) setIsLoading(false)
+      if (request === latestRequest.current) {
+        setIsLoading(false)
+        loadingRef.current = false
+      }
     }
   }, [])
 
@@ -126,12 +153,13 @@ export function useRegisterCaptcha() {
 
   useEffect(() => {
     if (!enabled) return
-    void refresh()
+    if (autoLoad) void refresh()
     return () => {
       // Ignore a response that arrives after the field went away.
       latestRequest.current += 1
+      loadingRef.current = false
     }
-  }, [enabled, refresh])
+  }, [enabled, autoLoad, refresh])
 
   useEffect(() => {
     const seconds = challenge?.expires_in ?? 0
@@ -162,6 +190,35 @@ export function useRegisterCaptcha() {
     }
   }, [isLoading, challenge])
 
+  /**
+   * Loads a challenge when the captcha is on and none is shown or loading;
+   * true when it started one. With `focusAnswer`, the answer takes the focus
+   * once the image is shown (the answer itself was focused).
+   */
+  const ensureLoaded = (focusAnswer = false): boolean => {
+    if (!enabled || challenge || loadingRef.current) return false
+    if (focusAnswer) {
+      refocusFrom.current = document.activeElement ?? document.body
+    }
+    void refresh()
+    return true
+  }
+
+  /**
+   * Drops the shown challenge and its answer without loading another; the
+   * next `ensureLoaded` or `validate` loads one. For a refusal after which
+   * no attempt can follow for a while, such as a locked sign-in.
+   */
+  const discard = () => {
+    latestRequest.current += 1
+    loadingRef.current = false
+    refocusFrom.current = null
+    setChallenge(null)
+    setAnswer('')
+    setExpired(false)
+    setIsLoading(false)
+  }
+
   /** Loads a new challenge in place of an expired one; true when it did. */
   const refreshIfExpired = (): boolean => {
     if (!challenge || (!expired && Date.now() < expiresAt.current)) {
@@ -180,7 +237,8 @@ export function useRegisterCaptcha() {
 
   /**
    * True when the captcha is off or answered; toasts otherwise. An expired
-   * challenge is replaced instead of being sent.
+   * challenge is replaced instead of being sent, and a missing one is loaded
+   * (a page that loads it lazily, submitted with autofilled fields).
    */
   const validate = (): boolean => {
     if (!enabled) return true
@@ -193,14 +251,19 @@ export function useRegisterCaptcha() {
       return false
     }
     if (challenge && trimmedAnswer) return true
+    if (!challenge) {
+      ensureLoaded()
+      // The answer takes the focus once the image is shown.
+      refocusFrom.current = document.activeElement ?? document.body
+    }
     toast.error(i18next.t('Please complete the captcha.'))
     return false
   }
 
   /**
-   * Call after every registration or email code request with its response
-   * or error, and whether it carried the captcha. Not needed after a request
-   * that leaves the page.
+   * Call after every request the captcha guards with its response or error,
+   * and whether it carried the captcha. Not needed after a request that
+   * leaves the page.
    */
   const handleRequestSettled = (outcome: unknown, sentCaptcha: boolean) => {
     // A refusal can come from settings changed since the page read the
@@ -226,6 +289,8 @@ export function useRegisterCaptcha() {
     params,
     refresh,
     refreshIfExpired,
+    ensureLoaded,
+    discard,
     validate,
     handleRequestSettled,
   }

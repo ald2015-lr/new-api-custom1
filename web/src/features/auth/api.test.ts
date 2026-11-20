@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { generateKeyPairSync, webcrypto } from 'node:crypto'
+
 import { act, renderHook } from '@testing-library/react'
 import type { AxiosAdapter } from 'axios'
 import { toast } from 'sonner'
@@ -27,13 +29,19 @@ import type { AuthBundle } from '@/stores/auth-store'
 import {
   executeLogout,
   getRegisterCaptcha,
+  login,
   register,
   sendEmailVerification,
+  sendPasswordResetEmail,
 } from './api'
 import { useOAuthLogin } from './hooks/use-oauth-login'
 import { consumeOAuthLoginRedirect } from './lib/oauth-callback-mode'
+import { clearPasswordEncryptionCache } from './lib/password-encryption'
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 test.each([true, false])(
   'starts Telegram OAuth only when configuration is ready: %s',
@@ -289,5 +297,128 @@ describe('registration requests', () => {
     } finally {
       api.defaults.adapter = originalAdapter
     }
+  })
+})
+
+describe('password login and reset requests', () => {
+  const captcha = { captcha_id: 'captcha-id', captcha: '12' }
+
+  test('signs in with Turnstile and the captcha as query parameters and the password in the body', async () => {
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: false, message: '' } })
+
+    await login({
+      username: 'alice',
+      password: 'password123',
+      turnstile: 'turnstile-token',
+      captcha,
+    })
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/user/login',
+      { username: 'alice', password: 'password123' },
+      {
+        params: {
+          turnstile: 'turnstile-token',
+          captcha_id: 'captcha-id',
+          captcha: '12',
+        },
+        skipAuthRefresh: true,
+      }
+    )
+  })
+
+  test('signs in with an encrypted password and keeps the captcha out of the body', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    clearPasswordEncryptionCache()
+    const { publicKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+    })
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          kid: 'login-key',
+          public_key: publicKey
+            .export({ type: 'spki', format: 'pem' })
+            .toString(),
+        },
+      },
+    })
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true, message: '' } })
+
+    await login({
+      username: 'alice',
+      password: 'password123',
+      passwordEncryptionEnabled: true,
+      captcha,
+    })
+
+    const [url, body, config] = post.mock.calls[0]
+    expect(url).toBe('/api/user/login')
+    expect(Object.keys(body as object).sort()).toEqual([
+      'encryption_key_id',
+      'password_encrypted',
+      'username',
+    ])
+    expect(body).toMatchObject({
+      username: 'alice',
+      encryption_key_id: 'login-key',
+    })
+    expect(JSON.stringify(body)).not.toContain('password123')
+    expect(config).toEqual({
+      params: { turnstile: '', captcha_id: 'captcha-id', captcha: '12' },
+      skipAuthRefresh: true,
+    })
+    clearPasswordEncryptionCache()
+  })
+
+  test('signs in without captcha parameters while the captcha is off', async () => {
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: false, message: '' } })
+
+    await login({ username: 'alice', password: 'password123' })
+
+    expect(post.mock.calls[0][2]?.params).toStrictEqual({
+      turnstile: '',
+      captcha_id: undefined,
+      captcha: undefined,
+    })
+  })
+
+  test('requests a reset email with Turnstile and the captcha', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValue({ data: { success: true, message: '' } })
+
+    await sendPasswordResetEmail('user@example.com', 'turnstile-token', captcha)
+
+    expect(get).toHaveBeenCalledWith('/api/reset_password', {
+      params: {
+        email: 'user@example.com',
+        turnstile: 'turnstile-token',
+        captcha_id: 'captcha-id',
+        captcha: '12',
+      },
+    })
+  })
+
+  test('requests a reset email without captcha parameters while the captcha is off', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValue({ data: { success: true, message: '' } })
+
+    await sendPasswordResetEmail('user@example.com')
+
+    expect(get.mock.calls[0][1]?.params).toStrictEqual({
+      email: 'user@example.com',
+      turnstile: undefined,
+      captcha_id: undefined,
+      captcha: undefined,
+    })
   })
 })
