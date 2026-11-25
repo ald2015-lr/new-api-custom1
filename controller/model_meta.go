@@ -163,6 +163,7 @@ func UpdateModelMeta(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
+		model.BumpSyncTopic(model.SyncTopicModels)
 	} else {
 		m.ModelName = strings.TrimSpace(m.ModelName)
 		if m.ModelName == "" {

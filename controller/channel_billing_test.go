@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -223,6 +224,12 @@ func TestUpdateChannelNovelAIBalanceStoresAnlas(t *testing.T) {
 			assert.Equal(t, tc.want, result.Balance)
 			assert.Equal(t, tc.want, stored.Balance)
 			assert.NotZero(t, stored.BalanceUpdatedTime)
+			// The balance detail names the unit, so the console does not
+			// read the Anlas as USD.
+			require.NotNil(t, result.Detail)
+			require.NotNil(t, result.Detail.Amount)
+			assert.Equal(t, tc.want, *result.Detail.Amount)
+			assert.Equal(t, "Anlas", result.Detail.Currency)
 		})
 	}
 
@@ -235,7 +242,8 @@ func TestUpdateChannelNovelAIBalanceStoresAnlas(t *testing.T) {
 		channel := &model.Channel{Type: constant.ChannelTypeNovelAI, BaseURL: common.GetPointer(server.URL), Key: "pst-test", Name: "novelai", Status: common.ChannelStatusEnabled, Balance: 5, AutoBan: common.GetPointer(1)}
 		require.NoError(t, model.DB.Create(channel).Error)
 
-		require.NoError(t, updateAllChannelsBalance())
+		_, err := updateAllChannelsBalance(context.Background(), func(int, int) {})
+		require.NoError(t, err)
 
 		stored, err := model.GetChannelById(channel.Id, true)
 		require.NoError(t, err)

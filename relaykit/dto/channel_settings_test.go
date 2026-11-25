@@ -3,11 +3,12 @@ package dto
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
+	stdregexp "regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1090,8 +1091,9 @@ func TestModerationRulePresetsAreValid(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, preset, found)
 	}
+	// relay/moderation compiles the guards with the standard library's RE2.
 	for _, guard := range []string{ModerationNegationGuardEnglish, ModerationNegationGuardChinese} {
-		_, err := regexp.Compile(guard)
+		_, err := stdregexp.Compile(guard)
 		assert.NoError(t, err)
 	}
 	_, ok := ModerationRulePresetByID("gone")

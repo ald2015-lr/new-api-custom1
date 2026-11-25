@@ -894,6 +894,7 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	if authzTouched {
+		model.BumpSyncTopic(model.SyncTopicAuthz)
 		if err := authz.ReloadPolicy(); err != nil {
 			common.ApiError(c, err)
 			return
@@ -1143,6 +1144,7 @@ func DeleteUser(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.BumpSyncTopic(model.SyncTopicAuthz)
 	if err := authz.ReloadPolicy(); err != nil {
 		common.SysError(common.LogText("failed to reload authz policy: %s", err.Error()))
 	}
@@ -1271,6 +1273,7 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 	if authzTouched {
+		model.BumpSyncTopic(model.SyncTopicAuthz)
 		if err := authz.ReloadPolicy(); err != nil {
 			common.ApiError(c, err)
 			return
@@ -1515,6 +1518,7 @@ func ManageUser(c *gin.Context) {
 		// audited and reported (the deputy assignment is read from the
 		// database on every decision, so a stale policy snapshot cannot widen
 		// it).
+		model.BumpSyncTopic(model.SyncTopicAuthz)
 		if err := authz.ReloadPolicy(); err != nil {
 			common.SysError(common.LogText("failed to reload authz policy: %s", err.Error()))
 		}

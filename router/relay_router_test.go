@@ -46,6 +46,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
@@ -1648,6 +1649,32 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			assert.Equal(t, tc.n*10_000, log.Quota, tc.path+": the per-image price is unchanged")
 			assert.Equal(t, before-tc.n*10_000, walletQuota())
 		}
+
+		// A request plugin's outbound effect changes the body before the
+		// override does and is held to the same rule: parameters.n_samples
+		// is no billing field the plugin host guards, so the NovelAI check
+		// refuses it.
+		require.NoError(t, model.DB.Model(&overridden).Update("param_override", "").Error)
+		registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-novelai-samples", name: "Samples", version: "1.0.0", author: {name: "Test"}};
+export function outbound(ctx, req) {
+  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/parameters/n_samples", value: 3}]}]};
+}`)
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: `[{"id":"samples","name":"Samples","plugin":"rp-novelai-samples","enabled":true,"global":true,"models":["nai-diffusion-4-5-curated"],"config":{}}]`}))
+		t.Cleanup(func() {
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+		})
+		calls, before = upstream.calls(), walletQuota()
+		for _, tc := range []struct{ path, body string }{
+			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-curated","prompt":"a cat","n":1}`},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-curated","n":1,"messages":[{"role":"user","content":"a cat"}]}`},
+		} {
+			recorder := send(tc.path, "application/json", []byte(tc.body))
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Contains(t, recorder.Body.String(), "sets parameters.n_samples to 3; it must stay 1")
+		}
+		assert.Equal(t, calls, upstream.calls(), "NovelAI is not asked for images a request plugin added")
+		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
 	})
 
 	t.Run("NovelAI errors keep their status in an OpenAI error and charge nothing", func(t *testing.T) {

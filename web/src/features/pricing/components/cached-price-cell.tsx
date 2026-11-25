@@ -30,6 +30,7 @@ import {
 } from '../lib/dynamic-price'
 import { getSplitPriceGroups, hasCachedPrice } from '../lib/model-family'
 import { isTokenBasedModel } from '../lib/model-helpers'
+import { withBasePricing } from '../lib/plugin-pricing'
 import { formatPrice, stripTrailingZeros } from '../lib/price'
 import type { PricingModel } from '../types'
 import { GroupPriceList } from './model-family-price'
@@ -50,7 +51,7 @@ export function CachedPriceCell(props: {
 
   const tokenUnitLabel = tokenUnit === 'K' ? '1K' : '1M'
 
-  const model = props.model
+  const model = useMemo(() => withBasePricing(props.model), [props.model])
   const currency = useSystemConfigStore((state) => state.config.currency)
   const billingTime = useBillingTime(model.billing_expr)
   const dynamicSummary = useMemo(

@@ -71,9 +71,12 @@ import {
   CHANNEL_TYPE_TASK_PLUGIN,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
-  MODEL_FETCHABLE_TYPES,
 } from '../constants'
 import { useChannelQuotaLimit } from '../hooks/use-channel-quota-limits'
+import {
+  useChannelBalanceQueryable,
+  useChannelModelFetchable,
+} from '../hooks/use-task-plugin-option'
 import {
   formatRelativeTime,
   formatResponseTime,
@@ -92,8 +95,13 @@ import {
   isTagAggregateRow,
   type TagRow,
 } from '../lib'
+import {
+  formatChannelBalanceSummary,
+  getChannelBalanceUsedPercent,
+} from '../lib/channel-balance'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
+import { ChannelBalanceDetails } from './channel-balance-details'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
@@ -129,7 +137,8 @@ function parseIonetMeta(otherInfo: string | null | undefined): null | {
  */
 function UpstreamUpdateTags({ channel }: { channel: Channel }) {
   const { upstream, setCurrentRow } = useChannels()
-  if (!MODEL_FETCHABLE_TYPES.has(channel.type)) {
+  const modelFetchable = useChannelModelFetchable(channel)
+  if (!modelFetchable) {
     return null
   }
 
@@ -379,6 +388,13 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const balance = channel.balance || 0
   const usedQuota = channel.used_quota || 0
   const quotaLimit = useChannelQuotaLimit(channel.id)
+  const balanceQueryable = useChannelBalanceQueryable(channel)
+  const detail = channel.balance_detail
+  const usedPercent = getChannelBalanceUsedPercent(detail?.windows)
+  const ownCurrency =
+    detail?.amount != null &&
+    Boolean(detail.currency?.trim()) &&
+    detail.currency?.trim().toUpperCase() !== 'USD'
   const [isUpdating, setIsUpdating] = useState(false)
   const [rawBalanceResponse, setRawBalanceResponse] = useState<string | null>(
     null
@@ -438,12 +454,33 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       : remainingFull
   // A NovelAI channel's balance is its account's Anlas, not USD.
   const isAnlasBalance = channel.type === CHANNEL_TYPE_NOVELAI
-  if (isAnlasBalance) {
+  if (!balanceQueryable) {
+    remainingFull = '-'
+    remainingDisplay = '-'
+  } else if (isAnlasBalance) {
     const anlas = formatNumber(balance, locale)
     remainingFull = t('{{anlas}} Anlas', { anlas })
     remainingDisplay =
       anlas.length > MAX_INLINE_BALANCE_CHARS
         ? t('{{anlas}} Anlas', { anlas: formatCompactNumber(balance, locale) })
+        : remainingFull
+  } else if (
+    detail?.unlimited ||
+    ownCurrency ||
+    (detail?.amount == null && usedPercent !== null)
+  ) {
+    // The upstream's own currency, an unlimited balance or its limits
+    // replace the USD amount when the upstream reports them.
+    remainingFull = formatChannelBalanceSummary(detail, balance, {
+      ...balanceFormatOptions,
+      locale,
+    })
+    remainingDisplay =
+      remainingFull.length > MAX_INLINE_BALANCE_CHARS
+        ? formatChannelBalanceSummary(detail, balance, {
+            compact: true,
+            locale,
+          })
         : remainingFull
   }
   const usedLabel = `${t('Used:')} ${usedFull}`
@@ -524,11 +561,11 @@ export function BalanceCell({ channel }: { channel: Channel }) {
           ? t('{{anlas}} Anlas', {
               anlas: formatNumber(response.balance, locale),
             })
-          : formatCurrencyFromUSD(response.balance, {
-              digitsLarge: 2,
-              digitsSmall: 4,
-              abbreviate: false,
-            })
+          : formatChannelBalanceSummary(
+              response.balance_detail,
+              response.balance,
+              { digitsLarge: 2, digitsSmall: 4, abbreviate: false, locale }
+            )
         toast.success(
           t('Balance updated: {{balance}}', { balance: updatedBalance })
         )
@@ -566,20 +603,29 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   let remainingBadgeVariant: StatusBadgeProps['variant'] = variant
   if (channel.type === 57 || isInferenceChannel) {
     remainingBadgeVariant = 'info'
-  } else if (isUpdating) {
+  } else if (isUpdating || !balanceQueryable) {
     remainingBadgeVariant = 'neutral'
+  } else if (detail?.unlimited) {
+    remainingBadgeVariant = 'success'
+  } else if (detail?.amount == null && usedPercent !== null) {
+    remainingBadgeVariant = 'success'
+    if (usedPercent >= 70) remainingBadgeVariant = 'warning'
+    if (usedPercent >= 90) remainingBadgeVariant = 'danger'
   }
+  const balanceClickable = !isInferenceChannel && balanceQueryable
   const remainingBadge = (
     <StatusBadge
       label={remainingBadgeLabel}
       variant={remainingBadgeVariant}
+      icon={sensitiveVisible && detail?.error ? AlertTriangle : undefined}
       size='sm'
       copyable={false}
       showDot={false}
-      className='cursor-pointer'
-      onClick={isInferenceChannel ? undefined : handleClickUpdate}
+      className={balanceClickable ? 'cursor-pointer' : 'cursor-help'}
+      onClick={balanceClickable ? handleClickUpdate : undefined}
     />
   )
+  const balanceQueryHint = balanceClickable && channel.type !== 57
 
   return (
     <TooltipProvider>
@@ -619,11 +665,15 @@ export function BalanceCell({ channel }: { channel: Channel }) {
               )
             }
           />
-          <TooltipContent>
+          <TooltipContent className='flex-col items-start'>
             <p>{remainingTooltipLabel}</p>
-            {channel.type !== 57 && !isInferenceChannel && (
-              <p>{t('Click to update balance')}</p>
+            {sensitiveVisible && balanceQueryHint && (
+              <ChannelBalanceDetails
+                result={detail}
+                updatedTime={channel.balance_updated_time}
+              />
             )}
+            {balanceQueryHint && <p>{t('Click to update balance')}</p>}
           </TooltipContent>
         </Tooltip>
       </div>
