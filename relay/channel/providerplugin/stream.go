@@ -98,7 +98,9 @@ func (s *streamConverter) streamSource(resp *http.Response) eventSource {
 // while the upstream headers are awaited.
 func (s *streamConverter) respond(c *gin.Context, header http.Header) (*http.Response, error) {
 	stopPinger := func() {}
-	if generalSettings := operation_setting.GetGeneralSetting(); s.clientStream && generalSettings.PingIntervalEnabled && !s.disablePing {
+	// A KeepAliveWriter installed by the relay owns the pings: these would
+	// reach it as response bytes and stop the retry on another channel.
+	if generalSettings := operation_setting.GetGeneralSetting(); s.clientStream && generalSettings.PingIntervalEnabled && !s.disablePing && !helper.KeepAliveActive(c) {
 		stopPinger = helper.StartStreamKeepAlive(c, time.Duration(generalSettings.PingIntervalSeconds)*time.Second)
 	}
 	upstreamErr, err := s.prime(time.Duration(constant.StreamingTimeout) * time.Second)

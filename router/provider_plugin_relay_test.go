@@ -1319,6 +1319,37 @@ func TestPluginStreamErrors(t *testing.T) {
 		assert.Equal(t, outcome.log.Quota, outcome.quota)
 	})
 
+	// With keep-alive on, the gateway's KeepAliveWriter owns the pings: an
+	// attempt that sent nothing but pings fails over like any other.
+	t.Run("keep-alive pings before an error leave the request retryable", func(t *testing.T) {
+		previousRetries := common.RetryTimes
+		common.RetryTimes = 1
+		t.Cleanup(func() { common.RetryTimes = previousRetries })
+		harness := newVendor(t)
+		settings := operation_setting.GetGeneralSetting()
+		previousEnabled, previousSeconds := settings.PingIntervalEnabled, settings.PingIntervalSeconds
+		settings.PingIntervalEnabled, settings.PingIntervalSeconds = true, 1
+		t.Cleanup(func() { settings.PingIntervalEnabled, settings.PingIntervalSeconds = previousEnabled, previousSeconds })
+		serve := slowVendor(0, 0)
+		harness.upstream.respond = func(w http.ResponseWriter, attempt int, request capturedRequest) {
+			if attempt > 1 {
+				serve(w, attempt, request)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			time.Sleep(2 * time.Second)
+			_, _ = io.WriteString(w, "data: {\"code\":1302,\"msg\":\"busy\"}\n\n")
+		}
+
+		outcome := harness.post(t, "/v1/chat/completions", streamBody)
+
+		require.Equal(t, http.StatusOK, outcome.status, outcome.body)
+		assert.Len(t, harness.upstream.captured(), 2, outcome.body)
+		assert.Equal(t, output, strings.ReplaceAll(outcome.body, ": PING\n\n", ""))
+		assert.Positive(t, outcome.quota)
+	})
+
 	t.Run("an error after output ends the stream as a read error does", func(t *testing.T) {
 		harness := newVendor(t)
 		harness.upstream.respond = respondWith(http.StatusOK, "text/event-stream", "data: {\"text\":\"one\"}\n\ndata: {\"code\":1302,\"msg\":\"busy\"}\n\ndata: {\"text\":\"two\"}\n\n")
@@ -2064,6 +2095,50 @@ export function outbound(ctx, req) {
 		gjson.Get(errorLog.Other, "request_plugins").Raw)
 	assert.Equal(t, "reject", gjson.Get(errorLog.Other, `admin_info.request_plugins.0.action`).Str)
 	assert.Equal(t, "door", gjson.Get(errorLog.Other, `admin_info.request_plugins.0.instance`).Str)
+}
+
+// A report instance bound to the channel starts its capture at the attempt,
+// in front of the relay's KeepAliveWriter. The pings stay the
+// KeepAliveWriter's, so an attempt that sent nothing but pings is retried.
+func TestChannelReportPluginKeepsKeepAliveRetries(t *testing.T) {
+	previousRetries := common.RetryTimes
+	common.RetryTimes = 1
+	t.Cleanup(func() { common.RetryTimes = previousRetries })
+	settings := operation_setting.GetGeneralSetting()
+	previousEnabled, previousSeconds := settings.PingIntervalEnabled, settings.PingIntervalSeconds
+	settings.PingIntervalEnabled, settings.PingIntervalSeconds = true, 1
+	t.Cleanup(func() { settings.PingIntervalEnabled, settings.PingIntervalSeconds = previousEnabled, previousSeconds })
+	harness := newRelayHarness(t)
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-report", name: "Report", version: "1.0.0", author: {name: "Test"}};
+export function report(ctx, record) {}`)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: `[
+		{"id":"report","name":"Report","plugin":"rp-report","enabled":true,"config":{}}
+	]`}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+	})
+	channel := harness.newChannel(constant.ChannelTypeOpenAI, "sk-upstream")
+	channel.SetSetting(dto.ChannelSettings{RequestPlugins: []string{"report"}})
+	harness.install(t, channel)
+	harness.upstream.respond = func(w http.ResponseWriter, attempt int, request capturedRequest) {
+		if attempt > 1 {
+			writeChat(w, request)
+			return
+		}
+		time.Sleep(2 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"busy","type":"rate_limit_error"}}`)
+	}
+	streamBody := strings.Replace(relayTestBody, `"max_tokens"`, `"stream":true,"max_tokens"`, 1)
+
+	outcome := harness.post(t, "/v1/chat/completions", streamBody)
+
+	require.Equal(t, http.StatusOK, outcome.status, outcome.body)
+	assert.Len(t, harness.upstream.captured(), 2, outcome.body)
+	assert.Contains(t, outcome.body, `"content":"hi"`)
+	assert.True(t, strings.HasSuffix(outcome.body, "data: [DONE]\n\n"), outcome.body)
+	assert.NotContains(t, outcome.body, "busy")
 }
 
 // The channel's own settings win over request plugins: its param override
