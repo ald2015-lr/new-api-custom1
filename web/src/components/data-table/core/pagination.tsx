@@ -57,6 +57,16 @@ export function DataTablePagination<TData>({
   const pageSize = pagination.pageSize
   const totalPages = table.getPageCount()
   const totalRows = table.getRowCount()
+  // A capped total is where the server stopped counting: more rows match and
+  // the last page is not known until a short page arrives.
+  const totalCapped = table.options.meta?.totalCountCapped === true
+  const lastPageKnown = !totalCapped || !table.getCanNextPage()
+  const totalLabel = totalCapped
+    ? t('{{total}}+', { total: totalRows.toLocaleString() })
+    : totalRows.toLocaleString()
+  const pageCountLabel = lastPageKnown
+    ? Math.max(1, totalPages)
+    : t('{{total}}+', { total: totalPages })
   const pageNumbers = getPageNumbers(currentPage, totalPages)
   const pageItems = pageNumbers.map((page, index) => ({
     page,
@@ -70,7 +80,7 @@ export function DataTablePagination<TData>({
         className='flex w-full min-w-0 flex-wrap items-center justify-between gap-2 text-sm'
       >
         <span className='text-muted-foreground min-w-0 [overflow-wrap:anywhere]'>
-          {t('Total:')} {totalRows.toLocaleString()}
+          {t('Total:')} {totalLabel}
         </span>
         <div className='flex items-center gap-2'>
           <Button
@@ -84,7 +94,7 @@ export function DataTablePagination<TData>({
             <ChevronLeftIcon />
           </Button>
           <span className='tabular-nums' aria-live='polite'>
-            {currentPage} / {Math.max(1, totalPages)}
+            {currentPage} / {pageCountLabel}
           </span>
           <Button
             variant='outline'
@@ -111,9 +121,7 @@ export function DataTablePagination<TData>({
       <div className='flex min-w-0 shrink-0 items-center gap-2 @xl/pagination:gap-3'>
         <div className='flex shrink-0 items-baseline gap-1.5 text-xs font-medium whitespace-nowrap sm:text-sm'>
           <span className='text-muted-foreground/80'>{t('Total:')}</span>
-          <span className='text-foreground tabular-nums'>
-            {totalRows.toLocaleString()}
-          </span>
+          <span className='text-foreground tabular-nums'>{totalLabel}</span>
         </div>
 
         <div className='flex shrink-0 items-center gap-1.5 @lg/pagination:gap-2'>
@@ -201,7 +209,7 @@ export function DataTablePagination<TData>({
             variant='outline'
             className='text-muted-foreground hover:text-foreground disabled:text-muted-foreground/50 size-8 p-0 @max-lg/pagination:hidden'
             onClick={() => table.setPageIndex(table.getPageCount() - 1)}
-            disabled={!table.getCanNextPage()}
+            disabled={!lastPageKnown || !table.getCanNextPage()}
           >
             <span className='sr-only'>{t('Go to last page')}</span>
             <DoubleArrowRightIcon className='h-4 w-4' />

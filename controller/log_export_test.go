@@ -195,6 +195,86 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			assert.EqualValues(t, 1, ownTopups["data"].(map[string]any)["total"])
 			ownExport := callLogHandler(t, ExportUserLogs, deputy, common.RoleAdminUser, query)
 			assert.Equal(t, []any{"type-1"}, exportedRequestIds(ownExport))
+
+			// The lists count at most model.LogCountCap matches of the search.
+			// Past the cap the total is the cap, total_capped is set and pages
+			// go on past it; at or below the cap the count stays exact. Exports
+			// are never capped.
+			previousCap := model.LogCountCap
+			t.Cleanup(func() { model.LogCountCap = previousCap })
+			for _, tc := range []struct {
+				name                string
+				handler             gin.HandlerFunc
+				viewer, role        int
+				params              string
+				countCap, wantTotal int
+				wantCapped          bool
+				wantPage            []any
+			}{
+				{"own logs at the cap", GetUserLogs, 1, common.RoleCommonUser, "", 2, 2, false, []any{"a-2", "a-1"}},
+				{"own logs past the cap", GetUserLogs, 2, common.RoleCommonUser, "&page_size=2", 2, 2, true, []any{"type-3", "type-4"}},
+				{"own logs, the short last page", GetUserLogs, 2, common.RoleCommonUser, "&page_size=2&p=2", 2, 2, true, []any{"b-1"}},
+				{"all logs past the cap", GetAllLogs, root, common.RoleRootUser, "&page_size=2", 4, 4, true, []any{"type-1", "type-3"}},
+				{"all logs, a page past the cap", GetAllLogs, root, common.RoleRootUser, "&page_size=2&p=3", 4, 4, true, []any{"b-1", "a-1"}},
+				{"all logs, a page past the last match", GetAllLogs, root, common.RoleRootUser, "&page_size=2&p=4", 4, 4, true, []any{}},
+				{"recharge rows a deputy cannot see are not counted", GetAllLogs, deputy, common.RoleAdminUser, "&page_size=2", 4, 4, false, []any{"type-4", "a-2"}},
+				{"a username search below the cap", GetAllLogs, root, common.RoleRootUser, "&username=alice", 4, 2, false, []any{"a-2", "a-1"}},
+				{"a type search below the cap", GetAllLogs, root, common.RoleRootUser, "&type=1", 4, 1, false, []any{"type-1"}},
+			} {
+				model.LogCountCap = tc.countCap
+				listed := callLogHandler(t, tc.handler, tc.viewer, tc.role, query+tc.params)[0]
+				require.Equal(t, true, listed["success"], tc.name)
+				data := listed["data"].(map[string]any)
+				assert.EqualValues(t, tc.wantTotal, data["total"], tc.name)
+				assert.Equal(t, tc.wantCapped, data["total_capped"], tc.name)
+				items, _ := data["items"].([]any)
+				page := []any{}
+				for _, item := range items {
+					page = append(page, item.(map[string]any)["request_id"])
+				}
+				assert.ElementsMatch(t, tc.wantPage, page, tc.name)
+			}
+			model.LogCountCap = 2
+			assert.Equal(t, everything, exportedRequestIds(callLogHandler(t, ExportAllLogs, root, common.RoleRootUser, query)), "exports are not capped")
+			assert.Len(t, exportedRequestIds(callLogHandler(t, ExportUserLogs, 2, common.RoleCommonUser, query)), 3, "exports are not capped")
+
+			// A page or page size below 1 is the default, like a missing one:
+			// a page size below 1 would leave the list query without a LIMIT
+			// and answer every matching log at once.
+			model.LogCountCap = previousCap
+			previousPerPage := common.ItemsPerPage
+			common.ItemsPerPage = 2
+			t.Cleanup(func() { common.ItemsPerPage = previousPerPage })
+			for _, tc := range []struct {
+				name         string
+				handler      gin.HandlerFunc
+				viewer, role int
+				params       string
+			}{
+				{"own logs, page size -1", GetUserLogs, 2, common.RoleCommonUser, "&page_size=-1"},
+				{"own logs, page -3", GetUserLogs, 2, common.RoleCommonUser, "&p=-3"},
+				{"all logs, page size -1", GetAllLogs, root, common.RoleRootUser, "&page_size=-1"},
+				{"all logs, page -3 and page size -5", GetAllLogs, root, common.RoleRootUser, "&p=-3&page_size=-5"},
+			} {
+				listed := callLogHandler(t, tc.handler, tc.viewer, tc.role, query+tc.params)[0]
+				require.Equal(t, true, listed["success"], tc.name)
+				data := listed["data"].(map[string]any)
+				assert.EqualValues(t, 1, data["page"], tc.name)
+				assert.EqualValues(t, 2, data["page_size"], tc.name)
+				items, _ := data["items"].([]any)
+				require.Len(t, items, 2, tc.name)
+				if tc.viewer == 2 {
+					assert.EqualValues(t, 1, items[0].(map[string]any)["id"], "%s: user lists number their rows from the first", tc.name)
+				}
+			}
+			// The model bounds a page whatever its caller passes.
+			allLogs, _, _, err := model.GetAllLogs(model.LogFilter{}, -8, -1)
+			require.NoError(t, err)
+			assert.Len(t, allLogs, 2)
+			ownLogs, _, _, err := model.GetUserLogs(2, model.LogFilter{}, -8, -1)
+			require.NoError(t, err)
+			require.Len(t, ownLogs, 2)
+			assert.Equal(t, 1, ownLogs[0].Id, "user lists number their rows from the first")
 		})
 	}
 }

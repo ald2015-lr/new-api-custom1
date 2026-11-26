@@ -131,6 +131,7 @@
     "{{target}} test failed": "Kiểm tra {{target}} thất bại",
     "{{target}} test succeeded": "Kiểm tra {{target}} thành công",
     "{{total}} models · {{syncable}} syncable · {{skipped}} skipped this time": "{{total}} mô hình · {{syncable}} có thể đồng bộ · {{skipped}} bỏ qua lần này",
+    "{{total}}+": "{{total}}+",
     "{{unit}} tokens": "{{unit}} token",
     "{{value}} more attachments": "Còn {{value}} tệp đính kèm khác",
     "{{value}} more changes": "Còn {{value}} thay đổi khác",

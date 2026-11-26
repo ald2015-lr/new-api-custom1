@@ -131,6 +131,7 @@
     "{{target}} test failed": "{{target}} 测试失败",
     "{{target}} test succeeded": "{{target}} 测试成功",
     "{{total}} models · {{syncable}} syncable · {{skipped}} skipped this time": "共 {{total}} 个模型 · 可同步 {{syncable}} · 本次不处理 {{skipped}}",
+    "{{total}}+": "{{total}}+",
     "{{unit}} tokens": "{{unit}} token",
     "{{value}} more attachments": "另有 {{value}} 个附件",
     "{{value}} more changes": "另有 {{value}} 处",

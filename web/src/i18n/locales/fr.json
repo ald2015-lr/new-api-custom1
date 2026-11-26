@@ -131,6 +131,7 @@
     "{{target}} test failed": "Échec du test de {{target}}",
     "{{target}} test succeeded": "Test de {{target}} réussi",
     "{{total}} models · {{syncable}} syncable · {{skipped}} skipped this time": "{{total}} modèles · {{syncable}} synchronisables · {{skipped}} ignorés cette fois",
+    "{{total}}+": "{{total}}+",
     "{{unit}} tokens": "{{unit}} jetons",
     "{{value}} more attachments": "{{value}} autres pièces jointes",
     "{{value}} more changes": "{{value}} autres modifications",

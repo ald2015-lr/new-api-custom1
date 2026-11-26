@@ -42,7 +42,14 @@ export const DEFAULT_LOG_STATS: LogStatistics = {
 export const DEFAULT_LOGS_DATA = {
   items: [],
   total: 0,
+  total_capped: false,
 }
+
+/**
+ * The most logs the server answers per page (common.GetPageQuery caps
+ * page_size at 100), the largest size the page size select offers.
+ */
+export const LOG_PAGE_SIZE_MAX = 100
 
 // ============================================================================
 // Log Type Enum
