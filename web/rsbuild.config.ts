@@ -44,27 +44,41 @@ export default defineConfig(({ envMode }) => {
       ...(isProd ? [pluginSlimEnglishLocale] : []),
     ],
     // Rsbuild 2: replaces deprecated `performance.chunkSplit` (RSPack 2 aligned)
+    // React itself is in the preset's `lib-react` chunk.
     splitChunks: {
       preset: 'default',
+      // Fewer, larger lazy chunks, so that a cold load of a console page
+      // stays at about 20 JS/CSS files: over HTTP/1.1 a browser opens only six
+      // connections per host and queues the rest. Sizes are before
+      // minification. Shared vendor code gets a chunk of its own from 200 KB;
+      // shared app code (the `default` group below) only from 600 KB, below
+      // that it stays in the chunks of the pages that use it.
+      minSize: 200_000,
       cacheGroups: {
-        'vendor-react': {
-          test: /node_modules[\\/](react|react-dom)[\\/]/,
-          name: 'vendor-react',
-          chunks: 'all',
-          priority: 0,
-          enforce: true,
+        // Rspack's built-in `default` group with a higher minSize. A group
+        // given here replaces the built-in one, so all its fields are listed.
+        default: {
+          idHint: '',
+          minChunks: 2,
+          priority: -20,
+          reuseExistingChunk: true,
+          minSize: 600_000,
         },
+        // Only what the entry needs: with `chunks: 'all'` every module of
+        // these packages used anywhere (settings, tables, editors) would be
+        // forced into the first load. Modules used only by lazy pages go to
+        // those pages' chunks.
         'vendor-ui-primitives': {
           test: /node_modules[\\/](@base-ui|@radix-ui)[\\/]/,
           name: 'vendor-ui-primitives',
-          chunks: 'all',
+          chunks: 'initial',
           priority: 0,
           enforce: true,
         },
         'vendor-tanstack': {
           test: /node_modules[\\/]@tanstack[\\/]/,
           name: 'vendor-tanstack',
-          chunks: 'all',
+          chunks: 'initial',
           priority: 0,
           enforce: true,
         },
@@ -131,6 +145,12 @@ export default defineConfig(({ envMode }) => {
             autoCodeSplitting: isProd,
           }),
         ],
+        optimization: {
+          // The chunk loader and its map of every chunk's file name in a file
+          // of its own: the map changes with any chunk, so inside index.js it
+          // would make every deploy re-download the whole entry.
+          runtimeChunk: { name: 'runtime' },
+        },
       },
     },
   }
