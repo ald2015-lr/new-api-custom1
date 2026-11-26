@@ -80,16 +80,10 @@ export default defineConfig(({ envMode }) => {
           minSize: 600_000,
         },
         // Only what the entry needs: with `chunks: 'all'` every module of
-        // these packages used anywhere (settings, tables, editors) would be
-        // forced into the first load. Modules used only by lazy pages go to
-        // those pages' chunks.
-        'vendor-ui-primitives': {
-          test: /node_modules[\\/](@base-ui|@radix-ui)[\\/]/,
-          name: 'vendor-ui-primitives',
-          chunks: 'initial',
-          priority: 0,
-          enforce: true,
-        },
+        // the package used anywhere (tables, editors) would be forced into
+        // the first load. The few @base-ui modules of the first load stay in
+        // its vendor chunk: a file of their own (8 KB) would only add a
+        // request to the first load.
         'vendor-tanstack': {
           test: /node_modules[\\/]@tanstack[\\/]/,
           name: 'vendor-tanstack',

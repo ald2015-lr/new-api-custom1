@@ -124,8 +124,9 @@ describe('rsbuild.config.ts', () => {
       name: 'runtime',
     })
     const groups = config.splitChunks.cacheGroups
-    expect(groups['vendor-ui-primitives']?.chunks).toBe('initial')
     expect(groups['vendor-tanstack']?.chunks).toBe('initial')
     expect(groups).not.toHaveProperty('vendor-react')
+    // The first load's few @base-ui modules stay in its vendor chunk.
+    expect(groups).not.toHaveProperty('vendor-ui-primitives')
   })
 })
