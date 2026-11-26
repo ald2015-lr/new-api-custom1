@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -2139,6 +2140,91 @@ export function report(ctx, record) {}`)
 	assert.Contains(t, outcome.body, `"content":"hi"`)
 	assert.True(t, strings.HasSuffix(outcome.body, "data: [DONE]\n\n"), outcome.body)
 	assert.NotContains(t, outcome.body, "busy")
+}
+
+// A client that leaves cancels the upstream request of a plugin converter
+// route too, as DoApiRequest does on every other route: the upstream stops
+// generating at once and nothing is billed, also when the plugin hands the
+// upstream's reply to the route's handler as it came.
+func TestPluginConverterCancelsTheUpstreamWhenTheClientLeaves(t *testing.T) {
+	const hold = 10 * time.Second
+	streamBody := strings.Replace(relayTestBody, `"max_tokens"`, `"stream":true,"max_tokens"`, 1)
+	for name, tc := range map[string]struct {
+		plugin, body, contentType, reply string
+	}{
+		"converter": {
+			plugin: strings.ReplaceAll(convertingPlugin, "%KEY%", "relay-gone"),
+			body:   relayTestBody, contentType: "application/json", reply: `{"text":"late","input":1000,"output":2000}`,
+		},
+		"converter stream": {
+			plugin: strings.ReplaceAll(convertingPlugin, "%KEY%", "relay-gone"),
+			body:   streamBody, contentType: "text/event-stream", reply: "data: {\"text\":\"late\"}\n\n",
+		},
+		"native response": {
+			plugin: `export const meta = {apiVersion: 1, key: "relay-gone", name: "Native", version: "1.0.0", author: {name: "Test"}, relay: [
+  {incoming_path: "/v1/chat/completions", upstream_path: "/v1/chat/completions", converter: "plugin"}
+]};
+export function convertRequest(ctx, req) { return {body: req.body, nativeResponse: true}; }
+export function convertResponse() { return {error: {message: "a native response skips the response hook"}}; }
+export function convertStreamEvent() { return {events: []}; }`,
+			body: relayTestBody, contentType: "application/json", reply: chatReply,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			harness := newRelayHarness(t)
+			registerRelayPlugin(t, tc.plugin)
+			reached, outcome := make(chan struct{}, 1), make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				select {
+				case reached <- struct{}{}:
+				default:
+				}
+				select {
+				case <-r.Context().Done():
+					outcome <- "cancelled"
+				case <-time.After(hold):
+					outcome <- "answered"
+					w.Header().Set("Content-Type", tc.contentType)
+					_, _ = io.WriteString(w, tc.reply)
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			channel := harness.pluginChannel("relay-gone", "sk-static")
+			channel.BaseURL = &upstream.URL
+			harness.install(t, channel)
+			var before model.Token
+			require.NoError(t, model.DB.First(&before, harness.tokenID).Error)
+
+			ctx, leave := context.WithCancel(context.Background())
+			defer leave()
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, harness.gateway.URL+"/v1/chat/completions", strings.NewReader(tc.body))
+			require.NoError(t, err)
+			request.Header.Set("Authorization", "Bearer "+relayTestToken)
+			request.Header.Set("Content-Type", "application/json")
+			sent := make(chan struct{})
+			go func() {
+				defer close(sent)
+				if response, err := http.DefaultClient.Do(request); err == nil {
+					_, _ = io.Copy(io.Discard, response.Body)
+					_ = response.Body.Close()
+				}
+			}()
+			select {
+			case <-reached:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the request never reached the upstream")
+			}
+			leave()
+			<-sent
+
+			assert.Equal(t, "cancelled", <-outcome, "the upstream kept generating an answer nobody will read")
+			harness.waitIdle(t)
+			var after model.Token
+			require.NoError(t, model.DB.First(&after, harness.tokenID).Error)
+			assert.Equal(t, before.RemainQuota, after.RemainQuota, "the abandoned request was billed")
+		})
+	}
 }
 
 // The channel's own settings win over request plugins: its param override

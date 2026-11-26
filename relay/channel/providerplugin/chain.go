@@ -145,7 +145,9 @@ func (a *Adaptor) sendStep(c *gin.Context, info *relaycommon.RelayInfo, step jsp
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, requestURL, reader)
+	// Bound to the client's request, like DoApiRequest: when the client
+	// leaves, the upstream stops generating an answer nobody will read.
+	req, err := http.NewRequestWithContext(c.Request.Context(), method, requestURL, reader)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
