@@ -5171,3 +5171,118 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
 	})
 }
+
+// A task submission retried on another channel is moderated with the prompt
+// that attempt sends. Each attempt starts again from the body the request's
+// ingress left, and the request plugin instances bound to the attempt's
+// channel may change its prompt, so the first attempt's check cannot stand
+// for the retry: a prompt the retried channel's instance makes flagged, or a
+// flagged one the first channel's instance had cleaned, is rejected before
+// it reaches the retried channel.
+func TestTaskRetryModeratesThePromptOfTheAttempt(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}, &model.Task{}))
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	logConsume, batchUpdate, retryTimes := common.LogConsumeEnabled, common.BatchUpdateEnabled, common.RetryTimes
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		common.LogConsumeEnabled, common.BatchUpdateEnabled, common.RetryTimes = logConsume, batchUpdate, retryTimes
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled, common.RetryTimes = true, false, 1
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-task-inject", name: "Inject", version: "1.0.0", author: {name: "Test"}};
+export function ingress(ctx, req) {
+  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/prompt", value: "Forbidden-Word-X video"}]}]};
+}`)
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-task-clean", name: "Clean", version: "1.0.0", author: {name: "Test"}};
+export function ingress(ctx, req) {
+  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/prompt", value: "a clean harbour"}]}]};
+}`)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: `[
+		{"id":"inject","name":"Inject","plugin":"rp-task-inject","enabled":true,"config":{}},
+		{"id":"clean","name":"Clean","plugin":"rp-task-clean","enabled":true,"config":{}}
+	]`}))
+
+	// The first channel's upstream fails every video submission that its
+	// moderation passed, so the request is retried on the second channel.
+	upstream := &moderationUpstream{}
+	var broken atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/videos" && r.Header.Get("Authorization") == "Bearer sk-video-broken" {
+			_, _ = io.ReadAll(r.Body)
+			broken.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"video upstream broke","type":"server_error"}}`)
+			return
+		}
+		upstream.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	user := model.User{Id: 6600000 + int(relayRouterTestUsers.Add(1)), Username: "mod-task-retry", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "modtaskretrykey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	const moderated = `{"moderation_enabled":true,"moderation_rules":[{"type":"keyword","pattern":"Forbidden-Word-X"}]}`
+	prices := map[string]float64{}
+	create := func(modelName, key, setting string, priority int64) {
+		channel := model.Channel{Name: "mod-" + key, Key: key, Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: modelName,
+			BaseURL: common.GetPointer(server.URL), OtherSettings: moderated, Setting: common.GetPointer(setting), Priority: &priority, AutoBan: common.GetPointer(0)}
+		require.NoError(t, model.DB.Create(&channel).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: modelName, Group: "default", Enabled: true, Priority: channel.Priority}).Error)
+		prices[modelName] = 0.01
+	}
+	create("mod-video-inject", "sk-video-broken", "", 10)
+	create("mod-video-inject", "sk-video-inject", `{"request_plugins":["inject"]}`, 0)
+	create("mod-video-clean", "sk-video-broken", `{"request_plugins":["clean"]}`, 10)
+	create("mod-video-clean", "sk-video-plain", "", 0)
+	priceJSON, err := common.Marshal(prices)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(priceJSON)))
+	engine := gin.New()
+	engine.Use(middleware.RequestId())
+	SetRelayRouter(engine)
+	SetVideoRouter(engine)
+	SetTaskPluginProtocolRouter(engine)
+
+	for _, tc := range []struct {
+		name, model, prompt, code string
+		status                    int
+	}{
+		{name: "the retried channel's instance makes the prompt flagged", model: "mod-video-inject", prompt: "a quiet harbour at dawn", status: http.StatusBadRequest, code: "content_moderation_flagged"},
+		{name: "the first channel's instance had cleaned a flagged prompt", model: "mod-video-clean", prompt: "Forbidden-Word-X harbour", status: http.StatusBadRequest, code: "content_moderation_flagged"},
+		{name: "a clean prompt is submitted on the retried channel", model: "mod-video-clean", prompt: "a quiet harbour at dusk", status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mark, failed := upstream.mark(), broken.Load()
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"`+tc.model+`","prompt":"`+tc.prompt+`","seconds":"4","size":"720x1280"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer modtaskretrykey")
+			engine.ServeHTTP(recorder, request)
+
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			assert.Equal(t, failed+1, broken.Load(), "the first channel was tried")
+			submitted := upstream.since(mark, "/v1/videos")
+			if tc.code == "" {
+				require.Len(t, submitted, 1)
+				assert.Equal(t, "Bearer sk-video-plain", submitted[0].Authorization)
+				var sent struct {
+					Prompt string `json:"prompt"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(submitted[0].Body, &sent))
+				assert.Equal(t, tc.prompt, sent.Prompt, "the retry sends the client's prompt again")
+				return
+			}
+			var answer struct {
+				Code string `json:"code"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &answer))
+			assert.Equal(t, tc.code, answer.Code)
+			assert.Empty(t, submitted, "nothing reaches the retried channel")
+		})
+	}
+}

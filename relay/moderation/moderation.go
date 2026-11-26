@@ -53,10 +53,12 @@ var keyFailureClasses = []string{
 // request obtained (keyed as the cache, http(s) images included). There are
 // at most four extractions, each with its own normalisation budget, so a
 // request normalises at most four budgets of text however often it is
-// retried.
+// retried. A task submission has one extraction instead, of its prompt,
+// made again for an attempt whose request plugins changed the prompt.
 type requestState struct {
 	extractions map[extractionKey]*extraction
 	task        *extraction
+	taskPrompt  string // the prompt task was extracted from
 	verdicts    map[string]Verdict
 	keyFailures []relaycommon.ModerationKeyFailure // every attempt that ended on one
 	keyFailure  *keyFailure                        // the latest, until the request is rejected for it
@@ -156,8 +158,10 @@ func CheckTask(c *gin.Context, info *relaycommon.RelayInfo) *taskdto.TaskError {
 		return nil
 	}
 	state := stateOf(c)
-	if state.task == nil {
-		state.task = extractTask(c)
+	// An attempt's late request plugins may change the prompt
+	// (requestplugin.TaskAttempt), so each attempt checks the prompt it sends.
+	if prompt, _ := taskPrompt(c); state.task == nil || prompt != state.taskPrompt {
+		state.task, state.taskPrompt = extractTask(c), prompt
 	}
 	apiErr := check(c, info, state.task, state, newAudit(info), time.Now())
 	if apiErr == nil {
