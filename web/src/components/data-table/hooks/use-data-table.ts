@@ -96,10 +96,14 @@ type UseDataTableOptions<TData> = DataTableFeatureOptions<TData> &
     columns: ColumnDef<TData, unknown>[]
     totalCount?: number
     /**
-     * The server stopped counting at totalCount: more rows match. The loaded
-     * page then decides the page count (a full page has a next page, a short
-     * page is the last one) and the page index is never clamped to it. For
-     * server-paginated tables, where data holds the current page.
+     * The server stopped counting at totalCount: more rows match. The
+     * server's page then decides the page count: a full page has a next page,
+     * a short page is the last one. A page past the end comes back empty.
+     * Paged onto from a full page, that page shows again, and as the last one
+     * when it is the page right before (the matches fill a whole number of
+     * pages); reached otherwise (an old link, another view, deleted rows),
+     * the first page shows, as ensurePageInRange does for a counted total.
+     * For server-paginated tables, where data holds the current page.
      */
     totalCountCapped?: boolean
     /**
@@ -110,8 +114,18 @@ type UseDataTableOptions<TData> = DataTableFeatureOptions<TData> &
      */
     isPlaceholderData?: boolean
     pageCount?: number
-    ensurePageInRange?: (pageCount: number) => void
+    ensurePageInRange?: (
+      pageCount: number,
+      opts?: { resetTo?: 'first' | 'last' }
+    ) => void
   }
+
+type PagePosition = { pageIndex: number; pageSize: number }
+type ServedPage = PagePosition & { rows: number }
+
+function isSamePosition(a: PagePosition, b: PagePosition) {
+  return a.pageIndex === b.pageIndex && a.pageSize === b.pageSize
+}
 
 type ColumnSizingBounds = Record<
   string,
@@ -383,6 +397,13 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     options.onPaginationChange
   )
 
+  // While the count is capped the end of the list is found by paging onto
+  // it: servedPageRef is the last page the server answered, cappedLastPage a
+  // full page that the empty page after it showed to be the last.
+  const servedPageRef = React.useRef<ServedPage | undefined>(undefined)
+  const [cappedLastPage, setCappedLastPage] =
+    React.useState<PagePosition | null>(null)
+
   const countedPageCount =
     totalCount !== undefined
       ? Math.ceil(totalCount / pagination.pageSize)
@@ -392,10 +413,12 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     // The count stopped at a cap, so the server's page tells whether another
     // follows: a full page has a next one, a short page is the last. A
     // stand-in shown while the page loads tells nothing.
-    resolvedPageCount =
-      !isPlaceholderData && data.length < pagination.pageSize
-        ? pagination.pageIndex + 1
-        : Math.max(countedPageCount ?? 0, pagination.pageIndex + 2)
+    const isLastPage =
+      (!isPlaceholderData && data.length < pagination.pageSize) ||
+      (cappedLastPage !== null && isSamePosition(cappedLastPage, pagination))
+    resolvedPageCount = isLastPage
+      ? pagination.pageIndex + 1
+      : Math.max(countedPageCount ?? 0, pagination.pageIndex + 2)
   }
   const resolvedEnableSorting =
     options.enableSorting ??
@@ -462,10 +485,65 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
 
   const actualPageCount = table.getPageCount()
   React.useEffect(() => {
-    // A capped count does not know the last page, so it clamps nothing.
+    // A capped count does not know the last page; see the effect below.
     if (totalCountCapped) return
     ensurePageInRange?.(actualPageCount)
   }, [actualPageCount, ensurePageInRange, totalCountCapped])
+
+  React.useEffect(() => {
+    if (!totalCountCapped) {
+      servedPageRef.current = undefined
+      if (cappedLastPage !== null) setCappedLastPage(null)
+      return
+    }
+    if (isPlaceholderData) return
+    const served: ServedPage = {
+      pageIndex: pagination.pageIndex,
+      pageSize: pagination.pageSize,
+      rows: data.length,
+    }
+    const previous = servedPageRef.current
+    if (
+      previous !== undefined &&
+      isSamePosition(previous, served) &&
+      previous.rows === served.rows
+    ) {
+      return
+    }
+    servedPageRef.current = served
+    if (cappedLastPage !== null && !isSamePosition(cappedLastPage, served)) {
+      setCappedLastPage(null)
+    }
+    if (served.rows > 0 || served.pageIndex === 0) return
+
+    // An empty page past the first: the list has at most pageIndex pages.
+    if (
+      previous !== undefined &&
+      previous.pageSize === served.pageSize &&
+      previous.rows === served.pageSize &&
+      previous.pageIndex < served.pageIndex
+    ) {
+      // Paged on from a full page past the end of the matches: show that
+      // page again. Right before the empty page, it is the last page.
+      if (previous.pageIndex === served.pageIndex - 1) {
+        setCappedLastPage({
+          pageIndex: previous.pageIndex,
+          pageSize: previous.pageSize,
+        })
+      }
+      ensurePageInRange?.(previous.pageIndex + 1, { resetTo: 'last' })
+      return
+    }
+    ensurePageInRange?.(served.pageIndex)
+  }, [
+    cappedLastPage,
+    data.length,
+    ensurePageInRange,
+    isPlaceholderData,
+    pagination.pageIndex,
+    pagination.pageSize,
+    totalCountCapped,
+  ])
 
   React.useEffect(() => {
     if (

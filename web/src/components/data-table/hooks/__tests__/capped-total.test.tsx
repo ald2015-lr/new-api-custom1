@@ -47,7 +47,10 @@ function ServerTable(props: {
   initialPage: number
   compact?: boolean
   placeholderRows?: number
-  ensurePageInRange?: (pageCount: number) => void
+  ensurePageInRange?: (
+    pageCount: number,
+    opts?: { resetTo?: 'first' | 'last' }
+  ) => void
 }) {
   const [pagination, setPagination] = React.useState<PaginationState>({
     pageIndex: props.initialPage - 1,
@@ -162,6 +165,39 @@ it('keeps the next page of a capped total while a short stand-in page is shown',
   )
   expect(screen.getByRole('button', { name: 'Go to next page' })).toBeEnabled()
   expect(screen.getByText('151', { selector: 'button' })).toBeVisible()
+})
+
+it('sends an empty page of a capped total opened directly back to the first page', () => {
+  const ensurePageInRange = vi.fn()
+  // 12,000 rows are 120 pages of 100: page 150 is empty.
+  render(
+    <ServerTable
+      matches={12000}
+      cap={10000}
+      initialPage={150}
+      ensurePageInRange={ensurePageInRange}
+    />
+  )
+  expect(ensurePageInRange).toHaveBeenCalledOnce()
+  expect(ensurePageInRange).toHaveBeenCalledWith(149)
+})
+
+it('steps back to a full page of a capped total when the next page comes back empty', async () => {
+  const ensurePageInRange = vi.fn()
+  const user = userEvent.setup()
+  // 10,100 rows fill exactly 101 pages of 100: page 102 is empty.
+  render(
+    <ServerTable
+      matches={10100}
+      cap={10000}
+      initialPage={101}
+      ensurePageInRange={ensurePageInRange}
+    />
+  )
+  await user.click(screen.getByRole('button', { name: 'Go to next page' }))
+
+  expect(ensurePageInRange).toHaveBeenCalledOnce()
+  expect(ensurePageInRange).toHaveBeenCalledWith(101, { resetTo: 'last' })
 })
 
 it('disables going to the last page while a capped total has more pages', () => {

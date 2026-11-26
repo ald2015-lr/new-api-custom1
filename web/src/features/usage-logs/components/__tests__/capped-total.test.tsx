@@ -37,6 +37,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { usageLogSchema } from '../../data/schema'
+import { UsageLogs } from '../../index'
 import { UsageLogsProvider } from '../usage-logs-provider'
 import { UsageLogsTable } from '../usage-logs-table'
 
@@ -63,6 +64,8 @@ type Server = {
   /** Logs matching the All view (/api/log/) and the own view (/api/log/self). */
   allMatches: number
   selfMatches: number
+  /** Logs matching a search by model name, in either view. */
+  modelMatches?: number
   /** While set, log list answers wait here until released. */
   held?: Array<() => void>
 }
@@ -81,7 +84,8 @@ function mockServer(server: Server) {
         SERVER_MAX_PAGE_SIZE,
         Number(params.get('page_size'))
       )
-      const matches = ownList ? server.selfMatches : server.allMatches
+      let matches = ownList ? server.selfMatches : server.allMatches
+      if (params.has('model_name')) matches = server.modelMatches ?? 0
       const rows = Math.max(0, Math.min(size, matches - (page - 1) * size))
       const data = {
         items: Array.from({ length: rows }, (_, index) =>
@@ -116,11 +120,16 @@ function mockServer(server: Server) {
 }
 
 /** Renders the common log list at the given URL search, answered by server. */
-function renderLogs(props: { server: Server; search: string }) {
+function renderLogs(props: {
+  server: Server
+  search: string
+  role?: number
+  page?: typeof LogsTablePage
+}) {
   useAuthStore.getState().auth.setUser({
     id: 1,
     username: 'tester',
-    role: ROLE.USER,
+    role: props.role ?? ROLE.USER,
   })
   mockServer(props.server)
   const root = createRootRoute()
@@ -128,7 +137,7 @@ function renderLogs(props: { server: Server; search: string }) {
   const logs = createRoute({
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
-    component: LogsTablePage,
+    component: props.page ?? LogsTablePage,
     validateSearch: UsageLogsRoute.options.validateSearch,
   })
   const router = createRouter({
@@ -157,7 +166,8 @@ function listRequests() {
     .map((url) => {
       const params = new URLSearchParams(url.split('?')[1])
       const view = url.startsWith('/api/log/self?') ? 'self' : 'all'
-      return `${view}:${params.get('p')}/${params.get('page_size')}`
+      const search = params.has('model_name') ? ' by model' : ''
+      return `${view}:${params.get('p')}/${params.get('page_size')}${search}`
     })
 }
 
@@ -218,6 +228,107 @@ it('keeps an exact total below the cap and sends a page past its end back to the
   expect(await screen.findByText('25')).toBeVisible()
   expect(screen.queryByText(/^\d[\d,.\s\u00a0\u202f]*\+$/)).toBeNull()
   expect(router.state.location.search).not.toHaveProperty('page')
+})
+
+it('sends a saved link past the end of a capped list back to the first page', async () => {
+  // 12,000 logs are 1,200 pages of 10.
+  const router = renderLogs({
+    server: { allMatches: 0, selfMatches: 12000 },
+    search: 'page=1500&pageSize=10',
+  })
+
+  await waitFor(() => expect(requestedPages()).toEqual([1500, 1]))
+  await waitFor(() =>
+    expect(router.state.location.search).not.toHaveProperty('page')
+  )
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  expect(nextPageButton()).toBeEnabled()
+  expect(screen.queryByText('No Logs Found')).toBeNull()
+})
+
+it('sends Only Mine back to the first page when the open page lies past its end', async () => {
+  const user = userEvent.setup()
+  // Page 2,000 of every log exists; 15,000 own logs are 1,500 pages of 10.
+  const router = renderLogs({
+    server: { allMatches: 1000000, selfMatches: 15000 },
+    search: 'page=2000&pageSize=10',
+    role: ROLE.SUPER_ADMIN,
+    page: UsageLogs,
+  })
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  expect(listRequests()).toEqual(['all:2000/10'])
+
+  await user.click(screen.getByRole('tab', { name: 'Only Mine' }))
+
+  await waitFor(() =>
+    expect(listRequests()).toEqual(['all:2000/10', 'self:2000/10', 'self:1/10'])
+  )
+  await waitFor(() =>
+    expect(router.state.location.search).not.toHaveProperty('page')
+  )
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  expect(screen.queryByText('No Logs Found')).toBeNull()
+})
+
+it('goes back to the last full page of a capped list when the next page comes back empty', async () => {
+  const user = userEvent.setup()
+  // 10,050 logs fill exactly 1,005 pages of 10: page 1,006 is empty.
+  const router = renderLogs({
+    server: { allMatches: 0, selfMatches: 10050 },
+    search: 'page=1005&pageSize=10',
+  })
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  await waitFor(() => expect(nextPageButton()).toBeEnabled())
+
+  await user.click(nextPageButton())
+
+  await waitFor(() => expect(requestedPages()).toContain(1006))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({ page: 1005 })
+  )
+  expect(nextPageButton()).toBeDisabled()
+  expect(screen.getByText('1005', { selector: 'button' })).toBeVisible()
+  expect(screen.queryByText('1006', { selector: 'button' })).toBeNull()
+  expect(screen.queryByText('No Logs Found')).toBeNull()
+})
+
+it('pages on past the page that ended a capped list once the search changes', async () => {
+  const user = userEvent.setup()
+  // 10,050 logs end on page 1,005 of 10; a search by model matches 20,000.
+  const server: Server = {
+    allMatches: 0,
+    selfMatches: 10050,
+    modelMatches: 20000,
+  }
+  const router = renderLogs({ server, search: 'page=1005&pageSize=10' })
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  await waitFor(() => expect(nextPageButton()).toBeEnabled())
+  await user.click(nextPageButton())
+  await waitFor(() => expect(requestedPages()).toContain(1006))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({ page: 1005 })
+  )
+  expect(nextPageButton()).toBeDisabled()
+
+  // A new search starts on its first page; then its page 1,005 opens.
+  await act(() =>
+    router.navigate({
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
+      search: { pageSize: 10, model: 'gpt-4o' },
+    })
+  )
+  await waitFor(() => expect(listRequests()).toContain('self:1/10 by model'))
+  await act(() =>
+    router.navigate({
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
+      search: { pageSize: 10, model: 'gpt-4o', page: 1005 },
+    })
+  )
+  await waitFor(() => expect(listRequests()).toContain('self:1005/10 by model'))
+
+  await waitFor(() => expect(nextPageButton()).toBeEnabled())
 })
 
 it('reads a page size above the server maximum as the maximum and keeps paging', async () => {
