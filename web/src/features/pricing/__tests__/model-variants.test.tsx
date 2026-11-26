@@ -1226,6 +1226,9 @@ describe('card titles', () => {
         squareModel('foo-2.1', { vendor_name: vendor }),
       ])[0].title
     expect(titleWith('Anthropic')).toBe('foo-2-1')
+    // The names the official metadata sync saves for ByteDance Ark.
+    expect(titleWith('Volcengine Ark')).toBe('foo-2-1')
+    expect(titleWith('Volcengine Ark Coding Plan')).toBe('foo-2-1')
     expect(titleWith('OpenAI')).toBe('foo-2.1')
     expect(titleWith(undefined)).toBe('foo-2.1')
   })
