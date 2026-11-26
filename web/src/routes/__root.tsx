@@ -43,6 +43,7 @@ import {
 import { subscribeAuthSessionEvents } from '@/lib/auth-session-sync'
 import { resolveLegacyRoute } from '@/lib/legacy-route'
 import { flushPendingStaleBundleNotice } from '@/lib/stale-bundle'
+import { readStatusForGuard } from '@/lib/status-query'
 import { useAuthStore } from '@/stores/auth-store'
 
 function RootComponent() {
@@ -117,11 +118,38 @@ function RootComponent() {
 // 同一页面会话内避免重复检查；刷新后重新校验当前服务实例。
 let setupStatusChecked = false
 
+// 启动时判断初始化状态最多分别等 /api/status 和 /api/setup 这么久，服务端卡住时也能进入页面。
+const SETUP_CHECK_TIMEOUT_MS = 8000
+
+/**
+ * 系统是否已初始化：/api/status 快照（与 main.tsx 共用一次请求）说已初始化就直接采用；
+ * 状态请求失败或超时、或快照说尚未初始化时（同一标签页或其他标签页刚完成初始化，快照可能已过时），
+ * 再查 /api/setup。都拿不到结果时返回 null，与以前一样继续进入页面。
+ */
+async function readSetupDone(
+  queryClient: QueryClient
+): Promise<boolean | null> {
+  const status = await readStatusForGuard(queryClient, SETUP_CHECK_TIMEOUT_MS)
+  if (status?.setup === true) return true
+
+  const setup = await getSetupStatus({
+    timeout: SETUP_CHECK_TIMEOUT_MS,
+  }).catch((error) => {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.warn('[root.beforeLoad] setup status check failed', error)
+    }
+    return null
+  })
+  if (setup?.success && setup.data) return Boolean(setup.data.status)
+  return null
+}
+
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient
 }>()({
   // 应用初始化与路由解析前统一校验会话
-  beforeLoad: async ({ location }) => {
+  beforeLoad: async ({ context, location }) => {
     const legacyTarget = resolveLegacyRoute(location.href)
     if (legacyTarget) {
       throw redirect({ href: legacyTarget, replace: true })
@@ -130,27 +158,20 @@ export const Route = createRootRouteWithContext<{
     const pathname = location?.pathname || ''
     const needsSetupCheck =
       !setupStatusChecked && !pathname.startsWith('/setup')
+    // main.tsx 已在请求 /api/status 时发起了刷新，这里复用同一个请求。
     const authBootstrap = bootstrapAuthentication()
 
     // 只检查 setup 状态（如果需要）
     if (needsSetupCheck) {
-      const [status] = await Promise.all([
-        getSetupStatus().catch((error) => {
-          if (import.meta.env.DEV) {
-            // eslint-disable-next-line no-console
-            console.warn('[root.beforeLoad] setup status check failed', error)
-          }
-          return null
-        }),
+      const [setupDone] = await Promise.all([
+        readSetupDone(context.queryClient),
         authBootstrap,
       ])
 
-      if (status?.success && status.data) {
-        if (!status.data.status) {
-          throw redirect({ to: '/setup' })
-        }
-        setupStatusChecked = true
+      if (setupDone === false) {
+        throw redirect({ to: '/setup' })
       }
+      if (setupDone === true) setupStatusChecked = true
     } else {
       await authBootstrap
     }

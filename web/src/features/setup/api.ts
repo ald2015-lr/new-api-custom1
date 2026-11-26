@@ -16,14 +16,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { api } from '@/lib/api'
+import { api, type ApiRequestConfig } from '@/lib/api'
 
 import type { SetupFormValues, SetupResponse } from './types'
 
-export async function getSetupStatus(): Promise<SetupResponse> {
+export async function getSetupStatus(
+  config?: ApiRequestConfig
+): Promise<SetupResponse> {
   const res = await api.get('/api/setup', {
+    ...config,
     // We want fresh status on every visit.
     params: {
+      ...config?.params,
       t: Date.now(),
     },
   })

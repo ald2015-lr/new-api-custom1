@@ -384,7 +384,7 @@ const acceptRefresh: RefreshReply = async (config) => ({
   config,
 })
 
-describe('refresh attempts after a temporary failure', () => {
+describe('refresh requests', () => {
   let requests: string[]
 
   function answerRefresh(reply: RefreshReply): void {
@@ -408,6 +408,30 @@ describe('refresh attempts after a temporary failure', () => {
     vi.useRealTimers()
     refreshTransport.reply = undefined
     clearAuthentication(false, 'idle')
+  })
+
+  test('the boot refresh started next to /api/status and the root guard share one request', async () => {
+    document.cookie = 'new_api_has_session=1; path=/'
+    let release = () => {}
+    answerRefresh(async (config) => {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return acceptRefresh(config)
+    })
+    try {
+      const fromBoot = bootstrapAuthentication()
+      await vi.waitFor(() => expect(requests).toHaveLength(1))
+      const fromGuard = bootstrapAuthentication()
+      release()
+
+      expect((await fromBoot).kind).toBe('authenticated')
+      expect((await fromGuard).kind).toBe('authenticated')
+      expect(requests).toEqual(['/api/user/auth/refresh'])
+    } finally {
+      document.cookie =
+        'new_api_has_session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'
+    }
   })
 
   test('a 429 with Retry-After answers the guards of a navigation with one request', async () => {
