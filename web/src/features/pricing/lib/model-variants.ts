@@ -563,11 +563,10 @@ function dateRank(parsed: ParsedModelName): number {
 }
 
 /**
- * Named variants first (standard, effort names, rule order), then -latest,
- * then snapshots newest first, each snapshot's own suffix variants right after
- * it. Year-less dates (MMDD) follow the dated ones.
+ * The variant order without the final name tie-break: two copies of one
+ * variant on different lines compare equal here.
  */
-export function compareVariants(a: ModelVariant, b: ModelVariant): number {
+function compareVariantKinds(a: ModelVariant, b: ModelVariant): number {
   const pa = a.parsed
   const pb = b.parsed
   const rank = dateRank(pa) - dateRank(pb)
@@ -582,9 +581,17 @@ export function compareVariants(a: ModelVariant, b: ModelVariant): number {
     extraRank(pa.extra) - extraRank(pb.extra) ||
     codePoint(pa.extra, pb.extra) ||
     compareRuleIndexes(pa.ruleIndexes, pb.ruleIndexes) ||
-    codePoint(pa.label, pb.label) ||
-    codePoint(pa.name, pb.name)
+    codePoint(pa.label, pb.label)
   )
+}
+
+/**
+ * Named variants first (standard, effort names, rule order), then -latest,
+ * then snapshots newest first, each snapshot's own suffix variants right after
+ * it. Year-less dates (MMDD) follow the dated ones.
+ */
+export function compareVariants(a: ModelVariant, b: ModelVariant): number {
+  return compareVariantKinds(a, b) || codePoint(a.parsed.name, b.parsed.name)
 }
 
 function lineRank(line: string): number {
@@ -661,12 +668,17 @@ function variantCount(variant: ModelVariant): number {
   return variant.parsed.ruleIndexes.length + (variant.parsed.extra ? 1 : 0)
 }
 
-/** Fewest suffix-rule variants, then variant order (alias before snapshots, newest first), then line. */
+/**
+ * Fewest suffix-rule variants, then variant order (alias before snapshots,
+ * newest first), then line (untagged first), then name: copies of one variant
+ * on different lines are ordered by line, not by their tagged names.
+ */
 function compareLeadCandidates(a: ModelVariant, b: ModelVariant): number {
   return (
     variantCount(a) - variantCount(b) ||
-    compareVariants(a, b) ||
-    compareLines(a.parsed.line, b.parsed.line)
+    compareVariantKinds(a, b) ||
+    compareLines(a.parsed.line, b.parsed.line) ||
+    codePoint(a.parsed.name, b.parsed.name)
   )
 }
 

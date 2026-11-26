@@ -1424,6 +1424,60 @@ describe('family vendor', () => {
   })
 })
 
+describe('family lead', () => {
+  it('is the untagged copy of a variant, not a line-tagged one', () => {
+    const [family] = familiesOf([
+      squareModel('[按次]claude-opus-4-5-thinking', {
+        description: 'per-call line',
+      }),
+      squareModel('claude-opus-4-5-thinking', {
+        icon: 'Claude.Color',
+        description: 'untagged line',
+      }),
+    ])
+    expect(family).toMatchObject({
+      title: 'claude-opus-4-5-thinking',
+      titleIsFullName: true,
+    })
+    expect(family.lead).toMatchObject({
+      model_name: 'claude-opus-4-5-thinking',
+      icon: 'Claude.Color',
+      description: 'untagged line',
+    })
+  })
+
+  it('orders line copies of one variant by line, so a search leads with the untagged copy', () => {
+    const catalogue = squareModels([
+      'claude-opus-4-6',
+      'claude-opus-4-6-thinking',
+      '[按量]claude-opus-4-6',
+      '[按量]claude-opus-4-6-thinking',
+      '[官KEY]claude-opus-4-6',
+      '[官KEY]claude-opus-4-6-thinking',
+      '[正价kiro]claude-opus-4.6',
+      '[正价kiro]claude-opus-4.6-thinking',
+    ])
+    const index = buildModelSquareIndex(catalogue, squareSettings())
+    const [family] = groupModelFamilies(
+      filterBySearch(catalogue, 'thinking', index),
+      index
+    )
+    expect(family.models).toHaveLength(4)
+    expect(family.title).toBe('claude-opus-4-6')
+    expect(family.lead.model_name).toBe('claude-opus-4-6-thinking')
+    expect(index.titles.get(family.key)?.order).toEqual([
+      'claude-opus-4-6',
+      '[按量]claude-opus-4-6',
+      '[官KEY]claude-opus-4-6',
+      'claude-opus-4-6-thinking',
+      '[按量]claude-opus-4-6-thinking',
+      '[官KEY]claude-opus-4-6-thinking',
+      '[正价kiro]claude-opus-4.6',
+      '[正价kiro]claude-opus-4.6-thinking',
+    ])
+  })
+})
+
 // ----------------------------------------------------------------------------
 // Both folds off: exactly the grouping without folds
 // ----------------------------------------------------------------------------
