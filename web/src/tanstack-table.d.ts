@@ -17,9 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import '@tanstack/react-table'
+import type { RowData } from '@tanstack/react-table'
 
+// An augmentation merges with the library's interface only when it repeats
+// the library's type parameters (names and constraints); otherwise the
+// interface gains parameters and every use of it in the library goes untyped.
 declare module '@tanstack/react-table' {
-  interface ColumnMeta<_TData, _TValue> {
+  interface ColumnMeta<TData extends RowData, TValue> {
     label?: string
     description?: string
     className?: string
@@ -31,7 +35,7 @@ declare module '@tanstack/react-table' {
     mobileOrder?: number // lower values appear first in card field area
   }
 
-  interface TableMeta<_TData> {
+  interface TableMeta<TData extends RowData> {
     // The row count is where the server stopped counting: more rows match
     // (set by useDataTable's totalCountCapped).
     totalCountCapped?: boolean

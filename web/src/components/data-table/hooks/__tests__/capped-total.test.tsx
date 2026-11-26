@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ColumnDef, PaginationState } from '@tanstack/react-table'
+import type {
+  ColumnDef,
+  PaginationState,
+  TableOptions,
+} from '@tanstack/react-table'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as React from 'react'
@@ -157,4 +161,15 @@ it('shows the page count of a capped total as a lower bound in compact mode', as
   await user.click(screen.getByRole('button', { name: 'Go to next page' }))
   expect(screen.getByText('101 / 101')).toBeVisible()
   expect(screen.getByRole('button', { name: 'Go to next page' })).toBeDisabled()
+})
+
+it('types the capped flag of the table meta as a boolean', () => {
+  type Meta = NonNullable<TableOptions<Row>['meta']>
+  // bun check covers the test files: if the TableMeta augmentation in
+  // tanstack-table.d.ts stops merging, the meta is untyped, the string below
+  // type-checks and the unused directive fails the check.
+  // @ts-expect-error totalCountCapped is a boolean, not a string
+  const wrong: Meta = { totalCountCapped: 'yes' }
+  const right: Meta = { totalCountCapped: true }
+  expect([wrong, right]).toHaveLength(2)
 })
