@@ -14,6 +14,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -81,13 +82,19 @@ func NovelAIImageHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 	}
 	tokens := novelai.RequestTokens(requestJSON)
-	if billingErr := service.PrepareImageBillingForRequest(c, info, imageCount); billingErr != nil {
-		return billingErr
-	}
 
 	storage, err := common.GetBodyStorage(c)
 	if err != nil {
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	// The stored body goes upstream unchanged, as on a pass-through channel:
+	// request plugins record late ingress and outbound as unchecked, and
+	// egress checks a JSON body as it is sent.
+	if apiErr := requestplugin.PassThrough(c, info, storage); apiErr != nil {
+		return apiErr
+	}
+	if billingErr := service.PrepareImageBillingForRequest(c, info, imageCount); billingErr != nil {
+		return billingErr
 	}
 
 	adaptor := GetAdaptor(info.ApiType)

@@ -786,6 +786,136 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 	}
 }
 
+// The NovelAI native routes send the stored client body unchanged, as a
+// channel that passes bodies through does: the egress hook of a request
+// plugin instance, global or bound to the channel, checks that body, and its
+// rejection answers 400 before anything reaches NovelAI or is billed, as on
+// the OpenAI image route. The ingress hook of a bound instance cannot change
+// the body, so the log shows it as unchecked.
+func TestNovelAINativeRoutesRunTheRequestPluginEgress(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"checked-image":0.02}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-novelai-check", name: "Check", version: "1.0.0", author: {name: "Test"}};
+export function ingress(ctx, req) { return {action: "continue"}; }
+export function egress(ctx, req) {
+  return req.body.input.includes("forbidden") ? {action: "reject", code: "blocked.word", message: "Not allowed here"} : {action: "continue"};
+}`)
+
+	upstream := &novelAIUpstream{}
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	entry, err := zipWriter.Create("image_0.png")
+	require.NoError(t, err)
+	_, err = entry.Write([]byte("\x89PNG\r\n\x1a\nimage"))
+	require.NoError(t, err)
+	require.NoError(t, zipWriter.Close())
+	upstream.respond(http.StatusOK, "application/x-zip-compressed", archive.String())
+	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-plugins", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaipluginkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	walletQuota := func() int {
+		quota, err := model.GetUserQuota(user.Id, true)
+		require.NoError(t, err)
+		return quota
+	}
+	sent := func() (int, string) {
+		upstream.mu.Lock()
+		defer upstream.mu.Unlock()
+		return upstream.calls, string(upstream.body)
+	}
+	consumeLogs := func() []model.Log {
+		var logs []model.Log
+		require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", user.Id, model.LogTypeConsume).Order("id").Find(&logs).Error)
+		return logs
+	}
+	type recordEntry struct {
+		Plugin    string `json:"plugin"`
+		Stage     string `json:"stage"`
+		Unchecked bool   `json:"unchecked"`
+	}
+
+	for name, tc := range map[string]struct{ instances, setting string }{
+		"global instance": {instances: `[{"id":"check","name":"Check","plugin":"rp-novelai-check","enabled":true,"global":true,"config":{}}]`},
+		"bound instance":  {instances: `[{"id":"check","name":"Check","plugin":"rp-novelai-check","enabled":true,"config":{}}]`, setting: `{"request_plugins":["check"]}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: tc.instances}))
+			t.Cleanup(func() {
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+			})
+			require.NoError(t, model.DB.Where("1 = 1").Delete(&model.Ability{}).Error)
+			require.NoError(t, model.DB.Where("1 = 1").Delete(&model.Channel{}).Error)
+			channel := model.Channel{Name: "novelai-plugins", Key: "pst-novelai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+				Models: "checked-image", BaseURL: common.GetPointer(server.URL), Setting: common.GetPointer(tc.setting)}
+			require.NoError(t, model.DB.Create(&channel).Error)
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: "checked-image", Group: "default", Enabled: true}).Error)
+			engine := gin.New()
+			SetRelayRouter(engine)
+			send := func(body string) *httptest.ResponseRecorder {
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodPost, "/ai/generate-image", strings.NewReader(body))
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Authorization", "Bearer novelaipluginkey")
+				engine.ServeHTTP(recorder, request)
+				return recorder
+			}
+
+			calls, _ := sent()
+			before := walletQuota()
+			rejected := send(`{"input":"a forbidden cat","model":"checked-image","action":"generate","parameters":{"n_samples":1}}`)
+
+			require.Equal(t, http.StatusBadRequest, rejected.Code, "%.200q", rejected.Body.String())
+			var payload struct {
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(rejected.Body.Bytes(), &payload))
+			assert.Contains(t, payload.Message, "Not allowed here (code: blocked.word)")
+			afterRejection, _ := sent()
+			assert.Equal(t, calls, afterRejection, "nothing reaches NovelAI")
+			assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+
+			clean := `{"input":"a cat","model":"checked-image","action":"generate","parameters":{"n_samples":1}}`
+			logged := len(consumeLogs())
+			served := send(clean)
+
+			require.Equal(t, http.StatusOK, served.Code, served.Body.String())
+			assert.Equal(t, archive.Bytes(), served.Body.Bytes())
+			afterServed, body := sent()
+			assert.Equal(t, calls+1, afterServed)
+			assert.Equal(t, clean, body, "the client body goes to NovelAI unchanged")
+			assert.Eventually(t, func() bool { return walletQuota() == before-10_000 }, 5*time.Second, 10*time.Millisecond, "one image at $0.02")
+			require.Eventually(t, func() bool { return len(consumeLogs()) == logged+1 }, 5*time.Second, 10*time.Millisecond)
+			if tc.setting == "" {
+				return
+			}
+			consumed := consumeLogs()[logged]
+			var other struct {
+				RequestPlugins []recordEntry `json:"request_plugins"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(consumed.Other, &other))
+			assert.Contains(t, other.RequestPlugins, recordEntry{Plugin: "rp-novelai-check", Stage: "ingress", Unchecked: true}, consumed.Other)
+		})
+	}
+}
+
 // novelAIImagesUpstream is a fake NovelAI image host: it records every
 // generation request and answers with the next queued response.
 type novelAIImagesUpstream struct {
