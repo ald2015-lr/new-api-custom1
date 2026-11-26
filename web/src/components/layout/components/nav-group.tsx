@@ -131,6 +131,8 @@ function SidebarMenuLink({ item, href }: { item: NavLink; href: string }) {
           <Link
             to={item.url}
             preload={isMobile ? false : undefined}
+            onPointerEnter={item.prefetch}
+            onFocus={item.prefetch}
             onClick={() => setOpenMobile(false)}
           />
         }

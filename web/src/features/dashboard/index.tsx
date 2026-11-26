@@ -47,6 +47,15 @@ import {
   saveChartPreferences,
 } from './lib'
 import {
+  loadConsumptionDistributionChart,
+  loadFlowCharts,
+  loadLogStatCards,
+  loadModelCharts,
+  loadPerformanceOverview,
+  loadUserCharts,
+  prefetchDashboardSection,
+} from './lib/section-chunks'
+import {
   type DashboardSectionId,
   DASHBOARD_DEFAULT_SECTION,
   DASHBOARD_SECTION_IDS,
@@ -80,39 +89,29 @@ const PERFORMANCE_MODEL_FALLBACK_KEYS = [
 ] as const
 
 const LazyLogStatCards = lazy(() =>
-  import('./components/models/log-stat-cards').then((m) => ({
-    default: m.LogStatCards,
-  }))
+  loadLogStatCards().then((m) => ({ default: m.LogStatCards }))
 )
 
 const LazyModelCharts = lazy(() =>
-  import('./components/models/model-charts').then((m) => ({
-    default: m.ModelCharts,
-  }))
+  loadModelCharts().then((m) => ({ default: m.ModelCharts }))
 )
 
 const LazyConsumptionDistributionChart = lazy(() =>
-  import('./components/models/consumption-distribution-chart').then((m) => ({
+  loadConsumptionDistributionChart().then((m) => ({
     default: m.ConsumptionDistributionChart,
   }))
 )
 
 const LazyPerformanceOverview = lazy(() =>
-  import('./components/models/performance-overview').then((m) => ({
-    default: m.PerformanceOverview,
-  }))
+  loadPerformanceOverview().then((m) => ({ default: m.PerformanceOverview }))
 )
 
 const LazyUserCharts = lazy(() =>
-  import('./components/users/user-charts').then((m) => ({
-    default: m.UserCharts,
-  }))
+  loadUserCharts().then((m) => ({ default: m.UserCharts }))
 )
 
 const LazyFlowCharts = lazy(() =>
-  import('./components/flow/flow-charts').then((m) => ({
-    default: m.FlowCharts,
-  }))
+  loadFlowCharts().then((m) => ({ default: m.FlowCharts }))
 )
 
 function LogStatCardsFallback() {
@@ -336,7 +335,12 @@ export function Dashboard() {
               <Tabs value={activeSection} onValueChange={handleSectionChange}>
                 <TabsList className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'>
                   {visibleSections.map((section) => (
-                    <TabsTrigger key={section} value={section}>
+                    <TabsTrigger
+                      key={section}
+                      value={section}
+                      onPointerEnter={() => prefetchDashboardSection(section)}
+                      onFocus={() => prefetchDashboardSection(section)}
+                    >
                       {t(SECTION_META[section].titleKey)}
                     </TabsTrigger>
                   ))}

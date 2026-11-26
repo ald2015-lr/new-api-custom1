@@ -19,7 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import i18next from 'i18next'
 import { useEffect, useState } from 'react'
 
-import { isHttpUrl } from '@/lib/content-format'
+import { preloadMarkdown } from '@/components/markdown-loader'
+import { isHttpUrl, isLikelyHtml } from '@/lib/content-format'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import { getHomePageContent } from '../api'
@@ -31,6 +32,14 @@ const STATE_STORAGE_KEY = 'home_page_content_state'
 
 /** A first visit shows the default home if the custom content takes longer. */
 export const FIRST_VISIT_CONTENT_WAIT_MS = 5000
+
+// A markdown home page renders through LazyMarkdown: start loading the
+// renderer together with the content, so the page is not slower than before.
+function preloadRendererFor(content: string) {
+  if (content && !isHttpUrl(content) && !isLikelyHtml(content)) {
+    preloadMarkdown()
+  }
+}
 
 interface CachedHomePageContent {
   content: string
@@ -80,6 +89,7 @@ export function useHomePageContent(): HomePageContentResult {
 
   useEffect(() => {
     let mounted = true
+    preloadRendererFor(cached.content)
     const firstVisitTimer = cached.known
       ? undefined
       : setTimeout(() => setIsLoaded(true), FIRST_VISIT_CONTENT_WAIT_MS)
@@ -92,6 +102,7 @@ export function useHomePageContent(): HomePageContentResult {
         if (!mounted) return
 
         if (success && data) {
+          preloadRendererFor(data)
           setContent(data)
           writeCachedContent(data)
         } else {
@@ -116,7 +127,7 @@ export function useHomePageContent(): HomePageContentResult {
       mounted = false
       clearTimeout(firstVisitTimer)
     }
-  }, [cached.known])
+  }, [cached.content, cached.known])
 
   const isUrl = isHttpUrl(content)
 

@@ -32,7 +32,7 @@ import dayjs from '@/lib/dayjs'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
-import { formatModelName, logTokenName, parseLogOther } from '../lib/format'
+import { formatModelName, getLogOther, logTokenName } from '../lib/format'
 import {
   getLogTypeConfig,
   isDisplayableLogType,
@@ -66,7 +66,7 @@ export function CommonLogMobileCard<TData>(props: {
   const context = useUsageLogsContext()
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
-  const other = parseLogOther(log.other)
+  const other = getLogOther(log)
   const displayable = isDisplayableLogType(log.type)
   const timing = isTimingLogType(log.type)
   const model = formatModelName(log)

@@ -171,6 +171,28 @@ export function parseLogOther(other: string): LogOtherData | null {
   }
 }
 
+const parsedLogOther = new WeakMap<
+  object,
+  { source: string; value: LogOtherData | null }
+>()
+
+/**
+ * The parsed `other` field of a log row, parsed once per row: every cell of
+ * the logs table, its row tint, the mobile card and the details dialog read
+ * it on each render. The result is shared, so callers must not modify it. A
+ * row whose `other` text changes is parsed again.
+ */
+export function getLogOther(log: {
+  other?: string | null
+}): LogOtherData | null {
+  const source = log.other ?? ''
+  const cached = parsedLogOther.get(log)
+  if (cached && cached.source === source) return cached.value
+  const value = parseLogOther(source)
+  parsedLogOther.set(log, { source, value })
+  return value
+}
+
 export function getReasoningEffortVariant(
   effort: string | undefined
 ): StatusBadgeProps['variant'] {
@@ -243,7 +265,7 @@ export function formatModelName(log: UsageLog): {
   actualModel?: string
   responseModel?: LogOtherData['response_model']
 } {
-  const other = parseLogOther(log.other)
+  const other = getLogOther(log)
   const isMapped = !!(
     other?.is_model_mapped &&
     other?.upstream_model_name &&
