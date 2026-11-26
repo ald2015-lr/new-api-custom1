@@ -131,7 +131,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `model/option.go` | 三个手续费键、`LogResponseModelEnabled` 的注册与解析 |
 | `web/src/features/system-settings/integrations/*` | 「计价与手续费」UI |
 | `web/src/i18n/locales/*.json` | 46 条新文案（注意保持 `footer.new\u0061pi…` 那个键的转义形式不变，别用 JSON 库整体重写这些文件） |
-| `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go`、`middleware/frontend_static.go` | 静态资源不计入页面限流、缺失 chunk 返回 404、immutable 缓存与 304、页面/静态限流在 Redis 故障时放行（见第六节） |
+| `router/web-router.go`、`middleware/cache.go`、`middleware/rate-limit.go`、`middleware/frontend_static.go` | 静态资源不计入页面限流、缺失 chunk 返回 404、immutable 缓存与 304、页面/静态限流在 Redis 故障时放行（见第六节）；页面请求被限流时返回自动重试的提示页（`writeWebRateLimited`）；静态文件优先返回构建时生成的 `.br`，每种编码各有 ETag、可压缩文件的响应都带 `Vary`（见第二十节） |
 | `service/relay_error.go`（rc.40 前在 `controller/relay.go`） | `DecideRelayRetry` 开头的"已向客户端输出就不再重试"守卫 |
 | `controller/relay.go` | defer 里流已开始时改走 `helper.WriteStreamError` |
 | `relay/helper/stream_scanner.go`、`stream_error.go`、`common.go` | 裸 `[DONE]`、流内错误事件、写超时续期 |
@@ -153,6 +153,15 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 | `.github/workflows/ci.yml` | 前端作业的 `timeout-minutes` 从上游的 10 放宽到 20：rc.51 起前端测试从 243 个文件增加到 274 个、耗时多约 19%，较慢的 GitHub runner 上 10 分钟跑不完 |
+| `middleware/rate-limit.go`（`AuthRefreshRateLimit`、Redis 出错时的内存回退与限频日志）、`common/{constants,init}.go`、`router/api-router.go`（刷新路由）、`common/log_text.zh-CN.json` | 刷新登录状态单独限流 `AUTH_REFRESH_RATE_LIMIT*`；Redis 出错时 API 与按用户限流改用内存计数 `RATE_LIMIT_REDIS_FAILURE`（见第六节、第二十节） |
+| `model/utils.go`（`FlushBatchUpdates`、`batchFlushMu`）、`main.go`（`srv.Shutdown` 之后调用） | 停机前写入批量更新中尚未落库的额度变化（见第二十节第 5 条） |
+| `model/log.go`（`createLog` 用 `SkipDefaultTransaction`） | 写使用日志不再包默认事务，每个中转请求少 3 次数据库往返 |
+| `model/channel_quota_limit.go`（`channelQuotaLimits` 改为原子快照 + 单个后台刷新 + 刷新期间本地写入保留） | 渠道限额快照不再在选渠道路径上同步查库 |
+| `service/rankings.go`（`rankingBuilds` singleflight、`buildRankings` 包变量） | 排行榜同一时间只构建一次，过期缓存先返回旧数据再后台重建 |
+| 新文件 `model/enabled_models_cache.go`，以及 `model/channel_cache.go`（重载时建快照）、`model/model_pricing_config.go`（`GetModelPricingIssues`）、`service/group.go`（`GetGroupsEnabledModelsCached`）、`controller/user.go`（`GetUserModels`） | 可用模型列表与定价问题检查在开启内存缓存时读渠道缓存；`/v1/models` 等其他调用不变 |
+| `web/index.html`（启动外壳、看门狗脚本、noscript）、`web/src/main.tsx`、新文件 `web/src/lib/boot.ts`、`web/src/routes/__root.tsx`、`web/src/lib/status-query.ts`、`web/src/features/setup/api.ts`、`web/src/features/home/hooks/use-home-page-content.ts` | 首屏不再白屏、老浏览器提示、语言包最多等 10 秒、setup 从 `/api/status` 判断、首页内容先用缓存（见第二十节） |
+| `web/src/lib/auth-session.ts`、`web/src/routes/_authenticated/route.tsx`、`web/src/features/errors/general-error.tsx`、`web/src/lib/server-error-message.ts`、`web/src/lib/query-client.ts`、`web/src/features/usage-logs/components/usage-logs-table.tsx` 等 | 刷新临时失败时不误退出登录、429 本地化提示、可选查询失败不跳错误页、请求重试策略、日志表加载失败可重试 |
+| `web/src/features/{channels,models,subscriptions,dashboard,usage-logs}/api.ts` | 列表接口带结尾斜杠，省掉 301/307 跳转 |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
@@ -270,7 +279,7 @@ docker run -d --name new-api-alpha-us --restart always \
 |---|---|---|
 | 静态资源被每 IP 限流（默认 120 次 / 180 秒，JS/CSS 也计数；一次冷加载就要十几个请求；CDN/反代未配 `TRUSTED_PROXIES` 时全站共用一个桶） | 路由 chunk 收到 429 → `ChunkLoadError` → 500 页 | 限流移到静态资源之后，只对页面 HTML 兜底和 404 计数 |
 | 发布新版后，旧标签页请求已不存在的 chunk | 返回 `200 text/html` 的 index.html，浏览器把 HTML 当 JS 执行 → 500 页 | 缺失的 `/static/*` 返回 `404 + no-store`；前端识别 chunk 加载失败后**自动整页刷新一次**（sessionStorage 防死循环），刷新失败才显示「页面部分资源加载失败，请刷新」和一个刷新按钮 |
-| Redis 抖动 | 限流中间件直接回 500，每个资源请求都变 500 | 页面层限流在 Redis 出错时放行并记日志；API 层限流保持原样（拒绝） |
+| Redis 抖动 | 限流中间件直接回 500，每个资源请求都变 500 | 页面层限流在 Redis 出错时放行并记日志；API 层和按用户的限流在 Redis 出错时临时改用本机内存计数继续限流（超限照常 429 并带 Retry-After），不再返回 500，日志每个限流器最多 10 秒一条（「限流检查失败，改用内存限流」）；多节点时每个节点各自计数，相当于暂时放宽到节点数倍。`RATE_LIMIT_REDIS_FAILURE=reject` 恢复旧行为（直接返回 500） |
 
 首屏慢的处理：
 
@@ -278,6 +287,8 @@ docker run -d --name new-api-alpha-us --restart always \
 - 七种语言包原本全部打进首屏同步 chunk（约 2.5 MB 原始 / 770 KB gzip），现在只内置英文，当前语言按需加载
 - 登录态刷新请求加了 30 秒超时，卡住时以临时错误结束而不是让首屏一直等（普通 API 客户端不加，渠道测试等长请求不受影响）
 - 每个响应都带 `X-New-Api-Version`；前端发现与自身构建版本不一致时弹一次「有新版本，请刷新」提示，避免用户在旧页面里一路点到已失效的 chunk
+- 构建产物里有 `.br`（前端构建时生成）的静态文件，对接受 brotli 的浏览器直接返回 `.br`，比 gzip 再小约 20%；每种编码各有自己的 ETag（`"<路径>"`、`"<路径>-gzip"`、`"<路径>-br"`），可压缩文件的所有响应都带 `Vary: Accept-Encoding`，旧版本发出的 ETag 仍然能得到 304
+- 打开页面被每 IP 页面限流拦下时，浏览器不再显示空白错误页，而是「访问过于频繁，N 秒后自动重试」的中英文提示页，N 秒（最多 60 秒）后自动刷新；脚本、样式、接口请求仍然是空的 429
 
 **发布后建议做的两件事：**
 
@@ -291,6 +302,8 @@ curl -sI https://<你的域名>/static/js/index.$(hash).js | grep -iE "^(HTTP|ca
 curl -sI https://<你的域名>/static/js/async/nope.js | grep -iE "^(HTTP|cache-control|content-type)"
 # 连打 150 次静态资源不应出现 429
 for i in $(seq 1 150); do curl -s -o /dev/null -w "%{http_code}\n" https://<你的域名>/static/js/index.$(hash).js; done | sort | uniq -c
+# 接受 brotli 时应为 content-encoding: br，并带 vary: Accept-Encoding
+curl -sI -H 'Accept-Encoding: gzip, br' https://<你的域名>/static/js/index.$(hash).js | grep -iE "^(content-encoding|vary|etag)"
 ```
 
 `$(hash)` 换成 `curl -s https://<你的域名>/ | grep -o 'static/js/index[^"]*'` 查到的实际文件名。
@@ -946,3 +959,194 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 用户说收不到重置邮件：看审计。「已发送邮件」说明已经发出 → 让用户查垃圾邮件，并用最新的一封；「已发送邮件」之后紧跟一条「链接无效或已过期」：重置链接只在发出后 10 分钟内有效（没有改变），邮件晚到超过 10 分钟或用了旧邮件里的链接都会这样（服务重启也会让未用的链接失效），让用户重新申请（注意冷却时间），收到后尽快打开最新的一封；「邮件发送失败」→ 看原因，检查 SMTP；「申请过于频繁」/「已达每日上限」→ 等待，或管理员「解除登录锁定」。
 - 用户说一直提示登录失败次数过多：在审计里按用户名或事件「登录失败」看「已锁定」/「已锁定密码登录」的来源 IP，确认不是本人后由管理员「解除登录锁定」；锁定反复出现说明有人在针对这个账号，建议绑定 Passkey、开启两步验证。
 - 服务器日志里出现 `auth guard: Redis failed, using the in-memory store`（中文日志「登录与找回密码防护：Redis 出错，改用内存计数」）：检查 Redis 连接；在恢复之前多节点各自计数。
+
+---
+
+## 二十、访问速度与稳定性：部署和配置建议
+
+适用于「服务器在海外、用户主要在国内」的站点。本节只讲**配置和部署**，大部分不需要升级就能做；标了「本版本起」的条目依赖这次更新里的改动（第 9 条列出了这次更新改了什么、新增了哪些环境变量），升级之后再改。每一条都可以单独做、随时改回去。建议先做第 1 条的测量，再按结果挑着做。
+
+### 1. 先量几个数（约半小时）
+
+| 量什么 | 怎么量 | 怎么看 |
+|---|---|---|
+| 应用到数据库的往返时间 | 在运行容器的服务器上执行（只建立 TCP 连接，不需要数据库密码）：<br>`for i in 1 2 3 4 5; do bash -c 'time (exec 3<>/dev/tcp/<数据库地址>/3306)' 2>&1 \| grep real; done` | 同机房一般在 1 ms 左右。每个中转请求在数据库上原来有 5 次往返，本版本起写使用日志不再包一层事务，减为 2 次；每次发布或重启要先做约 1,270 次往返才开始响应（见第 5 条）。超过 5 ms 就值得把数据库和应用放到同一机房 |
+| 数据库连接数 | 在 MySQL 客户端执行：<br>`SHOW VARIABLES LIKE 'max_connections';`<br>`SHOW GLOBAL STATUS WHERE Variable_name IN ('Max_used_connections','Connection_errors_max_connections','Aborted_connects');` | `Connection_errors_max_connections` 大于 0，说明出现过「数据库连接已满」导致的页面报错，按第 4 条调整 |
+| 用户的实际访问链路 | 在国内的一台机器上执行：<br>`curl -so /dev/null -w 'DNS %{time_namelookup}s 连接 %{time_connect}s TLS %{time_appconnect}s 首字节 %{time_starttransfer}s 总计 %{time_total}s HTTP/%{http_version}\n' https://<你的域名>/`<br>或请一位国内用户用 Chrome 打开网站：F12 → Network → 勾选 Disable cache → 刷新 → 在请求列表上右键「Save all as HAR」发给你 | 显示 `HTTP/1.1` 时按第 2 条开启 HTTP/2；DNS 超过 0.3 秒可以换一家国内有节点的解析服务商；首字节远大于连接时间的 2 倍，说明源站或中间代理慢 |
+| 后端看到的用户 IP | `docker compose logs --no-log-prefix --tail 3000 new-api \| grep '^\[GIN\]' \| awk -F'\|' '{gsub(/ /,"",$6); print $6}' \| sort \| uniq -c \| sort -rn \| head` | 大部分请求都来自同一两个 IP（CDN 或反代的地址）时，所有用户共用一个限流桶，登录、刷新页面会互相挤占，要配 `TRUSTED_PROXIES`（见第六节和第 2 条） |
+| 磁盘和日志 | `df -h / /var/lib/docker; du -sh <部署目录>/logs` | 使用率接近 95% 时，所有 `/v1` 请求都会被过载保护拒绝（503），见第 7 条 |
+
+有条件再看两项：用户浏览器版本（nginx 访问日志 `awk -F'"' '{print $6}' /var/log/nginx/access.log | sort | uniq -c | sort -rn | head -30`，见第 8 条）；后台「系统设置 → 请求策略 → 会话与重试」里的「重试次数」，以及渠道是否开启了内容审查（见第 6 条）。
+
+### 2. 跨境网络（不改代码，收益最大的一类）
+
+**开启 BBR。** 国内到海外的线路丢包多，Linux 默认的拥塞控制一遇到丢包就大幅降速，BBR 受丢包影响小得多。在**向用户发送数据的那台服务器**上执行（海外源站；如果前面还有国内或香港的反代，两台都可以开）：
+
+```bash
+uname -r                       # 内核需 4.9 或更新
+cat > /etc/sysctl.d/90-newapi-net.conf <<'CONF'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_slow_start_after_idle = 0
+CONF
+sysctl --system
+sysctl net.ipv4.tcp_congestion_control    # 输出 bbr 即已生效
+```
+
+撤销：删除这个文件，再执行 `sysctl -w net.ipv4.tcp_congestion_control=cubic net.ipv4.tcp_slow_start_after_idle=1`。nginx 跑在容器里时，改完重启那个容器。
+
+**开启 HTTP/2。** HTTP/1.1 下浏览器对一个站点最多同时开 6 个连接，控制台首页、渠道页一次要发 7–8 个请求，多出来的要多等一个往返。nginx 1.25.1 及以上在 `server` 里写 `http2 on;`，更老的版本写 `listen 443 ssl http2;`。宝塔开启 SSL 后一般已经带 HTTP/2，用第 1 条的 curl 命令确认显示的是 `HTTP/2`。HTTP/3（QUIC）在国内运营商上常被限速，不必追求。
+
+**两层 nginx（国内或香港反代 → 海外 nginx → new-api，见第十三节）时，外层要复用到源站的连接。** nginx 默认每个请求都对源站新建连接，跨境一次 TCP + TLS 握手要 2–3 个往返，比请求本身还慢。外层这样写：
+
+```nginx
+upstream newapi_origin {
+    server <海外源站域名或IP>:443;
+    keepalive 64;
+}
+
+server {
+    # ……原有的 listen、ssl 配置不变……
+    location / {
+        proxy_pass https://newapi_origin;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host <海外源站域名>;
+        proxy_ssl_server_name on;
+        proxy_ssl_name <海外源站域名>;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+同时在**海外**那台的 compose 里，把外层反代的出口 IP 加进 `TRUSTED_PROXIES`，否则所有用户都会被算成这一个 IP（第六节）。
+
+**让静态文件离用户近一些。** `/static/` 下的文件名带内容哈希，源站已经设了一年缓存（第六节），可以放心让 CDN 或外层反代缓存。本版本起源站对接受 brotli 的浏览器直接返回构建时生成的 `.br`，每种压缩格式各有自己的 ETag，所有响应都带 `Vary: Accept-Encoding`，缓存会按压缩格式分别保存，不会把 brotli 发给不支持它的客户端。外层反代缓存的写法：先在 `http {}` 里加一行（宝塔在「软件商店 → Nginx → 设置 → 配置修改」）：
+
+```nginx
+proxy_cache_path /var/cache/nginx/newapi levels=1:2 keys_zone=newapi_static:20m max_size=2g inactive=30d use_temp_path=off;
+```
+
+再在站点的 `server {}` 里加：
+
+```nginx
+location /static/ {
+    proxy_pass https://newapi_origin;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host <海外源站域名>;
+    proxy_ssl_server_name on;
+    proxy_ssl_name <海外源站域名>;
+    proxy_cache newapi_static;
+    proxy_cache_lock on;
+    add_header X-Cache-Status $upstream_cache_status;
+}
+```
+
+第二次访问同一个文件时，响应头里 `X-Cache-Status: HIT` 就说明命中了。只缓存 `/static/`，页面和接口不要缓存。
+
+### 3. CDN 和服务器位置
+
+- **国内 CDN 节点需要 ICP 备案。** 没有备案只能用香港、日本、新加坡等境外节点，或选对国内线路做了优化的服务商。
+- **只让 CDN 缓存 `/static/*`。** `/` 和其他页面路径、`/api/*`、`/v1/*` 一律不缓存、不改写。不要用「缓存所有内容」「忽略源站缓存头」这类规则，否则用户会看到旧页面、旧公告，甚至别的分组的价格。
+- **中转接口尽量不经过会掐断长请求的 CDN。** Cloudflare 免费、Pro、Business 套餐在源站约 100 秒没有响应时直接返回 524，非流式的长回答、画图会因此失败；流式请求要开启第十三节的「保持连接心跳」（间隔填 10 秒）。最稳妥的是给 API 单独一个不走 CDN（Cloudflare 里是「仅 DNS」灰云）的子域名，网页走 CDN。CDN 和 nginx 的压缩类型里不要包含 `text/event-stream`。
+- **服务器位置。** 大部分用户在国内时，把服务器连同数据库搬到香港、日本或新加坡等对国内有优质线路（如 CN2 GIA、CMI）的机房，网页、接口、中转三类请求的往返会一起缩短，这是 CDN 做不到的。
+- **预期收益。** 在实测的 2 Mbit/s、180 ms 往返条件下，只把静态文件放到近处，首次进入从约 6.9 秒降到约 1.1–1.4 秒（接口仍然跨境）。
+
+### 4. docker-compose 建议改动
+
+```yaml
+services:
+  new-api:
+    # ……原有配置不变，新增下面几项……
+    stop_grace_period: 35s            # 必须比 SHUTDOWN_TIMEOUT_SECONDS 大
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    environment:
+      # ……原有变量不变，新增或修改：
+      - SHUTDOWN_TIMEOUT_SECONDS=25   # 发布时最多等正在输出的回复 25 秒，见第 5 条
+      - STREAMING_TIMEOUT=1800        # 单位是秒；原来的 1800000 约等于 20 天
+      - REDIS_POOL_SIZE=50
+
+  redis:
+    image: redis:<主版本.次版本>      # 不要用 latest；当前版本用 docker exec redis-alpha-us redis-server --version 查
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+```
+
+逐项说明：
+
+- **日志上限。** 现在 Docker 的标准输出日志没有上限，`logs/` 里的 `oneapi-*.log` 每 100 万行换一个新文件但从不删除。磁盘到 95% 时过载保护会让所有 `/v1` 请求返回 503。`logs/` 里的旧文件可以在后台「系统设置 → 运维 → 性能」里清理，或加一条定时任务：`find <部署目录>/logs -name 'oneapi-*.log' -mtime +14 -delete`。
+- **Redis 固定版本。** `latest` 会在 `docker compose pull` 时直接升到新的大版本并重启 Redis。旧版本在 Redis 重启的那几秒里所有 `/api` 请求都返回 500，打开着的控制台会跳到「糟糕！出错了」；本版本起 API 限流在 Redis 出错时临时改用本机内存计数继续限流，不再返回 500（第六节）。即使这样也建议固定版本，自己选时间升级 Redis。
+- **`STREAMING_TIMEOUT`。** 它是上游两次输出之间最长允许沉默的秒数。1800000 秒等于不限制：上游卡住时请求会一直挂着，开了心跳后客户端也不会自己超时。1800（30 分钟）足够长推理用，嫌长可以改成 600。
+- **`SQL_MAX_OPEN_CONNS`（本版本起）。** 第 1 条查到 `Connection_errors_max_connections` 大于 0，或 `Max_used_connections` 接近 `max_connections` 时，改成 `(max_connections − 20) ÷ new-api 实例数`，例如 `max_connections=151`、一个实例 → `SQL_MAX_OPEN_CONNS=130`。本版本起渠道限额改为后台刷新，连接被占满时选渠道不再排队等这个查询，可以放心调低；旧版本不要调，否则所有渠道选择都会排队等同一个查询。查不出问题就保持不变。`SQL_MAX_LIFETIME` 保持默认的 60 秒，不要调大：外部数据库前面的 NAT 或负载均衡常会断开空闲连接，调大后会偶发 `invalid connection`。
+- **Redis 超时（本版本起）。** 升级到本版本后，可以把连接串改为 `REDIS_CONN_STRING=redis://redis:6379/0?dial_timeout=1s&read_timeout=1s&write_timeout=1s&pool_timeout=2s&max_retries=1`，Redis 卡住时请求最多多等两三秒就改用内存计数，而不是一直挂着。设了 `RATE_LIMIT_REDIS_FAILURE=reject`（恢复旧行为）或还在用旧版本时不要单独改：Redis 一出错就返回 500，超时调短只会让 500 来得更快。连接池大小以 `REDIS_POOL_SIZE` 为准（连接串里的 `pool_size` 不生效）。
+- **`TRUSTED_PROXIES` 和页面限流。** 见第六节「发布后建议做的两件事」第 1 条；前面有 CDN 或两层反代时一定要填。前面已经有限流（CDN、WAF）时可以设 `GLOBAL_WEB_RATE_LIMIT_ENABLE=false`，否则按 compose 里的注释设 `GLOBAL_WEB_RATE_LIMIT=3000`。本版本起打开页面被页面限流拦下时，浏览器看到的是「访问过于频繁，N 秒后自动重试」的提示页，到时间自动刷新，不再是空白错误页。
+- **登录与刷新登录状态的限流（本版本起）。** 旧版本里刷新登录状态和登录、两步验证、退出共用关键接口限流（每 IP 20 次 / 20 分钟），同一个 IP 20 分钟内打开页面超过约 20 次就会被登出，而且暂时无法登录（一个公司、学校或运营商出口 IP 下的用户共用这 20 次）。本版本起刷新登录状态有单独的额度：每 IP `AUTH_REFRESH_RATE_LIMIT=300` 次 / `AUTH_REFRESH_RATE_LIMIT_DURATION=1200` 秒，`AUTH_REFRESH_RATE_LIMIT_ENABLE` 默认跟随 `CRITICAL_RATE_LIMIT_ENABLE`（关掉关键接口限流的站点，刷新照旧不限）；刷新暂时失败时页面显示「暂时无法恢复登录状态」并可重试，不再直接退出登录。以前为此临时加的 `CRITICAL_RATE_LIMIT=60` 升级后可以删掉（它让同一 IP 的密码尝试也放宽到 60 次 / 20 分钟；按账号的登录锁定仍然有效，见第十九节）。很多用户共用一个出口 IP 时如果仍然出现刷新被限流，先确认 `TRUSTED_PROXIES`，再酌情调大 `AUTH_REFRESH_RATE_LIMIT`。
+
+### 5. 发布、重启时少报错
+
+实测（定制版 `df1bb3a`，数据库已初始化）：new-api 启动时要先做约 1,270 次数据库往返（逐个检查表结构），这段时间端口不响应，前面的 nginx 返回 502。
+
+| 应用到数据库的往返 | 启动到能响应 |
+|---|---|
+| 同一台机器（约 0 ms） | 0.4 秒 |
+| 10 ms | 13 秒 |
+| 50 ms | 60 秒 |
+
+停止旧容器时，new-api 先关掉端口，再等正在进行的请求（主要是流式回复）结束，最多等 `SHUTDOWN_TIMEOUT_SECONDS`（默认 120 秒）；而 Docker 默认只给 10 秒，到时直接强杀。所以每次发布的不可用时间大约是「等待时间 + 启动时间」。
+
+- 先 `docker compose pull`，再 `docker compose up -d`，不要让 `up` 现场下载镜像。
+- 选用户少的时段发布。发布后执行 `docker compose logs --no-log-prefix new-api | grep 'ready in'`，看到的时间就是这次的启动停机时间。
+- `SHUTDOWN_TIMEOUT_SECONDS` 是一个取舍：调大，发布时少打断正在生成的长回复，但这段时间里新请求全部失败；调小，发布快，但超过这个时间还没结束的回复会被打断（「生成一半报错」）。上面的 25 秒适合以普通聊天为主的站；以长推理、长代码输出为主的站可以设 60–110，同时把 `stop_grace_period` 设为 70s–120s。**`stop_grace_period` 一定要比它大**，否则 Docker 会在 new-api 保存数据之前强杀：本版本起退出前会先把批量更新里还没写进数据库的额度变化（`BATCH_UPDATE_INTERVAL`，compose 里是 30 秒）写进去，日志里有一行「退出前写入批量更新中尚未落库的额度变化」（英文日志 `flushing batched quota updates before exit`）；被强杀就写不进去，这段时间的用量会丢失。
+- 数据库往返超过 5 ms 时，最有效的办法是把数据库和应用放到同一机房。想做到发布完全不停机，需要跑两个 new-api 实例、由 nginx 在两者之间切换，这要单独规划。
+
+### 6. 中转（API 调用）少报错
+
+- **重试和备用渠道。** 后台「系统设置 → 请求策略 → 会话与重试」里的「重试次数」默认是 0，上游偶发的 5xx、429 会直接报给用户。同一模型有备用渠道时设为 1–2（实测换渠道只多花约 1 毫秒）；「渠道健康」里可以开启「重复失败时自动禁用渠道」。
+- **上游卡住不回应。** `RELAY_RESPONSE_HEADER_TIMEOUT` 默认 1800 秒：上游接受了连接却一直不回响应头时，请求会一直挂着，也不会换渠道。开了重试、有备用渠道时可以设为 300。注意非流式的长推理、画图可能要几分钟才返回第一个字节，设太小会误杀。
+- **长请求保活。** 按第十三节开启「保持连接心跳」，间隔填 10 秒。
+- **内容审查。** 渠道开启外部内容审查（第十八节）时，每个请求要先等审查接口返回才发往上游，首字会晚一个审查往返。
+- **数据库位置。** 实测数据库往返每增加 2 ms，一个中转请求从 3 ms 变成 15 ms；增加 10 ms 时变成 57 ms（旧版本的数字，本版本起写日志少了 3 次往返）。
+
+### 7. 过载保护（突然「全部 503」时先看这里）
+
+后台「系统设置 → 运维 → 性能」里的性能监控默认开启：CPU 90%、内存 90%、磁盘 95%，连续超过阈值时**所有 `/v1` 请求返回 503**（网页和控制台不受影响）。磁盘按容器临时目录所在的分区算，一般就是 Docker 所在的磁盘，日志写满磁盘是最常见的原因（第 4 条）。容器没有设 CPU、内存上限时按整台机器算，同机的其他程序也会触发。
+
+### 8. 老浏览器
+
+当前前端支持 Chrome / Edge 107 及以上、Firefox 104 及以上、Safari 16 及以上（iOS 16）。旧版本里更老的浏览器（例如 iOS 15 上的微信内置浏览器、很旧的安卓 WebView）会白屏；本版本起会显示「浏览器版本过低，请升级或换用系统浏览器打开」的提示。如果第 1 条的访问日志里这类用户较多，再考虑放宽兼容范围（会增加一些下载体积）。
+
+### 9. 这次更新改了什么、新增了哪些设置
+
+**新增的环境变量**（都有默认值，不设就是下面的默认行为）：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `AUTH_REFRESH_RATE_LIMIT_ENABLE` | 跟随 `CRITICAL_RATE_LIMIT_ENABLE`（默认开） | 刷新登录状态（`POST /api/user/auth/refresh`）是否限流 |
+| `AUTH_REFRESH_RATE_LIMIT` | `300` | 每个 IP 在一个窗口内最多刷新多少次；不是正数时用默认值 |
+| `AUTH_REFRESH_RATE_LIMIT_DURATION` | `1200`（秒） | 刷新限流的窗口；不要超过 1200（内存计数 20 分钟不活动就清掉） |
+| `RATE_LIMIT_REDIS_FAILURE` | `memory` | Redis 出错时 API 层和按用户的限流怎么办：`memory` 临时改用本机内存计数继续限流；`reject` 恢复旧行为，直接返回 500。页面和静态文件的限流不受影响，Redis 出错时照旧放行 |
+
+**行为变化**（除前两项是有意改变的默认行为外，其余对用户可见的功能不变）：
+
+- 刷新登录状态单独限流（见第 4 条）；刷新暂时失败时不再直接退出登录，限流提示按界面语言显示并说明等待秒数。
+- Redis 出错时 API 限流改用内存计数，不再整站返回 500（第六节）；多节点时每个节点各自计数，等于暂时放宽到 N 倍；日志每个限流器最多 10 秒一条「限流检查失败，改用内存限流」。
+- 停机前写入批量更新中尚未落库的额度变化（第 5 条）。
+- 写使用日志不再包一层事务（每个中转请求少 3 次数据库往返）；渠道限额改为后台刷新，选渠道不再等数据库查询。
+- 排行榜同一时间只构建一次，缓存过期后先返回旧数据（最多再用 5 分钟）、后台重建。
+- 「可用模型」列表（令牌、操练场等处）和后台定价问题检查改读内存渠道缓存（开启内存缓存时；内容与上次渠道缓存刷新时的数据库一致，渠道改动后几秒内随渠道缓存一起刷新），不再每个分组查一次数据库。
+- 页面限流返回自动重试的提示页（第 4 条）；静态文件提供 brotli 版本（第 2 条）。
+- 前端：首屏先显示启动外壳，不再长时间白屏；老浏览器提示（第 8 条）；可选面板加载失败时就地显示错误，不再整页跳到错误页。
+
+**回滚：** 回到旧版本即可，没有数据库结构变化；新增的环境变量旧版本会忽略。
