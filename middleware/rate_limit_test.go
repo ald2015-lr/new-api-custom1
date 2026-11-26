@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -215,6 +216,15 @@ func uniqueRateLimitMark(base string) string {
 	return base + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
+var authRefreshTestIPs atomic.Uint32
+
+// uniqueTestClientIP gives a test run client IPs of its own: the in-memory
+// limiter keeps its counters for the whole test process.
+func uniqueTestClientIP() string {
+	n := uint32(time.Now().UnixMicro()) + authRefreshTestIPs.Add(1)
+	return fmt.Sprintf("10.%d.%d.%d", byte(n>>16), byte(n>>8), byte(n))
+}
+
 // newRedisFailureRouter wires an IP limiter, a per-user limiter (user 7) and
 // the email code limiter, each allowing one request per 30 seconds.
 func newRedisFailureRouter(t *testing.T, ipMark, userMark string) *gin.Engine {
@@ -347,6 +357,111 @@ func TestRedisFailureFallbackLogIsThrottled(t *testing.T) {
 	assert.Contains(t, linesOf(firstMark)[1], "(mark="+firstMark+", 5 more failures since the last line)")
 }
 
+// useAuthRefreshRateLimit sets the session refresh limit and the critical
+// limit (both with a 20-minute window) for one test.
+func useAuthRefreshRateLimit(t *testing.T, refreshEnabled bool, refreshNum int, criticalNum int) {
+	t.Helper()
+	previousRefresh := []any{common.AuthRefreshRateLimitEnable, common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration}
+	previousCritical := []any{common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration}
+	common.AuthRefreshRateLimitEnable, common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration = refreshEnabled, refreshNum, 20*60
+	common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = true, criticalNum, 20*60
+	t.Cleanup(func() {
+		common.AuthRefreshRateLimitEnable, common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration = previousRefresh[0].(bool), previousRefresh[1].(int), previousRefresh[2].(int64)
+		common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = previousCritical[0].(bool), previousCritical[1].(int), previousCritical[2].(int64)
+	})
+}
+
+// newAuthRefreshLimitRouter wires sign-in and refresh with their limiters as
+// the API router does.
+func newAuthRefreshLimitRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	accepted := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	router.POST("/api/user/login", CriticalRateLimit(), accepted)
+	router.POST("/api/user/auth/refresh", AuthRefreshRateLimit(), accepted)
+	return router
+}
+
+func postFrom(router http.Handler, path string, remoteAddr string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, path, nil)
+	request.RemoteAddr = remoteAddr
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+// Session refreshes count in a per-IP budget of their own (RF): once the
+// critical budget of an IP is used up, its refreshes still pass, up to the
+// refresh limit, which then answers 429 with Retry-After like the others.
+func TestAuthRefreshRateLimitHasItsOwnBucket(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		t.Run(backend, func(t *testing.T) {
+			var redisServer *miniredis.Miniredis
+			clientIP, otherIP := "192.0.2.110", "198.51.100.110"
+			if backend == "redis" {
+				redisServer, _ = useRateLimitMiniRedis(t)
+			} else {
+				useMemoryRateLimitBackend(t)
+				clientIP, otherIP = uniqueTestClientIP(), uniqueTestClientIP()
+			}
+			useAuthRefreshRateLimit(t, true, 300, 20)
+			router := newAuthRefreshLimitRouter(t)
+			remoteAddr := clientIP + ":4321"
+
+			for i := range 20 {
+				require.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", remoteAddr).Code, "login %d", i+1)
+			}
+			require.Equal(t, http.StatusTooManyRequests, postFrom(router, "/api/user/login", remoteAddr).Code, "the critical budget is used up")
+
+			for i := range 300 {
+				require.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", remoteAddr).Code, "refresh %d", i+1)
+			}
+			limited := postFrom(router, "/api/user/auth/refresh", remoteAddr)
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.Equal(t, "no-store", limited.Header().Get("Cache-Control"))
+			retryAfter, err := strconv.Atoi(limited.Header().Get("Retry-After"))
+			require.NoError(t, err)
+			assert.Positive(t, retryAfter)
+			assert.LessOrEqual(t, retryAfter, 20*60)
+
+			// Another IP has both budgets untouched.
+			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", otherIP+":4321").Code)
+			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", otherIP+":4321").Code)
+
+			if redisServer == nil {
+				return
+			}
+			refreshKey := redisIPRateLimitKey("RF", clientIP)
+			assert.Equal(t, "rateLimit:v2:ip:RF:"+clientIP, refreshKey)
+			count, err := redisServer.Get(refreshKey)
+			require.NoError(t, err)
+			assert.Equal(t, "301", count)
+			assert.Equal(t, 20*time.Minute, redisServer.TTL(refreshKey))
+			criticalCount, err := redisServer.Get(redisIPRateLimitKey("CT", clientIP))
+			require.NoError(t, err)
+			assert.Equal(t, "21", criticalCount, "refreshes do not count against the critical budget")
+		})
+	}
+}
+
+// Refreshes, unlike sign-in, are not limited at all while
+// AUTH_REFRESH_RATE_LIMIT_ENABLE is off.
+func TestAuthRefreshRateLimitDisabled(t *testing.T) {
+	redisServer, _ := useRateLimitMiniRedis(t)
+	useAuthRefreshRateLimit(t, false, 1, 1)
+	router := newAuthRefreshLimitRouter(t)
+	const clientIP = "192.0.2.112"
+
+	for i := range 5 {
+		assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", clientIP+":4321").Code, "refresh %d", i+1)
+	}
+	assert.False(t, redisServer.Exists(redisIPRateLimitKey("RF", clientIP)))
+	assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", clientIP+":4321").Code)
+	assert.Equal(t, http.StatusTooManyRequests, postFrom(router, "/api/user/login", clientIP+":4321").Code)
+}
+
 func useGlobalWebRateLimit(t *testing.T, maxRequestNum int, duration int64) {
 	t.Helper()
 
@@ -473,6 +588,76 @@ func TestGlobalWebRateLimitCountsFrontendFilesInStaticBucket(t *testing.T) {
 func emptyFrontendFS(t *testing.T) static.ServeFileSystem {
 	t.Helper()
 	return static.LocalFile(t.TempDir(), false)
+}
+
+func performWebLimitRequest(router http.Handler, method, accept, remoteAddr string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, "/console/log", nil)
+	request.RemoteAddr = remoteAddr
+	if accept != "" {
+		request.Header.Set("Accept", accept)
+	}
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+const browserPageAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+// A rate-limited page load (GET or HEAD that accepts HTML) gets a short page
+// in Chinese and English that reloads itself after Retry-After, at most 60
+// seconds, instead of the empty body browsers show as an error page. Other
+// requests keep the empty 429. Both backends answer the same way.
+func TestGlobalWebRateLimitAnswersPageLoadsWithARetryPage(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		for _, window := range []int64{45, 180} {
+			t.Run(fmt.Sprintf("%s/%ds", backend, window), func(t *testing.T) {
+				if backend == "redis" {
+					useRateLimitMiniRedis(t)
+				} else {
+					useMemoryRateLimitBackend(t)
+				}
+				useGlobalWebRateLimit(t, 1, window)
+				gin.SetMode(gin.TestMode)
+				router := gin.New()
+				require.NoError(t, router.SetTrustedProxies(nil))
+				router.Any("/console/log", GlobalWebRateLimit(emptyFrontendFS(t)), func(c *gin.Context) {
+					c.Status(http.StatusNoContent)
+				})
+				remoteAddr := uniqueTestClientIP() + ":4321"
+				require.Equal(t, http.StatusNoContent, performWebLimitRequest(router, http.MethodGet, browserPageAccept, remoteAddr).Code)
+
+				page := performWebLimitRequest(router, http.MethodGet, browserPageAccept, remoteAddr)
+				assert.Equal(t, http.StatusTooManyRequests, page.Code)
+				assert.Equal(t, "text/html; charset=utf-8", page.Header().Get("Content-Type"))
+				assert.Equal(t, "no-store", page.Header().Get("Cache-Control"))
+				assert.Equal(t, fmt.Sprint(window), page.Header().Get("Retry-After"))
+				refresh := min(window, 60)
+				body := page.Body.String()
+				assert.Contains(t, body, fmt.Sprintf(`<meta http-equiv="refresh" content="%d">`, refresh))
+				assert.Contains(t, body, "访问过于频繁")
+				assert.Contains(t, body, fmt.Sprintf("%d 秒后自动重试", refresh))
+				assert.Contains(t, body, fmt.Sprintf("Too many requests. Retrying automatically in %d seconds.", refresh))
+				assert.Less(t, len(body), 1024)
+
+				head := performWebLimitRequest(router, http.MethodHead, browserPageAccept, remoteAddr)
+				assert.Equal(t, http.StatusTooManyRequests, head.Code)
+				assert.Equal(t, "text/html; charset=utf-8", head.Header().Get("Content-Type"))
+
+				for _, other := range []struct{ method, accept string }{
+					{http.MethodGet, "application/json, text/plain, */*"},
+					{http.MethodGet, "*/*"},
+					{http.MethodGet, ""},
+					{http.MethodPost, browserPageAccept},
+				} {
+					response := performWebLimitRequest(router, other.method, other.accept, remoteAddr)
+					assert.Equal(t, http.StatusTooManyRequests, response.Code, "%s %q", other.method, other.accept)
+					assert.Empty(t, response.Body.String(), "%s %q", other.method, other.accept)
+					assert.Equal(t, fmt.Sprint(window), response.Header().Get("Retry-After"))
+					assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+				}
+			})
+		}
+	}
 }
 
 // useRegisterRateLimit sets the per-network registration limit for one test.
