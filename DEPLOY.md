@@ -152,6 +152,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`；前端 `features/pricing/lib/model-variants.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`features/system-settings/models/model-square-*` | 模型广场按基础模型合并变体（见第十四节） |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
+| `.github/workflows/ci.yml` | 前端作业的 `timeout-minutes` 从上游的 10 放宽到 20：rc.51 起前端测试从 243 个文件增加到 274 个、耗时多约 19%，较慢的 GitHub runner 上 10 分钟跑不完 |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
