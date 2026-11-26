@@ -36,6 +36,7 @@ import { ModelDetailsDrawer } from './components/model-details-drawer'
 import { PricingLoadError } from './components/pricing-load-error'
 import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
 import { useFilters } from './hooks/use-filters'
+import { usePricingAccessRedirect } from './hooks/use-pricing-access-redirect'
 import { usePricingData } from './hooks/use-pricing-data'
 import {
   prefetchModelDetails,
@@ -67,6 +68,7 @@ export function Pricing() {
     priceRate,
     usdExchangeRate,
   } = usePricingData()
+  const redirecting = usePricingAccessRedirect(error)
   const failed = Boolean(error) && !hasData
 
   const {
@@ -188,7 +190,7 @@ export function Pricing() {
     )
   }
 
-  if (isLoading) {
+  if (isLoading || redirecting) {
     return (
       <PublicLayout showMainContainer={false}>
         <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>

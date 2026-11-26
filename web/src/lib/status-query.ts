@@ -229,3 +229,46 @@ export function readStatusForGuard(
     if (firstAttemptFailed()) finish(null)
   })
 }
+
+/**
+ * Status for a guard that has a fallback of its own: the shared request's
+ * answer (a fresh cache entry at once, a stale or invalidated one once it is
+ * refreshed), or `null` as soon as an attempt of that request has failed or
+ * `timeoutMs` has passed.
+ *
+ * The query itself keeps retrying in the background for its other consumers.
+ */
+export function fetchStatusForGuard(
+  queryClient: QueryClient,
+  timeoutMs: number
+): Promise<StatusData | null> {
+  const queryHash = hashKey(STATUS_QUERY_KEY)
+  const cache = queryClient.getQueryCache()
+  return new Promise((resolve) => {
+    let settled = false
+    let unsubscribe = () => {}
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    function finish(status: StatusData | null) {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      unsubscribe()
+      resolve(status)
+    }
+    // The request in flight failed at least once and is waiting to retry.
+    const attemptFailed = () => {
+      const state = cache.get(queryHash)?.state
+      return state?.fetchStatus === 'fetching' && state.fetchFailureCount > 0
+    }
+    unsubscribe = cache.subscribe((event) => {
+      if (event.query.queryHash === queryHash && attemptFailed()) {
+        finish(null)
+      }
+    })
+    queryClient
+      .fetchQuery(statusQueryOptions)
+      .then((status) => finish(status ?? null))
+      .catch(() => finish(null))
+    if (attemptFailed()) finish(null)
+  })
+}

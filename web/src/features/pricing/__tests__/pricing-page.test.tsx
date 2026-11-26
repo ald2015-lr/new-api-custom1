@@ -17,7 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   AxiosError,
@@ -216,5 +223,48 @@ describe('model square errors', () => {
     expect(
       screen.queryByText('Failed to load model pricing')
     ).not.toBeInTheDocument()
+  })
+
+  test.each([
+    {
+      status: 401,
+      why: 'sign-in is required',
+      to: { to: '/sign-in', search: { redirect: '/pricing?view=card' } },
+    },
+    { status: 403, why: 'the model square is switched off', to: { to: '/' } },
+  ])(
+    'an anonymous $status ($why) redirects without a session refresh or a toast',
+    async ({ status, to }) => {
+      pricingAnswers.push((config) =>
+        fail(config, status, { success: false, message: 'refused' })
+      )
+      renderPricing()
+
+      await waitFor(() =>
+        expect(navigate).toHaveBeenCalledWith({ ...to, replace: true })
+      )
+      expect(refreshAuthentication).not.toHaveBeenCalled()
+      expect(toast.error).not.toHaveBeenCalled()
+      expect(screen.queryByText('Failed to load model pricing')).toBeNull()
+      expect(requests.filter((r) => r === 'GET /api/pricing')).toHaveLength(1)
+    }
+  )
+
+  test('a signed-in 401 still refreshes the session and retries', async () => {
+    useAuthStore.setState({
+      auth: { ...originalAuth, accessToken: 'expired-access-token' },
+    })
+    vi.mocked(refreshAuthentication).mockResolvedValue({
+      kind: 'authenticated',
+      bundle: {} as never,
+    })
+    pricingAnswers.push((config) =>
+      fail(config, 401, { success: false, message: 'expired' })
+    )
+    renderPricing()
+
+    expect(await screen.findByText('alpha-model')).toBeVisible()
+    expect(refreshAuthentication).toHaveBeenCalledTimes(1)
+    expect(navigate).not.toHaveBeenCalled()
   })
 })

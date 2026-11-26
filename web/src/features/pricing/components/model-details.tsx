@@ -54,6 +54,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import { useBillingTime } from '../hooks/use-billing-time'
+import { usePricingAccessRedirect } from '../hooks/use-pricing-access-redirect'
 import { usePricingData } from '../hooks/use-pricing-data'
 import type { ParsedTaskTier } from '../lib/billing-expr'
 import { formatBillingCondition } from '../lib/billing-expression/condition-display'
@@ -1634,6 +1635,7 @@ export function ModelDetails() {
     priceRate,
     usdExchangeRate,
   } = usePricingData()
+  const redirecting = usePricingAccessRedirect(error)
 
   const tokenUnit: TokenUnit =
     search.tokenUnit === 'K' ? 'K' : DEFAULT_TOKEN_UNIT
@@ -1647,7 +1649,7 @@ export function ModelDetails() {
     navigate({ to: '/pricing', search })
   }
 
-  if (isLoading) {
+  if (isLoading || redirecting) {
     return (
       <PublicLayout>
         <div className='mx-auto max-w-5xl px-4 sm:px-6'>

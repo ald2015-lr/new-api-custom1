@@ -205,4 +205,15 @@ describe('model details page', () => {
       await screen.findByRole('tab', { name: 'Overview' })
     ).toBeInTheDocument()
   })
+
+  test('an anonymous 403 (model square switched off) sends the visitor home', async () => {
+    pricingStatus.push(403)
+    render(withClient(<ModelDetails />))
+
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({ to: '/', replace: true })
+    )
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(screen.queryByText('Model not found')).not.toBeInTheDocument()
+  })
 })
