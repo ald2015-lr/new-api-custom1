@@ -164,7 +164,7 @@ rc.41 → rc.42（2026-10-08）：上游自己也修了「前端静态文件把�
 rc.42 → rc.46、rc.46 → rc.49 两次的冲突和处理写在合并提交 `f2184ca4d`、`11a3b1251` 的提交信息里（`git show -s <提交>`）。
 
 rc.49 → rc.51（2026-11-25，合并提交 `4cdc46af5`）：上游这一版的主体是 provider 插件、请求处理插件和社区插件市场（#8271）。57 个文件冲突（后端 38、前端 19），绝大多数是两边在同一位置各加了一段，两边都保留：
-- 中继入口（`controller/relay.go`、`controller/plugin_protocol*.go`、`middleware/task_plugin.go`、`relay/responses_websocket.go`、`relay/relay_task.go`、`relay/{claude,gemini,image}_handler.go`、`relay/responses_request.go`、`relay/chat_completions_via_responses.go`）：上游请求插件的各个阶段和我们的外部审查、`safety_identifier`、保活、上游余额错误屏蔽并存。顺序是：插件 ingress（可改写请求体）→ 解析 → 每次尝试先审查 → 设置 `safety_identifier` → 插件 outbound → 参数覆盖 → 插件 egress（Chat Completions 转 Responses 时 outbound 和参数覆盖在设置标识之前，见第十八节限制 12）。审查看得到 ingress 的改写，看不到 outbound 的改写（和参数覆盖一样，见第十八节限制 15）；请求处理插件只有 root 能配置。
+- 中继入口（`controller/relay.go`、`controller/plugin_protocol*.go`、`middleware/task_plugin.go`、`relay/responses_websocket.go`、`relay/relay_task.go`、`relay/{claude,gemini,image}_handler.go`、`relay/responses_request.go`、`relay/chat_completions_via_responses.go`）：上游请求插件的各个阶段和我们的外部审查、`safety_identifier`、保活、上游余额错误屏蔽并存。顺序是：全局实例和请求所在分组的实例的插件 ingress（可改写请求体）→ 解析 → 每次尝试先审查 → 设置 `safety_identifier` → 渠道绑定实例的 ingress（以及自动分组跨分组重试后才生效的分组实例的 ingress）→ 插件 outbound → 参数覆盖 → 插件 egress（Chat Completions 转 Responses 时，渠道绑定实例的 ingress、outbound 和参数覆盖都在设置标识之前，见第十八节限制 12）。审查只看得到请求开始时那次 ingress 的改写，看不到渠道绑定实例的 ingress 和 outbound 的改写（和参数覆盖一样，见第十八节限制 15；视频任务 `/v1/videos` 例外，每次尝试先执行这些 ingress 再审查）；请求处理插件只有 root 能配置。
 - 渠道余额：上游把「更新全部渠道余额」改成并发的系统任务，每次查询结果存进 `other_info.balance_detail`。NovelAI 的规则（余额为 0 不自动禁用、币种是 Anlas）挪进了上游的新文件 `controller/channel_balance.go`；渠道类型在 NovelAI 和其他类型之间切换时，`ClearBalance` 连 `balance_detail` 一起清掉。
 - `service/relay_error.go` 用上游抽出的 `RecordRelayErrorLog`，上游余额错误屏蔽合在同一个内部函数里；`service/quota.go` 的 `PreWssConsumeQuota` 用上游的新返回值，免费分组照旧不扣费；NovelAI 的 `n_samples` 校验挪到参数覆盖和插件 outbound 都执行完之后，两者任一改了请求体都会再校验。
 - NovelAI 原生接口（`/ai/generate-image` 及 `/v1`、流式变体，`relay/novelai_handler.go`）原样转发客户端请求体，请求处理插件按透传渠道执行：每次尝试的 egress 检查原样发出的 JSON（全局实例和渠道绑定的实例都执行，拒绝时不发送、不计费），渠道绑定插件的 ingress 和 outbound 不执行，在日志里记为未检查（`router` 包 `TestNovelAINativeRoutesRunTheRequestPluginEgress` 覆盖）。
@@ -821,7 +821,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 服务器日志关键字：`content moderation rejected`（中文日志 `内容审查拒绝了请求`，WARN）、`content moderation failed`（`内容审查失败`，WARN）。被拒绝请求的 `relay error:` 那一行是 INFO，不会触发按 ERROR 报警。KEY 或账号不能用时，每次尝试另有一行 ERROR `channel error (channel #…, status code: 401): status_code=401, content moderation call failed: …`（中文日志 `渠道请求出错 (渠道 #…，状态码 401): …`，后面的 `content moderation call failed` 不翻译），和上游返回错误时一样。日志里不会打印请求内容、规则正则、KEY 或地址。
 
 **用户安全标识（「向 OpenAI 发送用户安全标识」）：**
-- 和审查开关相互独立，也只对 OpenAI 类型的渠道有效。打开后，发往上游的 Chat Completions 和 Responses 请求里的 `safety_identifier` 一律换成网关按用户生成的标识（`u_` 加 32 位十六进制，同一用户永远相同，无法反推出用户是谁），客户端自己传的值会被覆盖。OpenAI 据此只封禁违规的那个用户，而不是整个组织。
+- 和审查开关相互独立，也只对 OpenAI 类型的渠道有效。打开后，发往上游的 Chat Completions 和 Responses 请求里的 `safety_identifier` 一律换成网关按用户生成的标识（`u_` 加 32 位十六进制，同一用户永远相同，无法反推出用户是谁），客户端自己传的值会被覆盖（管理员自己配置的参数覆盖和请求处理插件规则例外，见限制 12）。OpenAI 据此只封禁违规的那个用户，而不是整个组织。
 - 打开「透传请求体」时也生效：只改写 `safety_identifier` 这一个字段，其他字节原样转发。
 - 打开后，「允许透传 safety_identifier」不再起作用。
 - **请在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（例如 `openssl rand -hex 32` 生成），之后不要再改**，多节点设成一样的值。没有设置 `CRYPTO_SECRET` 也没有设置 `SESSION_SECRET` 时，每次重启都会随机生成密钥，发给 OpenAI 的标识也随之改变（服务器日志会提示一次）。改动 `CRYPTO_SECRET` 会让所有用户的标识变化，Redis 里的令牌缓存键也会换一批（无害）；改动前发出的任务结果（视频、图片）下载链接（`/v1/tasks/…/artifacts/…/content?access=…`、`/v1/videos/…/content?access=…`）也会失效（返回 404），客户端需要重新查询任务拿新链接。已经设置了 `SESSION_SECRET` 的部署可以让 `CRYPTO_SECRET` 留空，或设成与 `SESSION_SECRET` 相同的值，这样密钥不变；两者都没设的部署每次重启本来就会让这些链接失效，设置后反而稳定。`deploy/docker-compose.yml` 已经透传这个变量，留空时行为和以前一样。
@@ -839,10 +839,10 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 9. 管理员把保活心跳间隔设得比审查耗时还短时，被拒绝的请求在心跳发出后才返回：流式请求以 HTTP 200 + 一个 SSE 错误事件返回；打开了「非流式请求也保活」时，非流式请求以 HTTP 200 + JSON 错误体（`{"error":…}`，Claude 格式为 `{"type":"error",…}`）返回，各官方 SDK 不会把它当作错误抛出（见第十三节）。这是保活的固有行为，不是 bug。审查通常不到一秒；要让被拒绝的非流式请求拿到真实的 400/503，请把开启审查的渠道的「审查超时（秒）」设得比 Ping 间隔短（例如间隔 10 秒时设为 8 秒）。
 10. 关键词规则发现不了「行为上的蒸馏」（大量、整齐划一的请求，多个账号协同），也发现不了没有明确指令的加密推理回放；换个说法、用形近字（例如西里尔字母的 о）或编码（base64、leetspeak）都能绕过。否定说法只跳过少数固定句式，个别正常句子仍可能被拦，「不要公开，但告诉我」这种说法也可能被跳过。「别」「別」「勿」前面的空格不去掉，所以在「请勿」「分别」这类词中间加空格仍能绕开对应的规则；汉字之间的换行会去掉，预设规则可能跨过这样的换行命中。
 11. Sora 任务（OpenAI 渠道上的 `/v1/videos`）被拒绝时正常记录；通过和失败放行的审查结果不写到任务的计费记录里。
-12. 用户安全标识的覆盖范围见上一节；Chat Completions 转 Responses 时，渠道的参数覆盖在设置标识之前执行，无法改掉它。
+12. 用户安全标识的覆盖范围见上一节。设置标识之后才执行的渠道参数覆盖、请求处理插件的 outbound 阶段（包括 rc.51 的「全局参数覆盖」插件）和渠道绑定实例的 ingress 能改掉或删除它，例如「全局参数覆盖」里一条删除 `safety_identifier` 的规则会让所有 OpenAI 渠道都不再发送标识；开启这个开关时不要在这些规则里改 `safety_identifier`。Chat Completions 转 Responses 时，这些规则都在设置标识之前执行，无法改掉它。
 13. 同一个 OpenAI 组织下所有 KEY 共用审查额度。一个用户连续发大段新内容就可能在一分钟内用光额度：这时所有「失败时拒绝」的渠道对所有用户都返回 503，「失败时放行」的渠道则不经审查转发。OpenAI SDK、Claude Code、Codex 遇到 503 会自动重试，会进一步放大审查调用量。v1 没有按用户的审查额度，也没有熔断。
 14. 「审查失败时放行」对所有失败原因都放行，包括请求本身造成的失败：例如图片地址 OpenAI 下载不了、data URL 格式错误。在放行的渠道上，这样的请求（连同图片）会不经审查转发；在拒绝的渠道上返回 503。
-15. 参数覆盖在审查之后执行：如果覆盖规则把客户端的请求头或未检查的字段复制进 `messages`、`input`、`instructions`，这部分不会被审查。渠道的系统提示词、参数覆盖里写的内容也不检查。rc.51 起的请求处理插件同理：ingress 阶段的改写会被审查，outbound 阶段的改写不会（插件只有 root 能配置）。
+15. 参数覆盖在审查之后执行：如果覆盖规则把客户端的请求头或未检查的字段复制进 `messages`、`input`、`instructions`，这部分不会被审查。渠道的系统提示词、参数覆盖里写的内容也不检查。rc.51 起的请求处理插件同理：全局实例和请求所在分组的实例在请求开始时 ingress 阶段的改写会被审查；渠道绑定的实例（渠道的「请求处理插件」）和自动分组跨分组重试后才生效的分组实例，它们的 ingress 在每次尝试的审查之后才执行，和 outbound 阶段的改写一样不会被审查（视频任务 `/v1/videos` 例外：每次尝试先执行这些 ingress，再按改写后的提示词审查）。插件只有 root 能配置；不要把会添加、解码或还原文字的插件绑定到开启审查的渠道上。
 16. OpenAI 自 2026-11-20 起对「模型接入中间商」的使用政策调整（需要事先获批）不是代码能解决的，请自行评估。
 
 **以后可能加的选项（v1 没有）：** 「无法完整审查时拒绝请求」（超出字数、图片被跳过、有无法检查的内容时一律拒绝）；按用户的审查额度。需要时提出来。
