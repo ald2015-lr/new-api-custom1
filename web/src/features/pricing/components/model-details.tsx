@@ -279,6 +279,7 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
     queryFn: async () =>
       requireServerSuccess(await getPerfMetrics(props.model.model_name, 24)),
     staleTime: 60 * 1000,
+    meta: { errorPage: false },
   })
 
   const summary = metricsQuery.data?.data.summary
