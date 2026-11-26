@@ -259,6 +259,32 @@ describe('queryForms', () => {
     expect(queryForms('deepseek-ai/DeepSeek-V3')).toEqual(['deepseek-v3'])
   })
 
+  it('also reads a dash typed right after a version major as the dot of the other spelling', () => {
+    expect(queryForms('claude-opus-4-')).toEqual([
+      'claude-opus-4-',
+      'claude-opus-4.',
+    ])
+    expect(queryForms('[正价KIRO]claude-opus-4-')).toEqual([
+      '[正价kiro]claude-opus-4-',
+      '[正价kiro]claude-opus-4.',
+    ])
+    expect(queryForms('deepseek-ai/DeepSeek-V3-')).toEqual([
+      'deepseek-v3-',
+      'deepseek-v3.',
+    ])
+  })
+
+  it.each([
+    // the version is complete, a date, or no version at all
+    ['claude-opus-4.5-', ['claude-opus-4.5-']],
+    ['claude-opus-4-5-', ['claude-opus-4.5-']],
+    ['2025-11-', ['2025-11-']],
+    ['claude-', ['claude-']],
+    ['gpt-4o-', ['gpt-4o-']],
+  ])('adds no dotted form to %s', (query, forms) => {
+    expect(queryForms(query)).toEqual(forms)
+  })
+
   it('has no form for a blank query', () => {
     expect(queryForms('   ')).toEqual([])
   })

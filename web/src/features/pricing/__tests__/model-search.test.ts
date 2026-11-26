@@ -185,6 +185,25 @@ function search(names: readonly string[], query: string, foldOn = true) {
   return filterBySearch(models, query, index).map((model) => model.model_name)
 }
 
+/**
+ * Names the full query finds that a typed prefix loses after an earlier
+ * prefix already found them: none, so results never vanish while typing.
+ */
+function lostWhileTyping(names: readonly string[], query: string): string[] {
+  const wanted = search(names, query)
+  const seen = new Set<string>()
+  const lost: string[] = []
+  for (let length = 1; length <= query.length; length++) {
+    const prefix = query.slice(0, length)
+    const found = new Set(search(names, prefix))
+    for (const name of wanted) {
+      if (found.has(name)) seen.add(name)
+      else if (seen.has(name)) lost.push(`${prefix} loses ${name}`)
+    }
+  }
+  return lost
+}
+
 describe('folded search', () => {
   it.each(SEARCHES)('%s finds %j', (query, names) => {
     expect(search(SEARCH_CATALOGUE, query)).toEqual(names)
@@ -196,6 +215,24 @@ describe('folded search', () => {
       expect(search(OWNER_CATALOGUE, query)).toEqual(names)
     }
   )
+
+  it.each([
+    ['claude-opus-4-6', OWNER_CATALOGUE],
+    ['[正价kiro]claude-opus-4-6', OWNER_CATALOGUE],
+    ['claude-sonnet-4-6', OWNER_CATALOGUE],
+    ['claude-opus-4-5', SEARCH_CATALOGUE],
+  ])('keeps every result of %s while it is typed', (query, names) => {
+    expect(lostWhileTyping(names, query)).toEqual([])
+  })
+
+  it('keeps the dotted members once the dash after the version major is typed', () => {
+    expect(search(OWNER_CATALOGUE, '[正价kiro]claude-opus-4-')).toContain(
+      '[正价kiro]claude-opus-4.6'
+    )
+    expect(search(SEARCH_CATALOGUE, 'claude-opus-4-')).toEqual(
+      expect.arrayContaining(['claude-opus-4.5', 'claude-opus-4.5-20251101'])
+    )
+  })
 
   it('finds a family by either spelling with the same members', () => {
     const dashed = search(OWNER_CATALOGUE, 'claude-opus-4-6')

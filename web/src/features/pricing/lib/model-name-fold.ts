@@ -433,16 +433,40 @@ export const DASH_VERSION_VENDORS: ReadonlySet<string> = new Set([
 // ----------------------------------------------------------------------------
 
 /**
+ * Whether a folded query ends in `-` right after a token the fold could join
+ * with a minor (conditions 1 and 4 of foldVersions on the last token of the
+ * last path segment): `claude-opus-4-`, `deepseek-v3-`, but not
+ * `claude-opus-4.5-`, `2025-11-` or `claude-`.
+ */
+function endsAfterVersionMajor(form: string): boolean {
+  if (!form.endsWith('-')) return false
+  const tokens = form.slice(form.lastIndexOf('/') + 1, -1).split('-')
+  const major = tokens.at(-1) ?? ''
+  const before = tokens.at(-2) ?? ''
+  return MAJOR.test(major) && !(NUMBER.test(major) && NUMBER.test(before))
+}
+
+/**
  * The folded forms of a search query: the strict and the relaxed fold, with a
  * leading [tag] kept in lower case. A dated name is then found in the other
- * spelling, and a half-typed date keeps its results.
+ * spelling, and a half-typed date keeps its results. A query that ends in the
+ * dash after a version major (`claude-opus-4-`, typed on the way to
+ * `claude-opus-4-5`) also reads that dash as the dot of the other spelling
+ * (`claude-opus-4.`), so the dotted members stay in the results until the
+ * minor is typed.
  */
 export function queryForms(query: string): string[] {
   const { line, rest } = splitLineTag(query.trim())
   const prefix = line ? `[${line.toLowerCase()}]` : ''
-  const forms = [
-    prefix + spellingKey(rest, true),
-    prefix + spellingKey(rest, true, orgPrefixLength(rest), true),
-  ]
+  const forms: string[] = []
+  for (const form of [
+    spellingKey(rest, true),
+    spellingKey(rest, true, orgPrefixLength(rest), true),
+  ]) {
+    forms.push(prefix + form)
+    if (endsAfterVersionMajor(form)) {
+      forms.push(`${prefix}${form.slice(0, -1)}.`)
+    }
+  }
   return forms.filter((form, index) => form && forms.indexOf(form) === index)
 }
