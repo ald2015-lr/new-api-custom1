@@ -331,6 +331,18 @@ test('an invalid base model is named under the field and blocks saving', async (
   expect(api.put).not.toHaveBeenCalled()
 })
 
+/** The preview result as label -> value, each term with the value after it. */
+function previewRows(preview: HTMLElement): Record<string, string> {
+  const result = preview.parentElement?.querySelector('dl')
+  if (!result) throw new Error('Preview result is missing')
+  return Object.fromEntries(
+    [...result.querySelectorAll('dt')].map((term) => [
+      term.textContent ?? '',
+      term.nextElementSibling?.textContent ?? '',
+    ])
+  )
+}
+
 test('the preview folds a name into a base model being edited', async () => {
   const user = userEvent.setup()
   await renderSettings(true)
@@ -338,10 +350,29 @@ test('the preview folds a name into a base model being edited', async () => {
   const preview = screen.getByRole('textbox', { name: 'Preview' })
   await user.clear(preview)
   await user.type(preview, 'gemini-4-argon-medium')
-  const result = preview.parentElement?.querySelector('dl')
-  if (!result) throw new Error('Preview result is missing')
-  expect(within(result).getByText('gemini-4-argon')).toBeVisible()
-  expect(within(result).getByText('medium')).toBeVisible()
+  expect(previewRows(preview)).toMatchObject({
+    'Base model': 'gemini-4-argon',
+    'Merged as': 'gemini-4-argon',
+    Variant: 'medium',
+  })
+})
+
+test('the preview shows the base model without its variant while both merge switches are off', async () => {
+  const user = userEvent.setup()
+  await renderSettings(
+    true,
+    JSON.stringify(DEFAULT_MODEL_VARIANT_RULES),
+    JSON.stringify(['claude-haiku-4-5']),
+    { versionSpellingFoldEnabled: false, snapshotFoldEnabled: false }
+  )
+  const preview = screen.getByRole('textbox', { name: 'Preview' })
+  await user.clear(preview)
+  await user.type(preview, 'claude-haiku-4-5-20251001')
+  expect(previewRows(preview)).toMatchObject({
+    'Base model': 'claude-haiku-4-5',
+    'Merged as': 'claude-haiku-4-5',
+    Variant: '20251001',
+  })
 })
 
 test('a long invalid base model wraps in the error list instead of widening the form', async () => {

@@ -126,8 +126,19 @@ function RulesPreview(props: {
     snapshotFold: props.snapshotFold,
   })
   const items = [
-    // What was typed without the line tag, the suffixes and the date.
-    { label: t('Base model'), value: parsed.spelling },
+    // What was typed without the line tag, the suffixes, the date and a
+    // family-base variant (gemini-4-argon-medium under the base
+    // gemini-4-argon shows gemini-4-argon). The fold maps characters one to
+    // one, so cutting the variant's length keeps the typed case.
+    {
+      label: t('Base model'),
+      value: parsed.extra
+        ? parsed.spelling.slice(
+            0,
+            parsed.spelling.length - parsed.extra.length - 1
+          )
+        : parsed.spelling,
+    },
     // The card the name joins: the folded spelling or a configured base.
     { label: t('Merged as'), value: parsed.key },
     { label: t('Line'), value: parsed.line || t('Default') },
