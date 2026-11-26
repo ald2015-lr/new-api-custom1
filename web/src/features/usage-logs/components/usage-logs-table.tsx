@@ -43,6 +43,8 @@ import {
 import {
   createServerError,
   getServerErrorMessage,
+  getServerErrorStatus,
+  getServerPayloadMessage,
 } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -276,7 +278,12 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   let emptyAction: React.ReactNode
   if (loadFailed) {
     emptyTitle = t('Failed to load logs')
-    const reason = getServerErrorMessage(error, '')
+    // What the server said: its message, or the wait a 429 asks for. A network
+    // error or a proxy's error page only has the HTTP client's English text.
+    const reason =
+      getServerErrorStatus(error) === 429
+        ? getServerErrorMessage(error, '')
+        : getServerPayloadMessage(error)
     emptyDescription =
       reason && reason !== emptyTitle ? reason : t('Please try again later.')
     emptyAction = (

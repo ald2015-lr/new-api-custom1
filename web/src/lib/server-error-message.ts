@@ -284,6 +284,31 @@ export function translateServerText(
   return t(text, { skipInterpolation: true })
 }
 
+/**
+ * The message the server put in its response payload (a web console message,
+ * or its `message`, `error` or `title`), if any. Unlike getServerErrorMessage
+ * it never falls back to the HTTP client's own English text, such as "Network
+ * Error" or "Request failed with status code 503".
+ */
+export function getServerPayloadMessage(value: unknown): string | undefined {
+  for (const source of getServerErrorSources(value)) {
+    if (
+      source instanceof Error ||
+      source.isAxiosError ||
+      isRecord(source.response)
+    ) {
+      continue
+    }
+    const detail = isRecord(source.error)
+      ? messageText(source.error.message)
+      : messageText(source.error)
+    const message =
+      getServerMessage(source) || detail || messageText(source.title)
+    if (message) return message
+  }
+  return undefined
+}
+
 export function getServerErrorMessage(
   value: unknown,
   fallback?: string
@@ -302,21 +327,8 @@ export function getServerErrorMessage(
   }
   const key = getServerErrorMessageKey(value)
   if (key) return i18next.t(key)
-  for (const source of sources) {
-    if (
-      source instanceof Error ||
-      source.isAxiosError ||
-      isRecord(source.response)
-    ) {
-      continue
-    }
-    const detail = isRecord(source.error)
-      ? messageText(source.error.message)
-      : messageText(source.error)
-    const message =
-      getServerMessage(source) || detail || messageText(source.title)
-    if (message) return message
-  }
+  const payloadMessage = getServerPayloadMessage(value)
+  if (payloadMessage) return payloadMessage
   const status = getServerErrorStatus(value)
   // The API rate limiters answer 429 with an empty body and Retry-After; the
   // client's generic "Request failed with status code 429" is not for people.

@@ -123,6 +123,53 @@ describe('usage logs load failure', () => {
     expect(screen.queryByText('No Logs Found')).not.toBeInTheDocument()
   })
 
+  test.each([
+    [
+      'a network error',
+      Object.assign(new Error('Network Error'), {
+        isAxiosError: true,
+        code: 'ERR_NETWORK',
+      }),
+    ],
+    [
+      'a proxy 503 page',
+      Object.assign(new Error('Request failed with status code 503'), {
+        isAxiosError: true,
+        response: { status: 503, data: 'Service Unavailable', headers: {} },
+      }),
+    ],
+  ])(
+    '%s shows a localized hint instead of the HTTP client text',
+    async (_, failure) => {
+      renderLogs([
+        async () => {
+          throw failure
+        },
+      ])
+
+      expect(await screen.findByText('Failed to load logs')).toBeVisible()
+      expect(screen.getByText('Please try again later.')).toBeVisible()
+      expect(screen.queryByText(failure.message)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
+    }
+  )
+
+  test('a rate-limited load says how long to wait', async () => {
+    renderLogs([
+      async () => {
+        throw Object.assign(new Error('Request failed with status code 429'), {
+          isAxiosError: true,
+          response: { status: 429, data: '', headers: { 'retry-after': '30' } },
+        })
+      },
+    ])
+
+    expect(await screen.findByText('Failed to load logs')).toBeVisible()
+    expect(
+      screen.getByText('Too many requests. Please try again in 30 seconds.')
+    ).toBeVisible()
+  })
+
   test('Retry loads the logs again', async () => {
     const { logRequests } = renderLogs([
       async () => {

@@ -23,6 +23,7 @@ import { describe, expect, test } from 'vitest'
 import {
   getServerErrorMessage,
   getServerErrorMessageKey,
+  getServerPayloadMessage,
   parseRetryAfter,
   retryAfterMs,
   translateServerText,
@@ -187,6 +188,28 @@ describe('rate-limited responses', () => {
     expect(getServerErrorMessage(httpError(503))).toBe(
       'Request failed with status code 503'
     )
+  })
+})
+
+describe('server payload messages', () => {
+  test("only what the server sent, never the HTTP client's own text", () => {
+    expect(
+      getServerPayloadMessage(
+        httpError(502, { success: false, message: 'Upstream unavailable' })
+      )
+    ).toBe('Upstream unavailable')
+    expect(
+      getServerPayloadMessage(
+        new Error('Failed to query logs', {
+          cause: { success: false, message: 'Failed to query logs' },
+        })
+      )
+    ).toBe('Failed to query logs')
+    expect(getServerPayloadMessage(httpError(503))).toBeUndefined()
+    expect(
+      getServerPayloadMessage(httpError(502, '<html>Bad Gateway</html>'))
+    ).toBeUndefined()
+    expect(getServerPayloadMessage(new Error('Network Error'))).toBeUndefined()
   })
 })
 
