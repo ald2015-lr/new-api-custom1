@@ -20,6 +20,7 @@ import type { TFunction } from 'i18next'
 import { Bell, Megaphone } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { preloadMarkdown } from '@/components/markdown-loader'
 import { RichContent } from '@/components/rich-content'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -305,6 +306,11 @@ export function NotificationPopover({
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger
+        // Notices and announcements are markdown: fetch the renderer as soon
+        // as the bell is about to be used, not only after the popover opens.
+        onPointerEnter={preloadMarkdown}
+        onFocus={preloadMarkdown}
+        onPointerDown={preloadMarkdown}
         render={
           <Button
             variant='ghost'

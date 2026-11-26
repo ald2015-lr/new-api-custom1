@@ -19,13 +19,22 @@ For commercial licensing, please contact support@quantumnous.com
 import i18next from 'i18next'
 import { useEffect, useState } from 'react'
 
-import { isHttpUrl } from '@/lib/content-format'
+import { preloadMarkdown } from '@/components/markdown-loader'
+import { isHttpUrl, isLikelyHtml } from '@/lib/content-format'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import { getHomePageContent } from '../api'
 import type { HomePageContentResult } from '../types'
 
 const STORAGE_KEY = 'home_page_content'
+
+// A markdown home page renders through LazyMarkdown: start loading the
+// renderer together with the content, so the page is not slower than before.
+function preloadRendererFor(content: string) {
+  if (content && !isHttpUrl(content) && !isLikelyHtml(content)) {
+    preloadMarkdown()
+  }
+}
 
 /**
  * Hook to load and manage custom home page content
@@ -42,6 +51,7 @@ export function useHomePageContent(): HomePageContentResult {
       // Load from localStorage first for immediate display
       const cached = localStorage.getItem(STORAGE_KEY)
       if (cached && mounted) {
+        preloadRendererFor(cached)
         setContent(cached)
       }
 
@@ -52,6 +62,7 @@ export function useHomePageContent(): HomePageContentResult {
         if (!mounted) return
 
         if (success && data) {
+          preloadRendererFor(data)
           setContent(data)
           localStorage.setItem(STORAGE_KEY, data)
         } else {

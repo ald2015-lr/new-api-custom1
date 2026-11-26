@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { HelpCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { LazyMarkdown } from '@/components/lazy-markdown'
 import {
   Accordion,
   AccordionContent,
@@ -26,7 +27,6 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion'
 import { IconBadge } from '@/components/ui/icon-badge'
-import { Markdown } from '@/components/ui/markdown'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useFAQ } from '@/features/dashboard/hooks/use-status-data'
 import type { FAQItem } from '@/features/dashboard/types'
@@ -66,14 +66,14 @@ export function FAQPanel() {
                 className='border-border/60'
               >
                 <AccordionTrigger className='text-start hover:no-underline'>
-                  <Markdown className='text-sm leading-relaxed font-semibold'>
+                  <LazyMarkdown className='text-sm leading-relaxed font-semibold'>
                     {item.question}
-                  </Markdown>
+                  </LazyMarkdown>
                 </AccordionTrigger>
                 <AccordionContent>
-                  <Markdown className='text-muted-foreground/60 text-sm'>
+                  <LazyMarkdown className='text-muted-foreground/60 text-sm'>
                     {item.answer}
-                  </Markdown>
+                  </LazyMarkdown>
                 </AccordionContent>
               </AccordionItem>
             )
