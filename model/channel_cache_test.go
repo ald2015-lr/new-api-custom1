@@ -521,6 +521,47 @@ func TestEnabledModelsCacheMatchesTheAbilitiesQueries(t *testing.T) {
 	})
 }
 
+// A channel that failing requests disable automatically leaves the cached
+// model lists at once, as it leaves channel selection and the abilities
+// queries (the periodic sync reloads the cache only later): a single-key
+// channel, and a multi-key channel once its last key is disabled. A model
+// another enabled channel serves stays.
+func TestEnabledModelsCacheDropsAnAutomaticallyDisabledChannel(t *testing.T) {
+	forEachChannelCacheDatabase(t, func(t *testing.T, dialect string) {
+		create := func(id int, key string, models string, info ChannelInfo) {
+			channel := &Channel{Id: id, Type: constant.ChannelTypeOpenAI, Key: key, Status: common.ChannelStatusEnabled,
+				Name: fmt.Sprintf("auto-%d", id), Models: models, Group: "default,vip", ChannelInfo: info}
+			require.NoError(t, DB.Create(channel).Error)
+			require.NoError(t, channel.AddAbilities(nil))
+		}
+		create(77001, "sk-solo", "solo-model,shared-model", ChannelInfo{})
+		create(77002, "sk-a\nsk-b", "multi-model,shared-model", ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModeRandom})
+		create(77003, "sk-other", "shared-model", ChannelInfo{})
+		InitChannelCache()
+		matchTheDatabase := func(step string) {
+			t.Helper()
+			for _, group := range []string{"default", "vip"} {
+				assert.Equal(t, groupModelsInModelOrder(t, group), GetGroupEnabledModelsCached(group), "%s: %s", step, group)
+			}
+			assert.ElementsMatch(t, GetEnabledModels(), GetEnabledModelsCached(), step)
+		}
+		matchTheDatabase("reloaded")
+		require.Equal(t, []string{"multi-model", "shared-model", "solo-model"}, GetGroupEnabledModelsCached("vip"))
+
+		require.True(t, UpdateChannelStatus(77001, "sk-solo", common.ChannelStatusAutoDisabled, "upstream error"))
+		matchTheDatabase("single-key channel disabled")
+		assert.Equal(t, []string{"multi-model", "shared-model"}, GetGroupEnabledModelsCached("default"))
+
+		UpdateChannelStatus(77002, "sk-a", common.ChannelStatusAutoDisabled, "upstream error")
+		matchTheDatabase("one key of two disabled")
+		assert.Equal(t, []string{"multi-model", "shared-model"}, GetGroupEnabledModelsCached("default"))
+		require.True(t, UpdateChannelStatus(77002, "sk-b", common.ChannelStatusAutoDisabled, "upstream error"))
+		matchTheDatabase("every key disabled")
+		assert.Equal(t, []string{"shared-model"}, GetGroupEnabledModelsCached("default"))
+		assert.Equal(t, []string{"shared-model"}, GetEnabledModelsCached())
+	})
+}
+
 // While the memory cache is on, the lists come from the last channel cache
 // reload without a query, and callers get copies; while it is off they are
 // read from the database.

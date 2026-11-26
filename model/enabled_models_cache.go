@@ -52,6 +52,33 @@ func buildEnabledAbilityModels(abilities []*Ability) *enabledAbilityModels {
 	return snapshot
 }
 
+// withoutUnservedModels is the snapshot without the models a group has no
+// enabled channel for any more (unserved: group -> models), and without a
+// model no group lists after that, in the same order. Snapshots are shared,
+// so it builds a new one.
+func (s *enabledAbilityModels) withoutUnservedModels(unserved map[string]map[string]bool) *enabledAbilityModels {
+	next := &enabledAbilityModels{byGroup: make(map[string][]string, len(s.byGroup))}
+	listed := make(map[string]bool)
+	for group, models := range s.byGroup {
+		if gone := unserved[group]; len(gone) > 0 {
+			models = slices.DeleteFunc(slices.Clone(models), func(model string) bool { return gone[model] })
+		}
+		if len(models) == 0 {
+			continue
+		}
+		next.byGroup[group] = models
+		for _, model := range models {
+			listed[model] = true
+		}
+	}
+	for _, model := range s.all {
+		if listed[model] {
+			next.all = append(next.all, model)
+		}
+	}
+	return next
+}
+
 // cachedEnabledModels returns the snapshot while the memory cache is on and
 // loaded, nil otherwise.
 func cachedEnabledModels() *enabledAbilityModels {
@@ -62,9 +89,10 @@ func cachedEnabledModels() *enabledAbilityModels {
 }
 
 // GetGroupEnabledModelsCached is GetGroupEnabledModels served from the memory
-// channel cache while it is on: the same list as of the last channel cache
-// reload, which follows every channel change and sync, without a query per
-// group. While the memory cache is off it reads the database.
+// channel cache while it is on, without a query per group: the same list as of
+// the last channel cache reload (every channel change and sync), less the
+// models a channel disabled automatically since then was the last one to
+// serve. While the memory cache is off it reads the database.
 func GetGroupEnabledModelsCached(group string) []string {
 	if snapshot := cachedEnabledModels(); snapshot != nil {
 		return slices.Clone(snapshot.byGroup[group])
