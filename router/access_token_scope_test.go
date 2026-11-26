@@ -17,6 +17,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -326,4 +328,59 @@ func TestRechargeRoutesRefuseDeputyAdmins(t *testing.T) {
 			assert.NotContains(t, response.Body.String(), "insufficient privileges", name)
 		}
 	}
+}
+
+// PUT /api/option/model_square is root only like every /api/option route, and
+// a personal access token needs option:write for it.
+func TestModelSquareOptionsRouteIsRootOnly(t *testing.T) {
+	db := setupRouterAuthzTest(t)
+	previousOptions := common.OptionMap
+	previousConfig := config.GlobalConfig.ExportAllConfigs()
+	t.Cleanup(func() {
+		common.OptionMap = previousOptions
+		for key, value := range previousConfig {
+			if operation_setting.IsModelSquareOptionKey(key) {
+				operation_setting.LoadModelSquareOption(key, value)
+			}
+		}
+	})
+	common.OptionMap = map[string]string{}
+	_, rootToken := createRouterTokenUser(t, db, "square-root", common.RoleRootUser, "option:write")
+	_, readOnlyRootToken := createRouterTokenUser(t, db, "square-root-read", common.RoleRootUser, "option:read")
+	_, adminToken := createRouterTokenUser(t, db, "square-admin", common.RoleAdminUser, "option:write")
+	engine := newAccessTokenScopeTestEngine(t)
+	put := func(token string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPut, "/api/option/model_square", strings.NewReader(`{"options":{"model_square_setting.show_tag_filter":true}}`))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		return response
+	}
+
+	for _, caller := range []struct{ name, token, code string }{
+		{"admin", adminToken, "AUTH_INSUFFICIENT_PRIVILEGE"},
+		{"root without option:write", readOnlyRootToken, "ACCESS_TOKEN_SCOPE_DENIED"},
+	} {
+		response := put(caller.token)
+		assert.Equal(t, http.StatusForbidden, response.Code, caller.name)
+		assert.Contains(t, response.Body.String(), `"code":"`+caller.code+`"`, caller.name)
+		assert.False(t, operation_setting.GetModelSquareDisplay().FilterSections.Tags, caller.name)
+	}
+	stored := func() map[string]string {
+		var options []model.Option
+		require.NoError(t, db.Find(&options).Error)
+		values := make(map[string]string, len(options))
+		for _, option := range options {
+			values[option.Key] = option.Value
+		}
+		return values
+	}
+	assert.NotContains(t, stored(), operation_setting.ModelSquareShowTagFilterOptionKey, "a refused caller saves nothing")
+
+	response := put(rootToken)
+	assert.Equal(t, http.StatusOK, response.Code)
+	assert.Contains(t, response.Body.String(), `"success":true`)
+	assert.True(t, operation_setting.GetModelSquareDisplay().FilterSections.Tags)
+	assert.Equal(t, "true", stored()[operation_setting.ModelSquareShowTagFilterOptionKey])
 }

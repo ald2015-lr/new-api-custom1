@@ -46,6 +46,10 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 
 import { getSortLabels, type SortOption, type ViewMode } from '../constants'
+import {
+  ALL_FILTER_SECTIONS,
+  type ModelSquareFilterSections,
+} from '../lib/model-variants'
 import type {
   GroupAccessRequirement,
   PricingModel,
@@ -90,12 +94,19 @@ export interface PricingToolbarProps {
   hasActiveFilters: boolean
   activeFilterCount: number
   onClearFilters: () => void
+  /**
+   * Filter sections of the mobile drawer, as in the sidebar; all of them when
+   * left out. Without any, the Filter button and the drawer are left out.
+   */
+  sections?: ModelSquareFilterSections
 }
 
 export function PricingToolbar(props: PricingToolbarProps) {
   const { t } = useTranslation()
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
   const sortLabels = getSortLabels(t)
+  const sections = props.sections ?? ALL_FILTER_SECTIONS
+  const hasFilterSections = Object.values(sections).some(Boolean)
   const familyCount = props.familyCount ?? props.filteredCount
   // Only worth the extra figure when some variants were folded together.
   const isGrouped = familyCount < props.filteredCount
@@ -104,21 +115,23 @@ export function PricingToolbar(props: PricingToolbarProps) {
     <div className='bg-card rounded-xl border p-3'>
       <div className='flex flex-wrap items-center justify-between gap-3'>
         <div className='flex items-center gap-2'>
-          <Button
-            type='button'
-            variant='outline'
-            size='sm'
-            onClick={() => setMobileFiltersOpen(true)}
-            className='gap-1.5 xl:hidden'
-          >
-            <Filter className='size-4' />
-            {t('Filter')}
-            {props.activeFilterCount > 0 && (
-              <Badge className='ml-0.5 size-5 justify-center p-0 text-[10px]'>
-                {props.activeFilterCount}
-              </Badge>
-            )}
-          </Button>
+          {hasFilterSections && (
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              onClick={() => setMobileFiltersOpen(true)}
+              className='gap-1.5 xl:hidden'
+            >
+              <Filter className='size-4' />
+              {t('Filter')}
+              {props.activeFilterCount > 0 && (
+                <Badge className='ml-0.5 size-5 justify-center p-0 text-[10px]'>
+                  {props.activeFilterCount}
+                </Badge>
+              )}
+            </Button>
+          )}
 
           <div className='text-muted-foreground flex flex-wrap items-baseline gap-x-1 text-sm'>
             {isGrouped ? (
@@ -226,43 +239,45 @@ export function PricingToolbar(props: PricingToolbarProps) {
         </div>
       </div>
 
-      <Sheet open={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
-        <SheetContent
-          side='left'
-          className={sideDrawerContentClassName('sm:max-w-md')}
-        >
-          <SheetHeader className={sideDrawerHeaderClassName()}>
-            <SheetTitle>{t('Filter')}</SheetTitle>
-            <SheetDescription>
-              {t('Filter models by provider, group, type, endpoint, and tags.')}
-            </SheetDescription>
-          </SheetHeader>
-          <div className={sideDrawerFormClassName('gap-0')}>
-            <PricingSidebar
-              quotaTypeFilter={props.quotaTypeFilter}
-              endpointTypeFilter={props.endpointTypeFilter}
-              vendorFilter={props.vendorFilter}
-              groupFilter={props.groupFilter}
-              tagFilter={props.tagFilter}
-              onQuotaTypeChange={props.onQuotaTypeChange}
-              onEndpointTypeChange={props.onEndpointTypeChange}
-              onVendorChange={props.onVendorChange}
-              onGroupChange={props.onGroupChange}
-              onTagChange={props.onTagChange}
-              vendors={props.vendors}
-              groups={props.groups}
-              groupRatios={props.groupRatios}
-              groupAccess={props.groupAccess}
-              freeGroups={props.freeGroups}
-              tags={props.tags}
-              models={props.models}
-              hasActiveFilters={props.hasActiveFilters}
-              onClearFilters={props.onClearFilters}
-              className='border-0 bg-transparent p-0 shadow-none'
-            />
-          </div>
-        </SheetContent>
-      </Sheet>
+      {hasFilterSections && (
+        <Sheet open={mobileFiltersOpen} onOpenChange={setMobileFiltersOpen}>
+          <SheetContent
+            side='left'
+            className={sideDrawerContentClassName('sm:max-w-md')}
+          >
+            <SheetHeader className={sideDrawerHeaderClassName()}>
+              <SheetTitle>{t('Filter')}</SheetTitle>
+              <SheetDescription>{t('Refine the model list.')}</SheetDescription>
+            </SheetHeader>
+            <div className={sideDrawerFormClassName('gap-0')}>
+              <PricingSidebar
+                quotaTypeFilter={props.quotaTypeFilter}
+                endpointTypeFilter={props.endpointTypeFilter}
+                vendorFilter={props.vendorFilter}
+                groupFilter={props.groupFilter}
+                tagFilter={props.tagFilter}
+                onQuotaTypeChange={props.onQuotaTypeChange}
+                onEndpointTypeChange={props.onEndpointTypeChange}
+                onVendorChange={props.onVendorChange}
+                onGroupChange={props.onGroupChange}
+                onTagChange={props.onTagChange}
+                vendors={props.vendors}
+                groups={props.groups}
+                groupRatios={props.groupRatios}
+                groupAccess={props.groupAccess}
+                freeGroups={props.freeGroups}
+                tags={props.tags}
+                models={props.models}
+                hasActiveFilters={props.hasActiveFilters}
+                onClearFilters={props.onClearFilters}
+                sections={sections}
+                hideHeading
+                className='border-0 bg-transparent p-0 shadow-none'
+              />
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
     </div>
   )
 }

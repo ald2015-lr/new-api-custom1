@@ -41,16 +41,18 @@ import { usePricingColumns } from './pricing-columns'
 import type { PricingTableRow } from './pricing-family-cells'
 
 /**
- * Parent row of a family: the lead variant's vendor and icon with the union
- * of the members' tags, endpoints and groups. Single-member families stay
- * plain model rows.
+ * Parent row of a family: the lead's fields under the family title and vendor,
+ * with the union of the members' tags, endpoints and groups. Single-member
+ * families stay plain model rows.
  */
 function toFamilyRow(family: ModelFamily): PricingTableRow {
   if (family.models.length === 1) return family.models[0]
   const union = getFamilyUnion(family)
   return {
-    ...family.variants[0].model,
-    model_name: family.base,
+    ...family.lead,
+    model_name: family.title,
+    vendor_name: family.vendor?.name,
+    vendor_icon: family.vendor?.icon,
     tags: union.tags.join(','),
     supported_endpoint_types: union.endpoints,
     enable_groups: union.groups,

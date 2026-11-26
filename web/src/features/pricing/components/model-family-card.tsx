@@ -36,6 +36,8 @@ import type { ModelPriceCellOptions } from './model-price-cell'
 
 /** Variant chips shown on a card before the `+N` overflow. */
 const MAX_VARIANT_CHIPS = 4
+/** Other spellings named on a card before the `+N` overflow. */
+const MAX_OTHER_SPELLINGS = 2
 
 export interface ModelFamilyCardProps {
   family: ModelFamily
@@ -61,14 +63,20 @@ export const ModelFamilyCard = memo(function ModelFamilyCard(
 ) {
   const { t } = useTranslation()
   const family = props.family
-  const lead = family.variants[0].model
-  const describedVariant = family.variants.find(
-    (variant) => variant.model.description
+  const lead = family.lead
+  // The lead's description and tags, else those of the first variant with any.
+  const description =
+    lead.description ||
+    family.variants.find((variant) => variant.model.description)?.model
+      .description
+  const tags = parseTags(
+    lead.tags ||
+      family.variants.find((variant) => variant.model.tags)?.model.tags
   )
-  const taggedVariant = family.variants.find((variant) => variant.model.tags)
-  const tags = parseTags(taggedVariant?.model.tags)
-  const iconKey = lead.icon || lead.vendor_icon
+  const iconKey = lead.icon || family.vendor?.icon
   const icon = iconKey ? getLobeIcon(iconKey, 28) : null
+  const otherSpellings = family.alsoWrittenAs
+  const hiddenSpellings = otherSpellings.length - MAX_OTHER_SPELLINGS
   const hiddenLabels = family.variantLabels.slice(MAX_VARIANT_CHIPS)
   const union = useMemo(() => getFamilyUnion(family), [family])
   const perf = useMemo(
@@ -99,23 +107,46 @@ export const ModelFamilyCard = memo(function ModelFamilyCard(
         >
           {icon || (
             <span className='text-muted-foreground text-sm font-bold'>
-              {family.base.charAt(0).toUpperCase() || '?'}
+              {family.title.charAt(0).toUpperCase() || '?'}
             </span>
           )}
         </div>
         <div className='min-w-0 flex-1'>
           <h3
             className='line-clamp-2 font-mono text-[15px] leading-snug font-semibold [overflow-wrap:anywhere]'
-            title={family.base}
+            title={family.title}
           >
-            {family.base}
+            {family.title}
           </h3>
-          {lead.vendor_name && (
+          {family.vendor && (
             <p
               className='text-muted-foreground mt-1 truncate text-xs'
-              title={lead.vendor_name}
+              title={family.vendor.name}
             >
-              {lead.vendor_name}
+              {family.vendor.name}
+            </p>
+          )}
+          {otherSpellings.length > 0 && (
+            // The +N count sits outside the truncated names, so it stays
+            // visible however long the names are.
+            <p
+              className='text-muted-foreground mt-0.5 flex min-w-0 items-baseline gap-1 text-xs'
+              title={t('Also written as {{names}}', {
+                names: otherSpellings.join(', '),
+              })}
+            >
+              <span className='truncate'>
+                {t('Also written as {{names}}', {
+                  names: otherSpellings
+                    .slice(0, MAX_OTHER_SPELLINGS)
+                    .join(', '),
+                })}
+              </span>
+              {hiddenSpellings > 0 && (
+                <span className='shrink-0 tabular-nums'>
+                  +{hiddenSpellings}
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -123,8 +154,7 @@ export const ModelFamilyCard = memo(function ModelFamilyCard(
       <CardContent className='flex flex-1 flex-col gap-3'>
         <div className='flex min-w-0 flex-col gap-1.5'>
           <p className='text-muted-foreground line-clamp-2 text-[13px] leading-5 break-words'>
-            {describedVariant?.model.description ||
-              t('No description available.')}
+            {description || t('No description available.')}
           </p>
           {tags.length > 0 && (
             <div
@@ -211,7 +241,7 @@ export const ModelFamilyCard = memo(function ModelFamilyCard(
             size='sm'
             aria-expanded={props.expanded}
             aria-controls={props.expanded ? props.panelId : undefined}
-            aria-label={`${toggleText} ${family.base}`}
+            aria-label={`${toggleText} ${family.title}`}
             onClick={() => props.onExpandedChange(family.key, !props.expanded)}
           >
             {toggleText}

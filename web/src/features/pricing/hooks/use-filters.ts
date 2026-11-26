@@ -30,7 +30,15 @@ import {
   VIEW_MODES,
   type ViewMode,
 } from '../constants'
-import { filterAndSortModels, extractAllTags } from '../lib/filters'
+import {
+  effectiveFilterValues,
+  extractAllTags,
+  filterAndSortModels,
+} from '../lib/filters'
+import {
+  buildModelSquareIndex,
+  type ModelSquareSettings,
+} from '../lib/model-variants'
 import type { PricingModel, TokenUnit } from '../types'
 
 type FilterState = {
@@ -53,7 +61,16 @@ function normalizeViewMode(value: unknown): ViewMode {
   return VIEW_MODES.CARD
 }
 
-export function useFilters(models: PricingModel[]) {
+/**
+ * Filter state of the Model Square, read once from the route's search params.
+ * A filter whose sidebar section the admin hid is not applied (its value is
+ * kept). With grouping on, `index` parses the whole catalogue once: families,
+ * titles and the folded search read it.
+ */
+export function useFilters(
+  models: PricingModel[],
+  modelSquare: ModelSquareSettings
+) {
   const search = useSearch({ from: '/pricing/' })
   const [filterState, setFilterState] = useState<FilterState>(() => ({
     search: search.search,
@@ -71,11 +88,14 @@ export function useFilters(models: PricingModel[]) {
   const searchInput = filterState.search || ''
   const debouncedSearchInput = useDebounce(searchInput, 200)
   const sortBy = filterState.sort || SORT_OPTIONS.NAME
-  const vendorFilter = filterState.vendor || FILTER_ALL
-  const groupFilter = filterState.group || FILTER_ALL
-  const quotaTypeFilter = filterState.quotaType || QUOTA_TYPES.ALL
-  const endpointTypeFilter = filterState.endpointType || ENDPOINT_TYPES.ALL
-  const tagFilter = filterState.tag || FILTER_ALL
+  const sections = modelSquare.filter_sections
+  const {
+    vendor: vendorFilter,
+    group: groupFilter,
+    quotaType: quotaTypeFilter,
+    endpointType: endpointTypeFilter,
+    tag: tagFilter,
+  } = effectiveFilterValues(filterState, sections)
   const tokenUnit: TokenUnit =
     filterState.tokenUnit === 'K' ? 'K' : DEFAULT_TOKEN_UNIT
   const viewMode = normalizeViewMode(filterState.view)
@@ -146,20 +166,34 @@ export function useFilters(models: PricingModel[]) {
     return extractAllTags(models)
   }, [models])
 
+  // Parsed once per catalogue and settings, not per keystroke or filter.
+  const index = useMemo(
+    () =>
+      modelSquare.variant_grouping_enabled
+        ? buildModelSquareIndex(models, modelSquare)
+        : undefined,
+    [models, modelSquare]
+  )
+
   const filteredModels = useMemo(() => {
     if (!models || models.length === 0) return []
 
-    return filterAndSortModels(models, {
-      search: debouncedSearchInput,
-      vendor: vendorFilter,
-      group: groupFilter,
-      quotaType: quotaTypeFilter,
-      endpointType: endpointTypeFilter,
-      tag: tagFilter,
-      sortBy,
-    })
+    return filterAndSortModels(
+      models,
+      {
+        search: debouncedSearchInput,
+        vendor: vendorFilter,
+        group: groupFilter,
+        quotaType: quotaTypeFilter,
+        endpointType: endpointTypeFilter,
+        tag: tagFilter,
+        sortBy,
+      },
+      index
+    )
   }, [
     models,
+    index,
     debouncedSearchInput,
     vendorFilter,
     groupFilter,
@@ -230,5 +264,7 @@ export function useFilters(models: PricingModel[]) {
     availableTags,
     clearFilters,
     clearSearch,
+    index,
+    sections,
   }
 }

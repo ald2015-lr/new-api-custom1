@@ -30,6 +30,13 @@ import {
 
 export const modelSquareSettingsSchema = z.object({
   variant_grouping_enabled: z.boolean(),
+  version_spelling_fold_enabled: z.boolean(),
+  snapshot_fold_enabled: z.boolean(),
+  show_group_filter: z.boolean(),
+  show_vendor_filter: z.boolean(),
+  show_tag_filter: z.boolean(),
+  show_quota_type_filter: z.boolean(),
+  show_endpoint_type_filter: z.boolean(),
   /** One base model per line; the card lists the individual problems. */
   family_bases: z.string().superRefine((text, ctx) => {
     if (validateFamilyBases(splitFamilyBases(text)).length > 0) {

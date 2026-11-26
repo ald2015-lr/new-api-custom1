@@ -209,6 +209,11 @@ function ModelVariantRow(props: {
           >
             {label || t('Standard')}
           </p>
+          {/* Two rows of one line can both read Standard (two spellings), so
+              every row names its model. */}
+          <p className='text-muted-foreground font-mono text-xs leading-4 [overflow-wrap:anywhere]'>
+            {name}
+          </p>
           {description && (
             <p className='text-muted-foreground mt-0.5 text-xs leading-4 break-words'>
               {description}
