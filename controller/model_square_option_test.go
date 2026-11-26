@@ -31,14 +31,18 @@ func restoreModelSquareDisplayOptions(t *testing.T) {
 	})
 }
 
-func TestUpdateModelSquareOptionsSavesAllOrNothing(t *testing.T) {
+// modelSquareOptionsFixture saves through PUT /api/option/model_square as the
+// root user on an empty option table, and puts the options back afterwards.
+// stored returns the saved option rows.
+func modelSquareOptionsFixture(t *testing.T) (put func(body string) *httptest.ResponseRecorder, stored func() map[string]string) {
+	t.Helper()
 	db := setupManageUserTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Option{}))
 	restoreModelSquareDisplayOptions(t)
 	previousOptions := common.OptionMap
 	t.Cleanup(func() { common.OptionMap = previousOptions })
 	common.OptionMap = map[string]string{}
-	put := func(body string) *httptest.ResponseRecorder {
+	put = func(body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(recorder)
 		c.Request = httptest.NewRequest(http.MethodPut, "/api/option/model_square", strings.NewReader(body))
@@ -49,7 +53,7 @@ func TestUpdateModelSquareOptionsSavesAllOrNothing(t *testing.T) {
 		UpdateModelSquareOptions(c)
 		return recorder
 	}
-	stored := func() map[string]string {
+	stored = func() map[string]string {
 		var options []model.Option
 		require.NoError(t, db.Find(&options).Error)
 		values := make(map[string]string, len(options))
@@ -58,6 +62,11 @@ func TestUpdateModelSquareOptionsSavesAllOrNothing(t *testing.T) {
 		}
 		return values
 	}
+	return put, stored
+}
+
+func TestUpdateModelSquareOptionsSavesAllOrNothing(t *testing.T) {
+	put, stored := modelSquareOptionsFixture(t)
 
 	recorder := put(`{"options":{"model_square_setting.show_tag_filter":true,"model_square_setting.snapshot_fold_enabled":false,"model_square_setting.family_bases":"[\"claude-opus-4-5\"]"}}`)
 	require.Contains(t, recorder.Body.String(), `"success":true`)
@@ -126,4 +135,27 @@ func TestUpdateModelSquareOptionsSavesAllOrNothing(t *testing.T) {
 			assert.Equal(t, int64(3), count, "nothing is audited")
 		})
 	}
+}
+
+func TestUpdateModelSquareOptionsStoresSwitchesAsTrueOrFalse(t *testing.T) {
+	put, stored := modelSquareOptionsFixture(t)
+
+	// The settings page reads only "true" and "1" as on, so every spelling
+	// the server accepts must read back as the state the model square applies.
+	recorder := put(`{"options":{"model_square_setting.show_endpoint_type_filter":"True","model_square_setting.show_quota_type_filter":0,"model_square_setting.show_group_filter":"F","model_square_setting.family_bases":"[]"}}`)
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+	saved := map[string]string{
+		"model_square_setting.show_endpoint_type_filter": "true",
+		"model_square_setting.show_quota_type_filter":    "false",
+		"model_square_setting.show_group_filter":         "false",
+		"model_square_setting.family_bases":              "[]",
+	}
+	assert.Equal(t, saved, stored())
+	for key, value := range saved {
+		assert.Equal(t, value, common.OptionMap[key], key)
+	}
+	sections := operation_setting.GetModelSquareDisplay().FilterSections
+	assert.True(t, sections.EndpointTypes)
+	assert.False(t, sections.QuotaTypes)
+	assert.False(t, sections.Groups)
 }

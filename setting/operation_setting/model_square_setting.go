@@ -272,10 +272,14 @@ func ParseModelFamilyBases(value string) ([]string, error) {
 }
 
 func IsModelSquareOptionKey(key string) bool {
-	if _, ok := modelSquareBoolOptions[key]; ok {
-		return true
-	}
-	return key == ModelSquareVariantRulesOptionKey || key == ModelSquareFamilyBasesOptionKey
+	return IsModelSquareSwitchKey(key) || key == ModelSquareVariantRulesOptionKey || key == ModelSquareFamilyBasesOptionKey
+}
+
+// IsModelSquareSwitchKey reports whether key is one of the model square's
+// on/off switches, whose values strconv.ParseBool reads.
+func IsModelSquareSwitchKey(key string) bool {
+	_, ok := modelSquareBoolOptions[key]
+	return ok
 }
 
 // ValidateModelSquareOption validates a value before it is stored.

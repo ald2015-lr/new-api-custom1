@@ -4,6 +4,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -32,7 +33,17 @@ func UpdateModelSquareOptions(c *gin.Context) {
 			common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
 			return
 		}
-		values[key] = common.Interface2String(value)
+		text := common.Interface2String(value)
+		// The settings page shows a stored switch as on only for "true" or
+		// "1", so every spelling strconv.ParseBool accepts ("True", "t", "0"
+		// …) is stored as "true" or "false" and the card shows what the model
+		// square applies. Other values are left for the validator to refuse.
+		if operation_setting.IsModelSquareSwitchKey(key) {
+			if enabled, err := strconv.ParseBool(text); err == nil {
+				text = strconv.FormatBool(enabled)
+			}
+		}
+		values[key] = text
 	}
 	if err := model.UpdateOptionsBulk(values); err != nil {
 		common.ApiError(c, err)
