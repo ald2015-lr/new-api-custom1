@@ -42,3 +42,18 @@ func TestAuthRefreshRateLimitEnv(t *testing.T) {
 		})
 	}
 }
+
+// RATE_LIMIT_REDIS_FAILURE is memory unless set to reject; an unknown value
+// falls back to memory.
+func TestRateLimitRedisFailureEnv(t *testing.T) {
+	for value, want := range map[string]string{
+		"":          RateLimitRedisFailureMemory,
+		"memory":    RateLimitRedisFailureMemory,
+		" Reject ":  RateLimitRedisFailureReject,
+		"reject":    RateLimitRedisFailureReject,
+		"fail-open": RateLimitRedisFailureMemory,
+	} {
+		t.Setenv("RATE_LIMIT_REDIS_FAILURE", value)
+		assert.Equal(t, want, rateLimitRedisFailureFromEnv(), "RATE_LIMIT_REDIS_FAILURE=%q", value)
+	}
+}

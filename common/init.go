@@ -140,6 +140,7 @@ func InitEnv() {
 	CriticalRateLimitNum = GetEnvOrDefault("CRITICAL_RATE_LIMIT", 20)
 	CriticalRateLimitDuration = int64(GetEnvOrDefault("CRITICAL_RATE_LIMIT_DURATION", 20*60))
 	initAuthRefreshRateLimitEnv()
+	RateLimitRedisFailure = rateLimitRedisFailureFromEnv()
 
 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
@@ -202,6 +203,21 @@ func positiveRateLimitEnv(name string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+// rateLimitRedisFailureFromEnv reads RATE_LIMIT_REDIS_FAILURE: memory (the
+// default) or reject.
+func rateLimitRedisFailureFromEnv() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("RATE_LIMIT_REDIS_FAILURE")))
+	switch value {
+	case "", RateLimitRedisFailureMemory:
+		return RateLimitRedisFailureMemory
+	case RateLimitRedisFailureReject:
+		return RateLimitRedisFailureReject
+	default:
+		SysError(LogText("invalid RATE_LIMIT_REDIS_FAILURE %q (allowed: memory, reject), using memory", value))
+		return RateLimitRedisFailureMemory
+	}
 }
 
 func initConstantEnv() {

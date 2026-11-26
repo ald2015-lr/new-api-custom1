@@ -1,9 +1,11 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,6 +43,15 @@ func newAuthRefreshLimitRouter(t *testing.T) *gin.Engine {
 	return router
 }
 
+var authRefreshTestIPs atomic.Uint32
+
+// uniqueTestClientIP gives a test run client IPs of its own: the in-memory
+// limiter keeps its counters for the whole test process.
+func uniqueTestClientIP() string {
+	n := uint32(time.Now().UnixMicro()) + authRefreshTestIPs.Add(1)
+	return fmt.Sprintf("10.%d.%d.%d", byte(n>>16), byte(n>>8), byte(n))
+}
+
 func postFrom(router http.Handler, path string, remoteAddr string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, path, nil)
@@ -53,17 +64,19 @@ func postFrom(router http.Handler, path string, remoteAddr string) *httptest.Res
 // critical budget of an IP is used up, its refreshes still pass, up to the
 // refresh limit, which then answers 429 with Retry-After like the others.
 func TestAuthRefreshRateLimitHasItsOwnBucket(t *testing.T) {
-	for _, backend := range []struct{ name, clientIP string }{{"redis", "192.0.2.110"}, {"memory", "192.0.2.111"}} {
-		t.Run(backend.name, func(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		t.Run(backend, func(t *testing.T) {
 			var redisServer *miniredis.Miniredis
-			if backend.name == "redis" {
+			clientIP, otherIP := "192.0.2.110", "198.51.100.110"
+			if backend == "redis" {
 				redisServer, _ = useRateLimitMiniRedis(t)
 			} else {
 				useMemoryRateLimitBackend(t)
+				clientIP, otherIP = uniqueTestClientIP(), uniqueTestClientIP()
 			}
 			useAuthRefreshRateLimit(t, true, 300, 20)
 			router := newAuthRefreshLimitRouter(t)
-			remoteAddr := backend.clientIP + ":4321"
+			remoteAddr := clientIP + ":4321"
 
 			for i := range 20 {
 				require.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", remoteAddr).Code, "login %d", i+1)
@@ -82,19 +95,19 @@ func TestAuthRefreshRateLimitHasItsOwnBucket(t *testing.T) {
 			assert.LessOrEqual(t, retryAfter, 20*60)
 
 			// Another IP has both budgets untouched.
-			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", "198.51.100.110:4321").Code)
-			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", "198.51.100.110:4321").Code)
+			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", otherIP+":4321").Code)
+			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", otherIP+":4321").Code)
 
 			if redisServer == nil {
 				return
 			}
-			refreshKey := redisIPRateLimitKey("RF", backend.clientIP)
-			assert.Equal(t, "rateLimit:v2:ip:RF:"+backend.clientIP, refreshKey)
+			refreshKey := redisIPRateLimitKey("RF", clientIP)
+			assert.Equal(t, "rateLimit:v2:ip:RF:"+clientIP, refreshKey)
 			count, err := redisServer.Get(refreshKey)
 			require.NoError(t, err)
 			assert.Equal(t, "301", count)
 			assert.Equal(t, 20*time.Minute, redisServer.TTL(refreshKey))
-			criticalCount, err := redisServer.Get(redisIPRateLimitKey("CT", backend.clientIP))
+			criticalCount, err := redisServer.Get(redisIPRateLimitKey("CT", clientIP))
 			require.NoError(t, err)
 			assert.Equal(t, "21", criticalCount, "refreshes do not count against the critical budget")
 		})

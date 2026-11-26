@@ -327,6 +327,18 @@ var (
 
 var RateLimitKeyExpirationDuration = 20 * time.Minute
 
+// What the API and per-user rate limiters do when Redis fails
+// (RATE_LIMIT_REDIS_FAILURE): RateLimitRedisFailureMemory counts the request
+// in this node's memory instead, so the limit still holds on each node;
+// RateLimitRedisFailureReject answers 500, as before the fallback existed. The
+// page and static limiters let requests through either way.
+const (
+	RateLimitRedisFailureMemory = "memory"
+	RateLimitRedisFailureReject = "reject"
+)
+
+var RateLimitRedisFailure = RateLimitRedisFailureMemory
+
 const (
 	UserStatusEnabled  = 1 // don't use 0, 0 is the default value!
 	UserStatusDisabled = 2 // also don't use 0
