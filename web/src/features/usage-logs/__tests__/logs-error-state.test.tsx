@@ -24,11 +24,14 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { AxiosError, AxiosHeaders } from 'axios'
+import { toast } from 'sonner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { createAppQueryClient } from '@/lib/query-client'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
@@ -60,7 +63,21 @@ const okLogs: LogsReply = async () => ({
   },
 })
 
-function renderLogs(replies: LogsReply[]) {
+const otherReply: LogsReply = async () => ({
+  data: { success: true, data: { quota: 0, rpm: 0, tpm: 0 } },
+})
+
+function renderLogs(
+  replies: LogsReply[],
+  {
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+    subscriptions = otherReply,
+  }: {
+    client?: QueryClient
+    /** The reply to /api/subscription/self (whether the billing column shows) */
+    subscriptions?: LogsReply
+  } = {}
+) {
   useAuthStore.getState().auth.setUser({
     id: 1,
     username: 'tester',
@@ -73,7 +90,8 @@ function renderLogs(replies: LogsReply[]) {
       const reply = replies[Math.min(logRequests.length, replies.length) - 1]
       return reply()
     }
-    return { data: { success: true, data: { quota: 0, rpm: 0, tpm: 0 } } }
+    if (url === '/api/subscription/self') return subscriptions()
+    return otherReply()
   })
   const root = createRootRoute()
   const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
@@ -87,9 +105,6 @@ function renderLogs(replies: LogsReply[]) {
     routeTree: root.addChildren([auth.addChildren([logs])]),
     history: createMemoryHistory({ initialEntries: ['/usage-logs/common'] }),
   })
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
   render(
     <QueryClientProvider client={client}>
       <UsageLogsProvider>
@@ -97,7 +112,7 @@ function renderLogs(replies: LogsReply[]) {
       </UsageLogsProvider>
     </QueryClientProvider>
   )
-  return { logRequests }
+  return { logRequests, client }
 }
 
 afterEach(() => {
@@ -187,6 +202,40 @@ describe('usage logs load failure', () => {
     expect(await screen.findAllByText('$0.01')).not.toHaveLength(0)
     expect(screen.queryByText('Failed to load logs')).not.toBeInTheDocument()
     expect(logRequests).toHaveLength(2)
+  })
+
+  test('a 500 from the billing column check keeps the logs on screen', async () => {
+    const openErrorPage = vi.fn<() => void>()
+    vi.spyOn(toast, 'error').mockReturnValue('toast')
+    const { client } = renderLogs([okLogs], {
+      client: createAppQueryClient(openErrorPage),
+      subscriptions: async () => {
+        throw new AxiosError(
+          'Request failed with status code 500',
+          'ERR_BAD_RESPONSE',
+          undefined,
+          undefined,
+          {
+            data: '',
+            status: 500,
+            statusText: '',
+            headers: new AxiosHeaders(),
+            config: { headers: new AxiosHeaders() },
+          }
+        )
+      },
+    })
+
+    expect(await screen.findAllByText('$0.01')).not.toHaveLength(0)
+    await waitFor(() =>
+      expect(
+        client
+          .getQueryCache()
+          .find({ queryKey: ['usage-log-billing-source'], exact: false })?.state
+          .status
+      ).toBe('error')
+    )
+    expect(openErrorPage).not.toHaveBeenCalled()
   })
 
   test('an empty result still says that no logs exist', async () => {
