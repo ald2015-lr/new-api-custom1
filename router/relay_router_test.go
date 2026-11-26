@@ -46,6 +46,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 	"github.com/QuantumNous/new-api/tokenkit"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
@@ -781,6 +782,136 @@ func TestNovelAIChannelServesOnlyTheNativeRoutes(t *testing.T) {
 			assert.Contains(t, payload["error"]["message"], rejected.message)
 			assert.Equal(t, calls, upstream.calls, "nothing reaches NovelAI")
 			assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+// The NovelAI native routes send the stored client body unchanged, as a
+// channel that passes bodies through does: the egress hook of a request
+// plugin instance, global or bound to the channel, checks that body, and its
+// rejection answers 400 before anything reaches NovelAI or is billed, as on
+// the OpenAI image route. The ingress hook of a bound instance cannot change
+// the body, so the log shows it as unchecked.
+func TestNovelAINativeRoutesRunTheRequestPluginEgress(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}))
+	require.NoError(t, i18n.Init())
+	logConsume, batchUpdate := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = true, false
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	savedOptions := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		savedOptions[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = logConsume, batchUpdate
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedOptions))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"checked-image":0.02}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-novelai-check", name: "Check", version: "1.0.0", author: {name: "Test"}};
+export function ingress(ctx, req) { return {action: "continue"}; }
+export function egress(ctx, req) {
+  return req.body.input.includes("forbidden") ? {action: "reject", code: "blocked.word", message: "Not allowed here"} : {action: "continue"};
+}`)
+
+	upstream := &novelAIUpstream{}
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	entry, err := zipWriter.Create("image_0.png")
+	require.NoError(t, err)
+	_, err = entry.Write([]byte("\x89PNG\r\n\x1a\nimage"))
+	require.NoError(t, err)
+	require.NoError(t, zipWriter.Close())
+	upstream.respond(http.StatusOK, "application/x-zip-compressed", archive.String())
+	user := model.User{Id: 6400000 + int(relayRouterTestUsers.Add(1)), Username: "novelai-plugins", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "novelaipluginkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	walletQuota := func() int {
+		quota, err := model.GetUserQuota(user.Id, true)
+		require.NoError(t, err)
+		return quota
+	}
+	sent := func() (int, string) {
+		upstream.mu.Lock()
+		defer upstream.mu.Unlock()
+		return upstream.calls, string(upstream.body)
+	}
+	consumeLogs := func() []model.Log {
+		var logs []model.Log
+		require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", user.Id, model.LogTypeConsume).Order("id").Find(&logs).Error)
+		return logs
+	}
+	type recordEntry struct {
+		Plugin    string `json:"plugin"`
+		Stage     string `json:"stage"`
+		Unchecked bool   `json:"unchecked"`
+	}
+
+	for name, tc := range map[string]struct{ instances, setting string }{
+		"global instance": {instances: `[{"id":"check","name":"Check","plugin":"rp-novelai-check","enabled":true,"global":true,"config":{}}]`},
+		"bound instance":  {instances: `[{"id":"check","name":"Check","plugin":"rp-novelai-check","enabled":true,"config":{}}]`, setting: `{"request_plugins":["check"]}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: tc.instances}))
+			t.Cleanup(func() {
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+			})
+			require.NoError(t, model.DB.Where("1 = 1").Delete(&model.Ability{}).Error)
+			require.NoError(t, model.DB.Where("1 = 1").Delete(&model.Channel{}).Error)
+			channel := model.Channel{Name: "novelai-plugins", Key: "pst-novelai", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeNovelAI, Group: "default",
+				Models: "checked-image", BaseURL: common.GetPointer(server.URL), Setting: common.GetPointer(tc.setting)}
+			require.NoError(t, model.DB.Create(&channel).Error)
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: "checked-image", Group: "default", Enabled: true}).Error)
+			engine := gin.New()
+			SetRelayRouter(engine)
+			send := func(body string) *httptest.ResponseRecorder {
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(http.MethodPost, "/ai/generate-image", strings.NewReader(body))
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Authorization", "Bearer novelaipluginkey")
+				engine.ServeHTTP(recorder, request)
+				return recorder
+			}
+
+			calls, _ := sent()
+			before := walletQuota()
+			rejected := send(`{"input":"a forbidden cat","model":"checked-image","action":"generate","parameters":{"n_samples":1}}`)
+
+			require.Equal(t, http.StatusBadRequest, rejected.Code, "%.200q", rejected.Body.String())
+			var payload struct {
+				Message string `json:"message"`
+			}
+			require.NoError(t, common.Unmarshal(rejected.Body.Bytes(), &payload))
+			assert.Contains(t, payload.Message, "Not allowed here (code: blocked.word)")
+			afterRejection, _ := sent()
+			assert.Equal(t, calls, afterRejection, "nothing reaches NovelAI")
+			assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
+
+			clean := `{"input":"a cat","model":"checked-image","action":"generate","parameters":{"n_samples":1}}`
+			logged := len(consumeLogs())
+			served := send(clean)
+
+			require.Equal(t, http.StatusOK, served.Code, served.Body.String())
+			assert.Equal(t, archive.Bytes(), served.Body.Bytes())
+			afterServed, body := sent()
+			assert.Equal(t, calls+1, afterServed)
+			assert.Equal(t, clean, body, "the client body goes to NovelAI unchanged")
+			assert.Eventually(t, func() bool { return walletQuota() == before-10_000 }, 5*time.Second, 10*time.Millisecond, "one image at $0.02")
+			require.Eventually(t, func() bool { return len(consumeLogs()) == logged+1 }, 5*time.Second, 10*time.Millisecond)
+			if tc.setting == "" {
+				return
+			}
+			consumed := consumeLogs()[logged]
+			var other struct {
+				RequestPlugins []recordEntry `json:"request_plugins"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(consumed.Other, &other))
+			assert.Contains(t, other.RequestPlugins, recordEntry{Plugin: "rp-novelai-check", Stage: "ingress", Unchecked: true}, consumed.Other)
 		})
 	}
 }
@@ -1648,6 +1779,32 @@ func TestNovelAIChannelConvertsOpenAIImages(t *testing.T) {
 			assert.Equal(t, tc.n*10_000, log.Quota, tc.path+": the per-image price is unchanged")
 			assert.Equal(t, before-tc.n*10_000, walletQuota())
 		}
+
+		// A request plugin's outbound effect changes the body before the
+		// override does and is held to the same rule: parameters.n_samples
+		// is no billing field the plugin host guards, so the NovelAI check
+		// refuses it.
+		require.NoError(t, model.DB.Model(&overridden).Update("param_override", "").Error)
+		registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-novelai-samples", name: "Samples", version: "1.0.0", author: {name: "Test"}};
+export function outbound(ctx, req) {
+  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/parameters/n_samples", value: 3}]}]};
+}`)
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: `[{"id":"samples","name":"Samples","plugin":"rp-novelai-samples","enabled":true,"global":true,"models":["nai-diffusion-4-5-curated"],"config":{}}]`}))
+		t.Cleanup(func() {
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+		})
+		calls, before = upstream.calls(), walletQuota()
+		for _, tc := range []struct{ path, body string }{
+			{"/v1/images/generations", `{"model":"nai-diffusion-4-5-curated","prompt":"a cat","n":1}`},
+			{"/v1/chat/completions", `{"model":"nai-diffusion-4-5-curated","n":1,"messages":[{"role":"user","content":"a cat"}]}`},
+		} {
+			recorder := send(tc.path, "application/json", []byte(tc.body))
+
+			require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+			assert.Contains(t, recorder.Body.String(), "sets parameters.n_samples to 3; it must stay 1")
+		}
+		assert.Equal(t, calls, upstream.calls(), "NovelAI is not asked for images a request plugin added")
+		assert.Eventually(t, func() bool { return walletQuota() == before }, 5*time.Second, 10*time.Millisecond)
 	})
 
 	t.Run("NovelAI errors keep their status in an OpenAI error and charge nothing", func(t *testing.T) {
@@ -5013,4 +5170,119 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 		}
 		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 && quota(t) == before }, 5*time.Second, 10*time.Millisecond, "refunded")
 	})
+}
+
+// A task submission retried on another channel is moderated with the prompt
+// that attempt sends. Each attempt starts again from the body the request's
+// ingress left, and the request plugin instances bound to the attempt's
+// channel may change its prompt, so the first attempt's check cannot stand
+// for the retry: a prompt the retried channel's instance makes flagged, or a
+// flagged one the first channel's instance had cleaned, is rejected before
+// it reaches the retried channel.
+func TestTaskRetryModeratesThePromptOfTheAttempt(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.UserSubscription{}, &model.Task{}))
+	require.NoError(t, i18n.Init())
+	service.InitHttpClient()
+	logConsume, batchUpdate, retryTimes := common.LogConsumeEnabled, common.BatchUpdateEnabled, common.RetryTimes
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, 5*time.Millisecond)
+		common.LogConsumeEnabled, common.BatchUpdateEnabled, common.RetryTimes = logConsume, batchUpdate, retryTimes
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: "[]"}))
+	})
+	common.LogConsumeEnabled, common.BatchUpdateEnabled, common.RetryTimes = true, false, 1
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false"}))
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-task-inject", name: "Inject", version: "1.0.0", author: {name: "Test"}};
+export function ingress(ctx, req) {
+  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/prompt", value: "Forbidden-Word-X video"}]}]};
+}`)
+	registerRelayPlugin(t, `export const meta = {apiVersion: 1, key: "rp-task-clean", name: "Clean", version: "1.0.0", author: {name: "Test"}};
+export function ingress(ctx, req) {
+  return {action: "continue", effects: [{type: "json.patch", ops: [{op: "replace", path: "/prompt", value: "a clean harbour"}]}]};
+}`)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{request_plugin_setting.InstancesOption: `[
+		{"id":"inject","name":"Inject","plugin":"rp-task-inject","enabled":true,"config":{}},
+		{"id":"clean","name":"Clean","plugin":"rp-task-clean","enabled":true,"config":{}}
+	]`}))
+
+	// The first channel's upstream fails every video submission that its
+	// moderation passed, so the request is retried on the second channel.
+	upstream := &moderationUpstream{}
+	var broken atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/videos" && r.Header.Get("Authorization") == "Bearer sk-video-broken" {
+			_, _ = io.ReadAll(r.Body)
+			broken.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"video upstream broke","type":"server_error"}}`)
+			return
+		}
+		upstream.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	user := model.User{Id: 6600000 + int(relayRouterTestUsers.Add(1)), Username: "mod-task-retry", Status: common.UserStatusEnabled, Group: "default", Quota: 10_000_000}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "modtaskretrykey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	const moderated = `{"moderation_enabled":true,"moderation_rules":[{"type":"keyword","pattern":"Forbidden-Word-X"}]}`
+	prices := map[string]float64{}
+	create := func(modelName, key, setting string, priority int64) {
+		channel := model.Channel{Name: "mod-" + key, Key: key, Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, Group: "default", Models: modelName,
+			BaseURL: common.GetPointer(server.URL), OtherSettings: moderated, Setting: common.GetPointer(setting), Priority: &priority, AutoBan: common.GetPointer(0)}
+		require.NoError(t, model.DB.Create(&channel).Error)
+		require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: modelName, Group: "default", Enabled: true, Priority: channel.Priority}).Error)
+		prices[modelName] = 0.01
+	}
+	create("mod-video-inject", "sk-video-broken", "", 10)
+	create("mod-video-inject", "sk-video-inject", `{"request_plugins":["inject"]}`, 0)
+	create("mod-video-clean", "sk-video-broken", `{"request_plugins":["clean"]}`, 10)
+	create("mod-video-clean", "sk-video-plain", "", 0)
+	priceJSON, err := common.Marshal(prices)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(priceJSON)))
+	engine := gin.New()
+	engine.Use(middleware.RequestId())
+	SetRelayRouter(engine)
+	SetVideoRouter(engine)
+	SetTaskPluginProtocolRouter(engine)
+
+	for _, tc := range []struct {
+		name, model, prompt, code string
+		status                    int
+	}{
+		{name: "the retried channel's instance makes the prompt flagged", model: "mod-video-inject", prompt: "a quiet harbour at dawn", status: http.StatusBadRequest, code: "content_moderation_flagged"},
+		{name: "the first channel's instance had cleaned a flagged prompt", model: "mod-video-clean", prompt: "Forbidden-Word-X harbour", status: http.StatusBadRequest, code: "content_moderation_flagged"},
+		{name: "a clean prompt is submitted on the retried channel", model: "mod-video-clean", prompt: "a quiet harbour at dusk", status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mark, failed := upstream.mark(), broken.Load()
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"`+tc.model+`","prompt":"`+tc.prompt+`","seconds":"4","size":"720x1280"}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer modtaskretrykey")
+			engine.ServeHTTP(recorder, request)
+
+			require.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			assert.Equal(t, failed+1, broken.Load(), "the first channel was tried")
+			submitted := upstream.since(mark, "/v1/videos")
+			if tc.code == "" {
+				require.Len(t, submitted, 1)
+				assert.Equal(t, "Bearer sk-video-plain", submitted[0].Authorization)
+				var sent struct {
+					Prompt string `json:"prompt"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(submitted[0].Body, &sent))
+				assert.Equal(t, tc.prompt, sent.Prompt, "the retry sends the client's prompt again")
+				return
+			}
+			var answer struct {
+				Code string `json:"code"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &answer))
+			assert.Equal(t, tc.code, answer.Code)
+			assert.Empty(t, submitted, "nothing reaches the retried channel")
+		})
+	}
 }

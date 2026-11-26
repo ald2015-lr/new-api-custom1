@@ -47,6 +47,7 @@ import {
 } from '../lib/model-family'
 import { isTokenBasedModel } from '../lib/model-helpers'
 import type { ModelFamily } from '../lib/model-variants'
+import { withBasePricing } from '../lib/plugin-pricing'
 import { formatPrice, formatRequestPrice } from '../lib/price'
 import { taskPriceLabel, taskUsageUnitLabel } from '../lib/task-price-display'
 import type { PricingModel } from '../types'
@@ -363,24 +364,25 @@ export function VariantPrice(props: {
   const options = useResolvedPriceOptions(props.options)
   const entryUnitLabel = useDynamicEntryUnitLabel()
   const tokenUnitLabel = options.tokenUnit === 'K' ? '1K' : '1M'
-  const billingTime = useBillingTime(props.model.billing_expr)
+  const model = useMemo(() => withBasePricing(props.model), [props.model])
+  const billingTime = useBillingTime(model.billing_expr)
   const summary = useMemo(
     () =>
-      getDynamicPricingSummary(props.model, {
+      getDynamicPricingSummary(model, {
         ...options,
         now: toDate(billingTime),
         groupRatioMultiplier: getDynamicDisplayGroupRatio(
-          props.model,
+          model,
           options.selectedGroup
         ),
       }),
-    [props.model, options, billingTime]
+    [model, options, billingTime]
   )
 
   const tokenPart = (type: 'input' | 'output' | 'cache', label: string) => ({
     label,
     value: formatPrice(
-      props.model,
+      model,
       type,
       options.tokenUnit,
       options.showRechargePrice,
@@ -422,18 +424,18 @@ export function VariantPrice(props: {
           : t('Dynamic Pricing')
       }
     }
-  } else if (isUnconfiguredTaskUsageModel(props.model)) {
+  } else if (isUnconfiguredTaskUsageModel(model)) {
     note = t('Not configured')
-  } else if (isTokenBasedModel(props.model)) {
+  } else if (isTokenBasedModel(model)) {
     parts = [tokenPart('input', t('Input')), tokenPart('output', t('Output'))]
-    if (props.model.cache_ratio != null && !props.hideCached) {
+    if (model.cache_ratio != null && !props.hideCached) {
       parts.push(tokenPart('cache', t('Cached')))
     }
   } else {
     parts = [
       {
         value: formatRequestPrice(
-          props.model,
+          model,
           options.showRechargePrice,
           options.priceRate,
           options.usdExchangeRate,

@@ -231,21 +231,28 @@ func extractRequest(c *gin.Context, info *relaycommon.RelayInfo, viaResponses, p
 	return e.ex, true
 }
 
-// extractTask reads the prompt of a task submission.
-func extractTask(c *gin.Context) *extraction {
-	e := &extractor{ex: &extraction{}}
+// taskPrompt is the prompt of a task submission, as "task_request" holds it.
+func taskPrompt(c *gin.Context) (string, bool) {
 	value, _ := c.Get("task_request")
 	switch req := value.(type) {
 	case map[string]any:
-		if prompt, ok := req["prompt"].(string); ok {
-			e.add(roleUser, prompt)
-		}
+		prompt, ok := req["prompt"].(string)
+		return prompt, ok
 	case relaycommon.TaskSubmitReq:
-		e.add(roleUser, req.Prompt)
+		return req.Prompt, true
 	case *relaycommon.TaskSubmitReq:
 		if req != nil {
-			e.add(roleUser, req.Prompt)
+			return req.Prompt, true
 		}
+	}
+	return "", false
+}
+
+// extractTask reads the prompt of a task submission.
+func extractTask(c *gin.Context) *extraction {
+	e := &extractor{ex: &extraction{}}
+	if prompt, ok := taskPrompt(c); ok {
+		e.add(roleUser, prompt)
 	}
 	return e.ex
 }

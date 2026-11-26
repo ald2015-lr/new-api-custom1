@@ -211,21 +211,23 @@ func newKeepAliveWriter(ctx context.Context, under gin.ResponseWriter, relayForm
 	return w
 }
 
-// keepAliveWriterOf finds the KeepAliveWriter guarding c's response. Once a
-// handler set SSE headers, it sits under the stream write budget that
-// SetEventStreamHeaders puts in front of c.Writer.
+// keepAliveWriterOf finds the KeepAliveWriter guarding c's response under the
+// writers put in front of it later: the stream write budget of
+// SetEventStreamHeaders, and the request plugins' response capture and reply
+// check of an attempt. Each of them unwraps to the writer it wraps.
 func keepAliveWriterOf(c *gin.Context) (*KeepAliveWriter, bool) {
-	writer := c.Writer
-	for {
-		switch w := writer.(type) {
-		case *KeepAliveWriter:
+	var writer http.ResponseWriter = c.Writer
+	for writer != nil {
+		if w, ok := writer.(*KeepAliveWriter); ok {
 			return w, true
-		case *streamResponseWriter:
-			writer = w.ResponseWriter
-		default:
+		}
+		unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
 			return nil, false
 		}
+		writer = unwrapper.Unwrap()
 	}
+	return nil, false
 }
 
 // KeepAliveActive reports whether a KeepAliveWriter guards c's response. It

@@ -111,14 +111,14 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 
 ## 三、合并上游更新并重新构建
 
-当前基线：`v1.0.0-rc.42` + 上游 `main` 到 `7aa3531ef` 的 1 个修复提交（2026-10-08 合并；当时没有比 rc.42 更新的正式版）。rc.42 之前依次是：rc.41（2026-10-01，从 rc.40 合并）、rc.40（2026-09-27，从 rc.30 合并）。上游发新版时：
+当前基线：`v1.0.0-rc.51`（2026-11-25 合并）。历次同步：rc.30 → rc.40（2026-09-27）→ rc.41（2026-10-01）→ rc.42 + 上游 `main` 到 `7aa3531ef` 的 1 个修复提交（2026-10-08）→ rc.46（2026-10-22）→ rc.49（2026-11-11）→ rc.51（2026-11-25），每次都以合并提交进入 `main`，保留上游的提交历史。上游发新版时：
 
 ```bash
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
 git fetch upstream --tags
 
 git checkout main
-git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 upstream/main
+git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 upstream/main
 ```
 
 冲突大概率出现在这几个文件（就是定制改动所在的位置）：
@@ -147,11 +147,12 @@ git merge v1.0.0-rc.42        # 换成上游最新的 release tag，不要用 up
 | 新文件 `model/channel_quota_limit.go`、`controller/channel_quota_limit.go`，以及 `model/{main,channel,channel_cache,ability}.go`、`service/channel_select.go`、`controller/relay.go`、`router/channel-router.go`、`i18n/` 里的小钩子；前端 `web/src/features/channels/*` | 渠道限额（见第十节）；新增 `channel_quota_limits` 表 |
 | 新文件 `setting/operation_setting/group_billing_setting.go`、`service/free_group.go`，以及 `service/{billing,quota,task_billing}.go`、`controller/pricing.go`、`model/option.go` 里的小钩子；前端 `features/system-settings/billing`、`features/pricing`、`features/usage-logs` | 不扣费（免费）分组（见第十一节） |
 | `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
-| 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go` 与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式按客户端协议发心跳（Claude 发 `event: ping`，Responses 在第一个事件之后发 `event: keepalive`，其余发 `: PING`）、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
-| `relay/channel/api_request.go`（`DoApiRequest` / `DoFormRequest` 用 `http.NewRequestWithContext`）、`service/relay_error.go`（`ClientGone`，`DecideRelayRetry` 的 `client_gone`）、`service/request_policy.go`、`controller/relay.go`（客户端已断开时不调用 `processChannelError`）、`relay/helper/stream_scanner.go`（读上游出错时先看客户端是否已断开）、`relay/responses_websocket.go`（WebSocket 连接上游失败时同样跳过 `ProcessChannelError`）、`relay/channel/{ollama/stream.go,coze/relay-coze.go,zhipu/relay-zhipu.go,cloudflare/relay_cloudflare.go,openai/audio.go}`（自己读上游的处理器：客户端断开后按已收到的文本结算、不记 ERR，TTS 非流式退款）；前端 `features/system-settings/request-policies/policy-label.ts` | 客户端断开时取消上游请求，不重试、不算渠道错误、退还预扣额度（见第十三节） |
-| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`；前端 `features/pricing/lib/model-variants.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`features/system-settings/models/model-square-*` | 模型广场按基础模型合并变体（见第十四节） |
+| 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go`、`relay/channel/providerplugin/stream.go`（rc.51 起）与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping；`keepAliveWriterOf` 沿 `Unwrap` 穿过前面包着的 writer 找保活写出器）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式按客户端协议发心跳（Claude 发 `event: ping`，Responses 在第一个事件之后发 `event: keepalive`，其余发 `: PING`）、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
+| `relay/channel/api_request.go`（`DoApiRequest` / `DoFormRequest` 用 `http.NewRequestWithContext`）、`relay/channel/providerplugin/chain.go`（rc.51 起，provider 插件转换路由的 `sendStep` 同样用 `http.NewRequestWithContext(c.Request.Context(), …)`）、`service/relay_error.go`（`ClientGone`，`DecideRelayRetry` 的 `client_gone`）、`service/request_policy.go`、`controller/relay.go`（客户端已断开时不调用 `processChannelError`）、`relay/helper/stream_scanner.go`（读上游出错时先看客户端是否已断开）、`relay/responses_websocket.go`（WebSocket 连接上游失败时同样跳过 `ProcessChannelError`）、`relay/channel/{ollama/stream.go,coze/relay-coze.go,zhipu/relay-zhipu.go,cloudflare/relay_cloudflare.go,openai/audio.go}`（自己读上游的处理器：客户端断开后按已收到的文本结算、不记 ERR，TTS 非流式退款）；前端 `features/system-settings/request-policies/policy-label.ts` | 客户端断开时取消上游请求，不重试、不算渠道错误、退还预扣额度（见第十三节） |
+| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`；前端 `features/pricing/lib/model-variants.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`features/system-settings/models/model-square-*` | 模型广场按基础模型合并变体（见第十四节）；rc.51 起系列卡片、线路价格、分组价格和缓存价格列都先经上游的 `withBasePricing`，普通请求按模型价格计费的模型（`ordinary_pricing`）显示和单模型卡片一样的价格 |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
+| `.github/workflows/ci.yml` | 前端作业的 `timeout-minutes` 从上游的 10 放宽到 20：rc.51 起前端测试从 243 个文件增加到 274 个、耗时多约 19%，较慢的 GitHub runner 上 10 分钟跑不完 |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
@@ -160,6 +161,19 @@ rc.40 → rc.41、rc.41 → upstream main（1a4166d8e）都是无冲突合并，
 rc.41 → rc.42（2026-10-08）：上游自己也修了「前端静态文件把页面限流用光」——静态文件改为预压缩直出，并单独加了一个默认关闭的静态限流（`GLOBAL_STATIC_RATE_LIMIT_ENABLE` / `GLOBAL_STATIC_RATE_LIMIT` / `GLOBAL_STATIC_RATE_LIMIT_DURATION`）。冲突在 `router/web-router.go`、`middleware/rate-limit.go`：以上游结构为主，保留我们的缺失 chunk 404、Redis 故障放行，并在预压缩路径补上 `If-None-Match` → 304（上游这条路径不回 304，会让浏览器每次重新下载整个 chunk）。另外上游把 Go 升到 1.26、构建时用了 moejs 的 PGO 文件，Dockerfile 已同步，不需要手动处理。
 
 注意 rc.41 → upstream main（1a4166d8e）那次合并的 7 个提交里有一条（feefe09f2）：Waffo Pancake 的支付回调现在会校验 Store ID，后台「Waffo Pancake」设置里的 Store ID 必须已填写且和商户后台一致，否则订单回调会被拒绝、充值不到账。
+
+rc.42 → rc.46、rc.46 → rc.49 两次的冲突和处理写在合并提交 `f2184ca4d`、`11a3b1251` 的提交信息里（`git show -s <提交>`）。
+
+rc.49 → rc.51（2026-11-25，合并提交 `4cdc46af5`）：上游这一版的主体是 provider 插件、请求处理插件和社区插件市场（#8271）。57 个文件冲突（后端 38、前端 19），绝大多数是两边在同一位置各加了一段，两边都保留：
+- 中继入口（`controller/relay.go`、`controller/plugin_protocol*.go`、`middleware/task_plugin.go`、`relay/responses_websocket.go`、`relay/relay_task.go`、`relay/{claude,gemini,image}_handler.go`、`relay/responses_request.go`、`relay/chat_completions_via_responses.go`）：上游请求插件的各个阶段和我们的外部审查、`safety_identifier`、保活、上游余额错误屏蔽并存。顺序是：全局实例和请求所在分组的实例的插件 ingress（可改写请求体）→ 解析 → 每次尝试先审查 → 设置 `safety_identifier` → 渠道绑定实例的 ingress（以及自动分组跨分组重试后才生效的分组实例的 ingress）→ 插件 outbound → 参数覆盖 → 插件 egress（Chat Completions 转 Responses 时，渠道绑定实例的 ingress、outbound 和参数覆盖都在设置标识之前，见第十八节限制 12）。审查只看得到请求开始时那次 ingress 的改写，看不到渠道绑定实例的 ingress 和 outbound 的改写（和参数覆盖一样，见第十八节限制 15；视频任务 `/v1/videos` 例外，每次尝试先执行这些 ingress 再审查）；请求处理插件只有 root 能配置。
+- 渠道余额：上游把「更新全部渠道余额」改成并发的系统任务，每次查询结果存进 `other_info.balance_detail`。NovelAI 的规则（余额为 0 不自动禁用、币种是 Anlas）挪进了上游的新文件 `controller/channel_balance.go`；渠道类型在 NovelAI 和其他类型之间切换时，`ClearBalance` 连 `balance_detail` 一起清掉。
+- `service/relay_error.go` 用上游抽出的 `RecordRelayErrorLog`，上游余额错误屏蔽合在同一个内部函数里；`service/quota.go` 的 `PreWssConsumeQuota` 用上游的新返回值，免费分组照旧不扣费；NovelAI 的 `n_samples` 校验挪到参数覆盖和插件 outbound 都执行完之后，两者任一改了请求体都会再校验。
+- NovelAI 原生接口（`/ai/generate-image` 及 `/v1`、流式变体，`relay/novelai_handler.go`）原样转发客户端请求体，请求处理插件按透传渠道执行：每次尝试的 egress 检查原样发出的 JSON（全局实例和渠道绑定的实例都执行，拒绝时不发送、不计费），渠道绑定插件的 ingress 和 outbound 不执行，在日志里记为未检查（`router` 包 `TestNovelAINativeRoutesRunTheRequestPluginEgress` 覆盖）。
+- 上游去掉了「敏感词过滤」设置（`CheckSensitive*`、`SensitiveWords` 等）：启动时把原来的敏感词自动搬进一个全局「请求过滤」插件实例，并删除旧设置项；回滚到旧版本后旧的敏感词设置不会回来（旧版本里敏感词检查变成关闭、词表为空）。
+- 保活：上游 provider 插件的流式转换器会自己起 ping，请求插件的响应采集和回复检查会包在保活写出器外面，合并后两路心跳会同时写，只发过心跳的失败无法换渠道重试。现在 provider 插件路径装了保活写出器时不再自起 ping，`keepAliveWriterOf` 沿 `Unwrap` 找保活写出器（`router` 包 `TestPluginStreamErrors` 和 `TestChannelReportPluginKeepsKeepAliveRetries` 覆盖）。
+- i18n：后端 `i18n/keys.go` 和三个 yaml、前端 7 个语言包都按 key 取并集，合并后 `node scripts/sync-i18n.mjs` 无差异。
+
+下次合并要注意：同步分支经 PR 合入 `main` 时选「Create a merge commit」，不要 Squash，否则丢掉上游父提交，下一次同步会把上游整段历史都当成冲突；上游新增的管理接口要同时出现在 `middleware/access_token_routes.go` 里（`router` 包的 `TestAccessTokenRouteRulesCoverEveryDashboardRoute` 会检查），并确认副管理员拿不到充值数据（第十七节）；上游每多一个能改写请求体的插件阶段，都要确认它在审查之前还是之后（第十八节），以及 NovelAI `n_samples` 这类计费数量在改写之后仍被校验；上游新加的 ping，或新包在 `c.Writer` 外面的 writer，都要确认装了保活写出器时不会再发第二路心跳（writer 要实现 `Unwrap`）；上游新增的、不经过 `DoApiRequest` 自己构建上游请求的代码，都要用 `http.NewRequestWithContext(c.Request.Context(), …)` 绑定客户端的请求，否则客户端断开后上游照样把回答生成完，还可能照常计费（provider 插件路由由 `router` 包 `TestPluginConverterCancelsTheUpstreamWhenTheClientLeaves` 覆盖）。
 
 解冲突的原则：**保留定制改动，接受上游其他部分**。解完必须验证：
 
@@ -808,7 +822,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 服务器日志关键字：`content moderation rejected`（中文日志 `内容审查拒绝了请求`，WARN）、`content moderation failed`（`内容审查失败`，WARN）。被拒绝请求的 `relay error:` 那一行是 INFO，不会触发按 ERROR 报警。KEY 或账号不能用时，每次尝试另有一行 ERROR `channel error (channel #…, status code: 401): status_code=401, content moderation call failed: …`（中文日志 `渠道请求出错 (渠道 #…，状态码 401): …`，后面的 `content moderation call failed` 不翻译），和上游返回错误时一样。日志里不会打印请求内容、规则正则、KEY 或地址。
 
 **用户安全标识（「向 OpenAI 发送用户安全标识」）：**
-- 和审查开关相互独立，也只对 OpenAI 类型的渠道有效。打开后，发往上游的 Chat Completions 和 Responses 请求里的 `safety_identifier` 一律换成网关按用户生成的标识（`u_` 加 32 位十六进制，同一用户永远相同，无法反推出用户是谁），客户端自己传的值会被覆盖。OpenAI 据此只封禁违规的那个用户，而不是整个组织。
+- 和审查开关相互独立，也只对 OpenAI 类型的渠道有效。打开后，发往上游的 Chat Completions 和 Responses 请求里的 `safety_identifier` 一律换成网关按用户生成的标识（`u_` 加 32 位十六进制，同一用户永远相同，无法反推出用户是谁），客户端自己传的值会被覆盖（管理员自己配置的参数覆盖和请求处理插件规则例外，见限制 12）。OpenAI 据此只封禁违规的那个用户，而不是整个组织。
 - 打开「透传请求体」时也生效：只改写 `safety_identifier` 这一个字段，其他字节原样转发。
 - 打开后，「允许透传 safety_identifier」不再起作用。
 - **请在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（例如 `openssl rand -hex 32` 生成），之后不要再改**，多节点设成一样的值。没有设置 `CRYPTO_SECRET` 也没有设置 `SESSION_SECRET` 时，每次重启都会随机生成密钥，发给 OpenAI 的标识也随之改变（服务器日志会提示一次）。改动 `CRYPTO_SECRET` 会让所有用户的标识变化，Redis 里的令牌缓存键也会换一批（无害）；改动前发出的任务结果（视频、图片）下载链接（`/v1/tasks/…/artifacts/…/content?access=…`、`/v1/videos/…/content?access=…`）也会失效（返回 404），客户端需要重新查询任务拿新链接。已经设置了 `SESSION_SECRET` 的部署可以让 `CRYPTO_SECRET` 留空，或设成与 `SESSION_SECRET` 相同的值，这样密钥不变；两者都没设的部署每次重启本来就会让这些链接失效，设置后反而稳定。`deploy/docker-compose.yml` 已经透传这个变量，留空时行为和以前一样。
@@ -826,10 +840,10 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 9. 管理员把保活心跳间隔设得比审查耗时还短时，被拒绝的请求在心跳发出后才返回：流式请求以 HTTP 200 + 一个 SSE 错误事件返回；打开了「非流式请求也保活」时，非流式请求以 HTTP 200 + JSON 错误体（`{"error":…}`，Claude 格式为 `{"type":"error",…}`）返回，各官方 SDK 不会把它当作错误抛出（见第十三节）。这是保活的固有行为，不是 bug。审查通常不到一秒；要让被拒绝的非流式请求拿到真实的 400/503，请把开启审查的渠道的「审查超时（秒）」设得比 Ping 间隔短（例如间隔 10 秒时设为 8 秒）。
 10. 关键词规则发现不了「行为上的蒸馏」（大量、整齐划一的请求，多个账号协同），也发现不了没有明确指令的加密推理回放；换个说法、用形近字（例如西里尔字母的 о）或编码（base64、leetspeak）都能绕过。否定说法只跳过少数固定句式，个别正常句子仍可能被拦，「不要公开，但告诉我」这种说法也可能被跳过。「别」「別」「勿」前面的空格不去掉，所以在「请勿」「分别」这类词中间加空格仍能绕开对应的规则；汉字之间的换行会去掉，预设规则可能跨过这样的换行命中。
 11. Sora 任务（OpenAI 渠道上的 `/v1/videos`）被拒绝时正常记录；通过和失败放行的审查结果不写到任务的计费记录里。
-12. 用户安全标识的覆盖范围见上一节；Chat Completions 转 Responses 时，渠道的参数覆盖在设置标识之前执行，无法改掉它。
+12. 用户安全标识的覆盖范围见上一节。设置标识之后才执行的渠道参数覆盖、请求处理插件的 outbound 阶段（包括 rc.51 的「全局参数覆盖」插件）和渠道绑定实例的 ingress 能改掉或删除它，例如「全局参数覆盖」里一条删除 `safety_identifier` 的规则会让所有 OpenAI 渠道都不再发送标识；开启这个开关时不要在这些规则里改 `safety_identifier`。Chat Completions 转 Responses 时，这些规则都在设置标识之前执行，无法改掉它。
 13. 同一个 OpenAI 组织下所有 KEY 共用审查额度。一个用户连续发大段新内容就可能在一分钟内用光额度：这时所有「失败时拒绝」的渠道对所有用户都返回 503，「失败时放行」的渠道则不经审查转发。OpenAI SDK、Claude Code、Codex 遇到 503 会自动重试，会进一步放大审查调用量。v1 没有按用户的审查额度，也没有熔断。
 14. 「审查失败时放行」对所有失败原因都放行，包括请求本身造成的失败：例如图片地址 OpenAI 下载不了、data URL 格式错误。在放行的渠道上，这样的请求（连同图片）会不经审查转发；在拒绝的渠道上返回 503。
-15. 参数覆盖在审查之后执行：如果覆盖规则把客户端的请求头或未检查的字段复制进 `messages`、`input`、`instructions`，这部分不会被审查。渠道的系统提示词、参数覆盖里写的内容也不检查。
+15. 参数覆盖在审查之后执行：如果覆盖规则把客户端的请求头或未检查的字段复制进 `messages`、`input`、`instructions`，这部分不会被审查。渠道的系统提示词、参数覆盖里写的内容也不检查。rc.51 起的请求处理插件同理：全局实例和请求所在分组的实例在请求开始时 ingress 阶段的改写会被审查；渠道绑定的实例（渠道的「请求处理插件」）和自动分组跨分组重试后才生效的分组实例，它们的 ingress 在每次尝试的审查之后才执行，和 outbound 阶段的改写一样不会被审查（视频任务 `/v1/videos` 例外：每次尝试先执行这些 ingress，再按改写后的提示词审查）。插件只有 root 能配置；不要把会添加、解码或还原文字的插件绑定到开启审查的渠道上。
 16. OpenAI 自 2026-11-20 起对「模型接入中间商」的使用政策调整（需要事先获批）不是代码能解决的，请自行评估。
 
 **以后可能加的选项（v1 没有）：** 「无法完整审查时拒绝请求」（超出字数、图片被跳过、有无法检查的内容时一律拒绝）；按用户的审查额度。需要时提出来。
