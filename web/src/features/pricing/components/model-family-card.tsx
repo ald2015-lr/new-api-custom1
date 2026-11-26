@@ -127,17 +127,26 @@ export const ModelFamilyCard = memo(function ModelFamilyCard(
             </p>
           )}
           {otherSpellings.length > 0 && (
+            // The +N count sits outside the truncated names, so it stays
+            // visible however long the names are.
             <p
-              className='text-muted-foreground mt-0.5 truncate text-xs'
+              className='text-muted-foreground mt-0.5 flex min-w-0 items-baseline gap-1 text-xs'
               title={t('Also written as {{names}}', {
                 names: otherSpellings.join(', '),
               })}
             >
-              {t('Also written as {{names}}', {
-                names:
-                  otherSpellings.slice(0, MAX_OTHER_SPELLINGS).join(', ') +
-                  (hiddenSpellings > 0 ? ` +${hiddenSpellings}` : ''),
-              })}
+              <span className='truncate'>
+                {t('Also written as {{names}}', {
+                  names: otherSpellings
+                    .slice(0, MAX_OTHER_SPELLINGS)
+                    .join(', '),
+                })}
+              </span>
+              {hiddenSpellings > 0 && (
+                <span className='shrink-0 tabular-nums'>
+                  +{hiddenSpellings}
+                </span>
+              )}
             </p>
           )}
         </div>

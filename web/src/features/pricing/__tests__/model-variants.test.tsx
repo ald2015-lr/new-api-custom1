@@ -1709,6 +1709,30 @@ describe('screenshot catalogue cards and rows', () => {
     expect(within(haiku).queryByText(/^Also written as/)).toBeNull()
   })
 
+  it('keeps the count of further spellings out of the truncated names', () => {
+    renderCards(
+      catalogue([
+        'deepseek-v3',
+        'DeepSeek-V3',
+        'Pro/deepseek-v3',
+        'deepseek-ai/DeepSeek-V3',
+      ])
+    )
+    const card = cardTitled('deepseek-v3')
+    const names = within(card).getByText(
+      'Also written as DeepSeek-V3, Pro/deepseek-v3'
+    )
+    expect(names).toHaveClass('truncate')
+    const more = within(card).getByText('+1')
+    expect(more).not.toHaveClass('truncate')
+    expect(names).not.toContainElement(more)
+    expect(names.parentElement).toContainElement(more)
+    expect(names.parentElement).toHaveAttribute(
+      'title',
+      'Also written as DeepSeek-V3, Pro/deepseek-v3, deepseek-ai/DeepSeek-V3'
+    )
+  })
+
   it('shows the vendor icon of merged OpenAI cards instead of a letter', () => {
     renderCards(catalogue())
     const tts = cardTitled('tts-1')
