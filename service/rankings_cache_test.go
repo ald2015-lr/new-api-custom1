@@ -53,9 +53,13 @@ func useFakeRankingBuilds(t *testing.T, blocking bool) *fakeRankingBuilds {
 	}
 	resetRankingCache()
 	t.Cleanup(func() {
-		// Background rebuilds the test started may still be running.
+		// Background rebuilds the test started may still be running, or not
+		// have reached buildRankings yet: wait until every build the group
+		// still holds has returned before buildRankings changes back.
 		fake.releaseBuilds()
-		require.Eventually(t, func() bool { return fake.finished.Load() == fake.builds.Load() }, 5*time.Second, time.Millisecond)
+		for _, period := range []string{"week", "today", "month", "year"} {
+			_, _, _ = rankingBuilds.Do(period, func() (any, error) { return nil, nil })
+		}
 		buildRankings = previousBuild
 		resetRankingCache()
 	})
@@ -170,11 +174,12 @@ func TestRankingsBuildErrors(t *testing.T) {
 	data, err := GetRankingsSnapshot("year")
 	require.NoError(t, err)
 	assert.Same(t, stale, data)
-	require.Eventually(t, func() bool { return fake.builds.Load() == 3 }, 5*time.Second, time.Millisecond)
-	require.Eventually(t, func() bool {
-		data, err := GetRankingsSnapshot("year")
-		return err == nil && data == stale
-	}, time.Second, time.Millisecond, "the expired snapshot stays in use")
+	// Once the background rebuild has failed, the expired snapshot is still
+	// the one served.
+	require.Eventually(t, func() bool { return fake.finished.Load() == 3 }, 5*time.Second, time.Millisecond)
+	data, err = GetRankingsSnapshot("year")
+	require.NoError(t, err)
+	assert.Same(t, stale, data, "the expired snapshot stays in use")
 
 	_, err = GetRankingsSnapshot("decade")
 	assert.Error(t, err, "an unknown period is refused")

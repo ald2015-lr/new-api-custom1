@@ -182,6 +182,14 @@ func buildAndCacheRankings(config rankingPeriodConfig) (data *RankingsResponse, 
 		}
 	}()
 	now := time.Now()
+	// A build that finished after the caller read the cache has already
+	// replaced the snapshot: use it rather than build again.
+	rankingCacheMu.Lock()
+	item, ok := rankingCache[config.id]
+	rankingCacheMu.Unlock()
+	if ok && now.Before(item.expiresAt) {
+		return item.data, nil
+	}
 	data, err = buildRankings(config, now)
 	if err != nil {
 		return nil, err
