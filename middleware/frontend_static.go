@@ -40,9 +40,17 @@ func ServeFrontendFiles(frontendFS static.ServeFileSystem) gin.HandlerFunc {
 			return
 		}
 		c.Abort()
-		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") ||
-			ginGzip.DefaultExcludedExtentions.Contains(path.Ext(urlPath)) ||
+		if ginGzip.DefaultExcludedExtentions.Contains(path.Ext(urlPath)) ||
 			strings.HasSuffix(urlPath, "/index.html") {
+			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		// The bytes of this file depend on Accept-Encoding, the uncompressed
+		// ones included: without Vary a shared cache could keep the
+		// uncompressed copy for everyone, or a compressed one for clients that
+		// cannot decode it.
+		c.Header("Vary", "Accept-Encoding")
+		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") {
 			fileServer.ServeHTTP(c.Writer, c.Request)
 			return
 		}

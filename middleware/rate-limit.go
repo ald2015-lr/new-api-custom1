@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -249,7 +250,13 @@ func GlobalWebRateLimit(frontendFS static.ServeFileSystem) func(c *gin.Context) 
 // answer 500 with RATE_LIMIT_REDIS_FAILURE=reject).
 func webTierRateLimit(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
 	if !common.RedisEnabled {
-		return rateLimitFactory(maxRequestNum, duration, mark)
+		// It's safe to call multi times.
+		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+		return func(c *gin.Context) {
+			if !inMemoryRateLimiter.Request(mark+c.ClientIP(), maxRequestNum, duration) {
+				writeWebRateLimited(c, duration)
+			}
+		}
 	}
 	return func(c *gin.Context) {
 		allowed, _, ttlSeconds, err := redisFixedWindowTake(
@@ -263,9 +270,52 @@ func webTierRateLimit(maxRequestNum int, duration int64, mark string) func(c *gi
 			return
 		}
 		if !allowed {
-			writeRateLimited(c, ttlSeconds)
+			writeWebRateLimited(c, ttlSeconds)
 		}
 	}
+}
+
+// rateLimitedPageMaxRefresh caps the wait before the 429 page reloads itself.
+const rateLimitedPageMaxRefresh = 60
+
+// rateLimitedPage is the page a rate-limited page load gets: a short note in
+// Chinese and English that reloads the page after refreshSeconds.
+const rateLimitedPage = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="%[1]d">
+<title>访问过于频繁 / Too many requests</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;font-family:system-ui,sans-serif;background:#fff;color:#222}p{color:#666}@media(prefers-color-scheme:dark){body{background:#111;color:#eee}p{color:#aaa}}</style>
+</head>
+<body>
+<main>
+<h1>访问过于频繁</h1>
+<p>%[1]d 秒后自动重试</p>
+<p>Too many requests. Retrying automatically in %[1]d seconds.</p>
+</main>
+</body>
+</html>
+`
+
+// writeWebRateLimited is writeRateLimited for the page and static limiters.
+// A page load (GET or HEAD that accepts HTML) gets rateLimitedPage instead
+// of an empty body, which browsers show as a blank error page; scripts,
+// styles and API requests keep the empty 429.
+func writeWebRateLimited(c *gin.Context, retryAfterSeconds int64) {
+	method := c.Request.Method
+	if (method != http.MethodGet && method != http.MethodHead) || !strings.Contains(c.GetHeader("Accept"), "text/html") {
+		writeRateLimited(c, retryAfterSeconds)
+		return
+	}
+	if retryAfterSeconds > 0 {
+		c.Header("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
+	}
+	c.Header("Cache-Control", "no-store")
+	refresh := min(max(retryAfterSeconds, 1), rateLimitedPageMaxRefresh)
+	c.Data(http.StatusTooManyRequests, "text/html; charset=utf-8", fmt.Appendf(nil, rateLimitedPage, refresh))
+	c.Abort()
 }
 
 func GlobalAPIRateLimit() func(c *gin.Context) {

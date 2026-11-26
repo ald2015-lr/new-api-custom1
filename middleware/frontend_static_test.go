@@ -104,3 +104,29 @@ func TestServeFrontendFilesCompressesEachFileOnce(t *testing.T) {
 	assert.Equal(t, http.StatusTeapot, missing.Code)
 	assert.Equal(t, "fallback", missing.Body.String())
 }
+
+// Every response of a file that is served compressed carries Vary:
+// Accept-Encoding, the uncompressed one included, so a shared cache keeps a
+// copy per encoding. Files that are never compressed do not vary.
+func TestServeFrontendFilesVaryOnAcceptEncoding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	frontendDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(frontendDir, "static", "js"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(frontendDir, "static", "js", "app.js"), []byte(strings.Repeat("let a = 1;\n", 100)), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(frontendDir, "logo.png"), []byte("\x89PNG\r\n\x1a\nnot-really-an-image"), 0o644))
+	router := gin.New()
+	router.NoRoute(ServeFrontendFiles(static.LocalFile(frontendDir, false)))
+
+	for _, acceptEncoding := range []string{"", "identity", "deflate", "gzip, deflate, br"} {
+		response := performFrontendRequest(router, http.MethodGet, "/static/js/app.js", acceptEncoding)
+		require.Equal(t, http.StatusOK, response.Code, acceptEncoding)
+		assert.Equal(t, "Accept-Encoding", response.Header().Get("Vary"), "Accept-Encoding %q", acceptEncoding)
+	}
+	head := performFrontendRequest(router, http.MethodHead, "/static/js/app.js", "")
+	assert.Equal(t, "Accept-Encoding", head.Header().Get("Vary"))
+	assert.Empty(t, head.Header().Get("Content-Encoding"))
+
+	png := performFrontendRequest(router, http.MethodGet, "/logo.png", "gzip")
+	assert.Equal(t, http.StatusOK, png.Code)
+	assert.Empty(t, png.Header().Get("Vary"))
+}
