@@ -559,14 +559,40 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	return tx, nil
 }
 
-func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
+// LogCountCap is the most matching logs the log lists count. Counting every
+// match of a large logs table takes seconds; past the cap a list reports the
+// cap and that more logs match, and its pages go on past the cap. Tests lower
+// it.
+var LogCountCap = 10000
+
+// countLogsUpToCap counts the logs tx matches, reading at most LogCountCap+1
+// of them. capped reports that more than LogCountCap match; total is then
+// LogCountCap.
+func countLogsUpToCap(tx *gorm.DB) (total int64, capped bool, err error) {
+	limit := LogCountCap
+	// A LIMIT on the count itself applies to its one result row, so the limit
+	// goes on the rows being counted: SELECT count(*) FROM (SELECT 1 FROM logs
+	// WHERE … LIMIT cap+1) AS matching_logs.
+	matching := tx.Session(&gorm.Session{}).Model(&Log{}).Select("1").Limit(limit + 1)
+	if err = LOG_DB.Table("(?) AS matching_logs", matching).Count(&total).Error; err != nil {
+		return 0, false, err
+	}
+	if total > int64(limit) {
+		return int64(limit), true, nil
+	}
+	return total, false, nil
+}
+
+// GetAllLogs returns a page of the logs matching filter, newest first, and
+// their count up to LogCountCap; totalCapped reports that more match.
+func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, totalCapped bool, err error) {
 	tx, err := filter.apply(LOG_DB)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	err = tx.Model(&Log{}).Count(&total).Error
+	total, totalCapped, err = countLogsUpToCap(tx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	order := "logs.created_at desc, logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
@@ -574,7 +600,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	}
 	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		assignDisplayLogIds(logs, startIdx)
@@ -608,7 +634,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 		} else {
 			// Bulk query channels from DB
 			if err = DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
-				return logs, total, err
+				return logs, total, totalCapped, err
 			}
 		}
 		channelMap := make(map[int]string, len(channels))
@@ -620,20 +646,19 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 		}
 	}
 
-	return logs, total, err
+	return logs, total, totalCapped, err
 }
 
-const logSearchCountLimit = 10000
-
-func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
+// GetUserLogs is GetAllLogs for one user's own logs, shaped for that user.
+func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, totalCapped bool, err error) {
 	tx, err := filter.apply(LOG_DB.Where("logs.user_id = ?", userId))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
+	total, totalCapped, err = countLogsUpToCap(tx)
 	if err != nil {
 		common.SysError(common.LogText("failed to count user logs: %s", err.Error()))
-		return nil, 0, common.NewMessage("Failed to query logs")
+		return nil, 0, false, common.NewMessage("Failed to query logs")
 	}
 	order := "logs.id desc"
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
@@ -642,11 +667,11 @@ func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*L
 	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
 	if err != nil {
 		common.SysError(common.LogText("failed to search user logs: %s", err.Error()))
-		return nil, 0, common.NewMessage("Failed to query logs")
+		return nil, 0, false, common.NewMessage("Failed to query logs")
 	}
 
 	formatUserLogs(logs, startIdx)
-	return logs, total, err
+	return logs, total, totalCapped, err
 }
 
 // StreamAllLogs calls fn with each log matching filter, newest first, as an

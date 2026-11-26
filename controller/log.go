@@ -59,9 +59,17 @@ func limitLogTimeRange(startTimestamp int64, endTimestamp int64) (int64, error) 
 	return startTimestamp, nil
 }
 
+// logPage is a page of the usage-log list. The list counts at most
+// model.LogCountCap matching logs: TotalCapped reports that more match than
+// Total, which is then the cap, and that pages go on past it.
+type logPage struct {
+	*common.PageInfo
+	TotalCapped bool `json:"total_capped"`
+}
+
 func GetAllLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
-	logs, total, err := model.GetAllLogs(logFilterFromQuery(c, true), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	logs, total, totalCapped, err := model.GetAllLogs(logFilterFromQuery(c, true), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -73,7 +81,7 @@ func GetAllLogs(c *gin.Context) {
 	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
-	common.ApiSuccess(c, pageInfo)
+	common.ApiSuccess(c, logPage{PageInfo: pageInfo, TotalCapped: totalCapped})
 	return
 }
 
@@ -88,14 +96,14 @@ func GetUserLogs(c *gin.Context) {
 		}
 		filter.StartTimestamp = startTimestamp
 	}
-	logs, total, err := model.GetUserLogs(c.GetInt("id"), filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	logs, total, totalCapped, err := model.GetUserLogs(c.GetInt("id"), filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
-	common.ApiSuccess(c, pageInfo)
+	common.ApiSuccess(c, logPage{PageInfo: pageInfo, TotalCapped: totalCapped})
 	return
 }
 

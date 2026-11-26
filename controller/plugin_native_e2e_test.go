@@ -528,7 +528,7 @@ func TestKlingNativeRouteHidesTheUpstreamBalanceError(t *testing.T) {
 	adminInfo, ok := other["admin_info"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "status_code=403, "+upstreamBody, adminInfo["upstream_error"])
-	logs, _, err := model.GetUserLogs(7, model.LogFilter{}, 0, 10)
+	logs, _, _, err := model.GetUserLogs(7, model.LogFilter{}, 0, 10)
 	require.NoError(t, err)
 	userView, err := common.Marshal(logs)
 	require.NoError(t, err)
