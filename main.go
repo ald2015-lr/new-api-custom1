@@ -277,6 +277,12 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(common.LogText("server forced to shutdown: %v", err))
 	}
+	// 批量更新在内存里攒着的额度变化（最多 BATCH_UPDATE_INTERVAL 秒）先写入数据库，
+	// 否则每次重启都会丢掉这段时间里用户、令牌和渠道的用量
+	if common.BatchUpdateEnabled {
+		common.SysLog(common.LogText("flushing batched quota updates before exit"))
+		model.FlushBatchUpdates()
+	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()

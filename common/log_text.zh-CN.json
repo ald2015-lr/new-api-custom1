@@ -672,6 +672,7 @@
   "failed to write to temp file: %s": "写入临时文件失败: %s",
   "final group ratio: %f": "最终分组倍率: %f",
   "final group: %s": "最终使用的分组: %s",
+  "flushing batched quota updates before exit": "退出前写入批量更新中尚未落库的额度变化",
   "free key error of channel #%d answered as Google's rate limit": "渠道 #%d 的免费KEY报错已按 Google 的限流报错返回",
   "getAndValidateTextRequest failed: %s": "getAndValidateTextRequest 失败: %s",
   "get_channel_null: %s": "查询渠道失败: %s",

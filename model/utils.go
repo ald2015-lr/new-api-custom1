@@ -51,6 +51,20 @@ func InitBatchUpdater() {
 	})
 }
 
+// batchFlushMu runs one flush of the batched deltas at a time, so a flush
+// returns only after a flush the updater had already started has written its
+// deltas too.
+var batchFlushMu sync.Mutex
+
+// FlushBatchUpdates writes every batched delta to the database now, as the
+// next periodic flush would. The server calls it on shutdown, after it stopped
+// taking requests: the deltas exist only in this process, so without it up to
+// BATCH_UPDATE_INTERVAL seconds of user, token and channel usage were lost at
+// every restart.
+func FlushBatchUpdates() {
+	batchUpdate()
+}
+
 func addNewRecord(type_ int, id int, value int) {
 	batchUpdateLocks[type_].Lock()
 	defer batchUpdateLocks[type_].Unlock()
@@ -112,6 +126,8 @@ func addLocked(type_ int, id int, value int) {
 }
 
 func batchUpdate() {
+	batchFlushMu.Lock()
+	defer batchFlushMu.Unlock()
 	// check if there's any data to update
 	hasData := false
 	for i := range BatchUpdateTypeCount {
