@@ -305,6 +305,14 @@ var (
 	CriticalRateLimitNum            = 20
 	CriticalRateLimitDuration int64 = 20 * 60
 
+	// Session refreshes per IP have a budget of their own (AuthRefreshRateLimit):
+	// every hard page load of a signed-in user refreshes the session, so in
+	// the critical budget they used up the sign-in attempts of everyone behind
+	// the same IP.
+	AuthRefreshRateLimitEnable         = true
+	AuthRefreshRateLimitNum            = 300
+	AuthRefreshRateLimitDuration int64 = 20 * 60
+
 	UploadRateLimitNum            = 10
 	UploadRateLimitDuration int64 = 60
 

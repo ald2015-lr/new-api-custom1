@@ -228,6 +228,18 @@ func CriticalRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+// AuthRefreshRateLimit limits session refreshes per IP in a budget of their
+// own (RF, AUTH_REFRESH_RATE_LIMIT*). Every hard page load of a signed-in
+// user refreshes the session; in the critical budget, about 20 page loads
+// from one IP signed the user out and then left sign-in itself rate limited.
+// Sign-in, logout and the other critical routes keep CriticalRateLimit.
+func AuthRefreshRateLimit() func(c *gin.Context) {
+	if common.AuthRefreshRateLimitEnable {
+		return rateLimitFactory(common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration, "RF")
+	}
+	return defNext
+}
+
 func UserCriticalRateLimit(scope string) func(c *gin.Context) {
 	if !common.CriticalRateLimitEnable {
 		return defNext

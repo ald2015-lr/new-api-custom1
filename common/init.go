@@ -139,6 +139,7 @@ func InitEnv() {
 	CriticalRateLimitEnable = GetEnvOrDefaultBool("CRITICAL_RATE_LIMIT_ENABLE", true)
 	CriticalRateLimitNum = GetEnvOrDefault("CRITICAL_RATE_LIMIT", 20)
 	CriticalRateLimitDuration = int64(GetEnvOrDefault("CRITICAL_RATE_LIMIT_DURATION", 20*60))
+	initAuthRefreshRateLimitEnv()
 
 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
@@ -175,6 +176,26 @@ func initUserSessionSettings() {
 }
 
 func positiveUserSessionEnv(name string, fallback int) int {
+	value := GetEnvOrDefault(name, fallback)
+	if value <= 0 {
+		SysError(LogText("%s must be positive, using default value: %d", name, fallback))
+		return fallback
+	}
+	return value
+}
+
+// initAuthRefreshRateLimitEnv reads the session refresh limit. It is on
+// whenever the critical limit is, unless AUTH_REFRESH_RATE_LIMIT_ENABLE says
+// otherwise, so a site that switched the critical limit off keeps refreshes
+// unlimited as before.
+func initAuthRefreshRateLimitEnv() {
+	AuthRefreshRateLimitEnable = GetEnvOrDefaultBool("AUTH_REFRESH_RATE_LIMIT_ENABLE", CriticalRateLimitEnable)
+	AuthRefreshRateLimitNum = positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT", 300)
+	AuthRefreshRateLimitDuration = int64(positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT_DURATION", 20*60))
+}
+
+// positiveRateLimitEnv reads a rate limit count or window, which must be positive.
+func positiveRateLimitEnv(name string, fallback int) int {
 	value := GetEnvOrDefault(name, fallback)
 	if value <= 0 {
 		SysError(LogText("%s must be positive, using default value: %d", name, fallback))
