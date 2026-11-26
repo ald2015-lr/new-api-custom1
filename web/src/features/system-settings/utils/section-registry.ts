@@ -16,8 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { TFunction } from 'i18next'
 import type { ReactNode } from 'react'
+
+import { createSectionMeta } from './section-meta'
 
 /**
  * Section definition for settings pages
@@ -51,31 +52,14 @@ export function createSectionRegistry<
   TSettings,
   TExtraArgs extends unknown[] = [],
 >(config: SectionRegistryConfig<TSectionId, TSettings, TExtraArgs>) {
-  const { sections, defaultSection, basePath, urlStyle = 'query' } = config
+  const { sections, defaultSection } = config
 
   type SectionId = TSectionId
 
-  const sectionIds = sections.map((section) => section.id) as [
-    SectionId,
-    ...SectionId[],
-  ]
-
-  /**
-   * Get navigation items for sidebar, with an optional badge per section
-   */
-  function getSectionNavItems(
-    t: TFunction,
-    badges?: Partial<Record<SectionId, string>>
-  ) {
-    return sections.map((section) => ({
-      title: t(section.titleKey),
-      url:
-        urlStyle === 'path'
-          ? `${basePath}/${section.id}`
-          : `${basePath}?section=${section.id}`,
-      badge: badges?.[section.id as SectionId],
-    }))
-  }
+  // Ids and sidebar items come from the helper behind the section-meta.ts
+  // files, so a registry and its metadata build the same URLs.
+  const { sectionIds, getSectionNavItems } =
+    createSectionMeta<SectionId>(config)
 
   /**
    * Get section content by section ID

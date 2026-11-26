@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
 import { RequestPolicies } from '@/features/system-settings/request-policies'
-import { POLICY_SECTION_IDS } from '@/features/system-settings/request-policies/section-registry'
+import { POLICY_SECTION_IDS } from '@/features/system-settings/request-policies/section-meta'
 
 export const Route = createFileRoute(
   '/_authenticated/system-settings/request-policies/$section'
