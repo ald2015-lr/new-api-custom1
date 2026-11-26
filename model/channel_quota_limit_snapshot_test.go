@@ -16,11 +16,17 @@ import (
 // quotaLimitQueryGate counts the queries of channel_quota_limits on a test
 // database and can hold one after it read its rows, or fail them.
 type quotaLimitQueryGate struct {
-	queries atomic.Int32
-	hold    atomic.Bool
-	fail    atomic.Bool
-	held    chan struct{}
-	release chan struct{}
+	queries     atomic.Int32
+	hold        atomic.Bool
+	fail        atomic.Bool
+	held        chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+// open lets a held query finish; it may be called more than once.
+func (g *quotaLimitQueryGate) open() {
+	g.releaseOnce.Do(func() { close(g.release) })
 }
 
 // useChannelQuotaLimitTestDB gives the test its own database with the
@@ -56,6 +62,7 @@ func useChannelQuotaLimitTestDB(t *testing.T) (*gorm.DB, *quotaLimitQueryGate) {
 	resetChannelQuotaLimitSnapshot()
 	DB = db
 	t.Cleanup(func() {
+		gate.open()
 		waitForChannelQuotaLimitReload(t)
 		resetChannelQuotaLimitSnapshot()
 		DB = previousDB
@@ -111,7 +118,7 @@ func TestChannelQuotaLimitsFirstLookupLoadsSynchronously(t *testing.T) {
 		t.Fatal("a lookup answered before the first load finished")
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(gate.release)
+	gate.open()
 	started.Wait()
 	close(results)
 	for exhausted := range results {
@@ -168,7 +175,7 @@ func TestChannelQuotaLimitsServeStaleSnapshotWhileReloading(t *testing.T) {
 	// Local changes while the query ran: 9102 gets a refund, 9103 a limit.
 	storeChannelQuotaLimit(9102, &ChannelQuotaLimit{ChannelId: 9102, LimitQuota: 100, UsedQuota: 50})
 	storeChannelQuotaLimit(9103, &ChannelQuotaLimit{ChannelId: 9103, LimitCount: 2, UsedCount: 2, Message: "次数已用完"})
-	close(gate.release)
+	gate.open()
 	waitForChannelQuotaLimitReload(t)
 
 	exhausted, _ = ChannelQuotaExhaustion(9102)
