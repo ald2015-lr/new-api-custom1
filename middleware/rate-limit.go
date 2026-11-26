@@ -75,6 +75,22 @@ func redisReplyInteger(value any) (int64, error) {
 	}
 }
 
+// invalidRateLimit is the error of a limiter redisFixedWindowTake cannot count
+// at all: an empty key, or a count or window that is not positive. It is a
+// configuration error, not a Redis failure.
+type invalidRateLimit string
+
+func (e invalidRateLimit) Error() string { return string(e) }
+
+// redisRateLimitRefused reports whether a limiter whose Redis check failed
+// with err answers an empty 500 instead of counting in memory: always for a
+// limit it cannot count (in memory a window that is not positive would let
+// every request through), and for any error with RATE_LIMIT_REDIS_FAILURE=reject.
+func redisRateLimitRefused(err error) bool {
+	var invalid invalidRateLimit
+	return errors.As(err, &invalid) || common.RateLimitRedisFailure == common.RateLimitRedisFailureReject
+}
+
 // redisFixedWindowTake counts one request under key in a Redis fixed window
 // and reports whether it is within maxRequestNum, the count and the seconds
 // left in the window.
@@ -91,13 +107,13 @@ func redisFixedWindowTake(ctx context.Context, key string, maxRequestNum int, du
 		return false, 0, 0, errors.New("Redis client is not initialized")
 	}
 	if key == "" {
-		return false, 0, 0, errors.New("rate limit key is empty")
+		return false, 0, 0, invalidRateLimit("rate limit key is empty")
 	}
 	if maxRequestNum <= 0 {
-		return false, 0, 0, errors.New("rate limit maximum must be positive")
+		return false, 0, 0, invalidRateLimit("rate limit maximum must be positive")
 	}
 	if duration <= 0 {
-		return false, 0, 0, errors.New("rate limit duration must be positive")
+		return false, 0, 0, invalidRateLimit("rate limit duration must be positive")
 	}
 
 	values, err := common.RDB.Eval(
@@ -138,7 +154,7 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 		duration,
 	)
 	if err != nil {
-		if common.RateLimitRedisFailure == common.RateLimitRedisFailureReject {
+		if redisRateLimitRefused(err) {
 			logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (mark=%s): %v", mark, err))
 			c.Status(http.StatusInternalServerError)
 			c.Abort()
@@ -418,7 +434,7 @@ func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mar
 	key := redisUserRateLimitKey(mark, userID)
 	allowed, _, ttlSeconds, err := redisFixedWindowTake(c.Request.Context(), key, maxRequestNum, duration)
 	if err != nil {
-		if common.RateLimitRedisFailure == common.RateLimitRedisFailureReject {
+		if redisRateLimitRefused(err) {
 			logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (key=%s): %v", key, err))
 			c.Status(http.StatusInternalServerError)
 			c.Abort()

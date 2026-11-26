@@ -410,6 +410,35 @@ func TestRedisRateLimitersCountRequestsWhoseClientWentAway(t *testing.T) {
 	assert.NotContains(t, output.String(), "rate limit check failed")
 }
 
+// A limiter whose count or window is not positive (CRITICAL_RATE_LIMIT_DURATION=0,
+// say) answers an empty 500 under either RATE_LIMIT_REDIS_FAILURE policy, as
+// before the memory fallback: the fallback is for Redis failures, and such a
+// window would let every request through in memory.
+func TestRedisRateLimitersRefuseALimitThatIsNotPositive(t *testing.T) {
+	useRateLimitMiniRedis(t)
+	gin.SetMode(gin.TestMode)
+	accepted := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	for _, policy := range []string{common.RateLimitRedisFailureMemory, common.RateLimitRedisFailureReject} {
+		for _, limit := range []struct {
+			num    int
+			window int64
+		}{{2, 0}, {2, -1}, {0, 60}} {
+			useRateLimitRedisFailure(t, policy)
+			router := gin.New()
+			require.NoError(t, router.SetTrustedProxies(nil))
+			router.GET("/ip", rateLimitFactory(limit.num, limit.window, uniqueRateLimitMark("BAD-IP")), accepted)
+			router.GET("/user", func(c *gin.Context) { c.Set("id", 7) }, userRateLimitFactory(limit.num, limit.window, uniqueRateLimitMark("BAD-USER")), accepted)
+			for _, path := range []string{"/ip", "/user"} {
+				for range 3 {
+					response := performRateLimitRequest(router, path, uniqueTestClientIP()+":12345")
+					assert.Equal(t, http.StatusInternalServerError, response.Code, "%s %s %+v", policy, path, limit)
+					assert.Empty(t, response.Body.String())
+				}
+			}
+		}
+	}
+}
+
 // useAuthRefreshRateLimit sets the session refresh limit and the critical
 // limit (both with a 20-minute window) for one test.
 func useAuthRefreshRateLimit(t *testing.T, refreshEnabled bool, refreshNum int, criticalNum int) {
