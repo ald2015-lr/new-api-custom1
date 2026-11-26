@@ -138,6 +138,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `relay/channel/openai/relay-openai.go` | `thinking_to_content` 交错思考 |
 | `relaykit/.../gemini_chat/to_oai_chat_resp.go` | thought 与正文分字段 |
 | `common/constants.go`、`model/log_other.go`、`web/src/features/system-settings/maintenance/log-settings-section.tsx` | 「在使用日志中显示响应模型」开关（默认关；关闭时日志接口不返回 `response_model`，黄色「响应模型」标记对所有人隐藏） |
+| `model/log.go`（`LogCountCap`、`countLogsUpToCap`，`GetAllLogs` / `GetUserLogs` 多返回 `totalCapped`）、`controller/log.go`（`logPage`）；前端 `web/src/components/data-table/hooks/use-data-table.ts`（`totalCountCapped`）、`core/pagination.tsx`、`web/src/tanstack-table.d.ts`（`TableMeta`）、`features/usage-logs/components/usage-logs-table.tsx` | 使用日志列表最多数 1 万条，超过时返回 `total_capped`、显示「10,000+」并可继续往后翻页（见第二十一节）；上游改这两个列表函数时保留有上限的计数 |
 | `model/subscription.go`、`service/{billing_session,funding_source,quota,task_billing}.go`、`relay/common/relay_info.go`、`service/log_info_generate.go` | 结算超出订阅剩余额度时，订阅扣满、超出部分按套餐设置转扣钱包（见第九节）；订阅优先回退钱包：`user_subscriptions` 只按列更新（不再整行 `Save`），「是否允许回退钱包」看套餐当前设置而不是购买时的快照（见第九节） |
 | 新文件 `setting/operation_setting/group_access_setting.go`、`model/group_access.go`、`service/group_access.go`、`middleware/group_access.go`，以及 `middleware/auth.go`、`middleware/distributor.go`、`service/group.go`、`controller/{group,pricing,token,option}.go`、`model/{option,user_cache}.go`、`constant/context_key.go`、`i18n/` 里的小钩子 | 分组充值门槛 + 白名单（见第八节） |
 | `web/src/features/system-settings/billing/group-access-*`、`features/keys/*`、`features/pricing/*` | 分组充值门槛的后台设置页、令牌分组锁定显示、模型广场门槛标记 |
@@ -946,3 +947,21 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 用户说收不到重置邮件：看审计。「已发送邮件」说明已经发出 → 让用户查垃圾邮件，并用最新的一封；「已发送邮件」之后紧跟一条「链接无效或已过期」：重置链接只在发出后 10 分钟内有效（没有改变），邮件晚到超过 10 分钟或用了旧邮件里的链接都会这样（服务重启也会让未用的链接失效），让用户重新申请（注意冷却时间），收到后尽快打开最新的一封；「邮件发送失败」→ 看原因，检查 SMTP；「申请过于频繁」/「已达每日上限」→ 等待，或管理员「解除登录锁定」。
 - 用户说一直提示登录失败次数过多：在审计里按用户名或事件「登录失败」看「已锁定」/「已锁定密码登录」的来源 IP，确认不是本人后由管理员「解除登录锁定」；锁定反复出现说明有人在针对这个账号，建议绑定 Passkey、开启两步验证。
 - 服务器日志里出现 `auth guard: Redis failed, using the in-memory store`（中文日志「登录与找回密码防护：Redis 出错，改用内存计数」）：检查 Redis 连接；在恢复之前多节点各自计数。
+
+## 二十一、使用日志：总数超过 1 万条时显示「10000+」
+
+**用户看到什么：** 使用日志页（管理员看全部日志，普通用户看自己的日志）分页栏的「总计」，在符合条件的日志超过 1 万条时显示「10,000+」（千位分隔符跟浏览器的语言走）；手机端的页码显示成「1 / 500+」这样的下限（每页 20 条时）。1 万条及以下（含正好 1 万条）仍显示准确条数，翻页和以前完全一样。
+
+**为什么：** 以前每次打开或翻页，服务器都要把符合条件的日志全部数一遍（普通用户是所选时间范围内自己的日志，管理员是所有人的日志）。日志表大了以后这一步要几百毫秒到几秒，并发时更慢；用户日志原来那个「最多数 1 万条」并没有生效（`LIMIT` 加在了计数结果那一行上）。现在最多只数 10001 条（`SELECT count(*) FROM (SELECT 1 FROM logs WHERE … LIMIT 10001)`），SQLite、MySQL、PostgreSQL 和 ClickHouse 日志库用的是同一条查询。本机约 30 万行日志的测试库上（MySQL 8.0，单个请求）：一个用户 30 天内约 15 万条日志，原来光计数就要 169 ms，现在计数加取一页共 14 ms；管理员看 30 天内的全部日志（约 30 万条），从 33 ms 降到 3 ms。筛选后不到 1 万条、但这个用户的日志很多时（例如只看错误日志），计数仍要把这个用户的日志过一遍，速度和以前一样。
+
+**超过 1 万条以后怎么翻页：**
+- 「下一页」照常可用，可以一直翻到 1 万条以后；翻回来的一页不满（例如每页 100 条只回来 37 条）就是最后一页，「下一页」变灰。
+- 总页数不知道，所以这时「最后一页」按钮（»）不可用；页码里最后那个数字只是目前已知的页数（每页 100 条时一开始是 100，翻过去以后会跟着往后加）。
+- 翻到很靠后（几百页以后）每页会比前面慢一些，数据库要跳过前面的行。总条数正好是每页条数的整数倍时，最后会多翻到一页空白页，点「上一页」回去即可。
+- 想看准确条数或更早的日志：缩小时间范围，或加上用户名、模型、令牌、类型等筛选条件，让结果不超过 1 万条。
+
+**不变的：** 导出日志（导出全部符合条件的日志，不受 1 万条限制）、统计（额度、RPM、TPM）、任务日志和绘图日志的列表。
+
+**接口：** `GET /api/log/` 和 `GET /api/log/self` 的 `data` 里多了 `total_capped`（布尔值）。为 `true` 时 `total` 是 10000，意思是「至少 10000 条」；为 `false` 时 `total` 是准确条数。自己写脚本按 `total` 算总页数的，要先看这个字段（翻页参数 `p` 可以超过按 `total` 算出的页数）。
+
+**升级与回滚：** 没有数据库结构变化，也没有新的设置项。回滚到旧版本即恢复原来的精确计数（以及原来的速度）。
