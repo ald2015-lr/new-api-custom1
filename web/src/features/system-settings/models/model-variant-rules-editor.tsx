@@ -104,13 +104,14 @@ function RuleInput(props: {
 }
 
 /**
- * Type a model name to see how the current rules and bases split it, with
- * the version spelling and snapshot folds on. Without the catalogue a
- * -latest alias never folds here.
+ * Type a model name to see how the current rules, bases and folds split it.
+ * Without the catalogue a -latest alias never folds here.
  */
 function RulesPreview(props: {
   rules: ModelSquareSettingsFormValues['variant_rules']
   familyBases: string
+  versionSpellingFold: boolean
+  snapshotFold: boolean
 }) {
   const { t } = useTranslation()
   const inputId = useId()
@@ -119,10 +120,10 @@ function RulesPreview(props: {
     rules: props.rules.filter((rule) => rule.suffix && rule.label),
     familyBases: normalizeFamilyBases(
       splitFamilyBases(props.familyBases),
-      true
+      props.versionSpellingFold
     ),
-    versionSpellingFold: true,
-    snapshotFold: true,
+    versionSpellingFold: props.versionSpellingFold,
+    snapshotFold: props.snapshotFold,
   })
   const items = [
     // What was typed without the line tag, the suffixes and the date.
@@ -177,6 +178,14 @@ export function ModelVariantRulesEditor(props: {
   })
   const rules = useWatch({ control: props.control, name: 'variant_rules' })
   const familyBases = useWatch({ control: props.control, name: 'family_bases' })
+  const versionSpellingFold = useWatch({
+    control: props.control,
+    name: 'version_spelling_fold_enabled',
+  })
+  const snapshotFold = useWatch({
+    control: props.control,
+    name: 'snapshot_fold_enabled',
+  })
   const { errors } = useFormState({
     control: props.control,
     name: 'variant_rules',
@@ -333,7 +342,12 @@ export function ModelVariantRulesEditor(props: {
         </Button>
       </div>
 
-      <RulesPreview rules={rules ?? []} familyBases={familyBases ?? ''} />
+      <RulesPreview
+        rules={rules ?? []}
+        familyBases={familyBases ?? ''}
+        versionSpellingFold={versionSpellingFold ?? true}
+        snapshotFold={snapshotFold ?? true}
+      />
     </div>
   )
 }

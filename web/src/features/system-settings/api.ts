@@ -61,6 +61,19 @@ export async function updateInviteAbuseOptions(
   return res.data
 }
 
+/**
+ * Save the Model Square display options the card changed in one request; the
+ * server saves all of them or none.
+ */
+export async function updateModelSquareOptions(
+  options: Record<string, UpdateOptionRequest['value']>
+) {
+  const res = await api.put<UpdateOptionResponse>('/api/option/model_square', {
+    options,
+  })
+  return res.data
+}
+
 export async function updatePasskeyDomains(
   request: UpdatePasskeyDomainsRequest
 ) {
