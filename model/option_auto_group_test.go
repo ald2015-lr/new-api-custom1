@@ -93,8 +93,23 @@ func TestValidateOptionValueModelSquareSetting(t *testing.T) {
 	} {
 		require.NoError(t, validateOptionValue(key, value))
 	}
-	assert.Error(t, validateOptionValue("model_square_setting.variant_grouping_enabled", "yes"))
-	require.NoError(t, validateOptionValue("model_square_setting.variant_grouping_enabled", "false"))
+	for _, switchKey := range []string{
+		"model_square_setting.variant_grouping_enabled",
+		"model_square_setting.version_spelling_fold_enabled",
+		"model_square_setting.snapshot_fold_enabled",
+		"model_square_setting.show_group_filter",
+		"model_square_setting.show_vendor_filter",
+		"model_square_setting.show_tag_filter",
+		"model_square_setting.show_quota_type_filter",
+		"model_square_setting.show_endpoint_type_filter",
+	} {
+		assert.Error(t, validateOptionValue(switchKey, "yes"), switchKey)
+		assert.Error(t, validateOptionValue(switchKey, ""), switchKey)
+		require.NoError(t, validateOptionValue(switchKey, "false"), switchKey)
+		require.NoError(t, validateOptionValue(switchKey, "true"), switchKey)
+		require.NoError(t, validateOptionValue(switchKey, config.GlobalConfig.ExportAllConfigs()[switchKey]), switchKey)
+	}
+	assert.EqualError(t, validateOptionValue(operation_setting.ModelSquareShowTagFilterOptionKey, "yes"), "是否显示模型标签筛选必须是 true 或 false")
 }
 
 func TestValidateOptionValueModelSquareFamilyBases(t *testing.T) {
@@ -142,27 +157,49 @@ func TestUpdateOptionMapAppliesModelSquareSetting(t *testing.T) {
 	const basesKey = operation_setting.ModelSquareFamilyBasesOptionKey
 	const rules = `[{"suffix":"-fast","label":"fast"}]`
 	const bases = `["gemini-4-argon"]`
+	switches := map[string]string{
+		enabledKey: "false",
+		operation_setting.ModelSquareVersionSpellingFoldOptionKey:    "false",
+		operation_setting.ModelSquareSnapshotFoldOptionKey:           "false",
+		operation_setting.ModelSquareShowGroupFilterOptionKey:        "false",
+		operation_setting.ModelSquareShowVendorFilterOptionKey:       "true",
+		operation_setting.ModelSquareShowTagFilterOptionKey:          "true",
+		operation_setting.ModelSquareShowQuotaTypeFilterOptionKey:    "false",
+		operation_setting.ModelSquareShowEndpointTypeFilterOptionKey: "true",
+	}
 	originalMap := common.OptionMap
 	common.OptionMap = map[string]string{}
 	previousConfig := config.GlobalConfig.ExportAllConfigs()
 	t.Cleanup(func() {
 		common.OptionMap = originalMap
-		operation_setting.LoadModelSquareOption(enabledKey, previousConfig[enabledKey])
+		for key := range switches {
+			operation_setting.LoadModelSquareOption(key, previousConfig[key])
+		}
 		operation_setting.LoadModelSquareOption(rulesKey, previousConfig[rulesKey])
 		operation_setting.LoadModelSquareOption(basesKey, previousConfig[basesKey])
 	})
 
-	require.NoError(t, updateOptionMap(enabledKey, "false"))
+	for key, value := range switches {
+		require.NoError(t, updateOptionMap(key, value))
+	}
 	require.NoError(t, updateOptionMap(rulesKey, rules))
 	require.NoError(t, updateOptionMap(basesKey, bases))
 
 	assert.Equal(t, operation_setting.ModelSquareDisplay{
-		VariantGroupingEnabled: false,
-		VariantRules:           []operation_setting.ModelVariantRule{{Suffix: "-fast", Label: "fast"}},
-		FamilyBases:            []string{"gemini-4-argon"},
+		VariantGroupingEnabled:     false,
+		VersionSpellingFoldEnabled: false,
+		SnapshotFoldEnabled:        false,
+		VariantRules:               []operation_setting.ModelVariantRule{{Suffix: "-fast", Label: "fast"}},
+		FamilyBases:                []string{"gemini-4-argon"},
+		FilterSections:             operation_setting.ModelSquareFilterSections{Groups: false, Vendors: true, Tags: true, QuotaTypes: false, EndpointTypes: true},
 	}, operation_setting.GetModelSquareDisplay())
-	assert.Equal(t, rules, config.GlobalConfig.ExportAllConfigs()[rulesKey])
-	assert.Equal(t, bases, config.GlobalConfig.ExportAllConfigs()[basesKey])
+	exported := config.GlobalConfig.ExportAllConfigs()
+	assert.Equal(t, rules, exported[rulesKey])
+	assert.Equal(t, bases, exported[basesKey])
+	for key, value := range switches {
+		assert.Equal(t, value, exported[key], key)
+		assert.Equal(t, value, common.OptionMap[key], key)
+	}
 }
 
 func TestValidateOptionValueBonusSettings(t *testing.T) {
