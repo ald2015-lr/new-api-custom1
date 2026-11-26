@@ -47,6 +47,11 @@ type BaseNavItem = {
  */
 export type NavLink = BaseNavItem & {
   url: LinkProps['to'] | (string & {})
+  /**
+   * Called when the pointer or keyboard focus reaches the link, to fetch what
+   * the page needs beyond its route (which the router preloads itself).
+   */
+  prefetch?: () => void
   items?: never
   type?: never
 }
