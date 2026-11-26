@@ -131,6 +131,7 @@
     "{{target}} test failed": "{{target}} test failed",
     "{{target}} test succeeded": "{{target}} test succeeded",
     "{{total}} models · {{syncable}} syncable · {{skipped}} skipped this time": "{{total}} models · {{syncable}} syncable · {{skipped}} skipped this time",
+    "{{total}}+": "{{total}}+",
     "{{unit}} tokens": "{{unit}} tokens",
     "{{value}} more attachments": "{{value}} more attachments",
     "{{value}} more changes": "{{value}} more changes",

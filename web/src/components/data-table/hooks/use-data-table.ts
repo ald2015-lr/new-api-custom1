@@ -95,6 +95,13 @@ type UseDataTableOptions<TData> = DataTableFeatureOptions<TData> &
     data: TData[]
     columns: ColumnDef<TData, unknown>[]
     totalCount?: number
+    /**
+     * The server stopped counting at totalCount: more rows match. The loaded
+     * page then decides the page count (a full page has a next page, a short
+     * page is the last one) and the page index is never clamped to it. For
+     * server-paginated tables, where data holds the current page.
+     */
+    totalCountCapped?: boolean
     pageCount?: number
     ensurePageInRange?: (pageCount: number) => void
   }
@@ -281,6 +288,7 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     data,
     columns,
     totalCount,
+    totalCountCapped = false,
     pageCount: explicitPageCount,
     ensurePageInRange,
     manualFiltering,
@@ -367,11 +375,19 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     options.onPaginationChange
   )
 
-  const resolvedPageCount =
-    explicitPageCount ??
-    (totalCount !== undefined
+  const countedPageCount =
+    totalCount !== undefined
       ? Math.ceil(totalCount / pagination.pageSize)
-      : undefined)
+      : undefined
+  let resolvedPageCount = explicitPageCount ?? countedPageCount
+  if (totalCountCapped && explicitPageCount === undefined) {
+    // The count stopped at a cap, so the loaded page tells whether another
+    // follows: a full page has a next one, a short page is the last.
+    resolvedPageCount =
+      data.length < pagination.pageSize
+        ? pagination.pageIndex + 1
+        : Math.max(countedPageCount ?? 0, pagination.pageIndex + 2)
+  }
   const resolvedEnableSorting =
     options.enableSorting ??
     (!manualPagination ||
@@ -383,6 +399,7 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     columns,
     rowCount: totalCount,
     pageCount: resolvedPageCount,
+    meta: { totalCountCapped },
     state: {
       sorting,
       columnVisibility,
@@ -436,8 +453,10 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
 
   const actualPageCount = table.getPageCount()
   React.useEffect(() => {
+    // A capped count does not know the last page, so it clamps nothing.
+    if (totalCountCapped) return
     ensurePageInRange?.(actualPageCount)
-  }, [actualPageCount, ensurePageInRange])
+  }, [actualPageCount, ensurePageInRange, totalCountCapped])
 
   React.useEffect(() => {
     if (

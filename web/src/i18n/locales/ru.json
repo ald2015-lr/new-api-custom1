@@ -131,6 +131,7 @@
     "{{target}} test failed": "Тест {{target}} не выполнен",
     "{{target}} test succeeded": "Тест {{target}} успешно выполнен",
     "{{total}} models · {{syncable}} syncable · {{skipped}} skipped this time": "Моделей: {{total}} · доступно: {{syncable}} · пропускается: {{skipped}}",
+    "{{total}}+": "{{total}}+",
     "{{unit}} tokens": "{{unit}} токенов",
     "{{value}} more attachments": "Ещё вложений: {{value}}",
     "{{value}} more changes": "Ещё изменений: {{value}}",
