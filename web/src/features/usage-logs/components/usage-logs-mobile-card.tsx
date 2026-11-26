@@ -50,6 +50,8 @@ interface UsageLogsMobileListProps<TData> {
   isLoading?: boolean
   emptyTitle?: string
   emptyDescription?: string
+  /** Shown below the empty message, e.g. a Retry button after a failed load */
+  emptyAction?: React.ReactNode
   logCategory: LogCategory
 }
 
@@ -243,6 +245,7 @@ export function UsageLogsMobileList<TData>({
   isLoading = false,
   emptyTitle,
   emptyDescription,
+  emptyAction,
   logCategory,
 }: UsageLogsMobileListProps<TData>) {
   const { t } = useTranslation()
@@ -269,6 +272,7 @@ export function UsageLogsMobileList<TData>({
             <EmptyTitle>{resolvedEmptyTitle}</EmptyTitle>
             <EmptyDescription>{resolvedEmptyDescription}</EmptyDescription>
           </EmptyHeader>
+          {emptyAction}
         </Empty>
       </div>
     )

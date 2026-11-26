@@ -156,6 +156,8 @@ export const statusQueryOptions = queryOptions({
   staleTime: 5 * 60 * 1000,
   // Cache expires after 30 minutes
   gcTime: 30 * 60 * 1000,
+  // The cached snapshot and the defaults keep pages usable without it.
+  meta: { errorPage: false },
 })
 
 /**

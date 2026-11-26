@@ -67,7 +67,7 @@ export function useModelPricingIssues() {
     queryKey: MODEL_PRICING_ISSUES_QUERY_KEY,
     queryFn: getModelPricingIssues,
     enabled: canEdit,
-    meta: { errorToast: false },
+    meta: { errorToast: false, errorPage: false },
   })
 }
 

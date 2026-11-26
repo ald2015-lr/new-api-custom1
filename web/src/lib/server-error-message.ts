@@ -197,6 +197,51 @@ export function isServerErrorCancelled(value: unknown): boolean {
   )
 }
 
+/** Retries after network failures and 5xx answers. */
+const QUERY_RETRY_LIMIT = 3
+/** Retries after a 429, and only when the server asks for a short wait. */
+const RATE_LIMITED_RETRY_LIMIT = 2
+const MAX_RETRY_WAIT_MS = 10_000
+const MAX_RETRY_BACKOFF_MS = 8_000
+
+/**
+ * Whether a failed query is worth another attempt (`failureCount` failures so
+ * far): network errors and 5xx answers up to three times; a 429 up to twice
+ * when its Retry-After is at most 10 s; a `success: false` payload once, since
+ * a transient database error (pool exhaustion) arrives as HTTP 200 like that;
+ * cancellations and other 4xx answers never.
+ */
+export function isRetryableQueryError(
+  error: unknown,
+  failureCount: number
+): boolean {
+  if (isServerErrorCancelled(error)) return false
+  const status = getServerErrorStatus(error)
+  if (status === undefined) {
+    const businessFailure = getServerErrorSources(error).some(
+      (source) => source.success === false
+    )
+    return failureCount < (businessFailure ? 1 : QUERY_RETRY_LIMIT)
+  }
+  if (status >= 500) return failureCount < QUERY_RETRY_LIMIT
+  if (status === 429) {
+    const wait = retryAfterMs(error)
+    return (
+      failureCount < RATE_LIMITED_RETRY_LIMIT &&
+      wait !== undefined &&
+      wait <= MAX_RETRY_WAIT_MS
+    )
+  }
+  return false
+}
+
+/** Delay before retry number `failureCount + 1`: Retry-After, else backoff. */
+export function queryRetryDelay(failureCount: number, error: unknown): number {
+  const wait = retryAfterMs(error)
+  if (wait !== undefined) return Math.min(wait, MAX_RETRY_WAIT_MS)
+  return Math.min(1000 * 2 ** failureCount, MAX_RETRY_BACKOFF_MS)
+}
+
 function messageText(value: unknown): string | undefined {
   if (
     typeof value !== 'string' ||

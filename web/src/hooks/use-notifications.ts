@@ -78,6 +78,7 @@ export function useNotifications() {
     queryKey: ['notice'],
     queryFn: async () => requireServerSuccess(await getNotice()),
     staleTime: 1000 * 60 * 5, // 5 minutes
+    meta: { errorPage: false },
   })
 
   // Fetch Announcements from status
