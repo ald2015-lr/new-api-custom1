@@ -87,6 +87,18 @@ export default defineConfig(({ envMode }) => {
     html: {
       template: './index.html',
       favicon: './public/favicon.ico',
+      // The app stylesheets go to the end of <body>, after the boot shell of
+      // index.html: a stylesheet in <head> holds back the first paint, so a
+      // slow or stalled one left the page blank. The deferred scripts still
+      // run only once they have loaded, so the app never renders unstyled.
+      tags: [
+        (tags) =>
+          tags.map((tag) =>
+            tag.tag === 'link' && tag.attrs?.rel === 'stylesheet'
+              ? { ...tag, head: false }
+              : tag
+          ),
+      ],
     },
     server: {
       host: '0.0.0.0',

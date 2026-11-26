@@ -32,7 +32,9 @@
       })()
     </script>
     <!-- Boot shell: painted with the HTML and hidden by CSS as soon as React
-         renders into #root, so a slow or failed start is never a blank page. -->
+         renders into #root, so a slow or failed start is never a blank page.
+         The app stylesheet comes after it, at the end of the body
+         (rsbuild.config.ts), so a slow stylesheet does not hold it back. -->
     <style>
       #boot-shell {
         position: fixed;
@@ -118,9 +120,23 @@
         }
       </style>
     </noscript>
+    <!--umami-->
+    <!--Google Analytics-->
+  </head>
+
+  <body>
+    <div id="root" translate="no" class="notranslate"></div>
+    <div id="boot-shell" role="status" aria-live="polite">
+      <div id="boot-shell-name"></div>
+      <div id="boot-shell-spinner" aria-hidden="true"></div>
+      <p id="boot-shell-message"></p>
+      <button id="boot-shell-reload" type="button" hidden></button>
+    </div>
     <!-- Boot watchdog: explains a slow or failed start in the shell. It never
          reloads by itself and stops once the app has rendered into #root.
-         It runs before i18n, hence its own Chinese and English text. -->
+         It runs before i18n, hence its own Chinese and English text. It runs
+         right after the shell markup: the build puts the app stylesheet at
+         the end of the body, and while that loads the parser waits there. -->
     <script id="boot-watchdog">
       ;(function () {
         var lang = ''
@@ -254,28 +270,9 @@
             show('', true)
           }, 45000)
         )
-        if (document.readyState === 'loading') {
-          document.addEventListener('readystatechange', function ready() {
-            document.removeEventListener('readystatechange', ready)
-            start()
-          })
-        } else {
-          start()
-        }
+        start()
       })()
     </script>
-    <!--umami-->
-    <!--Google Analytics-->
-  </head>
-
-  <body>
-    <div id="root" translate="no" class="notranslate"></div>
-    <div id="boot-shell" role="status" aria-live="polite">
-      <div id="boot-shell-name"></div>
-      <div id="boot-shell-spinner" aria-hidden="true"></div>
-      <p id="boot-shell-message"></p>
-      <button id="boot-shell-reload" type="button" hidden></button>
-    </div>
     <noscript>
       <p
         style="

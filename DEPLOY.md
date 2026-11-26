@@ -159,7 +159,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `model/channel_quota_limit.go`（`channelQuotaLimits` 改为原子快照 + 单个后台刷新 + 刷新期间本地写入保留） | 渠道限额快照不再在选渠道路径上同步查库 |
 | `service/rankings.go`（`rankingBuilds` singleflight、`buildRankings` 包变量） | 排行榜同一时间只构建一次，过期缓存先返回旧数据再后台重建 |
 | 新文件 `model/enabled_models_cache.go`，以及 `model/channel_cache.go`（重载时建快照）、`model/model_pricing_config.go`（`GetModelPricingIssues`）、`service/group.go`（`GetGroupsEnabledModelsCached`）、`controller/user.go`（`GetUserModels`） | 可用模型列表与定价问题检查在开启内存缓存时读渠道缓存；`/v1/models` 等其他调用不变 |
-| `web/index.html`（启动外壳、看门狗脚本、noscript）、`web/src/main.tsx`、新文件 `web/src/lib/boot.ts`、`web/src/routes/__root.tsx`、`web/src/lib/status-query.ts`、`web/src/features/setup/api.ts`、`web/src/features/home/hooks/use-home-page-content.ts`、`main.go`（`InjectUmamiAnalytics` 注入的统计脚本用 `async`） | 首屏不再白屏、老浏览器提示、语言包最多等 10 秒、setup 从 `/api/status` 判断、首页内容先用缓存、umami 统计脚本不再挡住页面启动（见第二十节） |
+| `web/index.html`（启动外壳、看门狗脚本、noscript）、`web/rsbuild.config.ts`（`html.tags` 把应用样式表放到 body 末尾、启动外壳之后）、`web/src/main.tsx`、新文件 `web/src/lib/boot.ts`、`web/src/routes/__root.tsx`、`web/src/lib/status-query.ts`、`web/src/features/setup/api.ts`、`web/src/features/home/hooks/use-home-page-content.ts`、`main.go`（`InjectUmamiAnalytics` 注入的统计脚本用 `async`） | 首屏不再白屏、老浏览器提示、语言包最多等 10 秒、setup 从 `/api/status` 判断、首页内容先用缓存、umami 统计脚本不再挡住页面启动（见第二十节） |
 | `web/src/lib/auth-session.ts`、`web/src/routes/_authenticated/route.tsx`、`web/src/features/errors/general-error.tsx`、`web/src/lib/server-error-message.ts`、`web/src/lib/query-client.ts`、`web/src/features/usage-logs/components/usage-logs-table.tsx` 等 | 刷新临时失败时不误退出登录、429 本地化提示、可选查询失败不跳错误页、请求重试策略、日志表加载失败可重试 |
 | `web/src/features/{channels,models,subscriptions,dashboard,usage-logs}/api.ts` | 列表接口带结尾斜杠，省掉 301/307 跳转 |
 | 新文件 `web/scripts/slim-locale.mjs`（及 `.d.mts`）、`web/rsbuild.config.ts`（只在生产构建时加的内联插件） | 生产构建的英文语言包去掉键和值相同的条目，`en.json` 源文件和开发模式不变；`src/i18n/__tests__/slim-en.test.ts` 检查 7 种语言的翻译结果不变。上游改了 `rsbuild.config.ts` 时保留这个插件 |
@@ -1154,7 +1154,7 @@ services:
 - 排行榜同一时间只构建一次，缓存过期后先返回旧数据（最多再用 5 分钟）、后台重建。
 - 「可用模型」列表（令牌、操练场等处）和后台定价问题检查改读内存渠道缓存（开启内存缓存时；内容和顺序与上次渠道缓存刷新时的数据库一致，渠道改动后几秒内随渠道缓存一起刷新；渠道因请求失败被自动禁用时，只由它提供的模型立即从列表里去掉，和选渠道一致），不再每个分组查一次数据库。
 - 页面限流返回自动重试的提示页（第 4 条）；静态文件提供 brotli 版本（第 2 条）。
-- 前端：首屏先显示启动外壳，不再长时间白屏；老浏览器提示（第 8 条）；可选面板加载失败时就地显示错误，不再整页跳到错误页；设置了 `UMAMI_WEBSITE_ID` 时统计脚本改为 `async` 加载，统计站点很慢或连不上时不再拖住页面启动。
+- 前端：首屏先显示启动外壳，不再长时间白屏（应用样式表放在启动外壳之后，样式文件很慢或卡住时外壳也照常显示，样式到了才渲染应用，不会出现无样式的页面）；老浏览器提示（第 8 条）；可选面板加载失败时就地显示错误，不再整页跳到错误页；设置了 `UMAMI_WEBSITE_ID` 时统计脚本改为 `async` 加载，统计站点很慢或连不上时不再拖住页面启动。
 - 前端下载更少：生产构建的英文语言包去掉键和值相同的条目，KaTeX/marked 只在显示 Markdown 时下载，钱包页不再下载整个图标包。每个页面首次打开都要下载的入口脚本和样式从约 931 KB（gzip）降到约 657 KB（brotli）；首页、模型广场、登录页和控制台常用页首次打开下载的静态文件少约 29%–34%，钱包页少约 74%。数据看板的图表分块在悬停链接和概览页空闲时提前下载（概览页因此会在后台多下载约 0.5 MB），页面切换去掉了模糊滤镜，使用日志每行只解析一次附加信息。
 - 构建：前端构建结束时多一步 brotli 预压缩（约 30 秒），`web/dist`、二进制和镜像各大约多 16 MB；Dockerfile 不变。
 

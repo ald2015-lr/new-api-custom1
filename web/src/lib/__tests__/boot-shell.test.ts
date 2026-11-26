@@ -101,6 +101,37 @@ describe('boot shell', () => {
     )
   })
 
+  test('is followed by the watchdog, before anything that can hold the parser', () => {
+    const shellEnd = bodyMarkup.indexOf('id="boot-shell-reload"')
+    const watchdogAt = bodyMarkup.indexOf('<script id="boot-watchdog">')
+    expect(watchdogAt).toBeGreaterThan(shellEnd)
+    expect(html.indexOf('<script id="boot-watchdog">')).toBeGreaterThan(
+      html.indexOf('<body>')
+    )
+  })
+
+  test('starts at once while a slow stylesheet still holds the parser', () => {
+    // The build puts the app stylesheet at the end of <body>; until it has
+    // loaded, the parser waits there and readyState stays 'loading'.
+    localStorage.setItem('status', JSON.stringify({ system_name: 'Acme AI' }))
+    Object.defineProperty(document, 'readyState', {
+      configurable: true,
+      get: () => 'loading',
+    })
+    try {
+      startWatchdog()
+    } finally {
+      Reflect.deleteProperty(document, 'readyState')
+    }
+
+    expect(byId('boot-shell-name').textContent).toBe('Acme AI')
+    vi.advanceTimersByTime(15_000)
+    expect(message()).toBe('The network is slow, still loading…')
+    vi.advanceTimersByTime(30_000)
+    reloadButton().click()
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
   test('shows the cached site name and a spinner while the app loads', () => {
     localStorage.setItem('status', JSON.stringify({ system_name: 'Acme AI' }))
 
