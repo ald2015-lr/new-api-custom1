@@ -266,9 +266,10 @@ func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 	assert.Equal(t, "zz-default-model", models[2])
 }
 
-// /api/user/models lists the same models on both paths: from the memory
-// channel cache without any abilities query while it is on, and with one
-// query per group from the database while it is off.
+// /api/user/models lists the same models in the same order on both paths
+// (the dashboard picks the first one): from the memory channel cache without
+// any abilities query while it is on, and with one query per group from the
+// database while it is off.
 func TestGetUserModelsReadsTheMemoryCacheWhenOn(t *testing.T) {
 	db := setupModelListControllerTestDB(t)
 	originalMemoryCacheEnabled := common.MemoryCacheEnabled
@@ -310,14 +311,14 @@ func TestGetUserModelsReadsTheMemoryCacheWhenOn(t *testing.T) {
 
 	common.MemoryCacheEnabled = false
 	fromDatabase := userModels()
-	assert.ElementsMatch(t, []string{"gpt-4o", "claude-sonnet-4"}, fromDatabase)
+	assert.Equal(t, []string{"claude-sonnet-4", "gpt-4o"}, fromDatabase)
 	assert.EqualValues(t, 1, abilityQueries.Load(), "one query for the group")
 
 	common.MemoryCacheEnabled = true
 	model.InitChannelCache()
 	abilityQueries.Store(0)
 	fromCache := userModels()
-	assert.ElementsMatch(t, fromDatabase, fromCache)
+	assert.Equal(t, fromDatabase, fromCache)
 	assert.Zero(t, abilityQueries.Load(), "no abilities query while the memory cache is on")
 }
 

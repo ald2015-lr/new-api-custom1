@@ -19,7 +19,11 @@ var enabledModelsSnapshot atomic.Pointer[enabledAbilityModels]
 
 // buildEnabledAbilityModels lists the distinct models of the enabled
 // abilities, per group and over all groups, in the order the abilities were
-// read: primary key order on MySQL, the order its DISTINCT returns them in.
+// read. InitChannelCache reads them in primary key order (group, model,
+// channel), so each group lists its models in the database's own model order,
+// as GetGroupEnabledModels does on SQLite and MySQL (PostgreSQL gives that
+// query no defined order). The order of all is not meaningful: its one
+// caller uses it as a set.
 func buildEnabledAbilityModels(abilities []*Ability) *enabledAbilityModels {
 	snapshot := &enabledAbilityModels{byGroup: make(map[string][]string)}
 	names := make(map[string]string) // one copy of each model name

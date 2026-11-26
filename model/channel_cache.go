@@ -54,8 +54,11 @@ func InitChannelCache() {
 			}
 		}
 	}
+	// In primary key order, the order GetGroupEnabledModels' DISTINCT walks
+	// them in, so the per-group model lists of the snapshot below come out in
+	// the order that query returns them.
 	var abilities []*Ability
-	if err := DB.Find(&abilities).Error; err != nil {
+	if err := DB.Order(commonGroupCol + ", model, channel_id").Find(&abilities).Error; err != nil {
 		common.SysError(common.LogText("failed to load abilities, keeping the previous channel cache: %s", err.Error()))
 		return
 	}
