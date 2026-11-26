@@ -64,12 +64,20 @@ async function guard(outcome: RefreshOutcome, href = '/console/log?p=2') {
   return undefined
 }
 
+/** The cookie the server sets next to the refresh cookie at sign-in. */
+function setSessionHint() {
+  document.cookie = 'new_api_has_session=1; path=/'
+}
+
 afterEach(() => {
   useAuthStore.getState().auth.reset('idle')
+  document.cookie =
+    'new_api_has_session=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'
 })
 
 describe('protected route guard', () => {
   test('a temporary refresh failure shows the retry page instead of signing out', async () => {
+    setSessionHint()
     const cause = new Error('Request failed with status code 429')
 
     const thrown = await guard({ kind: 'transient_error', error: cause })
@@ -78,6 +86,29 @@ describe('protected route guard', () => {
     expect(isRedirect(thrown)).toBe(false)
     expect((thrown as Error).cause).toBe(cause)
   })
+
+  test.each([
+    ['rate limited', 'Request failed with status code 429'],
+    ['server error', 'Request failed with status code 503'],
+    ['network error', 'Network Error'],
+  ])(
+    'a visitor without a session hint goes to sign-in when the refresh fails (%s)',
+    async (_, message) => {
+      // No session hint: most likely never signed in, so the retry page
+      // would claim a sign-in that does not exist.
+      const thrown = await guard({
+        kind: 'transient_error',
+        error: new Error(message),
+      })
+
+      expect(thrown).not.toBeInstanceOf(AuthSessionUnavailableError)
+      expect(isRedirect(thrown)).toBe(true)
+      expect((thrown as { options: unknown }).options).toMatchObject({
+        to: '/sign-in',
+        search: { redirect: '/console/log?p=2' },
+      })
+    }
+  )
 
   test('a confirmed anonymous visitor goes to sign-in with the page to return to', async () => {
     const thrown = await guard({ kind: 'anonymous' })

@@ -23,6 +23,7 @@ import {
   AuthSessionUnavailableError,
   resolveAuthentication,
 } from '@/lib/auth-session'
+import { hasSessionHint } from '@/lib/session-hint'
 import { useAuthStore } from '@/stores/auth-store'
 
 export const Route = createFileRoute('/_authenticated')({
@@ -37,8 +38,14 @@ export const Route = createFileRoute('/_authenticated')({
 
     if (!auth.user || !auth.accessToken) {
       // A rate-limited, failing or unreachable refresh says nothing about the
-      // session: keep the URL and offer a retry instead of the sign-in page.
-      if (outcome.kind === 'transient_error' && !auth.user) {
+      // session: when the server's session hint says one exists, keep the URL
+      // and offer a retry instead of the sign-in page. A visitor without the
+      // hint most likely never signed in, and goes to sign-in as before.
+      if (
+        outcome.kind === 'transient_error' &&
+        !auth.user &&
+        hasSessionHint()
+      ) {
         throw new AuthSessionUnavailableError({ cause: outcome.error })
       }
       throw redirect({
