@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -76,54 +77,135 @@ func (l ChannelQuotaLimit) Exhausted(now time.Time) bool {
 
 // The selection hot path reads an immutable snapshot that is replaced on every
 // change and reloaded from the database at most every refresh interval, so other
-// nodes pick up usage within that interval.
+// nodes pick up usage within that interval. Channel selection reads it without
+// a lock and never waits for the database once the first load is done: a stale
+// snapshot is served while one background reload replaces it.
 const channelQuotaLimitRefreshInterval = 10 * time.Second
 
+// channelQuotaLimitSnapshot is every channel's limits at loadedAt. complete is
+// false while it holds only local changes made before the first load.
+type channelQuotaLimitSnapshot struct {
+	limits   map[int]ChannelQuotaLimit
+	loadedAt time.Time
+	complete bool
+}
+
 var (
-	channelQuotaLimitMu       sync.Mutex
-	channelQuotaLimitSnapshot map[int]ChannelQuotaLimit
-	channelQuotaLimitLoadedAt time.Time
+	channelQuotaLimitCurrent   atomic.Pointer[channelQuotaLimitSnapshot]
+	channelQuotaLimitReloading atomic.Bool
+	// channelQuotaLimitFirstLoad makes the callers that find no snapshot wait
+	// for one load instead of each querying the database.
+	channelQuotaLimitFirstLoad sync.Mutex
+	// channelQuotaLimitMu orders the replacements of the snapshot: local
+	// changes, and the reloads that install database rows.
+	channelQuotaLimitMu sync.Mutex
+	// channelQuotaLimitGeneration counts the local changes, and
+	// channelQuotaLimitWrites holds the generation of each channel's last one,
+	// so a reload keeps the changes made while its query ran. Both are guarded
+	// by channelQuotaLimitMu.
+	channelQuotaLimitGeneration int64
+	channelQuotaLimitWrites     = map[int]int64{}
 )
 
 func channelQuotaLimits() map[int]ChannelQuotaLimit {
+	snapshot := channelQuotaLimitCurrent.Load()
+	if snapshot == nil || !snapshot.complete {
+		return loadFirstChannelQuotaLimits()
+	}
+	if time.Since(snapshot.loadedAt) >= channelQuotaLimitRefreshInterval &&
+		channelQuotaLimitReloading.CompareAndSwap(false, true) {
+		db := DB
+		go func() {
+			defer channelQuotaLimitReloading.Store(false)
+			defer func() {
+				if r := recover(); r != nil {
+					common.SysError(common.LogText("channel quota limit reload panicked, keeping the previous limits: %v", r))
+				}
+			}()
+			reloadChannelQuotaLimits(db)
+		}()
+	}
+	return snapshot.limits
+}
+
+// loadFirstChannelQuotaLimits loads the snapshot while there is none yet;
+// concurrent callers wait for the same load.
+func loadFirstChannelQuotaLimits() map[int]ChannelQuotaLimit {
+	channelQuotaLimitFirstLoad.Lock()
+	defer channelQuotaLimitFirstLoad.Unlock()
+	if snapshot := channelQuotaLimitCurrent.Load(); snapshot != nil && snapshot.complete {
+		return snapshot.limits
+	}
+	reloadChannelQuotaLimits(DB)
+	return channelQuotaLimitCurrent.Load().limits
+}
+
+// reloadChannelQuotaLimits replaces the snapshot with the limits in db, keeping
+// the local changes made while the query ran. When the query fails, the
+// current limits stay in use until the next refresh interval.
+func reloadChannelQuotaLimits(db *gorm.DB) {
+	channelQuotaLimitMu.Lock()
+	since := channelQuotaLimitGeneration
+	channelQuotaLimitMu.Unlock()
+
+	var rows []ChannelQuotaLimit
+	var err error
+	if db != nil {
+		err = db.Find(&rows).Error
+	}
+
 	channelQuotaLimitMu.Lock()
 	defer channelQuotaLimitMu.Unlock()
-	if channelQuotaLimitSnapshot != nil && time.Since(channelQuotaLimitLoadedAt) < channelQuotaLimitRefreshInterval {
-		return channelQuotaLimitSnapshot
+	var current map[int]ChannelQuotaLimit
+	if snapshot := channelQuotaLimitCurrent.Load(); snapshot != nil {
+		current = snapshot.limits
 	}
-	channelQuotaLimitLoadedAt = time.Now()
-	if DB == nil {
-		channelQuotaLimitSnapshot = map[int]ChannelQuotaLimit{}
-		return channelQuotaLimitSnapshot
-	}
-	var rows []ChannelQuotaLimit
-	if err := DB.Find(&rows).Error; err != nil {
+	limits := current
+	if err != nil {
 		common.SysLog("failed to load channel quota limits: " + err.Error())
-		if channelQuotaLimitSnapshot == nil {
-			channelQuotaLimitSnapshot = map[int]ChannelQuotaLimit{}
+		if limits == nil {
+			limits = map[int]ChannelQuotaLimit{}
 		}
-		return channelQuotaLimitSnapshot
+	} else {
+		limits = make(map[int]ChannelQuotaLimit, len(rows))
+		for _, row := range rows {
+			limits[row.ChannelId] = row
+		}
+		for channelId, generation := range channelQuotaLimitWrites {
+			if generation <= since {
+				// The query started after this change and has read it.
+				delete(channelQuotaLimitWrites, channelId)
+				continue
+			}
+			if limit, ok := current[channelId]; ok {
+				limits[channelId] = limit
+			} else {
+				delete(limits, channelId)
+			}
+		}
 	}
-	snapshot := make(map[int]ChannelQuotaLimit, len(rows))
-	for _, row := range rows {
-		snapshot[row.ChannelId] = row
-	}
-	channelQuotaLimitSnapshot = snapshot
-	return snapshot
+	channelQuotaLimitCurrent.Store(&channelQuotaLimitSnapshot{limits: limits, loadedAt: time.Now(), complete: true})
 }
 
 // storeChannelQuotaLimit replaces one entry of the snapshot (nil removes it).
 func storeChannelQuotaLimit(channelId int, limit *ChannelQuotaLimit) {
 	channelQuotaLimitMu.Lock()
 	defer channelQuotaLimitMu.Unlock()
-	next := make(map[int]ChannelQuotaLimit, len(channelQuotaLimitSnapshot)+1)
-	maps.Copy(next, channelQuotaLimitSnapshot)
-	if limit == nil {
-		delete(next, channelId)
-	} else {
-		next[channelId] = *limit
+	next := &channelQuotaLimitSnapshot{}
+	if current := channelQuotaLimitCurrent.Load(); current != nil {
+		*next = *current
 	}
-	channelQuotaLimitSnapshot = next
+	limits := make(map[int]ChannelQuotaLimit, len(next.limits)+1)
+	maps.Copy(limits, next.limits)
+	if limit == nil {
+		delete(limits, channelId)
+	} else {
+		limits[channelId] = *limit
+	}
+	next.limits = limits
+	channelQuotaLimitGeneration++
+	channelQuotaLimitWrites[channelId] = channelQuotaLimitGeneration
+	channelQuotaLimitCurrent.Store(next)
 }
 
 // ChannelQuotaExhaustion reports whether the channel reached its quota limit and
