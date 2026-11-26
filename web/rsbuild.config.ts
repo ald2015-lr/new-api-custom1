@@ -6,6 +6,7 @@ import { pluginReact } from '@rsbuild/plugin-react'
 import { pluginTailwindcss } from '@rsbuild/plugin-tailwindcss'
 import { tanstackRouter } from '@tanstack/router-plugin/rspack'
 
+import { isConsoleChunk } from './scripts/console-chunks.mjs'
 import { slimTranslationSource } from './scripts/slim-locale.mjs'
 import { BUILD_VERSION_META_NAME } from './src/lib/build-version-meta'
 
@@ -67,7 +68,8 @@ export default defineConfig(({ envMode }) => {
       // connections per host and queues the rest. Sizes are before
       // minification. Shared vendor code gets a chunk of its own from 200 KB;
       // shared app code (the `default` group below) only from 600 KB, below
-      // that it stays in the chunks of the pages that use it.
+      // that it is copied into the chunks of the pages that use it, except
+      // for the code the console pages share (the `console-*` groups).
       minSize: 200_000,
       cacheGroups: {
         // Rspack's built-in `default` group with a higher minSize. A group
@@ -89,6 +91,31 @@ export default defineConfig(({ envMode }) => {
           name: 'vendor-tanstack',
           chunks: 'initial',
           priority: 0,
+          enforce: true,
+        },
+        // Code the console pages share, in chunks of its own instead of a
+        // copy in every page chunk (each console navigation downloaded those
+        // copies again). Only console chunks take part (see
+        // scripts/console-chunks.mjs): the public pages (home, sign-in, model
+        // square) keep their smaller copies and never load these files. The
+        // UI kit serves nearly every console page, the data tables only the
+        // list pages.
+        'console-kit': {
+          test: /[\\/]src[\\/]components[\\/]ui[\\/]|[\\/]node_modules[\\/](@base-ui|@floating-ui|react-hook-form|@hookform)[\\/]/,
+          name: 'console-kit',
+          chunks: isConsoleChunk,
+          minChunks: 3,
+          priority: -5,
+          reuseExistingChunk: true,
+          enforce: true,
+        },
+        'console-table': {
+          test: /[\\/]src[\\/]components[\\/]data-table[\\/]|[\\/]node_modules[\\/]@tanstack[\\/](react-table|table-core)[\\/]/,
+          name: 'console-table',
+          chunks: isConsoleChunk,
+          minChunks: 3,
+          priority: -4,
+          reuseExistingChunk: true,
           enforce: true,
         },
       },

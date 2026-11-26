@@ -20,6 +20,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import createConfig from '../../rsbuild.config'
 import { BUILD_VERSION_META_NAME } from '../../src/lib/build-version-meta'
+import { isConsoleChunk } from '../console-chunks.mjs'
 
 type ConfigFn = (env: {
   env: string
@@ -36,7 +37,18 @@ async function productionConfig() {
   return config as {
     html: { meta: Record<string, string> }
     source: { define?: Record<string, string> }
-    splitChunks: { cacheGroups: Record<string, { chunks?: string }> }
+    splitChunks: {
+      cacheGroups: Record<
+        string,
+        {
+          chunks?: unknown
+          enforce?: boolean
+          minChunks?: number
+          name?: string
+          test?: RegExp
+        }
+      >
+    }
     tools: {
       rspack: { optimization?: { runtimeChunk?: { name: string } } }
     }
@@ -128,5 +140,39 @@ describe('rsbuild.config.ts', () => {
     expect(groups).not.toHaveProperty('vendor-react')
     // The first load's few @base-ui modules stay in its vendor chunk.
     expect(groups).not.toHaveProperty('vendor-ui-primitives')
+  })
+
+  // The console pages share the UI kit and the data tables through chunks
+  // of their own, which the public pages never load.
+  test('gives the console pages shared chunks for the UI kit and the data tables', async () => {
+    const config = await productionConfig()
+    const groups = config.splitChunks.cacheGroups
+
+    for (const name of ['console-kit', 'console-table']) {
+      expect(groups[name]).toMatchObject({
+        name,
+        chunks: isConsoleChunk,
+        minChunks: 3,
+        enforce: true,
+      })
+    }
+    const kit = groups['console-kit']?.test
+    const table = groups['console-table']?.test
+    const bun = '/w/node_modules/.bun/pkg@1.0.0/node_modules'
+    expect(kit?.test('/w/src/components/ui/select.tsx')).toBe(true)
+    expect(kit?.test(`${bun}/@base-ui/react/esm/select/index.js`)).toBe(true)
+    expect(kit?.test(`${bun}/react-hook-form/dist/index.esm.mjs`)).toBe(true)
+    expect(kit?.test('/w/src/components/data-table/core/table-empty.tsx')).toBe(
+      false
+    )
+    expect(
+      table?.test('/w/src/components/data-table/core/table-empty.tsx')
+    ).toBe(true)
+    expect(table?.test(`${bun}/@tanstack/table-core/build/lib/index.mjs`)).toBe(
+      true
+    )
+    expect(table?.test(`${bun}/@tanstack/react-router/dist/esm/index.js`)).toBe(
+      false
+    )
   })
 })
