@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -153,6 +154,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // Unmount first: a page still on screen would react to the resets below.
+  cleanup()
   api.defaults.adapter = originalAdapter
   client.clear()
   navigate.mockReset()
@@ -162,6 +165,17 @@ afterEach(() => {
   vi.mocked(prefetchModelDetailsWhenIdle).mockClear()
   vi.restoreAllMocks()
 })
+
+/** A visitor signed in earlier whose access token has expired. */
+function signInWithExpiredToken() {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 7, username: 'alice', role: 1 },
+      accessToken: 'expired-access-token',
+    },
+  })
+}
 
 function renderPricing() {
   return render(
@@ -266,5 +280,60 @@ describe('model square errors', () => {
     expect(await screen.findByText('alpha-model')).toBeVisible()
     expect(refreshAuthentication).toHaveBeenCalledTimes(1)
     expect(navigate).not.toHaveBeenCalled()
+  })
+
+  test('a signed-in 401 whose session refresh fails for a moment shows the error with a retry, not the sign-in page', async () => {
+    const user = userEvent.setup()
+    signInWithExpiredToken()
+    vi.mocked(refreshAuthentication).mockResolvedValue({
+      kind: 'transient_error',
+      error: new Error('refresh rate limited'),
+    })
+    pricingAnswers.push((config) =>
+      fail(config, 401, { success: false, message: 'access token expired' })
+    )
+    renderPricing()
+
+    expect(
+      await screen.findByText('Failed to load model pricing')
+    ).toBeVisible()
+    expect(navigate).not.toHaveBeenCalled()
+    expect(document.querySelector('[aria-busy="true"]')).toBeNull()
+
+    // Once the session can be refreshed again, Retry shows the list.
+    vi.mocked(refreshAuthentication).mockResolvedValue({
+      kind: 'authenticated',
+      bundle: {} as never,
+    })
+    pricingAnswers.push((config) =>
+      fail(config, 401, { success: false, message: 'access token expired' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText('alpha-model')).toBeVisible()
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  test('a list on screen stays when a signed-in refetch gets a 401 whose refresh fails for a moment', async () => {
+    signInWithExpiredToken()
+    vi.mocked(refreshAuthentication).mockResolvedValue({
+      kind: 'transient_error',
+      error: new Error('refresh failed'),
+    })
+    // Pricing loaded more than five minutes ago: the page refetches it.
+    client.setQueryData(['pricing'], pricingPayload, {
+      updatedAt: Date.now() - 6 * 60 * 1000,
+    })
+    pricingAnswers.push((config) =>
+      fail(config, 401, { success: false, message: 'access token expired' })
+    )
+    renderPricing()
+
+    await waitFor(() =>
+      expect(client.getQueryState(['pricing'])?.status).toBe('error')
+    )
+    expect(screen.getByText('alpha-model')).toBeVisible()
+    expect(navigate).not.toHaveBeenCalled()
+    expect(requests.filter((r) => r === 'GET /api/pricing')).toHaveLength(1)
   })
 })

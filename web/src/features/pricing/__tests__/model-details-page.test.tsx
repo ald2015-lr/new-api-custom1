@@ -17,7 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   AxiosError,
@@ -36,8 +43,10 @@ import {
   type Mock,
 } from 'vitest'
 
+import { refreshAuthentication } from '@/lib/auth-session'
 import { api } from '@/lib/http-client'
 import { createAppQueryClient } from '@/lib/query-client'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { ModelDetails, ModelDetailsContent } from '../components/model-details'
 import type { PricingModel } from '../types'
@@ -56,6 +65,11 @@ vi.mock('@tanstack/react-router', async (importOriginal) => ({
   useSearch: () => ({}),
   useNavigate: () => navigate,
   useRouter: () => ({ state: { location: { href: '/pricing/alpha-model' } } }),
+}))
+
+vi.mock('@/lib/auth-session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/auth-session')>()),
+  refreshAuthentication: vi.fn(),
 }))
 
 vi.mock('../components/model-details-charts', () => {
@@ -104,6 +118,7 @@ function fail(config: InternalAxiosRequestConfig, status: number): never {
 }
 
 const originalAdapter = api.defaults.adapter
+const originalAuth = useAuthStore.getState().auth
 let client: QueryClient
 let openErrorPage: Mock<() => void>
 let pricingStatus: number[]
@@ -141,9 +156,13 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // Unmount first: a page still on screen would react to the resets below.
+  cleanup()
   api.defaults.adapter = originalAdapter
   client.clear()
   navigate.mockReset()
+  useAuthStore.setState({ auth: originalAuth })
+  vi.mocked(refreshAuthentication).mockReset()
   vi.restoreAllMocks()
 })
 
@@ -204,6 +223,43 @@ describe('model details page', () => {
     expect(
       await screen.findByRole('tab', { name: 'Overview' })
     ).toBeInTheDocument()
+  })
+
+  test('a signed-in 401 whose session refresh fails for a moment shows the error with a retry, not the sign-in page', async () => {
+    useAuthStore.setState({
+      auth: {
+        ...originalAuth,
+        user: { id: 7, username: 'alice', role: 1 },
+        accessToken: 'expired-access-token',
+      },
+    })
+    vi.mocked(refreshAuthentication).mockResolvedValue({
+      kind: 'transient_error',
+      error: new Error('refresh rate limited'),
+    })
+    pricingStatus.push(401)
+    render(withClient(<ModelDetails />))
+
+    expect(
+      await screen.findByText('Failed to load model pricing')
+    ).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  test('an anonymous 401 (sign-in required) sends the visitor to sign in and back', async () => {
+    pricingStatus.push(401)
+    render(withClient(<ModelDetails />))
+
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith({
+        to: '/sign-in',
+        search: { redirect: '/pricing/alpha-model' },
+        replace: true,
+      })
+    )
+    expect(refreshAuthentication).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
   })
 
   test('an anonymous 403 (model square switched off) sends the visitor home', async () => {
