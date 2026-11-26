@@ -1274,17 +1274,29 @@ func TestBuildGenerationBoundsImageWork(t *testing.T) {
 	assert.LessOrEqual(t, largest, 1, "the largest difference of a channel")
 
 	// A 4096x4096 image on a 1728x1728 canvas: its columns (1728x4096) and the
-	// canvas, 39 MiB; one call would hold 216 MiB more. (Under the race
-	// detector sync.Pool drops a quarter of the band buffers it is given
-	// back, which are then allocated again.)
-	large := image.NewRGBA(image.Rect(0, 0, 4096, 4096))
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	coverResize(large, large.Bounds(), 1728, 1728)
-	runtime.ReadMemStats(&after)
+	// canvas, 39 MiB; one call would hold 216 MiB more. TotalAlloc counts what
+	// every goroutine allocates, and the scaler's sync.Pool keeps the band
+	// buffer it is given back for the P it was given back on. Any preemption
+	// can move the resize to another P between two bands (more often under
+	// CPU load; a collection is only one cause), and there that buffer is out
+	// of reach, so the scaler allocates another (about 1 MiB). Both only add,
+	// so the least of three runs is what the resize itself allocates; the
+	// collection before each run only keeps collections out of the
+	// measurement. (Under the race detector sync.Pool also drops a quarter of
+	// the band buffers it is given back, which are then allocated again.)
 	build, _ := debug.ReadBuildInfo()
 	if build == nil || !slices.Contains(build.Settings, debug.BuildSetting{Key: "-race", Value: "true"}) {
-		assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(4*1728*(4096+1728)+4<<20), "allocated for a 1728x1728 canvas")
+		large := image.NewRGBA(image.Rect(0, 0, 4096, 4096))
+		var allocated []uint64
+		for range 3 {
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			coverResize(large, large.Bounds(), 1728, 1728)
+			runtime.ReadMemStats(&after)
+			allocated = append(allocated, after.TotalAlloc-before.TotalAlloc)
+		}
+		assert.Less(t, slices.Min(allocated), uint64(4*1728*(4096+1728)+4<<20), "allocated for a 1728x1728 canvas, the least of %v", allocated)
 	}
 
 	// A 16-bit black-and-white mask: 65,536 pixels read in two passes.
