@@ -37,6 +37,9 @@ export function usePricingData(enabled = true) {
     queryFn: async () => requireServerSuccess(await getPricing()),
     staleTime: 5 * 60 * 1000,
     enabled,
+    // The model square shows its own error with a retry instead of an empty
+    // list; other users of the prices show what they can without them.
+    meta: { errorPage: false },
   })
 
   // Ensure rates never reach zero to prevent division errors
@@ -86,6 +89,8 @@ export function usePricingData(enabled = true) {
     modelSquare,
     isLoading,
     error,
+    /** Whether pricing data arrived; a failed refresh keeps the last data. */
+    hasData: data !== undefined,
     refetch,
     priceRate,
     usdExchangeRate,

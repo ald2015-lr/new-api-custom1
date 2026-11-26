@@ -29,10 +29,6 @@ import { useTranslation } from 'react-i18next'
 import type { BundledLanguage } from 'shiki/bundle/web'
 
 import {
-  CodeBlock,
-  CodeBlockCopyButton,
-} from '@/components/ai-elements/code-block'
-import {
   StaticDataTable,
   staticDataTableClassNames as tableStyles,
 } from '@/components/data-table'
@@ -48,6 +44,7 @@ import {
 } from '../lib/mock-stats'
 import { replaceModelInPath } from '../lib/model-helpers'
 import type { PricingModel } from '../types'
+import { LazyCodeSample } from './model-details-lazy'
 
 // ---------------------------------------------------------------------------
 // Code-sample registry
@@ -570,9 +567,7 @@ function CodeSamplesSection(props: {
       </div>
 
       <div className='mt-3'>
-        <CodeBlock code={code} language={LANG_HIGHLIGHT[lang]}>
-          <CodeBlockCopyButton />
-        </CodeBlock>
+        <LazyCodeSample code={code} language={LANG_HIGHLIGHT[lang]} />
       </div>
 
       <p className='text-muted-foreground mt-2 text-xs'>

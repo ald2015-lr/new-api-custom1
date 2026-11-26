@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { QueryClient } from '@tanstack/react-query'
 
-import { readCachedStatus, statusQueryOptions } from '@/lib/status-query'
+import {
+  STATUS_QUERY_KEY,
+  fetchStatusForGuard,
+  readCachedStatus,
+  statusQueryOptions,
+  type StatusData,
+} from '@/lib/status-query'
 
 export type ModuleAccess = { enabled: boolean; requireAuth: boolean }
 
@@ -191,6 +197,37 @@ export async function getModuleAccessForGuard(
   } catch {
     return { enabled: false, requireAuth: true }
   }
+}
+
+/** How long {@link getModuleAccessForPageGuard} waits for /api/status. */
+export const PAGE_GUARD_STATUS_WAIT_MS = 3000
+
+/**
+ * Resolve module access for the guard of a page that handles a refusal from
+ * its own API (a 401 or 403) itself, such as the model square.
+ *
+ * Decides from /api/status when it answers within PAGE_GUARD_STATUS_WAIT_MS
+ * (a fresh cache entry at once, a stale or invalidated one after its
+ * refresh). When the request fails or takes longer, it decides from the last
+ * known status (the cached query data, else the snapshot in localStorage) and
+ * without one from the module's defaults. Unlike {@link getModuleAccessForGuard}
+ * it never fails closed: trouble with /api/status shows the page instead of
+ * sending the visitor home, and the backend (`HeaderNavModuleAuth`) still
+ * decides who gets the data.
+ */
+export async function getModuleAccessForPageGuard(
+  queryClient: QueryClient,
+  module: HeaderNavModule
+): Promise<ModuleAccess> {
+  const status = await fetchStatusForGuard(
+    queryClient,
+    PAGE_GUARD_STATUS_WAIT_MS
+  )
+  if (status) return getModuleAccessFromStatus(status, module)
+  const snapshot =
+    queryClient.getQueryData<StatusData | null>(STATUS_QUERY_KEY) ??
+    readCachedStatus()
+  return getModuleAccessFromStatus(snapshot ?? null, module)
 }
 
 /**

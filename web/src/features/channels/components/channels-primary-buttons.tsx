@@ -66,6 +66,7 @@ import {
   handleTestAllChannels,
   handleUpdateAllBalances,
 } from '../lib'
+import { prefetchChannelMutateDrawer } from '../lib/channel-dialog-chunks'
 import type { ChannelSortBy } from '../types'
 import { ChannelSortControl } from './channel-priority-controls'
 import { useChannels } from './channels-provider'
@@ -168,6 +169,8 @@ export function ChannelsPrimaryButtons() {
                 setCurrentRow(null)
                 setOpen('create-channel')
               }}
+              onPointerEnter={prefetchChannelMutateDrawer}
+              onFocus={prefetchChannelMutateDrawer}
               disabled={!canEditSensitive}
             >
               <Plus className='h-4 w-4' />

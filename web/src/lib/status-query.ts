@@ -187,20 +187,24 @@ export async function ensureStatus(
   })
 }
 
+type StatusQueryState = ReturnType<QueryClient['getQueryState']>
+
 /**
- * Status for a boot-time guard: the shared request's data, or `null` as soon
- * as one attempt of it has failed or `timeoutMs` has passed.
- *
- * The query itself keeps retrying in the background for its other consumers;
- * a guard that decides the first screen falls back to its own source instead
- * of waiting for the whole retry schedule or a hung request.
+ * The shared request's status, or `null` as soon as `attemptFailed` says an
+ * attempt of it has failed or `timeoutMs` has passed. The query itself keeps
+ * retrying in the background for its other consumers; a guard falls back to
+ * its own source instead of waiting for the whole retry schedule or a hung
+ * request.
  */
-export function readStatusForGuard(
+function statusWithinDeadline(
   queryClient: QueryClient,
-  timeoutMs: number
+  timeoutMs: number,
+  request: () => Promise<StatusData | null>,
+  attemptFailed: (state: StatusQueryState) => boolean
 ): Promise<StatusData | null> {
   const queryHash = hashKey(STATUS_QUERY_KEY)
   const cache = queryClient.getQueryCache()
+  const failed = () => attemptFailed(cache.get(queryHash)?.state)
   return new Promise((resolve) => {
     let settled = false
     let unsubscribe = () => {}
@@ -212,20 +216,50 @@ export function readStatusForGuard(
       unsubscribe()
       resolve(status)
     }
-    const firstAttemptFailed = () => {
-      const state = cache.get(queryHash)?.state
-      return state?.data === undefined && (state?.fetchFailureCount ?? 0) > 0
-    }
     unsubscribe = cache.subscribe((event) => {
-      if (event.query.queryHash === queryHash && firstAttemptFailed()) {
-        finish(null)
-      }
+      if (event.query.queryHash === queryHash && failed()) finish(null)
     })
-    queryClient
-      .ensureQueryData(statusQueryOptions)
+    request()
       .then((status) => finish(status ?? null))
       .catch(() => finish(null))
-    // Joined a request that is already retrying: its first attempt failed.
-    if (firstAttemptFailed()) finish(null)
+    // Joined a request that is already retrying: an attempt has failed.
+    if (failed()) finish(null)
   })
+}
+
+/**
+ * Status for a boot-time guard: the shared request's data (any cached entry
+ * at once), or `null` as soon as its first attempt has failed or `timeoutMs`
+ * has passed.
+ */
+export function readStatusForGuard(
+  queryClient: QueryClient,
+  timeoutMs: number
+): Promise<StatusData | null> {
+  return statusWithinDeadline(
+    queryClient,
+    timeoutMs,
+    () => queryClient.ensureQueryData(statusQueryOptions),
+    (state) => state?.data === undefined && (state?.fetchFailureCount ?? 0) > 0
+  )
+}
+
+/**
+ * Status for a guard that has a fallback of its own: the shared request's
+ * answer (a fresh cache entry at once, a stale or invalidated one once it is
+ * refreshed), or `null` as soon as an attempt of that request has failed or
+ * `timeoutMs` has passed.
+ */
+export function fetchStatusForGuard(
+  queryClient: QueryClient,
+  timeoutMs: number
+): Promise<StatusData | null> {
+  return statusWithinDeadline(
+    queryClient,
+    timeoutMs,
+    () => queryClient.fetchQuery(statusQueryOptions),
+    // The request in flight failed at least once and is waiting to retry.
+    (state) =>
+      state?.fetchStatus === 'fetching' && (state?.fetchFailureCount ?? 0) > 0
+  )
 }
