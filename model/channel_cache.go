@@ -99,6 +99,7 @@ func InitChannelCache() {
 	}
 
 	swapChannelCache(newGroup2model2channels, newChannelId2channel, newChannel2advancedCustomConfig)
+	enabledModelsSnapshot.Store(buildEnabledAbilityModels(abilities))
 	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
 	// GetPricing (holding updatePricingLock) nests channelSyncLock.RLock via
 	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before

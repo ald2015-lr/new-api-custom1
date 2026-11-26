@@ -445,6 +445,9 @@ func TestPluginTaskPricesBesideAChatPrice(t *testing.T) {
 			insertPricingEndpointAbility(t, channelID, tc.model)
 		}
 	}
+	// Channel writes reload the channel cache, which the issues read while
+	// the memory cache is on.
+	InitChannelCache()
 	// Issues cover only the models an enabled channel serves.
 	issues := map[string]string{}
 	for _, key := range []string{"pricing-dual", "pricing-task"} {
