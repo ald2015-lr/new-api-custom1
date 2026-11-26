@@ -382,10 +382,12 @@ async function performRefreshWithBrowserLock(
   refreshEpoch: number
 ): Promise<RefreshOutcome> {
   try {
+    // `return await`: a rejected lock request (e.g. SecurityError in an
+    // opaque-origin frame) must reach the catch below as a temporary failure.
     if (typeof navigator === 'undefined' || !navigator.locks) {
-      return runRefresh(refreshEpoch)
+      return await runRefresh(refreshEpoch)
     }
-    return navigator.locks.request(
+    return await navigator.locks.request(
       'new-api:auth-refresh',
       { mode: 'exclusive' },
       () => runRefresh(refreshEpoch)

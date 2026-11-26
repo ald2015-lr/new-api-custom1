@@ -434,6 +434,26 @@ describe('refresh requests', () => {
     }
   })
 
+  test('a browser lock that cannot be taken is a temporary failure, not a crash', async () => {
+    const request = vi.fn(() =>
+      Promise.reject(new DOMException('Access denied', 'SecurityError'))
+    )
+    Object.defineProperty(navigator, 'locks', {
+      configurable: true,
+      value: { request },
+    })
+    try {
+      const outcome = await resolveAuthentication()
+
+      expect(outcome.kind).toBe('transient_error')
+      expect(request).toHaveBeenCalledTimes(1)
+      expect(requests).toEqual([])
+      expect(useAuthStore.getState().auth.bootstrapState).toBe('idle')
+    } finally {
+      Reflect.deleteProperty(navigator, 'locks')
+    }
+  })
+
   test('a 429 with Retry-After answers the guards of a navigation with one request', async () => {
     answerRefresh(failRefresh(429, { 'Retry-After': '30' }))
 
