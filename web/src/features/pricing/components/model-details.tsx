@@ -104,6 +104,7 @@ import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
 import { ModelDetailsPerformance } from './model-details-performance'
 import { ModelDetailsSkeleton } from './model-details-skeleton'
+import { PricingLoadError } from './pricing-load-error'
 
 // ----------------------------------------------------------------------------
 // Local UI helpers
@@ -1627,6 +1628,9 @@ export function ModelDetails() {
     groupAccess,
     freeGroups,
     isLoading,
+    error,
+    hasData,
+    refetch,
     priceRate,
     usdExchangeRate,
   } = usePricingData()
@@ -1648,6 +1652,17 @@ export function ModelDetails() {
       <PublicLayout>
         <div className='mx-auto max-w-5xl px-4 sm:px-6'>
           <ModelDetailsSkeleton backLink />
+        </div>
+      </PublicLayout>
+    )
+  }
+
+  // A failed request is not a missing model: say so and offer a retry.
+  if (error && !hasData) {
+    return (
+      <PublicLayout>
+        <div className='mx-auto max-w-5xl px-4 sm:px-6'>
+          <PricingLoadError error={error} onRetry={() => void refetch()} />
         </div>
       </PublicLayout>
     )

@@ -39,7 +39,7 @@ import {
 import { api } from '@/lib/http-client'
 import { createAppQueryClient } from '@/lib/query-client'
 
-import { ModelDetailsContent } from '../components/model-details'
+import { ModelDetails, ModelDetailsContent } from '../components/model-details'
 import type { PricingModel } from '../types'
 
 const navigate = vi.hoisted(() => vi.fn())
@@ -184,5 +184,25 @@ describe('model details tabs', () => {
     expect(
       await screen.findByText(/chat\/completions/, { selector: 'pre' })
     ).toBeVisible()
+  })
+})
+
+describe('model details page', () => {
+  test('a failed pricing request shows an error with a retry, not "Model not found"', async () => {
+    const user = userEvent.setup()
+    pricingStatus.push(500)
+    render(withClient(<ModelDetails />))
+
+    expect(
+      await screen.findByText('Failed to load model pricing')
+    ).toBeVisible()
+    expect(screen.queryByText('Model not found')).not.toBeInTheDocument()
+    expect(openErrorPage).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(
+      await screen.findByRole('tab', { name: 'Overview' })
+    ).toBeInTheDocument()
   })
 })

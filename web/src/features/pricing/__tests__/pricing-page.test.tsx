@@ -19,7 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { AxiosAdapter, InternalAxiosRequestConfig } from 'axios'
+import {
+  AxiosError,
+  AxiosHeaders,
+  type AxiosAdapter,
+  type InternalAxiosRequestConfig,
+} from 'axios'
 import type { ReactNode } from 'react'
 import { toast } from 'sonner'
 import {
@@ -93,6 +98,20 @@ const pricingPayload = {
 
 function respond(config: InternalAxiosRequestConfig, data: unknown) {
   return { data, status: 200, statusText: 'OK', headers: {}, config }
+}
+
+function fail(
+  config: InternalAxiosRequestConfig,
+  status: number,
+  data: unknown
+): never {
+  throw new AxiosError(
+    `Request failed with status code ${status}`,
+    status >= 500 ? 'ERR_BAD_RESPONSE' : 'ERR_BAD_REQUEST',
+    config,
+    undefined,
+    { data, status, statusText: '', headers: new AxiosHeaders(), config }
+  )
 }
 
 const originalAdapter = api.defaults.adapter
@@ -170,5 +189,32 @@ describe('model square list', () => {
     expect(within(drawer).getByText('alpha-model')).toBeInTheDocument()
     expect(drawer.querySelector('[aria-busy="true"]')).not.toBeNull()
     expect(loadModelDetails).toHaveBeenCalled()
+  })
+})
+
+describe('model square errors', () => {
+  test('a failed pricing request shows an error with a retry, not an empty list, and stays on the page', async () => {
+    const user = userEvent.setup()
+    pricingAnswers.push((config) =>
+      fail(config, 500, { success: false, message: 'database is busy' })
+    )
+    renderPricing()
+
+    expect(
+      await screen.findByText('Failed to load model pricing')
+    ).toBeVisible()
+    expect(screen.getByText('database is busy')).toBeVisible()
+    expect(screen.queryByText('No models found')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/This site currently has/)
+    ).not.toBeInTheDocument()
+    expect(openErrorPage).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText('alpha-model')).toBeVisible()
+    expect(
+      screen.queryByText('Failed to load model pricing')
+    ).not.toBeInTheDocument()
   })
 })

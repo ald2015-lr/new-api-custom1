@@ -33,6 +33,7 @@ import {
   ModelCardGrid,
 } from './components'
 import { ModelDetailsDrawer } from './components/model-details-drawer'
+import { PricingLoadError } from './components/pricing-load-error'
 import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
 import { useFilters } from './hooks/use-filters'
 import { usePricingData } from './hooks/use-pricing-data'
@@ -60,9 +61,13 @@ export function Pricing() {
     freeGroups,
     modelSquare,
     isLoading,
+    error,
+    hasData,
+    refetch,
     priceRate,
     usdExchangeRate,
   } = usePricingData()
+  const failed = Boolean(error) && !hasData
 
   const {
     searchInput,
@@ -135,7 +140,7 @@ export function Pricing() {
 
   // The details of a model are a chunk of their own: fetch it once the list
   // is on screen, so that opening a model rarely waits for it.
-  const listShown = !isLoading
+  const listShown = !isLoading && !failed
   useEffect(() => {
     if (!listShown) return
     return prefetchModelDetailsWhenIdle()
@@ -188,6 +193,22 @@ export function Pricing() {
       <PublicLayout showMainContainer={false}>
         <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
           <LoadingSkeleton viewMode={viewMode} />
+        </div>
+      </PublicLayout>
+    )
+  }
+
+  // A failed request is not an empty catalogue: say so and offer a retry.
+  if (failed) {
+    return (
+      <PublicLayout showMainContainer={false}>
+        <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
+          <header className='mx-auto mb-5 max-w-3xl pt-5 text-center sm:mb-10 sm:pt-10'>
+            <h1 className='text-[clamp(2rem,5.5vw,3.5rem)] leading-[1.15] font-bold tracking-tight'>
+              {t('Model Square')}
+            </h1>
+          </header>
+          <PricingLoadError error={error} onRetry={() => void refetch()} />
         </div>
       </PublicLayout>
     )
