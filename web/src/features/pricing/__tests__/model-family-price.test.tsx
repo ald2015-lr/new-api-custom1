@@ -35,18 +35,20 @@ import {
   useSystemConfigStore,
 } from '@/stores/system-config-store'
 
+import { ModelCard } from '../components/model-card'
 import { ModelFamilyCard } from '../components/model-family-card'
 import {
   FamilyLinePrices,
   VariantPrice,
 } from '../components/model-family-price'
 import { ModelVariantList } from '../components/model-variant-list'
+import { getSplitPriceGroups, hasCachedPrice } from '../lib/model-family'
 import {
   DEFAULT_MODEL_VARIANT_RULES,
   groupModelFamilies,
   type ModelFamily,
 } from '../lib/model-variants'
-import type { PricingModel } from '../types'
+import type { BillingUsageSchema, PricingModel } from '../types'
 
 const TIME_OF_DAY_EXPR =
   'hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12 ? tier("peak", p * 3 + c * 9) : tier("off_peak", p * 1.5 + c * 4.5)'
@@ -491,5 +493,91 @@ describe('lines and prices by group', () => {
     expect(screen.getByText('Group kiro')).toBeVisible()
     expect(screen.getByRole('heading', { name: '按量' })).toBeVisible()
     expect(screen.queryByText('Group 按量')).toBeNull()
+  })
+})
+
+describe('models that ordinary requests pay at the model-level price', () => {
+  // A model a provider plugin relays, or an ordinary channel serves, next to
+  // a plugin that prices it as a task: ordinary requests pay the model-level
+  // price, which the single-model card shows, so the family views do too.
+  const seconds = {
+    seconds: { type: 'number', unit: 'second' },
+  } satisfies BillingUsageSchema
+  function dualUse(name: string, overrides: Partial<PricingModel> = {}) {
+    return model(name, {
+      model_ratio: 1.5,
+      completion_ratio: 4,
+      enable_groups: ['default', 'vip'],
+      group_ratio: { default: 1, vip: 2 },
+      billing_usage_schema: seconds,
+      ordinary_pricing: true,
+      billing_plugin_variants: [
+        {
+          plugin_key: 'video',
+          plugin_name: 'Video',
+          billing_mode: 'tiered_expr',
+          billing_expr: '',
+          billing_usage_schema: seconds,
+        },
+      ],
+      ...overrides,
+    })
+  }
+
+  it('prices the line chips and the variant row by the model ratio in each group', () => {
+    const family = familyOf(dualUse('vid'), dualUse('vid-thinking'))
+    renderWithI18n(
+      <>
+        <div data-testid='chips'>
+          <FamilyLinePrices family={family} layout='chips' />
+        </div>
+        <div data-testid='row'>
+          <VariantPrice model={family.variants[0].model} />
+        </div>
+      </>
+    )
+    expect(
+      within(screen.getByTestId('chips'))
+        .getAllByRole('listitem')
+        .map((chip) => chip.textContent)
+    ).toEqual(['defaultfrom $3 / 1M', 'vipfrom $6 / 1M'])
+    expect(screen.getByTestId('row')).toHaveTextContent(/Input\$3.*Output\$12/)
+    expect(screen.queryByText('Not configured')).toBeNull()
+  })
+
+  it('lists its groups apart and keeps its cached price for the table', () => {
+    const listed = dualUse('vid', { cache_ratio: 0.1 })
+    expect(getSplitPriceGroups(listed)).toEqual(['default', 'vip'])
+    expect(hasCachedPrice(listed)).toBe(true)
+  })
+
+  it('shows the per-request price in the group chips of its model card', () => {
+    const perRequest = model('img', {
+      quota_type: 1,
+      model_ratio: 0,
+      model_price: 0.04,
+      enable_groups: ['default', 'vip'],
+      group_ratio: { default: 1, vip: 2 },
+      ordinary_pricing: true,
+      billing_plugin_variants: [
+        {
+          plugin_key: 'images',
+          plugin_name: 'Images',
+          billing_mode: 'tiered_expr',
+          billing_expr: 'tier("images", u("image_count") * 0.05)',
+          billing_usage_schema: {
+            image_count: { type: 'number', unit: 'count' },
+          },
+        },
+      ],
+    })
+    renderWithI18n(<ModelCard model={perRequest} onClick={vi.fn()} />)
+    const chips = within(
+      screen.getByRole('group', { name: 'Group Pricing' })
+    ).getAllByRole('listitem')
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      'default$0.04 / request',
+      'vip$0.08 / request',
+    ])
   })
 })

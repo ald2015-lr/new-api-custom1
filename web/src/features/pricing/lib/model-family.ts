@@ -48,6 +48,7 @@ import {
   type ModelFamilyLine,
   type ModelVariant,
 } from './model-variants'
+import { withBasePricing } from './plugin-pricing'
 import { formatPrice, formatRequestPrice } from './price'
 
 // ----------------------------------------------------------------------------
@@ -139,9 +140,12 @@ function missing(reason: MissingPriceReason): PricePointResult {
  * `options.now` pins the time of time-of-day prices.
  */
 export function getModelPricePoint(
-  model: PricingModel,
+  listedModel: PricingModel,
   options: PricePointOptions
 ): PricePointResult {
+  // The model-level price when ordinary requests still pay it, like the
+  // model cards and table cells.
+  const model = withBasePricing(listedModel)
   const groupRatioMultiplier = getDynamicDisplayGroupRatio(
     model,
     options.selectedGroup
@@ -303,9 +307,10 @@ export function getModelPriceGroups(
  * depends on the group (special expression, not configured, no entries).
  */
 function groupPriceSignature(
-  model: PricingModel,
+  listedModel: PricingModel,
   group: string
 ): string | null {
+  const model = withBasePricing(listedModel)
   const summary = getDynamicPricingSummary(model, {
     tokenUnit: 'M',
     groupRatioMultiplier: getDynamicDisplayGroupRatio(model, group),
@@ -349,7 +354,8 @@ export function getSplitPriceGroups(
 }
 
 /** Whether the table's Cached column has a price to show for the model. */
-export function hasCachedPrice(model: PricingModel): boolean {
+export function hasCachedPrice(listedModel: PricingModel): boolean {
+  const model = withBasePricing(listedModel)
   const summary = getDynamicPricingSummary(model, { tokenUnit: 'M' })
   if (summary) {
     return (
