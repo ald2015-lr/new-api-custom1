@@ -279,7 +279,8 @@ func webTierRateLimit(maxRequestNum int, duration int64, mark string) func(c *gi
 const rateLimitedPageMaxRefresh = 60
 
 // rateLimitedPage is the page a rate-limited page load gets: a short note in
-// Chinese and English that reloads the page after refreshSeconds.
+// Chinese and English, formatted with the seconds after which it reloads the
+// page.
 const rateLimitedPage = `<!doctype html>
 <html lang="zh-CN">
 <head>
