@@ -153,6 +153,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`、`model/pricing_default.go`（按名称识别供应商的有序规则、供应商别名）、`controller/model_square_option.go`、`router/api-router.go` 与 `middleware/access_token_routes.go`（`PUT /api/option/model_square`）；前端 `features/pricing/lib/model-variants.ts`、`lib/model-name-fold.ts`、`lib/filters.ts`、`hooks/use-filters.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`components/pricing-sidebar.tsx`、`components/pricing-toolbar.tsx`、`features/system-settings/models/model-square-*`、`features/system-settings/api.ts` 与 `hooks/use-update-option.ts` | 模型广场按基础模型合并变体（见第十四节）；rc.51 起系列卡片、线路价格、分组价格和缓存价格列都先经上游的 `withBasePricing`，普通请求按模型价格计费的模型（`ordinary_pricing`）显示和单模型卡片一样的价格；合并版本号写法和带日期的快照、左侧筛选项开关、设置一次保存、按名称识别供应商（见第十四节） |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
+| 新文件 `web/src/features/system-settings/*/section-meta.ts`（8 个设置页各一个）、`features/system-settings/utils/section-meta.ts`、`web/src/lib/build-version-meta.ts`，以及 `features/system-settings/utils/section-registry.ts`、`web/src/routes/_authenticated/system-settings/` 下的 16 个路由文件、`components/layout/config/system-settings.config.ts`、`lib/build-metadata.ts`、`rsbuild.config.ts`（`splitChunks`、`runtimeChunk`、`html.meta`） | 系统设置代码不进首屏（见第六节）：路由守卫和侧栏只引用各设置页的 `section-meta.ts`。上游给某个设置页的 `section-registry.tsx` 增删或调整分区时，同步改旁边的 `section-meta.ts`，`section-meta.test.tsx` 会检查两者的分区 id、顺序、默认分区和侧栏链接是否一致；路由文件或侧栏重新引用 `section-registry` 时测试会失败。构建版本号写在 `index.html` 的 `<meta name="new-api-version">` 里，不再编进 JS |
 | `.github/workflows/ci.yml` | 前端作业的 `timeout-minutes` 从上游的 10 放宽到 20：rc.51 起前端测试从 243 个文件增加到 274 个、耗时多约 19%，较慢的 GitHub runner 上 10 分钟跑不完 |
 | `middleware/rate-limit.go`（`AuthRefreshRateLimit`、Redis 出错时的内存回退与限频日志）、`common/{constants,init}.go`、`router/api-router.go`（刷新路由）、`common/log_text.zh-CN.json` | 刷新登录状态单独限流 `AUTH_REFRESH_RATE_LIMIT*`；Redis 出错时 API 与按用户限流改用内存计数 `RATE_LIMIT_REDIS_FAILURE`（见第六节、第二十节） |
 | `model/utils.go`（`FlushBatchUpdates`、`batchFlushMu`）、`main.go`（`srv.Shutdown` 之后调用） | 停机前写入批量更新中尚未落库的额度变化（见第二十节第 5 条） |
@@ -295,6 +296,9 @@ docker run -d --name new-api-alpha-us --restart always \
 - 七种语言包原本全部打进首屏同步 chunk（约 2.5 MB 原始 / 770 KB gzip），现在只内置英文，当前语言按需加载
 - 登录态刷新请求加了 30 秒超时，卡住时以临时错误结束而不是让首屏一直等（普通 API 客户端不加，渠道测试等长请求不受影响）
 - 每个响应都带 `X-New-Api-Version`；前端发现与自身构建版本不一致时弹一次「有新版本，请刷新」提示，避免用户在旧页面里一路点到已失效的 chunk
+- 系统设置的代码不再打进首屏入口：路由守卫和侧栏只用各设置页的分区元数据，设置页本身随各自页面按需下载。所有页面首次打开都要下载的 JS/CSS 从约 812 KB 降到约 293 KB（gzip，不含语言包）
+- chunk 加载器和全部 chunk 文件名的对照表单独放在 `runtime.*.js`，构建版本号写进 `index.html` 的 `<meta name="new-api-version">`（`index.html` 不缓存）：发布只改了某个页面的新版本后，老用户只需重新下载约 19 KB 的 runtime 和改动的那个页面（新增了界面文字时还有当前语言的语言包），不再重新下载约 317 KB 的入口文件；新版本提示照常按这个版本号和服务器的 `X-New-Api-Version` 比较
+- 按需加载的公共代码合并成较大的文件，控制台各页首次打开约 17–22 个 JS/CSS 文件（同一批最多约 14 个），网站还没开 HTTP/2 时也不会因为文件太碎多排几轮
 - 构建产物里有 `.br`（前端构建时生成）的静态文件，对接受 brotli 的浏览器直接返回 `.br`，比 gzip 再小约 20%；每种编码各有自己的 ETag（`"<路径>"`、`"<路径>-gzip"`、`"<路径>-br"`），可压缩文件的所有响应都带 `Vary: Accept-Encoding`，旧版本发出的 ETag 仍然能得到 304
 - 打开页面被每 IP 页面限流拦下时，浏览器不再显示空白错误页，而是「访问过于频繁，N 秒后自动重试」的中英文提示页，N 秒（最多 60 秒）后自动刷新；脚本、样式、接口请求仍然是空的 429
 
@@ -1037,7 +1041,7 @@ sysctl net.ipv4.tcp_congestion_control    # 输出 bbr 即已生效
 
 撤销：删除这个文件，再执行 `sysctl -w net.ipv4.tcp_congestion_control=cubic net.ipv4.tcp_slow_start_after_idle=1`。nginx 跑在容器里时，改完重启那个容器。
 
-**开启 HTTP/2。** HTTP/1.1 下浏览器对一个站点最多同时开 6 个连接，控制台首页、渠道页一次要发 7–8 个请求，多出来的要多等一个往返。nginx 1.25.1 及以上在 `server` 里写 `http2 on;`，更老的版本写 `listen 443 ssl http2;`。宝塔开启 SSL 后一般已经带 HTTP/2，用第 1 条的 curl 命令确认显示的是 `HTTP/2`。HTTP/3（QUIC）在国内运营商上常被限速，不必追求。
+**开启 HTTP/2。** HTTP/1.1 下浏览器对一个站点最多同时开 6 个连接，控制台各页首次打开时同一批要下载 7–14 个 JS/CSS 文件，超过 6 个的部分要多等一个往返。nginx 1.25.1 及以上在 `server` 里写 `http2 on;`，更老的版本写 `listen 443 ssl http2;`。宝塔开启 SSL 后一般已经带 HTTP/2，用第 1 条的 curl 命令确认显示的是 `HTTP/2`。HTTP/3（QUIC）在国内运营商上常被限速，不必追求。
 
 **两层 nginx（国内或香港反代 → 海外 nginx → new-api，见第十三节）时，外层要复用到源站的连接。** nginx 默认每个请求都对源站新建连接，跨境一次 TCP + TLS 握手要 2–3 个往返，比请求本身还慢。外层这样写：
 
