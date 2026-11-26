@@ -137,7 +137,7 @@ it('deleting a user sends the request only with a single-use proof for that user
   await completeTwoFactorVerification()
   await waitFor(() =>
     expect(del).toHaveBeenCalledWith(
-      '/api/user/2/',
+      '/api/user/2',
       expect.objectContaining({
         headers: { 'X-Security-Proof': 'delete-proof' },
         singleUseAuthorization: true,

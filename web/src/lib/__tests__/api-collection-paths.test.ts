@@ -46,6 +46,12 @@ const BARE_COLLECTION_PATH = new RegExp(
   String.raw`['"\x60]/api/(${SLASH_COLLECTIONS.join('|')})(?=['"\x60?]|\$\{)`
 )
 
+// Their items are registered as "<group>/:id", without the slash, so a
+// request to "<group>/<id>/" costs the same extra redirect.
+const ITEM_PATH_WITH_SLASH = new RegExp(
+  String.raw`['"\x60]/api/(${SLASH_COLLECTIONS.join('|')})/\$\{[^}]+\}/(?=['"\x60?])`
+)
+
 const SRC = resolve(import.meta.dirname, '../..')
 
 function sourceFiles(dir: string, files: string[] = []): string[] {
@@ -83,12 +89,32 @@ describe('collection endpoints', () => {
     for (const line of allowed) expect(line).not.toMatch(BARE_COLLECTION_PATH)
   })
 
-  test('are called with the trailing slash everywhere in the app', () => {
+  test('the guard recognises item paths that end in a slash', () => {
+    const offending = [
+      'api.delete(`/api/token/${id}/`)',
+      '`/api/user/${id}/`,',
+      'api.delete(`/api/redemption/${id}/?force=1`)',
+    ]
+    const allowed = [
+      'api.delete(`/api/token/${id}`)',
+      'api.post(`/api/token/${id}/key`)',
+      '`/api/user/${userId}/oauth/bindings/${providerId}`',
+      'api.get(`/api/channel/${id}`)',
+      `api.get('/api/channel/', { params })`,
+    ]
+    for (const line of offending) expect(line).toMatch(ITEM_PATH_WITH_SLASH)
+    for (const line of allowed) expect(line).not.toMatch(ITEM_PATH_WITH_SLASH)
+  })
+
+  test('are called as the server registers them everywhere in the app', () => {
     const violations: string[] = []
     for (const file of sourceFiles(SRC)) {
       const lines = readFileSync(file, 'utf8').split('\n')
       lines.forEach((line, index) => {
-        if (BARE_COLLECTION_PATH.test(line)) {
+        if (
+          BARE_COLLECTION_PATH.test(line) ||
+          ITEM_PATH_WITH_SLASH.test(line)
+        ) {
           violations.push(`${relative(SRC, file)}:${index + 1}: ${line.trim()}`)
         }
       })
