@@ -217,6 +217,7 @@
     "A name must be at most 64 characters": "Tên tối đa 64 ký tự",
     "A new version is available. Reload to update.": "Đã có phiên bản mới. Tải lại để cập nhật.",
     "A new version may have been deployed. Please reload the page.": "Có thể phiên bản mới đã được triển khai. Vui lòng tải lại trang.",
+    "Check your network connection and try again. If the site was just updated, reload the page.": "Hãy kiểm tra kết nối mạng rồi thử lại. Nếu trang web vừa được cập nhật, hãy tải lại trang.",
     "A number": "Một chữ số",
     "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.": "Số (ví dụ -128) là ngân sách token suy nghĩ. Mô hình chỉ nhận mức suy nghĩ (Gemini 3 trở về sau) sẽ được quy đổi ngân sách sang mức tương ứng; 128 tương ứng với low.",
     "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.": "Khóa truy cập tạo cho www.example.com không thể dùng trên example.com. Hãy duy trì trang web cũ để người dùng vẫn có thể xác minh tại đó.",

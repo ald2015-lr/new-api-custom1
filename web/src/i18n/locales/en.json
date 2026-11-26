@@ -217,6 +217,7 @@
     "A name must be at most 64 characters": "A name must be at most 64 characters",
     "A new version is available. Reload to update.": "A new version is available. Reload to update.",
     "A new version may have been deployed. Please reload the page.": "A new version may have been deployed. Please reload the page.",
+    "Check your network connection and try again. If the site was just updated, reload the page.": "Check your network connection and try again. If the site was just updated, reload the page.",
     "A number": "A number",
     "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.": "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.",
     "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.": "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.",

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { lazy, Suspense } from 'react'
+import { Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { sideDrawerContentClassName } from '@/components/drawer-layout'
@@ -31,12 +31,13 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
 
 import { loadModelDetails } from '../lib/model-details-chunks'
 import type { ModelDetailsContentProps } from './model-details'
 import { ModelDetailsSkeleton } from './model-details-skeleton'
 
-const ModelDetailsContent = lazy(() =>
+const ModelDetailsContent = lazyWithRetry(() =>
   loadModelDetails().then((module) => ({
     default: module.ModelDetailsContent,
   }))
@@ -50,7 +51,8 @@ export interface ModelDetailsDrawerProps extends ModelDetailsContentProps {
 /**
  * The model details beside the model square. The drawer opens at once; its
  * content is a chunk of its own (prefetched on intent and at idle, see
- * model-details-chunks.ts) and shows a skeleton while that loads.
+ * model-details-chunks.ts) and shows a skeleton while that loads. A failed
+ * load offers a retry, and the next opening loads it again.
  */
 export function ModelDetailsDrawer(props: ModelDetailsDrawerProps) {
   const { t } = useTranslation()

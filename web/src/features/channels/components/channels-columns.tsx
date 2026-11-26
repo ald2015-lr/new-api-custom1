@@ -27,7 +27,7 @@ import {
   Shuffle,
   SlidersHorizontal,
 } from 'lucide-react'
-import { lazy, useState, useMemo, useContext, useEffect } from 'react'
+import { useState, useMemo, useContext, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -59,6 +59,7 @@ import {
   formatTimestampToDate,
 } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
 import {
   createServerError,
   translateServerText,
@@ -113,12 +114,12 @@ import { NumericSpinnerInput } from './numeric-spinner-input'
 
 // The balance dialogs are chunks of their own (the raw-response viewer brings
 // a code editor), loaded when a row first opens one.
-const BalanceQueryDialog = lazy(() =>
+const BalanceQueryDialog = lazyWithRetry(() =>
   import('./dialogs/balance-query-dialog').then((module) => ({
     default: module.BalanceQueryDialog,
   }))
 )
-const CodexUsageDialog = lazy(() =>
+const CodexUsageDialog = lazyWithRetry(() =>
   import('./dialogs/codex-usage-dialog').then((module) => ({
     default: module.CodexUsageDialog,
   }))

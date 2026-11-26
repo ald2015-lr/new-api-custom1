@@ -217,6 +217,7 @@
     "A name must be at most 64 characters": "Un nom ne doit pas dépasser 64 caractères",
     "A new version is available. Reload to update.": "Une nouvelle version est disponible. Rechargez pour mettre à jour.",
     "A new version may have been deployed. Please reload the page.": "Une nouvelle version a peut-être été déployée. Veuillez recharger la page.",
+    "Check your network connection and try again. If the site was just updated, reload the page.": "Vérifiez votre connexion réseau et réessayez. Si le site vient d'être mis à jour, rechargez la page.",
     "A number": "Un chiffre",
     "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.": "Un nombre (par exemple -128) est un budget de tokens de réflexion. Les modèles qui n'acceptent que des niveaux de réflexion (Gemini 3 et suivants) reçoivent le niveau correspondant au budget ; 128 correspond à low.",
     "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.": "Une clé d’accès créée pour www.example.com ne fonctionne pas sur example.com. Gardez l’ancien site accessible pour permettre aux utilisateurs de s’y authentifier.",

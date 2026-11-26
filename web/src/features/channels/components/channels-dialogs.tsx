@@ -16,73 +16,73 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { lazy } from 'react'
-
 import { LazyDialog } from '@/components/lazy-dialog'
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
 
 import { CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG } from '../constants'
 import { loadChannelMutateDrawer } from '../lib/channel-dialog-chunks'
 import { useChannels } from './channels-provider'
 
 // Every dialog and drawer is a chunk of its own, loaded when it first opens
-// (see LazyDialog), so the channel list does not download them, nor the code
-// editor of the balance query, up front.
-const ChannelMutateDrawer = lazy(() =>
+// (see LazyDialog; after a failed load, the next opening loads it again), so
+// the channel list does not download them, nor the code editor of the
+// balance query, up front.
+const ChannelMutateDrawer = lazyWithRetry(() =>
   loadChannelMutateDrawer().then((module) => ({
     default: module.ChannelMutateDrawer,
   }))
 )
-const BalanceQueryDialog = lazy(() =>
+const BalanceQueryDialog = lazyWithRetry(() =>
   import('./dialogs/balance-query-dialog').then((module) => ({
     default: module.BalanceQueryDialog,
   }))
 )
-const ChannelQuotaLimitDialog = lazy(() =>
+const ChannelQuotaLimitDialog = lazyWithRetry(() =>
   import('./dialogs/channel-quota-limit-dialog').then((module) => ({
     default: module.ChannelQuotaLimitDialog,
   }))
 )
-const ChannelTestDialog = lazy(() =>
+const ChannelTestDialog = lazyWithRetry(() =>
   import('./dialogs/channel-test-dialog').then((module) => ({
     default: module.ChannelTestDialog,
   }))
 )
-const CopyChannelDialog = lazy(() =>
+const CopyChannelDialog = lazyWithRetry(() =>
   import('./dialogs/copy-channel-dialog').then((module) => ({
     default: module.CopyChannelDialog,
   }))
 )
-const EditTagDialog = lazy(() =>
+const EditTagDialog = lazyWithRetry(() =>
   import('./dialogs/edit-tag-dialog').then((module) => ({
     default: module.EditTagDialog,
   }))
 )
-const FetchModelsDialog = lazy(() =>
+const FetchModelsDialog = lazyWithRetry(() =>
   import('./dialogs/fetch-models-dialog').then((module) => ({
     default: module.FetchModelsDialog,
   }))
 )
-const InferenceStatusDialog = lazy(() =>
+const InferenceStatusDialog = lazyWithRetry(() =>
   import('./dialogs/inference-status-dialog').then((module) => ({
     default: module.InferenceStatusDialog,
   }))
 )
-const MultiKeyManageDialog = lazy(() =>
+const MultiKeyManageDialog = lazyWithRetry(() =>
   import('./dialogs/multi-key-manage-dialog').then((module) => ({
     default: module.MultiKeyManageDialog,
   }))
 )
-const OllamaModelsDialog = lazy(() =>
+const OllamaModelsDialog = lazyWithRetry(() =>
   import('./dialogs/ollama-models-dialog').then((module) => ({
     default: module.OllamaModelsDialog,
   }))
 )
-const TagBatchEditDialog = lazy(() =>
+const TagBatchEditDialog = lazyWithRetry(() =>
   import('./dialogs/tag-batch-edit-dialog').then((module) => ({
     default: module.TagBatchEditDialog,
   }))
 )
-const UpstreamUpdateDialog = lazy(() =>
+const UpstreamUpdateDialog = lazyWithRetry(() =>
   import('./dialogs/upstream-update-dialog').then((module) => ({
     default: module.UpstreamUpdateDialog,
   }))

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Component, type ReactNode } from 'react'
+import { Component, createContext, useContext, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ErrorState } from '@/components/error-state'
@@ -25,6 +25,10 @@ import {
   isChunkLoadError,
   reloadOnceForChunkError,
 } from '@/lib/chunk-load-error'
+import { retryLazyAfterError } from '@/lib/lazy-with-retry'
+
+/** Clears the failure of the boundary whose fallback is on screen. */
+const RetryLazyChunkContext = createContext<(() => void) | null>(null)
 
 type LazyChunkBoundaryProps = {
   children: ReactNode
@@ -35,7 +39,11 @@ type LazyChunkBoundaryProps = {
   fallback?: ReactNode
   /** Called when the code could not be loaded and no automatic reload is due. */
   onChunkError?: (error: unknown) => void
-  /** A new value clears a failure, so the next render loads the code again. */
+  /**
+   * A new value clears a failure, so the next render loads the code again
+   * (a part made with lazyWithRetry imports it again). Change it only for a
+   * new attempt, such as each opening of a dialog.
+   */
   resetKey?: unknown
 }
 
@@ -50,8 +58,10 @@ type LazyChunkBoundaryState = {
  * Error boundary for a lazily loaded part of a page. A chunk that cannot be
  * loaded (a deploy replaced it, or the network failed) gets the app's one
  * automatic reload, as a route chunk does; when no reload is due, `fallback`
- * stands in for that part and the rest of the page stays usable. Any other
- * error is passed on unchanged to the next boundary up.
+ * stands in for that part and the rest of the page stays usable. A part made
+ * with lazyWithRetry loads again at its next attempt: a new `resetKey`, a new
+ * mount, or the Retry of ChunkLoadErrorNotice. Any other error is passed on
+ * unchanged to the next boundary up.
  */
 export class LazyChunkBoundary extends Component<
   LazyChunkBoundaryProps,
@@ -85,6 +95,9 @@ export class LazyChunkBoundary extends Component<
 
   componentDidCatch(error: unknown) {
     if (!isChunkLoadError(error)) return
+    // The fallback now stands in for the part, so it can import again at its
+    // next render without a loop.
+    retryLazyAfterError(error)
     // Commit phase: the page that is about to reload never paints a fallback.
     if (reloadOnceForChunkError(error)) {
       this.setState({ reloading: true })
@@ -93,24 +106,37 @@ export class LazyChunkBoundary extends Component<
     this.props.onChunkError?.(error)
   }
 
+  private retry = () => {
+    this.setState({ error: null, failed: false, reloading: false })
+  }
+
   render() {
     if (!this.state.failed) return this.props.children
     if (!isChunkLoadError(this.state.error)) throw this.state.error
     if (this.state.reloading) return null
-    return this.props.fallback ?? null
+    return (
+      <RetryLazyChunkContext.Provider value={this.retry}>
+        {this.props.fallback ?? null}
+      </RetryLazyChunkContext.Provider>
+    )
   }
 }
 
-/** The usual `fallback` of a lazily loaded part: what failed, and a reload. */
+/**
+ * The usual `fallback` of a lazily loaded part: what failed, a retry in place
+ * (inside a LazyChunkBoundary) and a reload.
+ */
 export function ChunkLoadErrorNotice(props: { className?: string }) {
   const { t } = useTranslation()
+  const retry = useContext(RetryLazyChunkContext)
   return (
     <ErrorState
       className={props.className}
       title={t('Failed to load part of the page')}
       description={t(
-        'A new version may have been deployed. Please reload the page.'
+        'Check your network connection and try again. If the site was just updated, reload the page.'
       )}
+      onRetry={retry ?? undefined}
       action={
         <Button
           variant='outline'

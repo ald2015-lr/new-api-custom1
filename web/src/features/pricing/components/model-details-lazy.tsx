@@ -16,13 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { lazy, Suspense, type ComponentProps } from 'react'
+import { Suspense, type ComponentProps } from 'react'
 
 import {
   ChunkLoadErrorNotice,
   LazyChunkBoundary,
 } from '@/components/lazy-chunk-boundary'
 import { Skeleton } from '@/components/ui/skeleton'
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
 
 import {
   loadModelDetailsCharts,
@@ -34,17 +35,17 @@ import type {
 } from './model-details-charts'
 import type { ModelDetailsCodeSample } from './model-details-code-sample'
 
-const LatencyTrendChartImpl = lazy(() =>
+const LatencyTrendChartImpl = lazyWithRetry(() =>
   loadModelDetailsCharts().then((module) => ({
     default: module.LatencyTrendChart,
   }))
 )
-const UptimeTrendChartImpl = lazy(() =>
+const UptimeTrendChartImpl = lazyWithRetry(() =>
   loadModelDetailsCharts().then((module) => ({
     default: module.UptimeTrendChart,
   }))
 )
-const CodeSampleImpl = lazy(() =>
+const CodeSampleImpl = lazyWithRetry(() =>
   loadModelDetailsCodeSample().then((module) => ({
     default: module.ModelDetailsCodeSample,
   }))

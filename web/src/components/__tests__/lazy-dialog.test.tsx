@@ -17,9 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { act, render, screen } from '@testing-library/react'
-import { lazy, type ComponentType } from 'react'
+import type { ComponentType } from 'react'
 import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
 
 import { LazyDialog } from '../lazy-dialog'
 
@@ -54,7 +56,7 @@ function deferredDialog() {
         }
       })
   )
-  return { Dialog: lazy(load), load, settle: () => settle }
+  return { Dialog: lazyWithRetry(load), load, settle: () => settle }
 }
 
 const reload = vi.fn()
@@ -97,7 +99,7 @@ describe('LazyDialog', () => {
   })
 
   test('a closed dialog stays mounted, so it can play its closing animation', async () => {
-    const { Dialog, settle } = deferredDialog()
+    const { Dialog, load, settle } = deferredDialog()
     const { rerender } = render(
       <LazyDialog open onLoadError={vi.fn()}>
         <Dialog open />
@@ -112,6 +114,15 @@ describe('LazyDialog', () => {
     )
 
     expect(screen.getByRole('dialog')).toHaveAttribute('data-open', 'false')
+
+    // Opening it again loads nothing: the dialog that loaded stays.
+    rerender(
+      <LazyDialog open onLoadError={vi.fn()}>
+        <Dialog open />
+      </LazyDialog>
+    )
+    expect(screen.getByRole('dialog')).toHaveAttribute('data-open', 'true')
+    expect(load).toHaveBeenCalledTimes(1)
   })
 
   test('a chunk that cannot load gets the one automatic reload', async () => {
@@ -129,10 +140,10 @@ describe('LazyDialog', () => {
     expect(onLoadError).not.toHaveBeenCalled()
   })
 
-  test('when the reload was already spent, the dialog closes and a toast offers a reload', async () => {
+  test('when the reload was already spent, the dialog closes, a toast offers a reload, and opening it again loads it again', async () => {
     window.sessionStorage.setItem(`newapi:chunk-reload:${CHUNK_URL}`, '1')
     const notify = vi.spyOn(toast, 'error').mockReturnValue('toast')
-    const { Dialog, settle } = deferredDialog()
+    const { Dialog, load, settle } = deferredDialog()
     const onLoadError = vi.fn()
     const { rerender } = render(
       <LazyDialog open onLoadError={onLoadError}>
@@ -151,20 +162,48 @@ describe('LazyDialog', () => {
       })
     )
 
-    // Closing does not try again; opening again does, and says so again.
+    // Closing does not try again; opening again loads the chunk again.
     rerender(
       <LazyDialog open={false} onLoadError={onLoadError}>
         <Dialog open={false} />
       </LazyDialog>
     )
     expect(notify).toHaveBeenCalledTimes(1)
+    expect(load).toHaveBeenCalledTimes(1)
     rerender(
       <LazyDialog open onLoadError={onLoadError}>
         <Dialog open />
       </LazyDialog>
     )
-    await act(async () => undefined)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('status')).toHaveTextContent('Loading...')
+
+    // Still unreachable: the same toast again, and the dialog closes.
+    await act(async () => settle().reject(chunkLoadError()))
     expect(notify).toHaveBeenCalledTimes(2)
     expect(onLoadError).toHaveBeenCalledTimes(2)
+
+    // The network is back: the next opening shows the dialog.
+    rerender(
+      <LazyDialog open={false} onLoadError={onLoadError}>
+        <Dialog open={false} />
+      </LazyDialog>
+    )
+    rerender(
+      <LazyDialog open onLoadError={onLoadError}>
+        <Dialog open />
+      </LazyDialog>
+    )
+    expect(load).toHaveBeenCalledTimes(3)
+    await act(async () => settle().resolve())
+    expect(screen.getByRole('dialog')).toHaveAttribute('data-open', 'true')
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify).toHaveBeenLastCalledWith(
+      'Failed to load part of the page',
+      expect.objectContaining({
+        description:
+          'Check your network connection and try again. If the site was just updated, reload the page.',
+      })
+    )
   })
 })

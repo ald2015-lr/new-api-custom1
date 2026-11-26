@@ -42,7 +42,7 @@ type LazyDialogProps = {
   open: boolean
   /** Closes the dialog after its code could not be loaded. */
   onLoadError: () => void
-  /** The dialog, a React.lazy component. */
+  /** The dialog, a component made with lazyWithRetry (lib/lazy-with-retry). */
   children: ReactNode
 }
 
@@ -52,13 +52,15 @@ type LazyDialogProps = {
  * always there, so its closing animation and the state it keeps between
  * openings are unchanged. While the code downloads a small loading notice
  * shows. When the code cannot be loaded, the page gets its one automatic
- * reload; when no reload is due, the dialog closes and a toast offers one.
+ * reload; when no reload is due, the dialog closes and a toast offers one,
+ * and the next opening loads the code again.
  */
 export function LazyDialog(props: LazyDialogProps) {
   const { t } = useTranslation()
   const [mounted, setMounted] = useState(props.open)
   const [wasOpen, setWasOpen] = useState(props.open)
-  // Every opening gets a fresh attempt; closing does not retry a failure.
+  // Every opening gets a fresh attempt (a dialog that loaded stays loaded);
+  // closing does not retry a failure.
   const [attempt, setAttempt] = useState(0)
   if (props.open !== wasOpen) {
     setWasOpen(props.open)
@@ -75,7 +77,7 @@ export function LazyDialog(props: LazyDialogProps) {
       onChunkError={() => {
         toast.error(t('Failed to load part of the page'), {
           description: t(
-            'A new version may have been deployed. Please reload the page.'
+            'Check your network connection and try again. If the site was just updated, reload the page.'
           ),
           action: {
             label: t('Reload page'),

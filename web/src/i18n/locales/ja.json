@@ -217,6 +217,7 @@
     "A name must be at most 64 characters": "名前は 64 文字以内にしてください",
     "A new version is available. Reload to update.": "新しいバージョンが利用可能です。再読み込みして更新してください。",
     "A new version may have been deployed. Please reload the page.": "新しいバージョンがデプロイされた可能性があります。ページを再読み込みしてください。",
+    "Check your network connection and try again. If the site was just updated, reload the page.": "ネットワーク接続を確認して、もう一度お試しください。サイトが更新された直後の場合は、ページを再読み込みしてください。",
     "A number": "数字",
     "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.": "数値（例: -128）は思考トークンの予算です。レベルでしか設定できないモデル（Gemini 3 以降）では予算に応じたレベルに換算され、128 は low になります。",
     "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.": "www.example.com で作成したパスキーは example.com では使用できません。ユーザーが引き続き認証できるよう、以前のウェブサイトを維持してください。",

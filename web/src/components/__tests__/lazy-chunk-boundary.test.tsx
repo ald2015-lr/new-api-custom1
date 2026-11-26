@@ -16,10 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { Component, type ReactNode } from 'react'
+import { Component, Suspense, type ComponentType, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
 
 import { ChunkLoadErrorNotice, LazyChunkBoundary } from '../lazy-chunk-boundary'
 
@@ -35,6 +37,17 @@ function chunkLoadError(): Error {
 
 function Throws(props: { error: unknown }): ReactNode {
   throw props.error
+}
+
+/** A lazy part whose chunk fails to load while `network.up` is false. */
+function flakyPart() {
+  const network = { up: false }
+  const load = vi.fn((): Promise<{ default: ComponentType }> =>
+    network.up
+      ? Promise.resolve({ default: () => <p>loaded</p> })
+      : Promise.reject(chunkLoadError())
+  )
+  return { Part: lazyWithRetry(load), load, network }
 }
 
 class OuterBoundary extends Component<
@@ -127,22 +140,52 @@ describe('LazyChunkBoundary', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
-  test('a new resetKey renders the part again', () => {
+  test('a new resetKey loads the part that failed again', async () => {
     window.sessionStorage.setItem(`newapi:chunk-reload:${CHUNK_URL}`, '1')
-    const { rerender } = render(
-      <LazyChunkBoundary fallback={<p>fallback</p>} resetKey={1}>
-        <Throws error={chunkLoadError()} />
+    const { Part, load, network } = flakyPart()
+    const view = (resetKey: number) => (
+      <LazyChunkBoundary fallback={<p>fallback</p>} resetKey={resetKey}>
+        <Suspense fallback={<p>loading</p>}>
+          <Part />
+        </Suspense>
       </LazyChunkBoundary>
     )
+    const { rerender } = render(view(1))
+    await act(async () => undefined)
     expect(screen.getByText('fallback')).toBeVisible()
 
-    rerender(
-      <LazyChunkBoundary fallback={<p>fallback</p>} resetKey={2}>
-        <p>loaded</p>
+    network.up = true
+    rerender(view(2))
+    expect(await screen.findByText('loaded')).toBeVisible()
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  test('the chunk error notice in its place retries in place', async () => {
+    window.sessionStorage.setItem(`newapi:chunk-reload:${CHUNK_URL}`, '1')
+    const user = userEvent.setup()
+    const { Part, load, network } = flakyPart()
+    render(
+      <LazyChunkBoundary fallback={<ChunkLoadErrorNotice />}>
+        <Suspense fallback={<p>loading</p>}>
+          <Part />
+        </Suspense>
       </LazyChunkBoundary>
     )
+    expect(
+      await screen.findByText('Failed to load part of the page')
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        'Check your network connection and try again. If the site was just updated, reload the page.'
+      )
+    ).toBeVisible()
 
-    expect(screen.getByText('loaded')).toBeVisible()
+    network.up = true
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText('loaded')).toBeVisible()
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(reload).not.toHaveBeenCalled()
   })
 })
 
@@ -151,6 +194,8 @@ test('the chunk error notice offers a reload', async () => {
   render(<ChunkLoadErrorNotice />)
 
   expect(screen.getByText('Failed to load part of the page')).toBeVisible()
+  // Outside a boundary there is nothing to retry in place.
+  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
   await user.click(screen.getByRole('button', { name: 'Reload page' }))
 
   expect(reload).toHaveBeenCalledTimes(1)

@@ -217,6 +217,7 @@
     "A name must be at most 64 characters": "名称最多 64 个字符",
     "A new version is available. Reload to update.": "有新版本可用，刷新以更新。",
     "A new version may have been deployed. Please reload the page.": "可能已部署新版本，请刷新页面。",
+    "Check your network connection and try again. If the site was just updated, reload the page.": "请检查网络连接后重试；如果网站刚刚更新，请刷新页面。",
     "A number": "包含数字",
     "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.": "数字（如 -128）是思考 tokens 预算，只能按档位设置的模型（Gemini 3 及以后）会按预算换算成档位，128 对应 low。",
     "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.": "为 www.example.com 创建的通行密钥无法在 example.com 使用。请保留旧网站，让用户仍能在那里验证。",
