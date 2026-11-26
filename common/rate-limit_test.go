@@ -193,34 +193,50 @@ func TestInMemoryRateLimiterRequestRejectsWithoutWalkingTheWindow(t *testing.T) 
 }
 
 // The session refresh limit is on whenever the critical limit is, unless
-// AUTH_REFRESH_RATE_LIMIT_ENABLE says otherwise; a count or window that is
-// not positive falls back to the default.
+// AUTH_REFRESH_RATE_LIMIT_ENABLE says otherwise. Without
+// AUTH_REFRESH_RATE_LIMIT, refreshes get 300 per window or what the critical
+// limit they used to share allowed in that window, whichever is more; a count
+// or window that is not positive falls back to that default.
 func TestAuthRefreshRateLimitEnv(t *testing.T) {
-	previous := []any{CriticalRateLimitEnable, AuthRefreshRateLimitEnable, AuthRefreshRateLimitNum, AuthRefreshRateLimitDuration}
+	previous := []any{CriticalRateLimitEnable, AuthRefreshRateLimitEnable, AuthRefreshRateLimitNum, AuthRefreshRateLimitDuration, CriticalRateLimitNum, CriticalRateLimitDuration}
 	t.Cleanup(func() {
 		CriticalRateLimitEnable, AuthRefreshRateLimitEnable = previous[0].(bool), previous[1].(bool)
 		AuthRefreshRateLimitNum, AuthRefreshRateLimitDuration = previous[2].(int), previous[3].(int64)
+		CriticalRateLimitNum, CriticalRateLimitDuration = previous[4].(int), previous[5].(int64)
 	})
+	type critical struct {
+		on     bool
+		num    int
+		window int64
+	}
+	defaults := critical{on: true, num: 20, window: 1200}
 	for _, tc := range []struct {
 		name         string
-		critical     bool
+		critical     critical
 		env          map[string]string
 		wantEnabled  bool
 		wantNum      int
 		wantDuration int64
 	}{
-		{name: "defaults", critical: true, wantEnabled: true, wantNum: 300, wantDuration: 1200},
-		{name: "critical limit off", critical: false, wantEnabled: false, wantNum: 300, wantDuration: 1200},
-		{name: "on with the critical limit off", critical: false, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT_ENABLE": "true"}, wantEnabled: true, wantNum: 300, wantDuration: 1200},
-		{name: "off", critical: true, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT_ENABLE": "false"}, wantEnabled: false, wantNum: 300, wantDuration: 1200},
-		{name: "custom budget", critical: true, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT": "50", "AUTH_REFRESH_RATE_LIMIT_DURATION": "600"}, wantEnabled: true, wantNum: 50, wantDuration: 600},
-		{name: "not positive", critical: true, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT": "0", "AUTH_REFRESH_RATE_LIMIT_DURATION": "-5"}, wantEnabled: true, wantNum: 300, wantDuration: 1200},
+		{name: "defaults", critical: defaults, wantEnabled: true, wantNum: 300, wantDuration: 1200},
+		{name: "critical limit off", critical: critical{num: 20, window: 1200}, wantEnabled: false, wantNum: 300, wantDuration: 1200},
+		{name: "on with the critical limit off", critical: critical{num: 20, window: 1200}, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT_ENABLE": "true"}, wantEnabled: true, wantNum: 300, wantDuration: 1200},
+		{name: "off", critical: defaults, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT_ENABLE": "false"}, wantEnabled: false, wantNum: 300, wantDuration: 1200},
+		{name: "custom budget", critical: defaults, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT": "50", "AUTH_REFRESH_RATE_LIMIT_DURATION": "600"}, wantEnabled: true, wantNum: 50, wantDuration: 600},
+		{name: "not positive", critical: defaults, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT": "0", "AUTH_REFRESH_RATE_LIMIT_DURATION": "-5"}, wantEnabled: true, wantNum: 300, wantDuration: 1200},
+		{name: "a raised critical limit carries over", critical: critical{on: true, num: 1000, window: 1200}, wantEnabled: true, wantNum: 1000, wantDuration: 1200},
+		{name: "a shorter critical window is scaled to the refresh window", critical: critical{on: true, num: 20, window: 60}, wantEnabled: true, wantNum: 400, wantDuration: 1200},
+		{name: "a critical limit below the default", critical: critical{on: true, num: 60, window: 1200}, wantEnabled: true, wantNum: 300, wantDuration: 1200},
+		{name: "scaled to a custom refresh window", critical: critical{on: true, num: 1000, window: 1200}, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT_DURATION": "600"}, wantEnabled: true, wantNum: 500, wantDuration: 600},
+		{name: "an explicit budget is kept", critical: critical{on: true, num: 1000, window: 1200}, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT": "50"}, wantEnabled: true, wantNum: 50, wantDuration: 1200},
+		{name: "an explicit budget that is not positive", critical: critical{on: true, num: 1000, window: 1200}, env: map[string]string{"AUTH_REFRESH_RATE_LIMIT": "0"}, wantEnabled: true, wantNum: 1000, wantDuration: 1200},
+		{name: "a critical window that is not positive", critical: critical{on: true, num: 1000, window: 0}, wantEnabled: true, wantNum: 300, wantDuration: 1200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, name := range []string{"AUTH_REFRESH_RATE_LIMIT_ENABLE", "AUTH_REFRESH_RATE_LIMIT", "AUTH_REFRESH_RATE_LIMIT_DURATION"} {
 				t.Setenv(name, tc.env[name])
 			}
-			CriticalRateLimitEnable = tc.critical
+			CriticalRateLimitEnable, CriticalRateLimitNum, CriticalRateLimitDuration = tc.critical.on, tc.critical.num, tc.critical.window
 			initAuthRefreshRateLimitEnv()
 			assert.Equal(t, tc.wantEnabled, AuthRefreshRateLimitEnable)
 			assert.Equal(t, tc.wantNum, AuthRefreshRateLimitNum)

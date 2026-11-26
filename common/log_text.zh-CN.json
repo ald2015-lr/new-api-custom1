@@ -6,6 +6,7 @@
   "%s must be positive; using default": "%s 必须大于 0，已使用默认值",
   "%s%.6f quota": "%s%.6f 额度",
   "--form 'file=@\"%s\"' (size: %d bytes, content-type: %s)": "--form 'file=@\"%s\"' (大小: %d 字节, content-type: %s)",
+  "AUTH_REFRESH_RATE_LIMIT is not set: session refreshes keep what CRITICAL_RATE_LIMIT=%d per %d seconds allowed them, %d per %d seconds": "未设置 AUTH_REFRESH_RATE_LIMIT：刷新登录状态沿用 CRITICAL_RATE_LIMIT=%d（窗口 %d 秒）原来给它的额度：%d 次 / %d 秒",
   "Add abilities for channel %d failed: %s": "修复渠道一致性: 为渠道 %d 重建 abilities 记录失败: %s",
   "Auto selected group: %s": "Auto 分组选定: %s",
   "Auto selecting group: %s, priorityRetry: %d": "Auto 分组尝试: %s, priorityRetry: %d",

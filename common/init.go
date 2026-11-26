@@ -189,10 +189,28 @@ func positiveUserSessionEnv(name string, fallback int) int {
 // whenever the critical limit is, unless AUTH_REFRESH_RATE_LIMIT_ENABLE says
 // otherwise, so a site that switched the critical limit off keeps refreshes
 // unlimited as before.
+//
+// Refreshes used to share the critical limit. Without AUTH_REFRESH_RATE_LIMIT
+// they get 300 per window, or what CRITICAL_RATE_LIMIT allowed in that window
+// where a site raised it beyond that, so no site gives refreshes less than
+// before.
 func initAuthRefreshRateLimitEnv() {
 	AuthRefreshRateLimitEnable = GetEnvOrDefaultBool("AUTH_REFRESH_RATE_LIMIT_ENABLE", CriticalRateLimitEnable)
-	AuthRefreshRateLimitNum = positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT", 300)
 	AuthRefreshRateLimitDuration = int64(positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT_DURATION", 20*60))
+	defaultNum := 300
+	if CriticalRateLimitNum > 0 && CriticalRateLimitDuration > 0 {
+		critical := (int64(CriticalRateLimitNum)*AuthRefreshRateLimitDuration + CriticalRateLimitDuration - 1) / CriticalRateLimitDuration
+		if critical > int64(defaultNum) {
+			defaultNum = int(min(critical, math.MaxInt32))
+			if os.Getenv("AUTH_REFRESH_RATE_LIMIT") == "" {
+				SysLog(LogText(
+					"AUTH_REFRESH_RATE_LIMIT is not set: session refreshes keep what CRITICAL_RATE_LIMIT=%d per %d seconds allowed them, %d per %d seconds",
+					CriticalRateLimitNum, CriticalRateLimitDuration, defaultNum, AuthRefreshRateLimitDuration,
+				))
+			}
+		}
+	}
+	AuthRefreshRateLimitNum = positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT", defaultNum)
 }
 
 // positiveRateLimitEnv reads a rate limit count or window, which must be positive.
