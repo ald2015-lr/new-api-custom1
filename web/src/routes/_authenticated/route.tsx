@@ -19,7 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
 import { AuthenticatedLayout } from '@/components/layout'
-import { resolveAuthentication } from '@/lib/auth-session'
+import {
+  AuthSessionUnavailableError,
+  resolveAuthentication,
+} from '@/lib/auth-session'
 import { useAuthStore } from '@/stores/auth-store'
 
 export const Route = createFileRoute('/_authenticated')({
@@ -28,11 +31,16 @@ export const Route = createFileRoute('/_authenticated')({
     // present. That skip is an optimization for public pages and must not
     // decide a protected route, so resolve against the server before
     // redirecting. An in-memory session returns without a request.
-    await resolveAuthentication()
+    const outcome = await resolveAuthentication()
 
     const { auth } = useAuthStore.getState()
 
     if (!auth.user || !auth.accessToken) {
+      // A rate-limited, failing or unreachable refresh says nothing about the
+      // session: keep the URL and offer a retry instead of the sign-in page.
+      if (outcome.kind === 'transient_error' && !auth.user) {
+        throw new AuthSessionUnavailableError({ cause: outcome.error })
+      }
       throw redirect({
         to: '/sign-in',
         search: { redirect: location.href },

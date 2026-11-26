@@ -17,17 +17,46 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient } from '@tanstack/react-query'
-import { afterEach, describe, expect, test } from 'vitest'
+import {
+  AxiosError,
+  type AxiosResponse,
+  type InternalAxiosRequestConfig,
+} from 'axios'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { useAuthStore, type AuthBundle } from '../stores/auth-store'
 import {
   applyAuthRotation,
   bootstrapAuthentication,
   clearAuthenticatedClientState,
+  clearAuthentication,
   createRefreshRunner,
   isAuthBundle,
+  resolveAuthentication,
+  retryAuthentication,
   type AuthRefreshRuntime,
 } from './auth-session'
+
+type RefreshReply = (
+  config: InternalAxiosRequestConfig
+) => Promise<AxiosResponse>
+
+// The refresh client is private to auth-session; route every axios client of
+// this file through a stub so tests can answer (and count) refresh requests.
+const refreshTransport = vi.hoisted(() => ({
+  reply: undefined as RefreshReply | undefined,
+}))
+
+vi.mock('axios', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('axios')>()
+  actual.default.defaults.adapter = (config) => {
+    if (!refreshTransport.reply) {
+      return Promise.reject(new Error(`Unexpected request to ${config.url}`))
+    }
+    return refreshTransport.reply(config)
+  }
+  return actual
+})
 
 const bundle: AuthBundle = {
   access_token: 'access-token',
@@ -322,5 +351,131 @@ describe('authentication session coordination', () => {
     expect(queryClient.getQueryData(['account', bundle.user.id])).toBe(
       undefined
     )
+  })
+})
+
+function failRefresh(
+  status: number,
+  headers: Record<string, string> = {}
+): RefreshReply {
+  return async (config) => {
+    const response: AxiosResponse = {
+      data: '',
+      status,
+      statusText: '',
+      headers,
+      config,
+    }
+    throw new AxiosError(
+      `Request failed with status code ${status}`,
+      status >= 500 ? 'ERR_BAD_RESPONSE' : 'ERR_BAD_REQUEST',
+      config,
+      undefined,
+      response
+    )
+  }
+}
+
+const acceptRefresh: RefreshReply = async (config) => ({
+  data: { success: true, data: bundle },
+  status: 200,
+  statusText: 'OK',
+  headers: {},
+  config,
+})
+
+describe('refresh attempts after a temporary failure', () => {
+  let requests: string[]
+
+  function answerRefresh(reply: RefreshReply): void {
+    refreshTransport.reply = (config) => {
+      requests.push(String(config.url))
+      return reply(config)
+    }
+  }
+
+  function advance(milliseconds: number): void {
+    vi.setSystemTime(Date.now() + milliseconds)
+  }
+
+  beforeEach(() => {
+    requests = []
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-03-02T08:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    refreshTransport.reply = undefined
+    clearAuthentication(false, 'idle')
+  })
+
+  test('a 429 with Retry-After answers the guards of a navigation with one request', async () => {
+    answerRefresh(failRefresh(429, { 'Retry-After': '30' }))
+
+    const first = await resolveAuthentication()
+    expect(first).toMatchObject({
+      kind: 'transient_error',
+      retryAfterMs: 30_000,
+    })
+    expect(await resolveAuthentication()).toBe(first)
+    advance(29_000)
+    expect(await resolveAuthentication()).toBe(first)
+    expect(requests).toEqual(['/api/user/auth/refresh'])
+    expect(useAuthStore.getState().auth.bootstrapState).toBe('idle')
+
+    advance(1_000)
+    await resolveAuthentication()
+    expect(requests).toHaveLength(2)
+  })
+
+  test('retryAuthentication asks the server again during the pause', async () => {
+    answerRefresh(failRefresh(429, { 'Retry-After': '30' }))
+    await resolveAuthentication()
+
+    answerRefresh(acceptRefresh)
+    expect((await retryAuthentication()).kind).toBe('authenticated')
+    expect(requests).toHaveLength(2)
+
+    // The new session answers from memory; the old failure is forgotten.
+    expect((await resolveAuthentication()).kind).toBe('authenticated')
+    expect(requests).toHaveLength(2)
+  })
+
+  test('a 500 without Retry-After pauses refreshes for 5 seconds', async () => {
+    answerRefresh(failRefresh(500))
+
+    expect((await resolveAuthentication()).kind).toBe('transient_error')
+    advance(4_999)
+    await resolveAuthentication()
+    expect(requests).toHaveLength(1)
+
+    advance(1)
+    await resolveAuthentication()
+    expect(requests).toHaveLength(2)
+  })
+
+  test('a long Retry-After pauses refreshes for at most a minute', async () => {
+    answerRefresh(failRefresh(429, { 'Retry-After': '1200' }))
+
+    await resolveAuthentication()
+    advance(59_999)
+    await resolveAuthentication()
+    expect(requests).toHaveLength(1)
+
+    advance(1)
+    await resolveAuthentication()
+    expect(requests).toHaveLength(2)
+  })
+
+  test('a confirmed sign-out ends the pause', async () => {
+    answerRefresh(failRefresh(503))
+    await resolveAuthentication()
+
+    answerRefresh(failRefresh(401))
+    expect((await retryAuthentication()).kind).toBe('anonymous')
+    expect(requests).toHaveLength(2)
+    expect(await resolveAuthentication()).toEqual({ kind: 'anonymous' })
+    expect(requests).toHaveLength(2)
   })
 })

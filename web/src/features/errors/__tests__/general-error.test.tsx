@@ -29,7 +29,17 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import {
+  AuthSessionUnavailableError,
+  retryAuthentication,
+} from '@/lib/auth-session'
+
 import { GeneralError } from '../general-error'
+
+vi.mock('@/lib/auth-session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/auth-session')>()),
+  retryAuthentication: vi.fn(async () => ({ kind: 'anonymous' as const })),
+}))
 
 const CHUNK_URL = 'http://localhost/static/js/async/42.js'
 
@@ -206,4 +216,86 @@ test('an error without an HTTP status shows the generic notice and a Reload page
   expect(screen.getByRole('button', { name: 'Reload page' })).toBeVisible()
   expect(screen.queryByRole('heading', { level: 1 })).not.toBeInTheDocument()
   expect(reload).not.toHaveBeenCalled()
+})
+
+/** A protected page whose session check fails until `state.available`. */
+function createSessionCheckRouter(state: { available: boolean }) {
+  const root = createRootRoute({
+    component: Outlet,
+    errorComponent: GeneralError,
+  })
+  const home = createRoute({
+    getParentRoute: () => root,
+    path: '/',
+    component: () => <p>Current page</p>,
+  })
+  const protectedPage = createRoute({
+    getParentRoute: () => root,
+    path: '/console',
+    beforeLoad: () => {
+      if (!state.available) throw new AuthSessionUnavailableError()
+    },
+    component: () => <p>Console page</p>,
+  })
+  const signIn = createRoute({
+    getParentRoute: () => root,
+    path: '/sign-in',
+    validateSearch: (search: Record<string, unknown>) => ({
+      redirect: typeof search.redirect === 'string' ? search.redirect : '',
+    }),
+    component: function SignInPage() {
+      const { redirect } = signIn.useSearch()
+      return <p>Sign-in page, then {redirect}</p>
+    },
+  })
+  return createRouter({
+    routeTree: root.addChildren([home, protectedPage, signIn]),
+    history: createMemoryHistory({ initialEntries: ['/console?tab=logs'] }),
+  })
+}
+
+test('an unavailable session check shows a retry page without a status heading or reload', async () => {
+  render(
+    <RouterProvider router={createSessionCheckRouter({ available: false })} />
+  )
+
+  expect(
+    await screen.findByText('Unable to restore your sign-in right now')
+  ).toBeVisible()
+  expect(
+    screen.getByText(
+      'The network or server is busy. You are still signed in; please try again shortly.'
+    )
+  ).toBeVisible()
+  expect(screen.queryByRole('heading', { level: 1 })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Go to sign in' })).toBeVisible()
+  expect(reload).not.toHaveBeenCalled()
+})
+
+test('Retry asks the server again and reruns the guards of the page', async () => {
+  const state = { available: false }
+  render(<RouterProvider router={createSessionCheckRouter(state)} />)
+  await screen.findByText('Unable to restore your sign-in right now')
+
+  state.available = true
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+
+  expect(await screen.findByText('Console page')).toBeVisible()
+  expect(retryAuthentication).toHaveBeenCalledTimes(1)
+  expect(reload).not.toHaveBeenCalled()
+})
+
+test('Go to sign in opens the sign-in page with the page to return to', async () => {
+  render(
+    <RouterProvider router={createSessionCheckRouter({ available: false })} />
+  )
+  await screen.findByText('Unable to restore your sign-in right now')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Go to sign in' }))
+
+  expect(
+    await screen.findByText('Sign-in page, then /console?tab=logs')
+  ).toBeVisible()
+  expect(retryAuthentication).not.toHaveBeenCalled()
 })

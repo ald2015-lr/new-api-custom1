@@ -132,6 +132,62 @@ export function getServerErrorStatus(value: unknown): number | undefined {
   return undefined
 }
 
+function readHeader(headers: unknown, name: string): unknown {
+  if (!isRecord(headers)) return undefined
+  // AxiosHeaders and fetch Headers both look names up case-insensitively.
+  if (typeof headers.get === 'function') {
+    return (headers.get as (header: string) => unknown).call(headers, name)
+  }
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === wanted) return value
+  }
+  return undefined
+}
+
+/**
+ * Milliseconds to wait according to a `Retry-After` value: delta-seconds or an
+ * HTTP date (RFC 9110). Missing, malformed and past values give `undefined`.
+ */
+export function parseRetryAfter(
+  value: unknown,
+  now: number = Date.now()
+): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? value * 1000 : undefined
+  }
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  const text = value.trim()
+  if (/^\d+$/.test(text)) return Number(text) * 1000
+  const date = Date.parse(text)
+  if (Number.isNaN(date)) return undefined
+  return date > now ? date - now : undefined
+}
+
+/** The `Retry-After` delay of an HTTP error response, in milliseconds. */
+export function retryAfterMs(value: unknown): number | undefined {
+  for (const source of getServerErrorSources(value)) {
+    if (!isRecord(source.response)) continue
+    const delay = parseRetryAfter(
+      readHeader(source.response.headers, 'Retry-After')
+    )
+    if (delay !== undefined) return delay
+  }
+  return undefined
+}
+
+/** Message for an HTTP 429 whose body carries no message of its own. */
+function rateLimitedMessage(value: unknown): string {
+  const delay = retryAfterMs(value)
+  if (delay === undefined) {
+    return i18next.t('Too many requests. Please try again later.')
+  }
+  return i18next.t(
+    'Too many requests. Please try again in {{seconds}} seconds.',
+    { seconds: Math.max(1, Math.ceil(delay / 1000)) }
+  )
+}
+
 export function isServerErrorCancelled(value: unknown): boolean {
   return getServerErrorSources(value).some(
     (source) =>
@@ -217,6 +273,9 @@ export function getServerErrorMessage(
     if (message) return message
   }
   const status = getServerErrorStatus(value)
+  // The API rate limiters answer 429 with an empty body and Retry-After; the
+  // client's generic "Request failed with status code 429" is not for people.
+  if (status === 429) return rateLimitedMessage(value)
   if (status === 304) return i18next.t('Content not modified!')
   if (status === 204) return i18next.t('Content not found.')
   for (const source of sources) {

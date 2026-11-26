@@ -21,6 +21,7 @@ import axios from 'axios'
 import { t } from 'i18next'
 
 import { publishAuthSessionEvent } from '@/lib/auth-session-sync'
+import { retryAfterMs } from '@/lib/server-error-message'
 import { hasSessionHint } from '@/lib/session-hint'
 import {
   useAuthStore,
@@ -33,13 +34,20 @@ import {
 export type RefreshOutcome =
   | { kind: 'authenticated'; bundle: AuthBundle }
   | { kind: 'anonymous' }
-  | { kind: 'transient_error'; error: unknown }
+  | { kind: 'transient_error'; error: unknown; retryAfterMs?: number }
   | { kind: 'out_of_sync'; code?: string }
+
+type TransientRefreshOutcome = Extract<
+  RefreshOutcome,
+  { kind: 'transient_error' }
+>
 
 export interface AuthRefreshHTTPResponse {
   status: number
   data?: unknown
   error?: unknown
+  /** The response's `Retry-After` delay in milliseconds, when it sent one. */
+  retryAfterMs?: number
 }
 
 export interface AuthRefreshRuntime {
@@ -67,6 +75,27 @@ export class AuthRotationError extends Error {
   }
 }
 
+/**
+ * Thrown by the protected-route guard when the server could not be asked about
+ * the session (rate limit, server or network trouble). The Refresh Cookie may
+ * still be valid, so this is a retry page, never a sign-out.
+ */
+export class AuthSessionUnavailableError extends Error {
+  constructor(options?: ErrorOptions) {
+    super('The login session cannot be restored right now', options)
+    this.name = 'AuthSessionUnavailableError'
+  }
+}
+
+export function isAuthSessionUnavailableError(
+  error: unknown
+): error is AuthSessionUnavailableError {
+  return (
+    error instanceof AuthSessionUnavailableError ||
+    (error instanceof Error && error.name === 'AuthSessionUnavailableError')
+  )
+}
+
 const authClient = axios.create({
   baseURL: '',
   withCredentials: true,
@@ -80,6 +109,36 @@ const authClient = axios.create({
 const refreshRaceDelays = [80, 200, 500] as const
 let refreshPromise: Promise<RefreshOutcome> | null = null
 let authEpoch = 0
+
+// After a temporary refresh failure, `resolveAuthentication` answers with that
+// failure for a while instead of asking again: every guard of one navigation
+// (and the sign-in page it may lead to) would otherwise spend a request of the
+// same rate-limit budget. `Retry-After` sets the pause, within these bounds.
+const TRANSIENT_REFRESH_MIN_PAUSE_MS = 5_000
+const TRANSIENT_REFRESH_MAX_PAUSE_MS = 60_000
+let lastTransientRefresh: TransientRefreshOutcome | null = null
+let transientRefreshUntil = 0
+
+function clearTransientRefresh(): void {
+  lastTransientRefresh = null
+  transientRefreshUntil = 0
+}
+
+function rememberTransientRefresh(outcome: TransientRefreshOutcome): void {
+  const pause = Math.min(
+    Math.max(outcome.retryAfterMs ?? 0, TRANSIENT_REFRESH_MIN_PAUSE_MS),
+    TRANSIENT_REFRESH_MAX_PAUSE_MS
+  )
+  lastTransientRefresh = outcome
+  transientRefreshUntil = Date.now() + pause
+}
+
+function currentTransientRefresh(): TransientRefreshOutcome | null {
+  if (lastTransientRefresh && Date.now() < transientRefreshUntil) {
+    return lastTransientRefresh
+  }
+  return null
+}
 
 class AuthRefreshSupersededError extends Error {
   constructor() {
@@ -154,6 +213,7 @@ export function applyAuthBundle(
 ): void {
   const previousSID = useAuthStore.getState().auth.session?.sid
   authEpoch += 1
+  clearTransientRefresh()
   useAuthStore.getState().auth.setBundle(bundle)
   if (synchronizeTabs && previousSID !== bundle.session.sid) {
     publishAuthSessionEvent('authenticated', bundle.session.sid)
@@ -191,6 +251,7 @@ export function clearAuthentication(
 ): void {
   const sid = useAuthStore.getState().auth.session?.sid
   authEpoch += 1
+  clearTransientRefresh()
   useAuthStore.getState().auth.reset(bootstrapState)
   if (synchronizeTabs && sid) {
     publishAuthSessionEvent('signed_out', sid)
@@ -261,6 +322,7 @@ export function createRefreshRunner(
       return {
         kind: 'transient_error',
         error: response.error ?? response.data,
+        retryAfterMs: response.retryAfterMs,
       }
     }
 
@@ -292,6 +354,7 @@ async function requestRefresh(
       status: error.response?.status ?? 0,
       data: error.response?.data,
       error,
+      retryAfterMs: retryAfterMs(error),
     }
   }
 }
@@ -336,9 +399,22 @@ async function performRefreshWithBrowserLock(
 export function refreshAuthentication(): Promise<RefreshOutcome> {
   if (!refreshPromise) {
     const refreshEpoch = authEpoch
-    refreshPromise = performRefreshWithBrowserLock(refreshEpoch).finally(() => {
-      refreshPromise = null
-    })
+    refreshPromise = performRefreshWithBrowserLock(refreshEpoch)
+      .then((outcome) => {
+        // A newer sign-in or sign-out supersedes this answer; only a failure
+        // of the server's own answer pauses further attempts.
+        if (
+          outcome.kind === 'transient_error' &&
+          authEpoch === refreshEpoch &&
+          !(outcome.error instanceof AuthRefreshSupersededError)
+        ) {
+          rememberTransientRefresh(outcome)
+        }
+        return outcome
+      })
+      .finally(() => {
+        refreshPromise = null
+      })
   }
   return refreshPromise
 }
@@ -370,6 +446,9 @@ function currentValidAuthBundle(): AuthBundle | null {
  * redirect on the result, and the sign-in page. It contacts the server on a
  * cold cache even when no session hint is present, so a usable Refresh Cookie
  * is always honoured.
+ *
+ * Shortly after a temporary failure (see `rememberTransientRefresh`) it returns
+ * that failure without a request; `retryAuthentication` asks again at once.
  */
 export async function resolveAuthentication(): Promise<RefreshOutcome> {
   const bundle = currentValidAuthBundle()
@@ -384,8 +463,20 @@ export async function resolveAuthentication(): Promise<RefreshOutcome> {
     return { kind: 'anonymous' }
   }
 
+  const transient = currentTransientRefresh()
+  if (transient) return transient
+
   auth.setBootstrapState('checking')
   return refreshAuthentication()
+}
+
+/**
+ * Resolve authentication again now, without the pause that follows a
+ * temporary failure. For an explicit user action such as a Retry button.
+ */
+export function retryAuthentication(): Promise<RefreshOutcome> {
+  clearTransientRefresh()
+  return resolveAuthentication()
 }
 
 /**
