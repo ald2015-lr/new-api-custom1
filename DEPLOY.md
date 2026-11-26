@@ -159,9 +159,16 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `model/channel_quota_limit.go`（`channelQuotaLimits` 改为原子快照 + 单个后台刷新 + 刷新期间本地写入保留） | 渠道限额快照不再在选渠道路径上同步查库 |
 | `service/rankings.go`（`rankingBuilds` singleflight、`buildRankings` 包变量） | 排行榜同一时间只构建一次，过期缓存先返回旧数据再后台重建 |
 | 新文件 `model/enabled_models_cache.go`，以及 `model/channel_cache.go`（重载时建快照）、`model/model_pricing_config.go`（`GetModelPricingIssues`）、`service/group.go`（`GetGroupsEnabledModelsCached`）、`controller/user.go`（`GetUserModels`） | 可用模型列表与定价问题检查在开启内存缓存时读渠道缓存；`/v1/models` 等其他调用不变 |
-| `web/index.html`（启动外壳、看门狗脚本、noscript）、`web/src/main.tsx`、新文件 `web/src/lib/boot.ts`、`web/src/routes/__root.tsx`、`web/src/lib/status-query.ts`、`web/src/features/setup/api.ts`、`web/src/features/home/hooks/use-home-page-content.ts` | 首屏不再白屏、老浏览器提示、语言包最多等 10 秒、setup 从 `/api/status` 判断、首页内容先用缓存（见第二十节） |
+| `web/index.html`（启动外壳、看门狗脚本、noscript）、`web/src/main.tsx`、新文件 `web/src/lib/boot.ts`、`web/src/routes/__root.tsx`、`web/src/lib/status-query.ts`、`web/src/features/setup/api.ts`、`web/src/features/home/hooks/use-home-page-content.ts`、`main.go`（`InjectUmamiAnalytics` 注入的统计脚本用 `async`） | 首屏不再白屏、老浏览器提示、语言包最多等 10 秒、setup 从 `/api/status` 判断、首页内容先用缓存、umami 统计脚本不再挡住页面启动（见第二十节） |
 | `web/src/lib/auth-session.ts`、`web/src/routes/_authenticated/route.tsx`、`web/src/features/errors/general-error.tsx`、`web/src/lib/server-error-message.ts`、`web/src/lib/query-client.ts`、`web/src/features/usage-logs/components/usage-logs-table.tsx` 等 | 刷新临时失败时不误退出登录、429 本地化提示、可选查询失败不跳错误页、请求重试策略、日志表加载失败可重试 |
 | `web/src/features/{channels,models,subscriptions,dashboard,usage-logs}/api.ts` | 列表接口带结尾斜杠，省掉 301/307 跳转 |
+| 新文件 `web/scripts/slim-locale.mjs`（及 `.d.mts`）、`web/rsbuild.config.ts`（只在生产构建时加的内联插件） | 生产构建的英文语言包去掉键和值相同的条目，`en.json` 源文件和开发模式不变；`src/i18n/__tests__/slim-en.test.ts` 检查 7 种语言的翻译结果不变。上游改了 `rsbuild.config.ts` 时保留这个插件 |
+| 新文件 `web/src/components/lazy-markdown.tsx`、`web/src/components/markdown-loader.ts`，以及 `components/rich-content.tsx`、`components/notification-popover.tsx`、`features/dashboard/components/overview/faq-panel.tsx`、`features/home/hooks/use-home-page-content.ts` | KaTeX/marked 只在显示 Markdown 时才下载（铃铛在悬停、聚焦或按下时提前加载，首页内容是 Markdown 时也提前加载）；分块加载失败先自动刷新一次，其他错误按纯文本显示 |
+| 新文件 `web/src/components/react-icon-presets.ts`、`components/react-icon-by-name.tsx` | 支付方式的四个预置图标（支付宝、微信、Stripe、信用卡）用 react-icons 自带的图标数据直接生成，钱包页不再下载整个 `si`、`lu` 图标包；其他图标名照旧按需加载整包。升级 react-icons 后跑 `src/components/__tests__/react-icon-by-name.test.tsx`（逐个对比图标包里的同名组件） |
+| `web/src/lib/motion.ts` | 页面切换动画去掉整页 `blur()` 滤镜，只保留淡入和小位移 |
+| `web/src/features/usage-logs/lib/format.ts`（`getLogOther`），以及日志列、手机卡片、详情弹窗和 `usage-logs-table.tsx` | 使用日志每行的 `other` 只解析一次 |
+| 新文件 `web/src/features/dashboard/lib/section-chunks.ts`，以及 `features/dashboard/index.tsx`、`features/dashboard/components/overview/overview-dashboard.tsx`、`components/layout/types.ts`（`NavLink.prefetch`）、`components/layout/components/nav-group.tsx`、`hooks/use-sidebar-data.ts` | 数据看板各分区的分块在悬停或聚焦侧栏「数据看板」和分区标签时预取，概览页打开 2 秒后空闲时也预取图表（省流量模式和 2G 网络不预取，没有权限的分区不预取） |
+| 新文件 `web/scripts/precompress.mjs`（及 `.d.mts`）、`web/package.json`（`build` 改为 `rsbuild build && bun scripts/precompress.mjs`）、`web/vitest.config.ts`、`web/tsconfig.node.json`（测试和类型检查包含 `scripts/__tests__`） | 前端构建结束时给 `dist/static` 下大于 1 KB 的 JS、CSS、SVG、JSON 生成 brotli（质量 11）的 `<文件>.br`，后端对接受 brotli 的浏览器优先返回它（见第六节）。只用 `node:zlib`，Dockerfile 不变；构建多约 30 秒，`dist` 和二进制、镜像各大约 16 MB。上游改了 `build` 脚本时保留后半段 |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
@@ -1147,6 +1154,8 @@ services:
 - 排行榜同一时间只构建一次，缓存过期后先返回旧数据（最多再用 5 分钟）、后台重建。
 - 「可用模型」列表（令牌、操练场等处）和后台定价问题检查改读内存渠道缓存（开启内存缓存时；内容与上次渠道缓存刷新时的数据库一致，渠道改动后几秒内随渠道缓存一起刷新），不再每个分组查一次数据库。
 - 页面限流返回自动重试的提示页（第 4 条）；静态文件提供 brotli 版本（第 2 条）。
-- 前端：首屏先显示启动外壳，不再长时间白屏；老浏览器提示（第 8 条）；可选面板加载失败时就地显示错误，不再整页跳到错误页。
+- 前端：首屏先显示启动外壳，不再长时间白屏；老浏览器提示（第 8 条）；可选面板加载失败时就地显示错误，不再整页跳到错误页；设置了 `UMAMI_WEBSITE_ID` 时统计脚本改为 `async` 加载，统计站点很慢或连不上时不再拖住页面启动。
+- 前端下载更少：生产构建的英文语言包去掉键和值相同的条目，KaTeX/marked 只在显示 Markdown 时下载，钱包页不再下载整个图标包。每个页面首次打开都要下载的入口脚本和样式从约 931 KB（gzip）降到约 657 KB（brotli）；首页、模型广场、登录页和控制台常用页首次打开下载的静态文件少约 29%–34%，钱包页少约 74%。数据看板的图表分块在悬停链接和概览页空闲时提前下载（概览页因此会在后台多下载约 0.5 MB），页面切换去掉了模糊滤镜，使用日志每行只解析一次附加信息。
+- 构建：前端构建结束时多一步 brotli 预压缩（约 30 秒），`web/dist`、二进制和镜像各大约多 16 MB；Dockerfile 不变。
 
 **回滚：** 回到旧版本即可，没有数据库结构变化；新增的环境变量旧版本会忽略。
