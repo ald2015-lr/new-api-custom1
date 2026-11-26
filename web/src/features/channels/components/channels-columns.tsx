@@ -27,13 +27,14 @@ import {
   Shuffle,
   SlidersHorizontal,
 } from 'lucide-react'
-import { useState, useMemo, useContext, useEffect } from 'react'
+import { lazy, useState, useMemo, useContext, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { BadgeListCell } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
+import { LazyDialog } from '@/components/lazy-dialog'
 import { ProviderBadge } from '@/components/provider-badge'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
@@ -107,12 +108,21 @@ import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
 import { DataTableRowActions } from './data-table-row-actions'
 import { DataTableTagRowActions } from './data-table-tag-row-actions'
-import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
-import {
-  CodexUsageDialog,
-  type CodexUsageDialogData,
-} from './dialogs/codex-usage-dialog'
+import type { CodexUsageDialogData } from './dialogs/codex-usage-dialog'
 import { NumericSpinnerInput } from './numeric-spinner-input'
+
+// The balance dialogs are chunks of their own (the raw-response viewer brings
+// a code editor), loaded when a row first opens one.
+const BalanceQueryDialog = lazy(() =>
+  import('./dialogs/balance-query-dialog').then((module) => ({
+    default: module.BalanceQueryDialog,
+  }))
+)
+const CodexUsageDialog = lazy(() =>
+  import('./dialogs/codex-usage-dialog').then((module) => ({
+    default: module.CodexUsageDialog,
+  }))
+)
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
   source?: string
@@ -720,43 +730,50 @@ export function BalanceCell({ channel }: { channel: Channel }) {
         </div>
       )}
 
-      <CodexUsageDialog
+      <LazyDialog
         open={codexUsageOpen}
-        onOpenChange={setCodexUsageOpen}
-        channelName={channel.name}
-        channelId={channel.id}
-        channelDisplayName={sensitiveVisible ? undefined : SENSITIVE_MASK}
-        channelDisplayId={sensitiveVisible ? undefined : SENSITIVE_MASK}
-        response={codexUsageResponse}
-        onRefresh={async () => {
-          if (isUpdating) {
-            return
-          }
-          setIsUpdating(true)
-          try {
-            const res = await getCodexUsage(channel.id)
-            if (!res.success) {
-              throw createServerError(res, t('Failed to fetch usage'))
+        onLoadError={() => setCodexUsageOpen(false)}
+      >
+        <CodexUsageDialog
+          open={codexUsageOpen}
+          onOpenChange={setCodexUsageOpen}
+          channelName={channel.name}
+          channelId={channel.id}
+          channelDisplayName={sensitiveVisible ? undefined : SENSITIVE_MASK}
+          channelDisplayId={sensitiveVisible ? undefined : SENSITIVE_MASK}
+          response={codexUsageResponse}
+          onRefresh={async () => {
+            if (isUpdating) {
+              return
             }
-            setCodexUsageResponse(res)
-          } catch (error) {
-            handleServerError(error, t('Failed to fetch usage'))
-          } finally {
-            setIsUpdating(false)
-          }
-        }}
-        isRefreshing={isUpdating}
-      />
-      {rawBalanceResponse !== null && (
-        <BalanceQueryDialog
-          initialRawResponse={rawBalanceResponse}
-          open
-          onOpenChange={(open) => {
-            if (!open) {
-              setRawBalanceResponse(null)
+            setIsUpdating(true)
+            try {
+              const res = await getCodexUsage(channel.id)
+              if (!res.success) {
+                throw createServerError(res, t('Failed to fetch usage'))
+              }
+              setCodexUsageResponse(res)
+            } catch (error) {
+              handleServerError(error, t('Failed to fetch usage'))
+            } finally {
+              setIsUpdating(false)
             }
           }}
+          isRefreshing={isUpdating}
         />
+      </LazyDialog>
+      {rawBalanceResponse !== null && (
+        <LazyDialog open onLoadError={() => setRawBalanceResponse(null)}>
+          <BalanceQueryDialog
+            initialRawResponse={rawBalanceResponse}
+            open
+            onOpenChange={(open) => {
+              if (!open) {
+                setRawBalanceResponse(null)
+              }
+            }}
+          />
+        </LazyDialog>
       )}
     </TooltipProvider>
   )

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { Settings2 } from 'lucide-react'
+import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
@@ -37,12 +38,15 @@ import { ChannelsDialogs } from './components/channels-dialogs'
 import { ChannelsPrimaryButtons } from './components/channels-primary-buttons'
 import { ChannelsProvider } from './components/channels-provider'
 import { ChannelsTable } from './components/channels-table'
+import { prefetchChannelMutateDrawerWhenIdle } from './lib/channel-dialog-chunks'
 
 export function Channels() {
   const { t } = useTranslation()
   const isRoot = useAuthStore(
     (state) => state.auth.user?.role === ROLE.SUPER_ADMIN
   )
+  // The channel editor is a chunk of its own; fetch it once the list settled.
+  useEffect(() => prefetchChannelMutateDrawerWhenIdle(), [])
   const channelOpsQuery = useQuery({
     queryKey: ['channel-ops'],
     queryFn: async () => requireServerSuccess(await getChannelOps()),
