@@ -38,23 +38,27 @@ const CAPPED_TOTAL = /^10[,.\s\u00a0\u202f]?000\+$/
 
 /**
  * A server-paginated table over `matches` rows whose count stops at `cap`,
- * like the usage-log list: each page holds the rows the server would return.
+ * like the usage-log list: each page holds the rows the server would return,
+ * or placeholderRows stand in for it while it loads.
  */
 function ServerTable(props: {
   matches: number
   cap: number
   initialPage: number
   compact?: boolean
+  placeholderRows?: number
   ensurePageInRange?: (pageCount: number) => void
 }) {
   const [pagination, setPagination] = React.useState<PaginationState>({
     pageIndex: props.initialPage - 1,
     pageSize: PAGE_SIZE,
   })
-  const pageRows = Math.max(
-    0,
-    Math.min(PAGE_SIZE, props.matches - pagination.pageIndex * PAGE_SIZE)
-  )
+  const pageRows =
+    props.placeholderRows ??
+    Math.max(
+      0,
+      Math.min(PAGE_SIZE, props.matches - pagination.pageIndex * PAGE_SIZE)
+    )
   const data = React.useMemo(
     () =>
       Array.from({ length: pageRows }, (_, index) => ({
@@ -68,6 +72,7 @@ function ServerTable(props: {
     manualPagination: true,
     totalCount: Math.min(props.matches, props.cap),
     totalCountCapped: props.matches > props.cap,
+    isPlaceholderData: props.placeholderRows !== undefined,
     pagination,
     onPaginationChange: setPagination,
     ensurePageInRange: props.ensurePageInRange,
@@ -144,6 +149,19 @@ it('keeps a page of a capped total that lies past the counted pages', () => {
   expect(screen.getByText('151', { selector: 'button' })).toBeVisible()
   expect(screen.getByRole('button', { name: 'Go to next page' })).toBeEnabled()
   expect(ensurePageInRange).not.toHaveBeenCalled()
+})
+
+it('keeps the next page of a capped total while a short stand-in page is shown', () => {
+  render(
+    <ServerTable
+      matches={20000}
+      cap={10000}
+      initialPage={150}
+      placeholderRows={7}
+    />
+  )
+  expect(screen.getByRole('button', { name: 'Go to next page' })).toBeEnabled()
+  expect(screen.getByText('151', { selector: 'button' })).toBeVisible()
 })
 
 it('disables going to the last page while a capped total has more pages', () => {

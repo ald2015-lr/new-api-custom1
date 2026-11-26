@@ -102,6 +102,13 @@ type UseDataTableOptions<TData> = DataTableFeatureOptions<TData> &
      * server-paginated tables, where data holds the current page.
      */
     totalCountCapped?: boolean
+    /**
+     * data is a stand-in shown while the current page loads (react-query's
+     * placeholderData, usually the previous page), not the server's answer
+     * for the current pagination. A capped count then assumes another page
+     * follows rather than reading the stand-in's length.
+     */
+    isPlaceholderData?: boolean
     pageCount?: number
     ensurePageInRange?: (pageCount: number) => void
   }
@@ -289,6 +296,7 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
     columns,
     totalCount,
     totalCountCapped = false,
+    isPlaceholderData = false,
     pageCount: explicitPageCount,
     ensurePageInRange,
     manualFiltering,
@@ -381,10 +389,11 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
       : undefined
   let resolvedPageCount = explicitPageCount ?? countedPageCount
   if (totalCountCapped && explicitPageCount === undefined) {
-    // The count stopped at a cap, so the loaded page tells whether another
-    // follows: a full page has a next one, a short page is the last.
+    // The count stopped at a cap, so the server's page tells whether another
+    // follows: a full page has a next one, a short page is the last. A
+    // stand-in shown while the page loads tells nothing.
     resolvedPageCount =
-      data.length < pagination.pageSize
+      !isPlaceholderData && data.length < pagination.pageSize
         ? pagination.pageIndex + 1
         : Math.max(countedPageCount ?? 0, pagination.pageIndex + 2)
   }

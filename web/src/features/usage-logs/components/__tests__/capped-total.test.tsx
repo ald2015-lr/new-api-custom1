@@ -24,7 +24,7 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -63,6 +63,8 @@ type Server = {
   /** Logs matching the All view (/api/log/) and the own view (/api/log/self). */
   allMatches: number
   selfMatches: number
+  /** While set, log list answers wait here until released. */
+  held?: Array<() => void>
 }
 
 /**
@@ -97,6 +99,8 @@ function mockServer(server: Server) {
         page,
         page_size: size,
       }
+      const held = server.held
+      if (held) await new Promise<void>((resolve) => held.push(resolve))
       return { data: { success: true, data } }
     }
     let data: unknown = { quota: 0, rpm: 0, tpm: 0 }
@@ -226,4 +230,42 @@ it('reads a page size above the server maximum as the maximum and keeps paging',
   expect(listRequests()).toEqual(['self:1/100'])
   expect(router.state.location.search).toMatchObject({ pageSize: 100 })
   await waitFor(() => expect(nextPageButton()).toBeEnabled())
+})
+
+it('keeps the next page of a capped list while a larger page size loads', async () => {
+  const user = userEvent.setup()
+  const server: Server = { allMatches: 0, selfMatches: 20000 }
+  renderLogs({ server, search: 'pageSize=20' })
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  await waitFor(() => expect(nextPageButton()).toBeEnabled())
+
+  // The 20 rows on screen stay until the 100-row page arrives.
+  server.held = []
+  const rowsPerPage = screen
+    .getAllByRole('combobox')
+    .find((element) => element.textContent?.trim() === '20')
+  expect(rowsPerPage).toBeDefined()
+  await user.click(rowsPerPage as HTMLElement)
+  await user.click(await screen.findByRole('option', { name: '100' }))
+  await waitFor(() => expect(listRequests()).toContain('self:1/100'))
+
+  expect(nextPageButton()).toBeEnabled()
+  await act(async () => server.held?.splice(0).forEach((resolve) => resolve()))
+})
+
+it('keeps the next page of a capped list while the page before the short last page loads', async () => {
+  const user = userEvent.setup()
+  // 10,037 logs: page 1,004 of 10 holds the last 7.
+  const server: Server = { allMatches: 0, selfMatches: 10037 }
+  renderLogs({ server, search: 'page=1004&pageSize=10' })
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  await waitFor(() => expect(nextPageButton()).toBeDisabled())
+
+  // The short last page stays on screen until page 1,003 arrives.
+  server.held = []
+  await user.click(screen.getByRole('button', { name: 'Go to previous page' }))
+  await waitFor(() => expect(requestedPages()).toEqual([1004, 1003]))
+
+  expect(nextPageButton()).toBeEnabled()
+  await act(async () => server.held?.splice(0).forEach((resolve) => resolve()))
 })
