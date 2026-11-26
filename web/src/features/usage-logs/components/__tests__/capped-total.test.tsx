@@ -40,13 +40,14 @@ import { usageLogSchema } from '../../data/schema'
 import { UsageLogsProvider } from '../usage-logs-provider'
 import { UsageLogsTable } from '../usage-logs-table'
 
-const PAGE_SIZE = 10
 // The server's count cap; past it the list answers total_capped.
 const COUNT_CAP = 10000
+// The most logs the server answers per page (common.GetPageQuery).
+const SERVER_MAX_PAGE_SIZE = 100
 // "10,000+" in whatever digit grouping the test runtime formats with.
 const CAPPED_TOTAL = /^10[,.\s\u00a0\u202f]?000\+$/
 
-function LogsPage() {
+function LogsTablePage() {
   const [footer, setFooter] = useState<HTMLDivElement | null>(null)
   return (
     <PageFooterProvider container={footer}>
@@ -58,28 +59,32 @@ function LogsPage() {
   )
 }
 
+type Server = {
+  /** Logs matching the All view (/api/log/) and the own view (/api/log/self). */
+  allMatches: number
+  selfMatches: number
+}
+
 /**
- * Renders a user's own log list at page over `matches` logs, answered like
- * the server: a page of rows, the count up to COUNT_CAP and total_capped.
+ * Answers the log lists like the server: a page of rows (at most 100), the
+ * count up to COUNT_CAP and total_capped.
  */
-function renderLogs(props: { matches: number; page: number }) {
-  useAuthStore.getState().auth.setUser({
-    id: 1,
-    username: 'tester',
-    role: ROLE.USER,
-  })
+function mockServer(server: Server) {
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
-    let data: unknown = { quota: 0, rpm: 0, tpm: 0 }
-    if (url.startsWith('/api/log/self?')) {
-      const page = Number(new URLSearchParams(url.split('?')[1]).get('p'))
-      const rows = Math.max(
-        0,
-        Math.min(PAGE_SIZE, props.matches - (page - 1) * PAGE_SIZE)
+    const ownList = url.startsWith('/api/log/self?')
+    if (ownList || url.startsWith('/api/log?')) {
+      const params = new URLSearchParams(url.split('?')[1])
+      const page = Number(params.get('p'))
+      const size = Math.min(
+        SERVER_MAX_PAGE_SIZE,
+        Number(params.get('page_size'))
       )
-      data = {
+      const matches = ownList ? server.selfMatches : server.allMatches
+      const rows = Math.max(0, Math.min(size, matches - (page - 1) * size))
+      const data = {
         items: Array.from({ length: rows }, (_, index) =>
           usageLogSchema.parse({
-            id: (page - 1) * PAGE_SIZE + index + 1,
+            id: (page - 1) * size + index + 1,
             user_id: 1,
             created_at: 1788840000,
             type: 2,
@@ -87,32 +92,45 @@ function renderLogs(props: { matches: number; page: number }) {
             quota: 5000,
           })
         ),
-        total: Math.min(props.matches, COUNT_CAP),
-        total_capped: props.matches > COUNT_CAP,
+        total: Math.min(matches, COUNT_CAP),
+        total_capped: matches > COUNT_CAP,
         page,
-        page_size: PAGE_SIZE,
+        page_size: size,
       }
-    } else if (url === '/api/subscription/self') {
+      return { data: { success: true, data } }
+    }
+    let data: unknown = { quota: 0, rpm: 0, tpm: 0 }
+    if (url === '/api/subscription/self') {
       data = { subscriptions: [] }
+    } else if (url.startsWith('/api/subscription/') || url === '/api/group/') {
+      data = []
     } else if (url === '/api/user/self/groups') {
       data = {}
     }
     return { data: { success: true, data } }
   })
+}
+
+/** Renders the common log list at the given URL search, answered by server. */
+function renderLogs(props: { server: Server; search: string }) {
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'tester',
+    role: ROLE.USER,
+  })
+  mockServer(props.server)
   const root = createRootRoute()
   const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
   const logs = createRoute({
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
-    component: LogsPage,
+    component: LogsTablePage,
     validateSearch: UsageLogsRoute.options.validateSearch,
   })
   const router = createRouter({
     routeTree: root.addChildren([auth.addChildren([logs])]),
     history: createMemoryHistory({
-      initialEntries: [
-        `/usage-logs/common?page=${props.page}&pageSize=${PAGE_SIZE}`,
-      ],
+      initialEntries: [`/usage-logs/common?${props.search}`],
     }),
   })
   const client = new QueryClient({
@@ -126,13 +144,28 @@ function renderLogs(props: { matches: number; page: number }) {
   return router
 }
 
-/** The pages of the log list that were requested, in order. */
-function requestedPages() {
+/** The log list requests made, in order, as view:page/page size. */
+function listRequests() {
   return vi
     .mocked(api.get)
     .mock.calls.map(([url]) => url)
-    .filter((url) => url.startsWith('/api/log/self?'))
-    .map((url) => Number(new URLSearchParams(url.split('?')[1]).get('p')))
+    .filter((url) => /^\/api\/log(\/self)?\?/.test(url))
+    .map((url) => {
+      const params = new URLSearchParams(url.split('?')[1])
+      const view = url.startsWith('/api/log/self?') ? 'self' : 'all'
+      return `${view}:${params.get('p')}/${params.get('page_size')}`
+    })
+}
+
+/** The pages of the own log list that were requested, in order. */
+function requestedPages() {
+  return listRequests()
+    .filter((request) => request.startsWith('self:'))
+    .map((request) => Number(request.slice('self:'.length).split('/')[0]))
+}
+
+function nextPageButton() {
+  return screen.getByRole('button', { name: 'Go to next page' })
 }
 
 afterEach(() => {
@@ -145,10 +178,13 @@ afterEach(() => {
 
 it('shows a capped total as 10,000+ and pages on past the counted pages', async () => {
   const user = userEvent.setup()
-  const router = renderLogs({ matches: 20000, page: 1001 })
+  const router = renderLogs({
+    server: { allMatches: 0, selfMatches: 20000 },
+    search: 'page=1001&pageSize=10',
+  })
 
   expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
-  const next = screen.getByRole('button', { name: 'Go to next page' })
+  const next = nextPageButton()
   expect(next).toBeEnabled()
   await user.click(next)
 
@@ -158,22 +194,36 @@ it('shows a capped total as 10,000+ and pages on past the counted pages', async 
 })
 
 it('ends a capped list at the first short page', async () => {
-  renderLogs({ matches: COUNT_CAP + 5, page: 1001 })
+  renderLogs({
+    server: { allMatches: 0, selfMatches: COUNT_CAP + 5 },
+    search: 'page=1001&pageSize=10',
+  })
 
   expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
-  await waitFor(() =>
-    expect(
-      screen.getByRole('button', { name: 'Go to next page' })
-    ).toBeDisabled()
-  )
+  await waitFor(() => expect(nextPageButton()).toBeDisabled())
   expect(screen.getByText('1001', { selector: 'button' })).toBeVisible()
 })
 
 it('keeps an exact total below the cap and sends a page past its end back to the first', async () => {
-  const router = renderLogs({ matches: 25, page: 5 })
+  const router = renderLogs({
+    server: { allMatches: 0, selfMatches: 25 },
+    search: 'page=5&pageSize=10',
+  })
 
   await waitFor(() => expect(requestedPages()).toContain(1))
   expect(await screen.findByText('25')).toBeVisible()
   expect(screen.queryByText(/^\d[\d,.\s\u00a0\u202f]*\+$/)).toBeNull()
   expect(router.state.location.search).not.toHaveProperty('page')
+})
+
+it('reads a page size above the server maximum as the maximum and keeps paging', async () => {
+  const router = renderLogs({
+    server: { allMatches: 0, selfMatches: 20000 },
+    search: 'pageSize=200',
+  })
+
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+  expect(listRequests()).toEqual(['self:1/100'])
+  expect(router.state.location.search).toMatchObject({ pageSize: 100 })
+  await waitFor(() => expect(nextPageButton()).toBeEnabled())
 })
