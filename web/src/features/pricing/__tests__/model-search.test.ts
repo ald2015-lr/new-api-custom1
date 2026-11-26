@@ -19,7 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 import { describe, expect, it } from 'vitest'
 
 import { filterAndSortModels, filterBySearch } from '../lib/filters'
-import { buildModelSquareIndex } from '../lib/model-variants'
+import {
+  buildModelSquareIndex,
+  type ModelSquareSettings,
+} from '../lib/model-variants'
 import {
   squareModel,
   squareModels,
@@ -176,11 +179,16 @@ const OWNER_SEARCHES: [string, string[]][] = [
   ['doubao-1-5-pro', ['doubao-1-5-pro', 'doubao-1.5-pro']],
 ]
 
-function search(names: readonly string[], query: string, foldOn = true) {
+function search(
+  names: readonly string[],
+  query: string,
+  foldOn = true,
+  overrides: Partial<ModelSquareSettings> = {}
+) {
   const models = squareModels(names)
   const index = buildModelSquareIndex(
     models,
-    squareSettings({ version_spelling_fold_enabled: foldOn })
+    squareSettings({ version_spelling_fold_enabled: foldOn, ...overrides })
   )
   return filterBySearch(models, query, index).map((model) => model.model_name)
 }
@@ -240,6 +248,35 @@ describe('folded search', () => {
     expect(dashed).toContain('[正价kiro]claude-opus-4.6')
     expect(dotted).toContain('[按量]claude-opus-4-6')
     expect(dashed).toEqual(dotted)
+  })
+
+  it.each(SEARCHES)(
+    'with the snapshot fold off, %s still finds %j',
+    (query, names) => {
+      expect(
+        search(SEARCH_CATALOGUE, query, true, { snapshot_fold_enabled: false })
+      ).toEqual(names)
+    }
+  )
+
+  it('finds one snapshot by either spelling while the snapshot fold is off', () => {
+    const noSnapshots = { snapshot_fold_enabled: false }
+    const dotted = search(
+      SEARCH_CATALOGUE,
+      'claude-opus-4.5-20251101',
+      true,
+      noSnapshots
+    )
+    expect(dotted).toEqual([
+      'claude-opus-4-5-20251101',
+      'claude-opus-4.5-20251101',
+    ])
+    expect(
+      search(SEARCH_CATALOGUE, 'claude-opus-4-5-20251101', true, noSnapshots)
+    ).toEqual(dotted)
+    expect(
+      search(SEARCH_CATALOGUE, 'claude-opus-4.5-2025', true, noSnapshots)
+    ).toEqual(dotted)
   })
 
   it('matches only as written while the version fold is off', () => {

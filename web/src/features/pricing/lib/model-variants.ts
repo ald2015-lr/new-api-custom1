@@ -167,7 +167,11 @@ export type ParsedModelName = {
   description: string
   /** The folded spelling of the whole name without its line tag (search). */
   foldedName: string
-  /** Search text: `[line]` in lower case, the folded spelling and the peeled tail. */
+  /**
+   * Search text: `[line]` in lower case, the folded spelling and the peeled
+   * tail (with the snapshot fold off, the spelling is folded without its
+   * trailing date).
+   */
   searchText: string
 }
 
@@ -379,7 +383,15 @@ export function parseModelName(
   if (extra) labels.unshift(extra)
   const datePeel =
     datePeels.find((peel) => peel.format !== '@NNN') ?? datePeels[0]
-  const tail = untagged.slice(spelling.length).toLowerCase()
+  // While the snapshot fold is off the date stays in the spelling, so a
+  // version written right before it keeps its dash in the key
+  // (claude-opus-4-5-20251101). The search text still folds the spelling
+  // without that date, so a dotted query (claude-opus-4.5) finds the name.
+  let searchBase = spelling
+  if (fold && !options.snapshotFold) {
+    const hit = dateSuffix(spelling)
+    if (hit && hit.format !== 'latest') searchBase = hit.base
+  }
 
   return {
     name,
@@ -405,9 +417,9 @@ export function parseModelName(
     searchText:
       (line ? `[${line.toLowerCase()}]` : '') +
       (fold
-        ? spellingKey(spelling, true, Math.min(org, spelling.length))
-        : spelling.toLowerCase()) +
-      tail,
+        ? spellingKey(searchBase, true, Math.min(org, searchBase.length))
+        : searchBase.toLowerCase()) +
+      untagged.slice(searchBase.length).toLowerCase(),
   }
 }
 

@@ -1152,6 +1152,22 @@ describe('family bases with the folds', () => {
     })
   })
 
+  it('keeps the version before a date as written in the key while the snapshot fold is off', () => {
+    // The documented limit: two cards, while the search text of both reads
+    // the dotted version, so search finds both spellings.
+    const families = familiesOf(
+      squareModels(['claude-opus-4-5-20251101', 'claude-opus-4.5-20251101']),
+      { snapshot_fold_enabled: false }
+    )
+    expect(families.map((family) => family.key)).toEqual([
+      'claude-opus-4-5-20251101',
+      'claude-opus-4.5-20251101',
+    ])
+    expect(
+      families.map((family) => family.variants[0].parsed.searchText)
+    ).toEqual(['claude-opus-4.5-20251101', 'claude-opus-4.5-20251101'])
+  })
+
   it.each(BASE_SWITCH_CASES)(
     'base %j gives one card with every switch combination',
     (bases, names, combinations) => {
