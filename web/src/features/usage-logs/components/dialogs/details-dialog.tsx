@@ -72,7 +72,7 @@ import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import { LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import {
-  parseLogOther,
+  getLogOther,
   getParamOverrideActionLabel,
   parseAuditLine,
   decodeBillingExprB64,
@@ -528,7 +528,7 @@ interface DetailsDialogProps {
 export function DetailsDialog(props: DetailsDialogProps) {
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
-  const other = parseLogOther(props.log.other)
+  const other = getLogOther(props.log)
   const typeConfig = getLogTypeConfig(props.log.type)
 
   const isViolation = isViolationFeeLog(other)

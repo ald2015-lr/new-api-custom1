@@ -50,7 +50,7 @@ import {
 } from '../constants'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
-import { parseLogOther } from '../lib/format'
+import { getLogOther } from '../lib/format'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
@@ -228,8 +228,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       isAdmin &&
       !canReadAdminPlans &&
       ((data?.items ?? []) as Array<{ other?: string }>).some(
-        (log) =>
-          parseLogOther(log.other ?? '')?.billing_source === 'subscription'
+        (log) => getLogOther(log)?.billing_source === 'subscription'
       ),
     [isAdmin, canReadAdminPlans, data?.items]
   )
@@ -299,9 +298,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         let tintClass =
           isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
         if (isCommon && isAdmin) {
-          const other = parseLogOther(
-            ((row.original as Record<string, unknown>).other as string) ?? ''
-          )
+          const other = getLogOther(row.original as { other?: string })
           if (other?.admin_info?.quota_saturation) {
             tintClass = quotaSaturationRowTint
           }

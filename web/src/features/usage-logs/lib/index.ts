@@ -22,6 +22,7 @@ For commercial licensing, please contact support@quantumnous.com
 
 // Format utilities (usage-logs specific)
 export {
+  getLogOther,
   parseLogOther,
   getTimeColor,
   formatModelName,
