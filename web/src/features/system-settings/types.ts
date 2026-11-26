@@ -313,8 +313,15 @@ export type ModelSettings = {
   'grok.violation_deduction_enabled': boolean
   'grok.violation_deduction_amount': number
   'model_square_setting.variant_grouping_enabled': boolean
+  'model_square_setting.version_spelling_fold_enabled': boolean
+  'model_square_setting.snapshot_fold_enabled': boolean
   'model_square_setting.variant_rules': string
   'model_square_setting.family_bases': string
+  'model_square_setting.show_group_filter': boolean
+  'model_square_setting.show_vendor_filter': boolean
+  'model_square_setting.show_tag_filter': boolean
+  'model_square_setting.show_quota_type_filter': boolean
+  'model_square_setting.show_endpoint_type_filter': boolean
   ModelPrice: string
   ModelRatio: string
   CacheRatio: string

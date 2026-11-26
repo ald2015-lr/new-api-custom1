@@ -2,9 +2,11 @@ package controller
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -495,16 +497,29 @@ func TestListModelsTokenLimitUsesResolvedCustomAutoGroups(t *testing.T) {
 
 func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
 	setupModelListControllerTestDB(t)
-	optionKeys := []string{operation_setting.ModelSquareVariantGroupingEnabledOptionKey, operation_setting.ModelSquareVariantRulesOptionKey, operation_setting.ModelSquareFamilyBasesOptionKey}
+	const (
+		groupingKey       = operation_setting.ModelSquareVariantGroupingEnabledOptionKey
+		versionFoldKey    = operation_setting.ModelSquareVersionSpellingFoldOptionKey
+		snapshotFoldKey   = operation_setting.ModelSquareSnapshotFoldOptionKey
+		rulesKey          = operation_setting.ModelSquareVariantRulesOptionKey
+		basesKey          = operation_setting.ModelSquareFamilyBasesOptionKey
+		groupFilterKey    = operation_setting.ModelSquareShowGroupFilterOptionKey
+		vendorFilterKey   = operation_setting.ModelSquareShowVendorFilterOptionKey
+		tagFilterKey      = operation_setting.ModelSquareShowTagFilterOptionKey
+		quotaFilterKey    = operation_setting.ModelSquareShowQuotaTypeFilterOptionKey
+		endpointFilterKey = operation_setting.ModelSquareShowEndpointTypeFilterOptionKey
+	)
+	optionKeys := []string{groupingKey, versionFoldKey, snapshotFoldKey, rulesKey, basesKey, groupFilterKey, vendorFilterKey, tagFilterKey, quotaFilterKey, endpointFilterKey}
 	previousConfig := config.GlobalConfig.ExportAllConfigs()
-	t.Cleanup(func() {
+	resetOptions := func() {
 		for _, key := range optionKeys {
 			operation_setting.LoadModelSquareOption(key, previousConfig[key])
 		}
-	})
+	}
+	t.Cleanup(resetOptions)
 
 	var defaultRules []operation_setting.ModelVariantRule
-	require.NoError(t, common.UnmarshalJsonStr(previousConfig[operation_setting.ModelSquareVariantRulesOptionKey], &defaultRules))
+	require.NoError(t, common.UnmarshalJsonStr(previousConfig[rulesKey], &defaultRules))
 	assert.Contains(t, defaultRules, operation_setting.ModelVariantRule{Suffix: "-thinking-high", Label: "thinking-high"})
 	assert.Contains(t, defaultRules, operation_setting.ModelVariantRule{Suffix: "-nothinking", Label: "nothinking", Description: "会思考，但不返回思考内容"})
 	assert.Contains(t, defaultRules, operation_setting.ModelVariantRule{Suffix: "-128", Label: "128", Description: "思考预算 128（最低思考强度）"})
@@ -514,53 +529,102 @@ func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
 	}
 
 	// No base model is merged unless the admin names one.
-	assert.Equal(t, "[]", previousConfig[operation_setting.ModelSquareFamilyBasesOptionKey])
+	assert.Equal(t, "[]", previousConfig[basesKey])
+	// The option map carries every switch with its default, so the settings
+	// page shows them before any is saved. Tags and endpoint types are hidden.
+	for key, want := range map[string]string{
+		versionFoldKey: "true", snapshotFoldKey: "true", groupFilterKey: "true", vendorFilterKey: "true",
+		tagFilterKey: "false", quotaFilterKey: "true", endpointFilterKey: "false",
+	} {
+		assert.Equal(t, want, previousConfig[key], key)
+	}
+
+	type filterSections struct {
+		Groups        bool `json:"groups"`
+		Vendors       bool `json:"vendors"`
+		Tags          bool `json:"tags"`
+		QuotaTypes    bool `json:"quota_types"`
+		EndpointTypes bool `json:"endpoint_types"`
+	}
+	type modelSquare struct {
+		VariantGroupingEnabled     bool                                 `json:"variant_grouping_enabled"`
+		VersionSpellingFoldEnabled bool                                 `json:"version_spelling_fold_enabled"`
+		SnapshotFoldEnabled        bool                                 `json:"snapshot_fold_enabled"`
+		VariantRules               []operation_setting.ModelVariantRule `json:"variant_rules"`
+		FamilyBases                []string                             `json:"family_bases"`
+		FilterSections             filterSections                       `json:"filter_sections"`
+	}
+	defaults := modelSquare{
+		VariantGroupingEnabled:     true,
+		VersionSpellingFoldEnabled: true,
+		SnapshotFoldEnabled:        true,
+		VariantRules:               defaultRules,
+		FamilyBases:                []string{},
+		FilterSections:             filterSections{Groups: true, Vendors: true, QuotaTypes: true},
+	}
 
 	tests := []struct {
-		name        string
-		enabled     string
-		rules       string
-		bases       string
-		wantEnabled bool
-		wantRules   []operation_setting.ModelVariantRule
-		wantBases   []string
+		name   string
+		stored map[string]string
+		want   modelSquare
 	}{
 		{
-			name:        "stored rules",
-			enabled:     "false",
-			rules:       `[{"suffix":"-fast","label":"fast"},{"suffix":"-128","label":"128","description":"思考预算 128"}]`,
-			bases:       `["gemini-4-argon","gemini-4"]`,
-			wantEnabled: false,
-			wantRules: []operation_setting.ModelVariantRule{
-				{Suffix: "-fast", Label: "fast"},
-				{Suffix: "-128", Label: "128", Description: "思考预算 128"},
+			name: "fresh config",
+			want: defaults,
+		},
+		{
+			name: "stored values",
+			stored: map[string]string{
+				groupingKey: "false", versionFoldKey: "false", snapshotFoldKey: "false",
+				rulesKey:       `[{"suffix":"-fast","label":"fast"},{"suffix":"-128","label":"128","description":"思考预算 128"}]`,
+				basesKey:       `["gemini-4-argon","gemini-4"]`,
+				groupFilterKey: "false", vendorFilterKey: "false", tagFilterKey: "true", quotaFilterKey: "false", endpointFilterKey: "true",
 			},
-			wantBases: []string{"gemini-4-argon", "gemini-4"},
+			want: modelSquare{
+				VariantRules: []operation_setting.ModelVariantRule{
+					{Suffix: "-fast", Label: "fast"},
+					{Suffix: "-128", Label: "128", Description: "思考预算 128"},
+				},
+				FamilyBases:    []string{"gemini-4-argon", "gemini-4"},
+				FilterSections: filterSections{Tags: true, EndpointTypes: true},
+			},
 		},
 		{
-			name:        "invalid stored values fall back to defaults",
-			enabled:     "yes",
-			rules:       `[{"suffix":"-fast"}]`,
-			bases:       `["gemini 4"]`,
-			wantEnabled: true,
-			wantRules:   defaultRules,
-			wantBases:   []string{},
+			name: "invalid stored values fall back to defaults",
+			stored: map[string]string{
+				groupingKey: "yes", versionFoldKey: "no", snapshotFoldKey: "",
+				rulesKey: `[{"suffix":"-fast"}]`, basesKey: `["gemini 4"]`,
+				groupFilterKey: "off", vendorFilterKey: "off", tagFilterKey: "on", quotaFilterKey: "off", endpointFilterKey: "on",
+			},
+			want: defaults,
 		},
 		{
-			name:        "empty rules fold no suffix",
-			enabled:     "true",
-			rules:       `[]`,
-			bases:       `[]`,
-			wantEnabled: true,
-			wantRules:   []operation_setting.ModelVariantRule{},
-			wantBases:   []string{},
+			name:   "empty rules fold no suffix",
+			stored: map[string]string{groupingKey: "true", rulesKey: `[]`, basesKey: `[]`},
+			want: modelSquare{
+				VariantGroupingEnabled: true, VersionSpellingFoldEnabled: true, SnapshotFoldEnabled: true,
+				VariantRules: []operation_setting.ModelVariantRule{}, FamilyBases: []string{},
+				FilterSections: defaults.FilterSections,
+			},
+		},
+		{
+			// A site saved by an earlier release has rows for the first three
+			// keys only: the new switches keep their defaults.
+			name:   "upgrade",
+			stored: map[string]string{groupingKey: "true", rulesKey: previousConfig[rulesKey], basesKey: `["gemini-4-argon"]`},
+			want: modelSquare{
+				VariantGroupingEnabled: true, VersionSpellingFoldEnabled: true, SnapshotFoldEnabled: true,
+				VariantRules: defaultRules, FamilyBases: []string{"gemini-4-argon"},
+				FilterSections: filterSections{Groups: true, Vendors: true, Tags: false, QuotaTypes: true, EndpointTypes: false},
+			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareVariantGroupingEnabledOptionKey, tc.enabled)
-			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareVariantRulesOptionKey, tc.rules)
-			operation_setting.LoadModelSquareOption(operation_setting.ModelSquareFamilyBasesOptionKey, tc.bases)
+			resetOptions()
+			for key, value := range tc.stored {
+				operation_setting.LoadModelSquareOption(key, value)
+			}
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/pricing", nil)
@@ -568,18 +632,18 @@ func TestGetPricingReturnsModelSquareSetting(t *testing.T) {
 			GetPricing(ctx)
 
 			var response struct {
-				Success     bool `json:"success"`
-				ModelSquare struct {
-					VariantGroupingEnabled bool                                 `json:"variant_grouping_enabled"`
-					VariantRules           []operation_setting.ModelVariantRule `json:"variant_rules"`
-					FamilyBases            []string                             `json:"family_bases"`
-				} `json:"model_square"`
+				Success     bool        `json:"success"`
+				ModelSquare modelSquare `json:"model_square"`
 			}
 			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response), recorder.Body.String())
 			require.True(t, response.Success)
-			assert.Equal(t, tc.wantEnabled, response.ModelSquare.VariantGroupingEnabled)
-			assert.Equal(t, tc.wantRules, response.ModelSquare.VariantRules)
-			assert.Equal(t, tc.wantBases, response.ModelSquare.FamilyBases)
+			assert.Equal(t, tc.want, response.ModelSquare)
+
+			var raw struct {
+				ModelSquare map[string]any `json:"model_square"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &raw))
+			assert.ElementsMatch(t, []string{"variant_grouping_enabled", "version_spelling_fold_enabled", "snapshot_fold_enabled", "variant_rules", "family_bases", "filter_sections"}, slices.Collect(maps.Keys(raw.ModelSquare)))
 		})
 	}
 }

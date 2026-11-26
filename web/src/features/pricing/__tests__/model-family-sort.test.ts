@@ -21,11 +21,9 @@ import { describe, expect, it } from 'vitest'
 import { SORT_OPTIONS } from '../constants'
 import { sortModels } from '../lib/filters'
 import { sortModelFamilies } from '../lib/model-family'
-import {
-  DEFAULT_MODEL_VARIANT_RULES,
-  groupModelFamilies,
-} from '../lib/model-variants'
+import type { ModelSquareSettings } from '../lib/model-variants'
 import type { PricingModel } from '../types'
+import { familiesOf, LEGACY, squareModel } from './model-square-test-utils'
 
 let nextId = 1
 function model(name: string, price = 1): PricingModel {
@@ -52,13 +50,17 @@ function tokenModel(name: string, ratio: number): PricingModel {
 }
 
 /** Sort like the page does, group, then order the families. */
-function familyTitles(models: PricingModel[], sortBy: string): string[] {
+function familyTitles(
+  models: PricingModel[],
+  sortBy: string,
+  settings: Partial<ModelSquareSettings> = LEGACY
+): string[] {
   const families = sortModelFamilies(
-    groupModelFamilies(sortModels(models, sortBy), DEFAULT_MODEL_VARIANT_RULES),
+    familiesOf(sortModels(models, sortBy), settings),
     sortBy
   )
   return families.map((family) =>
-    family.models.length === 1 ? family.models[0].model_name : family.base
+    family.models.length === 1 ? family.models[0].model_name : family.title
   )
 }
 
@@ -83,6 +85,43 @@ describe('sortModelFamilies', () => {
       'gpt-5.5',
       '[按次]zeta-1',
     ])
+  })
+
+  it('orders a merged family by its title, not by its first member', () => {
+    // anthropic/claude-opus-4-6 comes first by name but is not the title.
+    const families = sortModelFamilies(
+      familiesOf(
+        sortModels(
+          [
+            squareModel('anthropic/claude-opus-4-6'),
+            squareModel('claude-opus-4-6'),
+            squareModel('claude-opus-4.6-thinking'),
+            squareModel('bravo-1'),
+            squareModel('ai21-jamba'),
+          ],
+          SORT_OPTIONS.NAME
+        )
+      ),
+      SORT_OPTIONS.NAME
+    )
+    expect(
+      families.map((family) =>
+        family.models.length === 1 ? family.models[0].model_name : family.title
+      )
+    ).toEqual(['ai21-jamba', 'bravo-1', 'claude-opus-4-6'])
+    // Most members carry the org/ prefix, so it titles the zeta-1 family.
+    expect(
+      familyTitles(
+        [
+          model('acme/zeta-1'),
+          model('acme/zeta-1-thinking'),
+          model('zeta-1'),
+          model('beta-1'),
+        ],
+        SORT_OPTIONS.NAME,
+        {}
+      )
+    ).toEqual(['acme/zeta-1', 'beta-1'])
   })
 
   it('places a tagged single model by its name without the tag', () => {

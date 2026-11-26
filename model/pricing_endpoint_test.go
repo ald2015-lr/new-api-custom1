@@ -371,6 +371,8 @@ func TestDefaultVendorMappingUsesSingleVendorChannelsInAnyAbilityOrder(t *testin
 		ability("nai-diffusion-4-5-full", constant.ChannelTypeOpenAI),
 		ability("gpt-4o", constant.ChannelTypeNovelAI),
 		ability("saved-alias", constant.ChannelTypeNovelAI),
+		ability("tts-1", constant.ChannelTypeNovelAI),
+		ability("tts-1-hd", constant.ChannelTypeOpenAI),
 	}
 	for _, reversed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("reversed_%t", reversed), func(t *testing.T) {
@@ -378,8 +380,13 @@ func TestDefaultVendorMappingUsesSingleVendorChannelsInAnyAbilityOrder(t *testin
 			if reversed {
 				slices.Reverse(ordered)
 			}
-			// A saved record keeps its vendor, even an empty one.
-			metaMap := map[string]*Model{"saved-alias": {ModelName: "saved-alias", Status: 1}}
+			// A saved record keeps its vendor; one saved without a vendor
+			// takes the vendor its name names, never the channel type's.
+			metaMap := map[string]*Model{
+				"saved-alias": {ModelName: "saved-alias", Status: 1},
+				"tts-1":       {ModelName: "tts-1", Status: 1},
+				"tts-1-hd":    {ModelName: "tts-1-hd", VendorID: 5, Status: 1},
+			}
 			initDefaultVendorMapping(metaMap, map[int]*Vendor{}, ordered)
 
 			vendors := make(map[string]int, len(metaMap))
@@ -388,7 +395,117 @@ func TestDefaultVendorMappingUsesSingleVendorChannelsInAnyAbilityOrder(t *testin
 			}
 			// Name rules come before the channel type, and name NovelAI models
 			// that an OpenAI-compatible channel serves.
-			assert.Equal(t, map[string]int{"anime-v4": -1024, "nai-diffusion-4-5-full": -1024, "gpt-4o": -1012, "saved-alias": 0}, vendors)
+			assert.Equal(t, map[string]int{"anime-v4": -1024, "nai-diffusion-4-5-full": -1024, "gpt-4o": -1012, "saved-alias": 0, "tts-1": -1012, "tts-1-hd": 5}, vendors)
 		})
 	}
+}
+
+// resolveModelMetadata shares one record among all the names a prefix,
+// suffix or contains record matches, so a vendor inferred for one of them
+// goes on that name's own copy and the record itself stays as saved.
+func TestDefaultVendorMappingInfersVendorOnACopyOfASharedRecord(t *testing.T) {
+	shared := &Model{ModelName: "tts-", Description: "Speech", Status: 1, NameRule: NameRulePrefix}
+	metaMap := map[string]*Model{"tts-1-1106": shared, "tts-1-hd": shared, "tts-custom-voice": shared}
+	initDefaultVendorMapping(metaMap, map[int]*Vendor{}, []AbilityWithChannel{
+		{Ability: Ability{Model: "tts-1-1106"}, ChannelType: constant.ChannelTypeOpenAI},
+		{Ability: Ability{Model: "tts-1-hd"}, ChannelType: constant.ChannelTypeOpenAI},
+		{Ability: Ability{Model: "tts-1-hd"}, ChannelType: constant.ChannelTypeNovelAI},
+		{Ability: Ability{Model: "tts-custom-voice"}, ChannelType: constant.ChannelTypeNovelAI},
+	})
+
+	assert.Equal(t, Model{ModelName: "tts-", Description: "Speech", Status: 1, NameRule: NameRulePrefix}, *shared, "the shared record is not changed")
+	for _, name := range []string{"tts-1-1106", "tts-1-hd"} {
+		require.NotSame(t, shared, metaMap[name], name)
+		assert.Equal(t, Model{ModelName: "tts-", Description: "Speech", VendorID: -1012, Status: 1, NameRule: NameRulePrefix}, *metaMap[name], name)
+	}
+	// No rule names a vendor: the name keeps the record as saved, and a
+	// record never takes the vendor of the NovelAI channel serving it.
+	assert.Same(t, shared, metaMap["tts-custom-voice"])
+}
+
+func TestPricingInfersOpenAIForSpeechAndEmbeddings(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	insertPricingEndpointChannel(t, 108, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	for _, name := range []string{"tts-1", "tts-1-1106", "[按次]tts-1", "text-embedding-ada-002"} {
+		insertPricingEndpointAbility(t, 108, name)
+	}
+	insertPricingEndpointChannel(t, 109, constant.ChannelTypeNovelAI, dto.ChannelOtherSettings{})
+	insertPricingEndpointAbility(t, 109, "gpt-sovits")
+	InitChannelCache()
+	vendorByModel := func() map[string]int {
+		vendors := make(map[string]int)
+		for _, pricing := range GetPricing() {
+			vendors[pricing.ModelName] = pricing.VendorID
+		}
+		return vendors
+	}
+
+	// gpt-sovits hits the stop row, so it lists under its NovelAI channel.
+	assert.Equal(t, map[string]int{"tts-1": -1012, "tts-1-1106": -1012, "[按次]tts-1": -1012, "text-embedding-ada-002": -1012, "gpt-sovits": -1024}, vendorByModel())
+	assert.Equal(t, []PricingVendor{
+		{ID: -1012, Name: "OpenAI", Icon: "OpenAI"},
+		{ID: -1024, Name: "NovelAI", Icon: "NovelAI"},
+	}, GetVendors())
+
+	// A record with another vendor keeps it.
+	require.NoError(t, DB.Create(&Vendor{Id: 4, Name: "Acme Speech", Status: 1}).Error)
+	require.NoError(t, DB.Create(&Model{ModelName: "tts-1", VendorID: 4, Status: 1, NameRule: NameRuleExact}).Error)
+	InvalidatePricingCache()
+	assert.Equal(t, map[string]int{"tts-1": 4, "tts-1-1106": -1012, "[按次]tts-1": -1012, "text-embedding-ada-002": -1012, "gpt-sovits": -1024}, vendorByModel())
+}
+
+// The official metadata sync saves Alibaba's models under "Alibaba"; models
+// inferred by name list under that saved vendor instead of a second "阿里巴巴".
+func TestPricingListsSyncedCompanyOnce(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	require.NoError(t, DB.Create(&Vendor{Id: 7, Name: "Alibaba", Icon: "Qwen.Color", Status: 1}).Error)
+	require.NoError(t, DB.Create(&Model{ModelName: "qwen-plus", VendorID: 7, Status: 1, NameRule: NameRuleExact}).Error)
+	insertPricingEndpointChannel(t, 111, constant.ChannelTypeAli, dto.ChannelOtherSettings{})
+	for _, name := range []string{"qwen-plus", "qwen-plus-latest", "qwen-plus-2025-07-28"} {
+		insertPricingEndpointAbility(t, 111, name)
+	}
+	InitChannelCache()
+
+	vendorByModel := make(map[string]int)
+	for _, pricing := range GetPricing() {
+		vendorByModel[pricing.ModelName] = pricing.VendorID
+	}
+	assert.Equal(t, map[string]int{"qwen-plus": 7, "qwen-plus-latest": 7, "qwen-plus-2025-07-28": 7}, vendorByModel)
+	assert.Equal(t, []PricingVendor{{ID: 7, Name: "Alibaba", Icon: "Qwen.Color"}}, GetVendors())
+}
+
+// A record saved without a vendor (made only to add a description, say)
+// takes the vendor its name names; a saved vendor always wins.
+func TestPricingInfersVendorOfRecordsWithoutVendor(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	require.NoError(t, DB.Create(&Vendor{Id: 4, Name: "Acme Speech", Status: 1}).Error)
+	for _, record := range []Model{
+		{ModelName: "tts-1", Description: "Text to speech", Status: 1, NameRule: NameRuleExact},
+		{ModelName: "tts-", Description: "Speech", Status: 1, NameRule: NameRulePrefix},
+		{ModelName: "tts-1-hd", Description: "HD speech", VendorID: 4, Status: 1, NameRule: NameRuleExact},
+	} {
+		require.NoError(t, DB.Create(&record).Error)
+	}
+	insertPricingEndpointChannel(t, 110, constant.ChannelTypeOpenAI, dto.ChannelOtherSettings{})
+	for _, name := range []string{"tts-1", "tts-1-1106", "tts-1-hd", "tts-1-hd-1106", "tts-custom-voice"} {
+		insertPricingEndpointAbility(t, 110, name)
+	}
+	InitChannelCache()
+
+	vendors, descriptions := make(map[string]int), make(map[string]string)
+	for _, pricing := range GetPricing() {
+		vendors[pricing.ModelName] = pricing.VendorID
+		descriptions[pricing.ModelName] = pricing.Description
+	}
+	// The prefix record "tts-" stands for tts-1-1106, tts-1-hd-1106 and
+	// tts-custom-voice; no rule names a vendor for the last one.
+	assert.Equal(t, map[string]int{"tts-1": -1012, "tts-1-1106": -1012, "tts-1-hd": 4, "tts-1-hd-1106": -1012, "tts-custom-voice": 0}, vendors)
+	assert.Equal(t, map[string]string{"tts-1": "Text to speech", "tts-1-1106": "Speech", "tts-1-hd": "HD speech", "tts-1-hd-1106": "Speech", "tts-custom-voice": "Speech"}, descriptions)
+	assert.Equal(t, []PricingVendor{
+		{ID: 4, Name: "Acme Speech"},
+		{ID: -1012, Name: "OpenAI", Icon: "OpenAI"},
+	}, GetVendors())
 }

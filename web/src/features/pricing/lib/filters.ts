@@ -35,6 +35,11 @@ import {
   isUnconfiguredTaskUsageModel,
 } from './dynamic-price'
 import { isTokenBasedModel } from './model-helpers'
+import { queryForms } from './model-name-fold'
+import type {
+  ModelSquareFilterSections,
+  ModelSquareIndex,
+} from './model-variants'
 import { withBasePricing } from './plugin-pricing'
 import { calculateTokenPrice } from './price'
 
@@ -43,21 +48,44 @@ import { calculateTokenPrice } from './price'
 // ----------------------------------------------------------------------------
 
 /**
- * Filter models by search query
+ * Filter models by search query: a substring of the name, description, tags
+ * or vendor. With the Model Square index and its version fold on, a model
+ * also matches when a folded form of the query is part of its family key or
+ * of its folded name, so either spelling of a version finds both
+ * (claude-opus-4-5 and claude-opus-4.5, a dated name typed in the other
+ * spelling, a [line] tag in any case).
  */
 export function filterBySearch(
   models: PricingModel[],
-  query: string
+  query: string,
+  index?: ModelSquareIndex
 ): PricingModel[] {
   if (!query) return models
 
   const lowerQuery = query.toLowerCase()
+  const forms = index?.settings.version_spelling_fold_enabled
+    ? queryForms(query)
+    : []
+  const matchesFolded = (model: PricingModel) => {
+    if (forms.length === 0) return false
+    const parsed = index?.byName.get(model.model_name)
+    return (
+      parsed !== undefined &&
+      forms.some(
+        (form) =>
+          parsed.key.includes(form) ||
+          parsed.foldedName.includes(form) ||
+          parsed.searchText.includes(form)
+      )
+    )
+  }
   return models.filter(
     (m) =>
       m.model_name?.toLowerCase().includes(lowerQuery) ||
       m.description?.toLowerCase().includes(lowerQuery) ||
       m.tags?.toLowerCase().includes(lowerQuery) ||
-      m.vendor_name?.toLowerCase().includes(lowerQuery)
+      m.vendor_name?.toLowerCase().includes(lowerQuery) ||
+      matchesFolded(m)
   )
 }
 
@@ -241,8 +269,39 @@ export function sortModels(
   return sorted
 }
 
+export type FilterValues = {
+  group: string
+  vendor: string
+  tag: string
+  quotaType: string
+  endpointType: string
+}
+
 /**
- * Apply all filters and sorting to models
+ * The filters that apply: a section the Model Square hides is not applied, so
+ * a stale URL parameter or a value chosen before an admin hid the section is
+ * ignored (the value itself is kept).
+ */
+export function effectiveFilterValues(
+  state: Partial<FilterValues>,
+  sections: ModelSquareFilterSections
+): FilterValues {
+  return {
+    group: sections.groups ? state.group || FILTER_ALL : FILTER_ALL,
+    vendor: sections.vendors ? state.vendor || FILTER_ALL : FILTER_ALL,
+    tag: sections.tags ? state.tag || FILTER_ALL : FILTER_ALL,
+    quotaType: sections.quota_types
+      ? state.quotaType || QUOTA_TYPES.ALL
+      : QUOTA_TYPES.ALL,
+    endpointType: sections.endpoint_types
+      ? state.endpointType || ENDPOINT_TYPES.ALL
+      : ENDPOINT_TYPES.ALL,
+  }
+}
+
+/**
+ * Apply all filters and sorting to models. The index (Model Square grouping
+ * on) lets the search match folded spellings.
  */
 export function filterAndSortModels(
   models: PricingModel[],
@@ -254,9 +313,10 @@ export function filterAndSortModels(
     endpointType: string
     tag: string
     sortBy: string
-  }
+  },
+  index?: ModelSquareIndex
 ): PricingModel[] {
-  let result = filterBySearch(models, filters.search)
+  let result = filterBySearch(models, filters.search, index)
   result = filterByVendor(result, filters.vendor)
   result = filterByGroup(result, filters.group)
   result = filterByQuotaType(result, filters.quotaType)
