@@ -61,6 +61,52 @@ describe('rsbuild.config.ts', () => {
     )
   })
 
+  // html-rspack-plugin writes attribute values into index.html as they are,
+  // so a quote or an ampersand in a tag name must reach it escaped.
+  test('escapes the build version for the attribute it is written into', async () => {
+    const version = 'v1"><script>alert(1)</script>&amp;'
+    vi.stubEnv('VITE_REACT_APP_VERSION', version)
+
+    const config = await productionConfig()
+    const content = config.html.meta[BUILD_VERSION_META_NAME]
+
+    expect(content).toBe(
+      'v1&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;amp;'
+    )
+    // jsdom's parser; the node project's types have no DOM.
+    const { DOMParser } = globalThis as unknown as {
+      DOMParser: new () => {
+        parseFromString(
+          html: string,
+          type: 'text/html'
+        ): {
+          querySelectorAll(selector: string): { length: number }
+          querySelector(
+            selector: string
+          ): { getAttribute(name: string): string | null } | null
+        }
+      }
+    }
+    const parsed = new DOMParser().parseFromString(
+      `<head><meta name="${BUILD_VERSION_META_NAME}" content="${content}"></head>`,
+      'text/html'
+    )
+    expect(parsed.querySelectorAll('script')).toHaveLength(0)
+    expect(
+      parsed
+        .querySelector(`meta[name="${BUILD_VERSION_META_NAME}"]`)
+        ?.getAttribute('content')
+    ).toBe(version)
+  })
+
+  test('writes an ordinary version unchanged', async () => {
+    vi.stubEnv('VITE_REACT_APP_VERSION', 'custom-abc1234')
+
+    const config = await productionConfig()
+
+    expect(config.html.meta[BUILD_VERSION_META_NAME]).toBe('custom-abc1234')
+  })
+
   test('adds no version tag to an unstamped build', async () => {
     vi.stubEnv('VITE_REACT_APP_VERSION', '')
 

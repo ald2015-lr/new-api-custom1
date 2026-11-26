@@ -11,6 +11,15 @@ import { BUILD_VERSION_META_NAME } from './src/lib/build-version-meta'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+// html-rspack-plugin writes attribute values into index.html as they are: a
+// quote in the value would end the attribute, and `&…;` would be decoded.
+const escapeHtmlAttribute = (value: string) =>
+  value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+
 // Production bundles get en.json without its identity entries (key === value);
 // see scripts/slim-locale.mjs. Development keeps the full file.
 const pluginSlimEnglishLocale: RsbuildPlugin = {
@@ -32,7 +41,7 @@ export default defineConfig(({ envMode }) => {
   // Written into index.html, not the bundle: see src/lib/build-version-meta.ts.
   const buildVersion = env.rawPublicVars.VITE_REACT_APP_VERSION ?? ''
   const buildVersionMeta: Record<string, string> = buildVersion
-    ? { [BUILD_VERSION_META_NAME]: buildVersion }
+    ? { [BUILD_VERSION_META_NAME]: escapeHtmlAttribute(buildVersion) }
     : {}
 
   const isProd = envMode === 'production'
