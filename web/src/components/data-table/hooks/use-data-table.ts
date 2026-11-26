@@ -114,14 +114,22 @@ type UseDataTableOptions<TData> = DataTableFeatureOptions<TData> &
      */
     isPlaceholderData?: boolean
     pageCount?: number
+    /**
+     * Moves a page past pageCount back into range; returns true when it did.
+     * The table then waits for the page or the page count to change before
+     * calling it again. A move through the router stays pending over the
+     * next renders, and calling again restarts the navigation: a table that
+     * renders on every navigation would never leave the page.
+     */
     ensurePageInRange?: (
       pageCount: number,
       opts?: { resetTo?: 'first' | 'last' }
-    ) => void
+    ) => boolean | void
   }
 
 type PagePosition = { pageIndex: number; pageSize: number }
 type ServedPage = PagePosition & { rows: number }
+type PageRange = PagePosition & { pageCount: number }
 
 function isSamePosition(a: PagePosition, b: PagePosition) {
   return a.pageIndex === b.pageIndex && a.pageSize === b.pageSize
@@ -483,12 +491,38 @@ export function useDataTable<TData>(options: UseDataTableOptions<TData>) {
       : undefined,
   })
 
+  // The page and page count that ensurePageInRange last moved the page away
+  // from: until one of them changes, that move is still pending.
+  const movedFromRef = React.useRef<PageRange | null>(null)
   const actualPageCount = table.getPageCount()
   React.useEffect(() => {
     // A capped count does not know the last page; see the effect below.
-    if (totalCountCapped) return
-    ensurePageInRange?.(actualPageCount)
-  }, [actualPageCount, ensurePageInRange, totalCountCapped])
+    if (totalCountCapped) {
+      movedFromRef.current = null
+      return
+    }
+    const range: PageRange = {
+      pageIndex: pagination.pageIndex,
+      pageSize: pagination.pageSize,
+      pageCount: actualPageCount,
+    }
+    const movedFrom = movedFromRef.current
+    if (
+      movedFrom !== null &&
+      isSamePosition(movedFrom, range) &&
+      movedFrom.pageCount === range.pageCount
+    ) {
+      return
+    }
+    movedFromRef.current =
+      ensurePageInRange?.(actualPageCount) === true ? range : null
+  }, [
+    actualPageCount,
+    ensurePageInRange,
+    pagination.pageIndex,
+    pagination.pageSize,
+    totalCountCapped,
+  ])
 
   React.useEffect(() => {
     if (!totalCountCapped) {

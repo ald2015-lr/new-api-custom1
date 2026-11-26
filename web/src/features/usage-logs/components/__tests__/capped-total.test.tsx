@@ -31,6 +31,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { PageFooterProvider } from '@/components/layout/components/page-footer'
 import { api } from '@/lib/api'
+import { resolveAuthentication } from '@/lib/auth-session'
 import { ROLE } from '@/lib/roles'
 import { Route as UsageLogsRoute } from '@/routes/_authenticated/usage-logs/$section'
 import { useAuthStore } from '@/stores/auth-store'
@@ -126,14 +127,39 @@ function renderLogs(props: {
   role?: number
   page?: typeof LogsTablePage
 }) {
-  useAuthStore.getState().auth.setUser({
-    id: 1,
-    username: 'tester',
-    role: props.role ?? ROLE.USER,
+  // Signed in: the session is in memory.
+  useAuthStore.getState().auth.setBundle({
+    access_token: 'test-access-token',
+    token_type: 'Bearer',
+    access_expires_at: Math.floor(Date.now() / 1000) + 3600,
+    user: { id: 1, username: 'tester', role: props.role ?? ROLE.USER },
+    session: {
+      sid: 'test-session',
+      current: true,
+      login_method: 'password',
+      ip: '',
+      user_agent: '',
+      created_at: 0,
+      last_active_at: 0,
+      expires_at: 0,
+    },
   })
   mockServer(props.server)
   const root = createRootRoute()
-  const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
+  // Like the console's route guard, check the session on every navigation.
+  // With the session in memory that only writes the auth store, which the
+  // log page reads (its sidebar config), so the page renders while each
+  // navigation is pending. After 50 navigations the check stops: a page that
+  // keeps navigating then fails its test instead of freezing it.
+  let sessionChecks = 0
+  const auth = createRoute({
+    getParentRoute: () => root,
+    id: '_authenticated',
+    beforeLoad: async () => {
+      sessionChecks += 1
+      if (sessionChecks <= 50) await resolveAuthentication()
+    },
+  })
   const logs = createRoute({
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
@@ -146,6 +172,7 @@ function renderLogs(props: {
       initialEntries: [`/usage-logs/common?${props.search}`],
     }),
   })
+  vi.spyOn(router, 'navigate')
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -218,23 +245,27 @@ it('ends a capped list at the first short page', async () => {
   expect(screen.getByText('1001', { selector: 'button' })).toBeVisible()
 })
 
-it('keeps an exact total below the cap and sends a page past its end back to the first', async () => {
+it('keeps an exact total below the cap and sends a page past its end back to the first once', async () => {
+  // 25 logs are 3 pages of 10.
   const router = renderLogs({
     server: { allMatches: 0, selfMatches: 25 },
     search: 'page=5&pageSize=10',
+    page: UsageLogs,
   })
 
-  await waitFor(() => expect(requestedPages()).toContain(1))
+  await waitFor(() => expect(requestedPages()).toEqual([5, 1]))
   expect(await screen.findByText('25')).toBeVisible()
   expect(screen.queryByText(/^\d[\d,.\s\u00a0\u202f]*\+$/)).toBeNull()
   expect(router.state.location.search).not.toHaveProperty('page')
+  expect(router.navigate).toHaveBeenCalledOnce()
 })
 
-it('sends a saved link past the end of a capped list back to the first page', async () => {
+it('sends a saved link past the end of a capped list back to the first page once', async () => {
   // 12,000 logs are 1,200 pages of 10.
   const router = renderLogs({
     server: { allMatches: 0, selfMatches: 12000 },
     search: 'page=1500&pageSize=10',
+    page: UsageLogs,
   })
 
   await waitFor(() => expect(requestedPages()).toEqual([1500, 1]))
@@ -244,6 +275,7 @@ it('sends a saved link past the end of a capped list back to the first page', as
   expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
   expect(nextPageButton()).toBeEnabled()
   expect(screen.queryByText('No Logs Found')).toBeNull()
+  expect(router.navigate).toHaveBeenCalledOnce()
 })
 
 it('sends Only Mine back to the first page when the open page lies past its end', async () => {
@@ -268,6 +300,31 @@ it('sends Only Mine back to the first page when the open page lies past its end'
   )
   expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
   expect(screen.queryByText('No Logs Found')).toBeNull()
+  expect(router.navigate).toHaveBeenCalledOnce()
+})
+
+it('sends Only Mine back to the first page once when its exact total ends before the open page', async () => {
+  const user = userEvent.setup()
+  // Page 2,000 of every log exists; 25 own logs are 3 pages of 10.
+  const router = renderLogs({
+    server: { allMatches: 1000000, selfMatches: 25 },
+    search: 'page=2000&pageSize=10',
+    role: ROLE.SUPER_ADMIN,
+    page: UsageLogs,
+  })
+  expect(await screen.findByText(CAPPED_TOTAL)).toBeVisible()
+
+  await user.click(screen.getByRole('tab', { name: 'Only Mine' }))
+
+  await waitFor(() =>
+    expect(listRequests()).toEqual(['all:2000/10', 'self:2000/10', 'self:1/10'])
+  )
+  await waitFor(() =>
+    expect(router.state.location.search).not.toHaveProperty('page')
+  )
+  expect(await screen.findByText('25')).toBeVisible()
+  expect(screen.queryByText('No Logs Found')).toBeNull()
+  expect(router.navigate).toHaveBeenCalledOnce()
 })
 
 it('goes back to the last full page of a capped list when the next page comes back empty', async () => {
