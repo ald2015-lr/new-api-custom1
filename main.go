@@ -298,7 +298,9 @@ func InjectUmamiAnalytics() {
 		if umamiScriptURL == "" {
 			umamiScriptURL = "https://analytics.umami.is/script.js"
 		}
-		analyticsInjectBuilder.WriteString("<script defer src=\"")
+		// async, not defer: a deferred tag here runs before the app's own deferred
+		// scripts, so a slow or unreachable analytics host would hold up the page.
+		analyticsInjectBuilder.WriteString("<script async src=\"")
 		analyticsInjectBuilder.WriteString(umamiScriptURL)
 		analyticsInjectBuilder.WriteString("\" data-website-id=\"")
 		analyticsInjectBuilder.WriteString(umamiSiteID)
