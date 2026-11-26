@@ -47,10 +47,18 @@ const defaultModelSettings: ModelSettings = {
   'grok.violation_deduction_enabled': true,
   'grok.violation_deduction_amount': 0.05,
   'model_square_setting.variant_grouping_enabled': true,
+  'model_square_setting.version_spelling_fold_enabled': true,
+  'model_square_setting.snapshot_fold_enabled': true,
   'model_square_setting.variant_rules': JSON.stringify(
     DEFAULT_MODEL_VARIANT_RULES
   ),
   'model_square_setting.family_bases': '[]',
+  // Model tags and endpoint types stay hidden until an admin shows them.
+  'model_square_setting.show_group_filter': true,
+  'model_square_setting.show_vendor_filter': true,
+  'model_square_setting.show_tag_filter': false,
+  'model_square_setting.show_quota_type_filter': true,
+  'model_square_setting.show_endpoint_type_filter': false,
   ModelPrice: '',
   ModelRatio: '',
   CacheRatio: '',
