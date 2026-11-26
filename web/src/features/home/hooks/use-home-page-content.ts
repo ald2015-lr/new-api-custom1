@@ -26,25 +26,65 @@ import { getHomePageContent } from '../api'
 import type { HomePageContentResult } from '../types'
 
 const STORAGE_KEY = 'home_page_content'
+/** `'none'` once the server said there is no custom content, `'content'` otherwise. */
+const STATE_STORAGE_KEY = 'home_page_content_state'
+
+/** A first visit shows the default home if the custom content takes longer. */
+export const FIRST_VISIT_CONTENT_WAIT_MS = 5000
+
+interface CachedHomePageContent {
+  content: string
+  /** Whether the cache answers what to show (content, or none) */
+  known: boolean
+}
+
+function readCachedContent(): CachedHomePageContent {
+  try {
+    const content = localStorage.getItem(STORAGE_KEY) || ''
+    if (content) return { content, known: true }
+    return {
+      content: '',
+      known: localStorage.getItem(STATE_STORAGE_KEY) === 'none',
+    }
+  } catch {
+    return { content: '', known: false }
+  }
+}
+
+function writeCachedContent(content: string): void {
+  try {
+    if (content) {
+      localStorage.setItem(STORAGE_KEY, content)
+      localStorage.setItem(STATE_STORAGE_KEY, 'content')
+    } else {
+      localStorage.removeItem(STORAGE_KEY)
+      localStorage.setItem(STATE_STORAGE_KEY, 'none')
+    }
+  } catch {
+    // Storage can be unavailable in private mode; the next visit just waits.
+  }
+}
 
 /**
  * Hook to load and manage custom home page content
  * Supports both Markdown/HTML content and iframe URLs
+ *
+ * A returning visitor renders the cached answer at once and refreshes it in
+ * the background; a first visit waits for the response, at most
+ * FIRST_VISIT_CONTENT_WAIT_MS, before the default home.
  */
 export function useHomePageContent(): HomePageContentResult {
-  const [content, setContent] = useState<string>('')
-  const [isLoaded, setIsLoaded] = useState(false)
+  const [cached] = useState(readCachedContent)
+  const [content, setContent] = useState<string>(cached.content)
+  const [isLoaded, setIsLoaded] = useState(cached.known)
 
   useEffect(() => {
     let mounted = true
+    const firstVisitTimer = cached.known
+      ? undefined
+      : setTimeout(() => setIsLoaded(true), FIRST_VISIT_CONTENT_WAIT_MS)
 
     const loadContent = async () => {
-      // Load from localStorage first for immediate display
-      const cached = localStorage.getItem(STORAGE_KEY)
-      if (cached && mounted) {
-        setContent(cached)
-      }
-
       try {
         const response = await getHomePageContent()
         const { success, data } = response
@@ -53,17 +93,18 @@ export function useHomePageContent(): HomePageContentResult {
 
         if (success && data) {
           setContent(data)
-          localStorage.setItem(STORAGE_KEY, data)
+          writeCachedContent(data)
         } else {
           // Clear content if API returns empty
           setContent('')
-          localStorage.removeItem(STORAGE_KEY)
+          writeCachedContent('')
         }
       } catch (error) {
         if (!mounted) return
         handleServerError(error, i18next.t('Failed to load home page content'))
       } finally {
         if (mounted) {
+          clearTimeout(firstVisitTimer)
           setIsLoaded(true)
         }
       }
@@ -73,8 +114,9 @@ export function useHomePageContent(): HomePageContentResult {
 
     return () => {
       mounted = false
+      clearTimeout(firstVisitTimer)
     }
-  }, [])
+  }, [cached.known])
 
   const isUrl = isHttpUrl(content)
 

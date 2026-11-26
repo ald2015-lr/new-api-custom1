@@ -22,6 +22,8 @@ import i18next from 'i18next'
 import { StrictMode } from 'react'
 import ReactDOM from 'react-dom/client'
 
+import { bootstrapAuthentication } from '@/lib/auth-session'
+import { LOCALE_WAIT_MS, waitAtMost } from '@/lib/boot'
 import { installBuildMetadata } from '@/lib/build-metadata'
 import { applyFaviconToDom } from '@/lib/dom-utils'
 import '@/lib/dayjs'
@@ -101,12 +103,17 @@ if (!rootElement) {
     /* empty */
   }
 })()
+// Start the session refresh next to /api/status instead of in the root guard,
+// which runs only after the locale and the first render. The guard's own call
+// joins this request (one refresh in flight at a time).
+void bootstrapAuthentication()
 if (!rootElement.innerHTML) {
   const root = ReactDOM.createRoot(rootElement)
   // Only `en` ships in the entry chunk; register the detected language's bundle
   // before first paint. `ensureLocale` never rejects, so a failed locale chunk
-  // still renders the app (in the fallback language) instead of blocking it.
-  void ensureLocale(i18next.language).finally(() => {
+  // still renders the app (in the fallback language) instead of blocking it,
+  // and a hung one holds the first render for at most LOCALE_WAIT_MS.
+  void waitAtMost(ensureLocale(i18next.language), LOCALE_WAIT_MS).then(() => {
     root.render(
       <StrictMode>
         <QueryClientProvider client={queryClient}>

@@ -16,14 +16,37 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { AxiosError, AxiosHeaders } from 'axios'
 import i18next from 'i18next'
 import { describe, expect, test } from 'vitest'
 
 import {
   getServerErrorMessage,
   getServerErrorMessageKey,
+  parseRetryAfter,
+  retryAfterMs,
   translateServerText,
 } from './server-error-message'
+
+function httpError(
+  status: number,
+  data: unknown = '',
+  headers: Record<string, string> = {}
+): AxiosError {
+  return new AxiosError(
+    `Request failed with status code ${status}`,
+    'ERR_BAD_REQUEST',
+    undefined,
+    undefined,
+    {
+      data,
+      status,
+      statusText: '',
+      headers: AxiosHeaders.from(headers),
+      config: { headers: new AxiosHeaders() },
+    }
+  )
+}
 
 describe('server error message mapping', () => {
   test('maps the active-session limit to recovery instructions', () => {
@@ -117,5 +140,95 @@ describe('server error message mapping', () => {
     } finally {
       await i18next.changeLanguage('en')
     }
+  })
+})
+
+describe('rate-limited responses', () => {
+  test('an empty 429 names the Retry-After wait in the active language', async () => {
+    i18next.addResourceBundle('zhCN', 'translation', {
+      'Too many requests. Please try again in {{seconds}} seconds.':
+        '请求过于频繁，请 {{seconds}} 秒后再试。',
+    })
+    await i18next.changeLanguage('zhCN')
+    try {
+      expect(
+        getServerErrorMessage(httpError(429, '', { 'Retry-After': '37' }))
+      ).toBe('请求过于频繁，请 37 秒后再试。')
+    } finally {
+      await i18next.changeLanguage('en')
+    }
+  })
+
+  test('an empty 429 without Retry-After, or with a caller fallback, still explains itself', () => {
+    expect(getServerErrorMessage(httpError(429))).toBe(
+      'Too many requests. Please try again later.'
+    )
+    expect(
+      getServerErrorMessage(
+        httpError(429, '', { 'Retry-After': '5' }),
+        'Failed to load logs'
+      )
+    ).toBe('Too many requests. Please try again in 5 seconds.')
+  })
+
+  test("a 429 that carries the server's own message keeps that message", () => {
+    expect(
+      getServerErrorMessage(
+        httpError(
+          429,
+          { success: false, message: 'Too many sign-in attempts' },
+          { 'Retry-After': '60' }
+        )
+      )
+    ).toBe('Too many sign-in attempts')
+  })
+
+  test('other statuses keep the generic text', () => {
+    expect(getServerErrorMessage(httpError(503))).toBe(
+      'Request failed with status code 503'
+    )
+  })
+})
+
+describe('Retry-After parsing', () => {
+  const now = Date.parse('2026-03-02T08:00:00Z')
+
+  test.each([
+    ['30', 30_000],
+    [' 0 ', 0],
+    [12, 12_000],
+    ['Mon, 02 Mar 2026 08:00:45 GMT', 45_000],
+  ])('%j waits %d ms', (value, expected) => {
+    expect(parseRetryAfter(value, now)).toBe(expected)
+  })
+
+  test.each([
+    undefined,
+    '',
+    'soon',
+    '-5',
+    '1.5',
+    -1,
+    'Mon, 02 Mar 2026 07:59:00 GMT',
+  ])('%j is ignored', (value) => {
+    expect(parseRetryAfter(value, now)).toBeUndefined()
+  })
+
+  test('reads the header from Axios errors and plain response records', () => {
+    expect(retryAfterMs(httpError(429, '', { 'retry-after': '9' }))).toBe(9_000)
+    expect(
+      retryAfterMs({
+        response: { status: 429, headers: { 'Retry-After': '4' } },
+      })
+    ).toBe(4_000)
+    expect(
+      retryAfterMs(
+        new Error('wrapped', {
+          cause: httpError(503, '', { 'Retry-After': '2' }),
+        })
+      )
+    ).toBe(2_000)
+    expect(retryAfterMs(httpError(429))).toBeUndefined()
+    expect(retryAfterMs(new Error('offline'))).toBeUndefined()
   })
 })

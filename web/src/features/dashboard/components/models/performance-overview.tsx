@@ -48,6 +48,7 @@ export function PerformanceOverview() {
       ),
     staleTime: 60 * 1000,
     retry: false,
+    meta: { errorPage: false },
   })
 
   const models = useMemo(

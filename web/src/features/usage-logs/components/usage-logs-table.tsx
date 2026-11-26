@@ -27,6 +27,7 @@ import {
   DataTableRow,
   useDataTable,
 } from '@/components/data-table'
+import { Button } from '@/components/ui/button'
 import {
   getAdminPlans,
   getPublicPlans,
@@ -39,7 +40,10 @@ import {
   ADMIN_PERMISSION_RESOURCES,
   hasPermission,
 } from '@/lib/admin-permissions'
-import { createServerError } from '@/lib/server-error-message'
+import {
+  createServerError,
+  getServerErrorMessage,
+} from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -118,6 +122,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   const { data: plansShowBillingSource = false } = useQuery({
     queryKey: ['usage-log-billing-source', isAdmin, canReadAdminPlans, userId],
     enabled: logCategory === 'common' && userId != null,
+    // Only decides whether the billing column shows; never worth /500.
+    meta: { errorPage: false },
     queryFn: async () => {
       if (isAdmin) {
         const plansResult = canReadAdminPlans
@@ -179,7 +185,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     queryKey: [
       'logs',
       logCategory,
@@ -262,6 +268,25 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
 
   const isCommon = logCategory === 'common'
 
+  // A failed load is not an empty log: say so and offer a retry.
+  const loadFailed = isError && !data
+  let emptyTitle = t('No Logs Found')
+  let emptyDescription = t(
+    'No usage logs available. Logs will appear here once API calls are made.'
+  )
+  let emptyAction: React.ReactNode
+  if (loadFailed) {
+    emptyTitle = t('Failed to load logs')
+    const reason = getServerErrorMessage(error, '')
+    emptyDescription =
+      reason && reason !== emptyTitle ? reason : t('Please try again later.')
+    emptyAction = (
+      <Button variant='outline' onClick={() => void refetch()}>
+        {t('Retry')}
+      </Button>
+    )
+  }
+
   return (
     <DataTablePage
       table={table}
@@ -269,10 +294,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       columns={columns as ColumnDef<Record<string, unknown>>[]}
       isLoading={isLoadingData}
       isFetching={isFetching}
-      emptyTitle={t('No Logs Found')}
-      emptyDescription={t(
-        'No usage logs available. Logs will appear here once API calls are made.'
-      )}
+      emptyTitle={emptyTitle}
+      emptyDescription={emptyDescription}
+      emptyAction={emptyAction}
       skeletonKeyPrefix='usage-log-skeleton'
       applyHeaderSize
       tableClassName={cn(
@@ -282,6 +306,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         <UsageLogsMobileList
           table={table}
           isLoading={isLoadingData}
+          emptyTitle={emptyTitle}
+          emptyDescription={emptyDescription}
+          emptyAction={emptyAction}
           logCategory={logCategory}
         />
       }

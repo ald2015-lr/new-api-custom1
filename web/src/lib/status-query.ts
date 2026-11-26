@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { queryOptions, type QueryClient } from '@tanstack/react-query'
+import { hashKey, queryOptions, type QueryClient } from '@tanstack/react-query'
 
 import { getStatus } from '@/lib/api'
 import { DEFAULT_SYSTEM_NAME, DEFAULT_LOGO } from '@/lib/constants'
@@ -156,6 +156,8 @@ export const statusQueryOptions = queryOptions({
   staleTime: 5 * 60 * 1000,
   // Cache expires after 30 minutes
   gcTime: 30 * 60 * 1000,
+  // The cached snapshot and the defaults keep pages usable without it.
+  meta: { errorPage: false },
 })
 
 /**
@@ -182,5 +184,48 @@ export async function ensureStatus(
   return queryClient.ensureQueryData({
     ...statusQueryOptions,
     revalidateIfStale: true,
+  })
+}
+
+/**
+ * Status for a boot-time guard: the shared request's data, or `null` as soon
+ * as one attempt of it has failed or `timeoutMs` has passed.
+ *
+ * The query itself keeps retrying in the background for its other consumers;
+ * a guard that decides the first screen falls back to its own source instead
+ * of waiting for the whole retry schedule or a hung request.
+ */
+export function readStatusForGuard(
+  queryClient: QueryClient,
+  timeoutMs: number
+): Promise<StatusData | null> {
+  const queryHash = hashKey(STATUS_QUERY_KEY)
+  const cache = queryClient.getQueryCache()
+  return new Promise((resolve) => {
+    let settled = false
+    let unsubscribe = () => {}
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    function finish(status: StatusData | null) {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      unsubscribe()
+      resolve(status)
+    }
+    const firstAttemptFailed = () => {
+      const state = cache.get(queryHash)?.state
+      return state?.data === undefined && (state?.fetchFailureCount ?? 0) > 0
+    }
+    unsubscribe = cache.subscribe((event) => {
+      if (event.query.queryHash === queryHash && firstAttemptFailed()) {
+        finish(null)
+      }
+    })
+    queryClient
+      .ensureQueryData(statusQueryOptions)
+      .then((status) => finish(status ?? null))
+      .catch(() => finish(null))
+    // Joined a request that is already retrying: its first attempt failed.
+    if (firstAttemptFailed()) finish(null)
   })
 }
