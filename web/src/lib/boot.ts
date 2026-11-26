@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-
 /**
  * The longest the first render waits for the visitor's locale bundle. A slower
  * bundle still switches the language when it arrives (`ensureLocale`).

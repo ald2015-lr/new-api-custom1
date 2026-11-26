@@ -349,7 +349,9 @@ it("an admin opening a Top-up logs link of every user's logs keeps asking for To
     path: '/usage-logs/common?type=%5B%221%22%5D',
   })
 
-  await waitFor(() => expect(lastLogRequest('/api/log/?').get('type')).toBe('1'))
+  await waitFor(() =>
+    expect(lastLogRequest('/api/log/?').get('type')).toBe('1')
+  )
   expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(
     'Top-up'
   )
