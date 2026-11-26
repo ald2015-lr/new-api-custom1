@@ -43,12 +43,9 @@ import {
 } from '../components/model-family-price'
 import { ModelVariantList } from '../components/model-variant-list'
 import { getSplitPriceGroups, hasCachedPrice } from '../lib/model-family'
-import {
-  DEFAULT_MODEL_VARIANT_RULES,
-  groupModelFamilies,
-  type ModelFamily,
-} from '../lib/model-variants'
+import type { ModelFamily } from '../lib/model-variants'
 import type { BillingUsageSchema, PricingModel } from '../types'
+import { familiesOf, LEGACY } from './model-square-test-utils'
 
 const TIME_OF_DAY_EXPR =
   'hour("Asia/Shanghai") >= 9 && hour("Asia/Shanghai") < 12 ? tier("peak", p * 3 + c * 9) : tier("off_peak", p * 1.5 + c * 4.5)'
@@ -82,7 +79,7 @@ function model(name: string, overrides: Partial<PricingModel> = {}) {
 }
 
 function familyOf(...models: PricingModel[]): ModelFamily {
-  const [family] = groupModelFamilies(models, DEFAULT_MODEL_VARIANT_RULES)
+  const [family] = familiesOf(models, LEGACY)
   return family
 }
 

@@ -138,6 +138,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `relay/channel/openai/relay-openai.go` | `thinking_to_content` 交错思考 |
 | `relaykit/.../gemini_chat/to_oai_chat_resp.go` | thought 与正文分字段 |
 | `common/constants.go`、`model/log_other.go`、`web/src/features/system-settings/maintenance/log-settings-section.tsx` | 「在使用日志中显示响应模型」开关（默认关；关闭时日志接口不返回 `response_model`，黄色「响应模型」标记对所有人隐藏） |
+| `model/log.go`（`LogCountCap`、`countLogsUpToCap`、`boundLogPage`，`GetAllLogs` / `GetUserLogs` 多返回 `totalCapped`）、`controller/log.go`（`logPage`、`logPageQuery`）；前端 `web/src/components/data-table/hooks/use-data-table.ts`（`totalCountCapped`、`isPlaceholderData`，跳转完成前不重复调 `ensurePageInRange`）、`web/src/hooks/use-table-url-state.ts`（`ensurePageInRange` 用 `useCallback` 保持同一个函数，并返回是否跳转）、`core/pagination.tsx`、`web/src/tanstack-table.d.ts`（`TableMeta`，`ColumnMeta` 改用库自己的类型参数）、`features/usage-logs/components/usage-logs-table.tsx`、`web/src/routes/_authenticated/usage-logs/$section.tsx`（`pageSize` 最多 100） | 使用日志列表最多数 1 万条，超过时返回 `total_capped`、显示「10,000+」并可继续往后翻页（见第二十一节）；页码或每页条数小于 1 时按默认值，不会一次返回全部日志；上游改这两个列表函数时保留有上限的计数和每页条数；上游改这两个分页 hook 时保留「只跳一次」的写法，否则打开最后一页之后的页会卡住标签页 |
 | `model/subscription.go`、`service/{billing_session,funding_source,quota,task_billing}.go`、`relay/common/relay_info.go`、`service/log_info_generate.go` | 结算超出订阅剩余额度时，订阅扣满、超出部分按套餐设置转扣钱包（见第九节）；订阅优先回退钱包：`user_subscriptions` 只按列更新（不再整行 `Save`），「是否允许回退钱包」看套餐当前设置而不是购买时的快照（见第九节） |
 | 新文件 `setting/operation_setting/group_access_setting.go`、`model/group_access.go`、`service/group_access.go`、`middleware/group_access.go`，以及 `middleware/auth.go`、`middleware/distributor.go`、`service/group.go`、`controller/{group,pricing,token,option}.go`、`model/{option,user_cache}.go`、`constant/context_key.go`、`i18n/` 里的小钩子 | 分组充值门槛 + 白名单（见第八节） |
 | `web/src/features/system-settings/billing/group-access-*`、`features/keys/*`、`features/pricing/*` | 分组充值门槛的后台设置页、令牌分组锁定显示、模型广场门槛标记 |
@@ -149,7 +150,7 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
 | 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go`、`relay/channel/providerplugin/stream.go`（rc.51 起）与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping；`keepAliveWriterOf` 沿 `Unwrap` 穿过前面包着的 writer 找保活写出器）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式按客户端协议发心跳（Claude 发 `event: ping`，Responses 在第一个事件之后发 `event: keepalive`，其余发 `: PING`）、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
 | `relay/channel/api_request.go`（`DoApiRequest` / `DoFormRequest` 用 `http.NewRequestWithContext`）、`relay/channel/providerplugin/chain.go`（rc.51 起，provider 插件转换路由的 `sendStep` 同样用 `http.NewRequestWithContext(c.Request.Context(), …)`）、`service/relay_error.go`（`ClientGone`，`DecideRelayRetry` 的 `client_gone`）、`service/request_policy.go`、`controller/relay.go`（客户端已断开时不调用 `processChannelError`）、`relay/helper/stream_scanner.go`（读上游出错时先看客户端是否已断开）、`relay/responses_websocket.go`（WebSocket 连接上游失败时同样跳过 `ProcessChannelError`）、`relay/channel/{ollama/stream.go,coze/relay-coze.go,zhipu/relay-zhipu.go,cloudflare/relay_cloudflare.go,openai/audio.go}`（自己读上游的处理器：客户端断开后按已收到的文本结算、不记 ERR，TTS 非流式退款）；前端 `features/system-settings/request-policies/policy-label.ts` | 客户端断开时取消上游请求，不重试、不算渠道错误、退还预扣额度（见第十三节） |
-| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`；前端 `features/pricing/lib/model-variants.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`features/system-settings/models/model-square-*` | 模型广场按基础模型合并变体（见第十四节）；rc.51 起系列卡片、线路价格、分组价格和缓存价格列都先经上游的 `withBasePricing`，普通请求按模型价格计费的模型（`ordinary_pricing`）显示和单模型卡片一样的价格 |
+| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`、`model/pricing_default.go`（按名称识别供应商的有序规则、供应商别名）、`controller/model_square_option.go`、`router/api-router.go` 与 `middleware/access_token_routes.go`（`PUT /api/option/model_square`）；前端 `features/pricing/lib/model-variants.ts`、`lib/model-name-fold.ts`、`lib/filters.ts`、`hooks/use-filters.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`components/pricing-sidebar.tsx`、`components/pricing-toolbar.tsx`、`features/system-settings/models/model-square-*`、`features/system-settings/api.ts` 与 `hooks/use-update-option.ts` | 模型广场按基础模型合并变体（见第十四节）；rc.51 起系列卡片、线路价格、分组价格和缓存价格列都先经上游的 `withBasePricing`，普通请求按模型价格计费的模型（`ordinary_pricing`）显示和单模型卡片一样的价格；合并版本号写法和带日期的快照、左侧筛选项开关、设置一次保存、按名称识别供应商（见第十四节） |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 | `.github/workflows/ci.yml` | 前端作业的 `timeout-minutes` 从上游的 10 放宽到 20：rc.51 起前端测试从 243 个文件增加到 274 个、耗时多约 19%，较慢的 GitHub runner 上 10 分钟跑不完 |
@@ -564,15 +565,48 @@ curl -N https://<你的域名>/v1/chat/completions \
 
 ## 十四、模型广场按「基础模型」合并变体
 
-**效果：** 模型广场里同一个基础模型只显示一张卡片。比如 `[按次]claude-opus-4-6`、`[按次]claude-opus-4-6-thinking-high`、`[正价kiro]claude-opus-4-6-thinking-max` 都归到 `claude-opus-4-6` 这张卡：
-- 卡片正面：各线路（名称开头的 `[...]` 标签）及其最低价、变体标签、综合状态条；
-- 点「展开」：卡片所在行的下方展开一个整行面板，按线路分组列出每个变体的价格、状态条、延迟、吞吐，「复制」复制的是**完整模型名**，「详情」打开原来的模型详情；
-- 表格视图同样按家族一行、点 ▸ 展开；只有一个变体的模型照常显示。
+**效果：** 模型广场里同一个基础模型只显示一张卡片。比如 `[按次]claude-opus-4-6`、`[按次]claude-opus-4-6-thinking-high`、`[正价kiro]claude-opus-4-6-thinking-max` 都归到 `claude-opus-4-6` 这张卡。下面两种写法也并到同一张卡：
+- **版本号写法不同**：`claude-opus-4-5` 和 `claude-opus-4.5`、`claude-3-5-sonnet` 和 `claude-3.5-sonnet`、`doubao-1-5-pro` 和 `doubao-1.5-pro` 是同一个模型；大小写不同（`DeepSeek-V3` / `deepseek-v3`）、名称前多一段 `厂商/`（`deepseek-ai/DeepSeek-V3`、`hf:deepseek-ai/DeepSeek-R1-0528`）也算同一个。`glm-4-9b`、`llama-3-8b` 这类参数量、日期、`gpt-4-32k` 这类上下文长度不受影响。名称和版本号之间的 `-`（`llama-3.3-70b-instruct` 与 `llama3.3-70b-instruct`、`qwen3-32b` 与 `qwen-3-32b`）不算同一种写法，仍是两张卡。
+- **带日期的快照**：`gpt-4o-mini-2024-07-18` 并到 `gpt-4o-mini`，`tts-1-1106` 并到 `tts-1`，`claude-opus-4-5-20251101` 并到 `claude-opus-4-5`，`[按次]deepseek-v4-flash-0731` 并到 `deepseek-v4-flash`（线路「按次」、变体 `0731`），`kimi-k2-thinking-251104` 并到 `kimi-k2`（变体 `thinking · 251104`）。日期原样作为变体名，排在 thinking 等具名变体之后，新的在前。
+
+展示方式：
+- 卡片正面：标题、供应商、其他写法（「也写作 …」）、各线路（名称开头的 `[...]` 标签）及其最低价、变体标签、综合状态条；
+- 点「展开」：卡片所在行的下方展开一个整行面板，按线路分组列出每个变体，每行显示变体名和**完整模型名**，以及价格、状态条、延迟、吞吐；「复制」复制的是完整模型名，「详情」打开原来的模型详情；
+- 表格视图同样按家族一行、点 ▸ 展开；只有一个变体的模型照常显示；
+- 搜索时输入任一写法都能找到整张卡：搜 `claude-opus-4-5` 也会列出 `claude-opus-4.5` 的成员，搜 `claude-opus-4.5` 或 `claude-opus-4.5-2025` 能找到 `claude-opus-4-5-20251101`，带线路标签搜 `[正价kiro]claude-opus-4-5` 能找到 `[正价kiro]claude-opus-4.5`。
 
 **只影响展示**：用户调用、计费、日志里用的模型名一律不变。
 
-**在哪设置：** 系统设置 → 模型 → 模型广场显示：
-- 「合并模型变体」开关（默认开），关掉即恢复成每个模型名一张卡；
+**卡片标题：** 用成员里最多的那种写法（去掉线路标签、变体后缀和日期后），例如 3 个成员写 `claude-opus-4.5`、2 个写 `claude-opus-4-5` 时标题是 `claude-opus-4.5`，另一种写法显示为「也写作 claude-opus-4-5」（只列出确实有成员叫这个名字的写法）。数量相同时依次看：不带线路标签的模型用的写法；不带 `厂商/` 前缀的；厂商自己 API 的写法（Anthropic、字节跳动、NovelAI、快手、Mistral 以及同步来的「Volcengine Ark」「Volcengine Ark Coding Plan」用 `-`，其他厂商用 `.`）；全小写的；字母顺序。没有任何成员正好叫这个名字时（比如只有 `doubao-seed-1-6-250615` 和 `doubao-seed-1-6-251015`），标题用最新快照的完整名称，它的变体标签排在最前。标题按模型广场里这一组的全部成员来定，搜索或筛选时卡片不会改名。卡片的供应商是标题模型的供应商（筛选后标题模型不在结果里时，取显示出来的第一个成员），它没有供应商时取显示出来的成员里最多的那个。
+
+**哪些日期会并入：** 只看名称末尾（变体后缀去掉之后），每个名称最多一个日期，另外可以再带一个 Vertex 的 `@001` 这类版本号：
+
+| 写法 | 例子 |
+|---|---|
+| `-YYYY-MM-DD` | `gpt-4o-mini-2024-07-18`、`qwen-plus-2025-07-28` |
+| `-YYYYMMDD`、Vertex 的 `@YYYYMMDD` | `claude-opus-4-5-20251101`、`claude-opus-4-5@20251101`、`hunyuan-2.0-thinking-20251109` |
+| `-YYMMDD` | `doubao-seed-1-6-250615`、`glm-4-flash-250414`、`kimi-k2-thinking-251104` |
+| `-MMDD` | `tts-1-1106`、`deepseek-v4-flash-0731`、`grok-4-0709` |
+| `-YYMM` | `mistral-large-2411`、`qwen3-235b-a22b-instruct-2507` |
+| `-MM-DD`、`-MM-YYYY`、`-YYYY-MM`、`-YYYYMM` | `gemini-2.5-pro-preview-05-06`、`command-r-08-2024`、`jamba-large-1.7-2025-07`、`deepseek-v4-flash-202605` |
+| Vertex 的 `@2411`、`@2411-001`、`@001` | `codestral@2405`、`mistral-large@2411-001`、`text-bison@002`；`mistral-small-2503@001` 显示为「2503 · 001」 |
+| Gemini / Imagen / Veo 的 `-001`、`-002` 版本 | `gemini-2.0-flash-001`、`imagen-4.0-generate-001` |
+| `-latest` | 只有同页已有这个模型、并且它带版本号或有带日期的快照时才并入（`claude-3-5-sonnet-latest`、`qwen-plus-latest`）；`gemini-pro-latest`、`chatgpt-4o-latest`、`claude-opus-latest`、`chat-latest` 不并 |
+
+**不会并入的：** `text-embedding-ada-002`、`text-embedding-004`、`davinci-002`、`lyria-002` 这类 `-00N` 是模型名的一部分；日期不在末尾的（`gpt-4-1106-preview` 是 GPT-4 Turbo 预览版，不是 `gpt-4` 的快照；`kimi-k2-0905-preview`、`o3-mini-2025-01-31-high`、`qwen-plus-2025-12-01-us`）；最后一段带 `:` 的名称（`ft:…`、Bedrock 的 `-v1:0`、`:free`）；思考预算（`-thinking-1024`，以及 Gemini 名称里不在 `-exp`/`-preview` 后面的 4 位数字，如 `gemini-2.5-flash-1024`）；Qwen 2507 新权重写在 MoE 规格后面的 4 位数字（`qwen/qwen3-235b-a22b-2507`、`qwen/qwen3-30b-a3b-2507` 是 Instruct-2507，和 4 月的 `qwen3-235b-a22b` 不是同一个模型，单独一张卡；它和通义自己写的 `qwen3-235b-a22b-instruct-2507` 也是两张卡）。只有月日、没有年份的日期（`0125`、`1106`）排在带年份的日期之后，按月日从大到小；跨年时顺序可能不对（`gpt-3.5-turbo` 的 `0125` 是 2024 年的，却排在 2023 年的 `1106` 后面）。
+
+**供应商：** 没有在「模型管理」里建记录、或记录里没选供应商的模型，按名称自动识别供应商。规则按固定顺序逐条匹配：`tts-1`、`whisper`、`text-embedding-3-*`、`text-embedding-ada-002`、`omni-moderation`、`dall-e`、`gpt-image`、`sora`、`codex`、`o1`/`o3`/`o4`、`gpt4`/`gpt5` 这类不带 `-` 的写法等都归 OpenAI；Gemma、Imagen、Veo、Lyria、Nano Banana 归 Google；`text-embedding-v*`、通义、万相、QwQ 归阿里巴巴；Seedream、Seedance 归字节跳动，即梦（Dreamina）归即梦。同时去掉了误判：`tongyi-*` 不再算零一万物，`veo3`、`hailuo3` 不再算 OpenAI，`gpt-5.3-codex-spark`、`muse-spark` 不再算讯飞，`inkling` 不再算快手，`gpt-sovits`、`gpt4all`、`tinyllama` 不再算 OpenAI / Meta。名称是 `平台/模型` 时先看斜杠后面的模型名，平台名不决定供应商（`llamagate/nomic-embed-text` 不再算 Meta，`mistral/gpt-oss-120b` 算 OpenAI，`qwencloud/MiniMax-M2.5` 算 MiniMax）；模型名认不出时才看斜杠前的原厂名（`deepseek-ai/janus-pro-7b` 算 DeepSeek）。`@cf/` 开头的 Cloudflare 模型按原厂商归类（`@cf/qwen/...` 归阿里巴巴），认不出原厂商的才归 Cloudflare。微调模型按它名字里的基础模型归类（`hermes-3-llama-...` 算 Meta）。
+- 在「模型管理」里建了记录的模型：记录里选了供应商就以记录为准；**记录里没选供应商时也按名称识别**（只看上面的名称规则，不看渠道类型）。比如为了加描述给 `tts-1` 建了记录、没选供应商，它照样显示 OpenAI；按前缀、后缀或包含规则建的记录，匹配到的每个模型各自按自己的名称识别。名称认不出供应商的仍不显示供应商。想显示别的供应商，在记录里选上即可（下拉框里有内置供应商）。升级前，没选供应商的记录会让模型不显示供应商，现在不再这样。
+- 用「同步官方元数据」后，记录里的供应商是官方数据里的名字。阿里巴巴、智谱、Moonshot、MiniMax 在官方数据里叫 `Alibaba`、`Z.AI`、`Moonshot AI`、`MiniMax (minimax.io)` 等；保存了这些供应商后，自动识别的同公司模型也归到它们名下，不会再多出一个「阿里巴巴」。官方数据把个别模型记在托管平台名下（例如 `deepseek-v4-pro`、`deepseek-v4-pro-0813` 记为 `Tencent TokenHub`），这类卡片会显示托管平台；需要时在模型管理里改这些记录的供应商。
+
+**左侧筛选栏：** 可以单独显示或隐藏「分组」「供应商」「模型标签」「定价类型」「端点类型」五个筛选项，手机上的「筛选」抽屉也跟着变。默认显示分组、供应商、定价类型，隐藏模型标签和端点类型（老站点升级后也是这样，需要时手动打开）。隐藏的筛选项不显示也不生效：链接里带的 `?tag=`、`?endpointType=` 等参数会被忽略。五个都隐藏时左侧栏整个不显示。
+
+**在哪设置：** 系统设置 → 模型 → 模型广场显示（点「保存」时一次提交，全部生效或全部不生效）：
+- 「合并模型变体」开关（默认开），关掉即恢复成每个模型名一张卡（下面两个合并开关随之失效）；
+- 「合并版本号写法」（默认开）：上面说的 `-`/`.`、大小写、`厂商/` 前缀；
+- 「合并带日期的快照」（默认开）：上面的日期表。关掉后带日期的名称不再并入不带日期的那张卡，紧挨在日期前面的版本号也不再合并写法：`claude-opus-4-5-20251101` 和 `claude-opus-4.5-20251101` 会是两张卡；搜索不受影响，搜 `claude-opus-4.5` 仍能找到 `claude-opus-4-5-20251101`；
+- 「左侧筛选栏」：五个筛选项各一个开关；
+- 「合并的基础模型」：见下；
 - 「变体后缀规则」：从模型名末尾去掉哪些后缀算作变体，以及显示名和说明。默认规则：
 
 | 后缀 | 显示名 | 说明 |
@@ -582,15 +616,16 @@ curl -N https://<你的域名>/v1/chat/completions \
 | `-nothinking` | nothinking | 会思考，但不返回思考内容 |
 | `-128` | 128 | 思考预算 128（最低思考强度） |
 
-规则从名称末尾按「最长匹配」逐层去除，可以叠加，例如 `-128-nothinking` 显示为「128 · nothinking」。规则顺序就是变体的显示顺序。设置页底部有「预览」框，输入一个模型名能看到它会被拆成什么。
+规则从名称末尾按「最长匹配」逐层去除，可以叠加，例如 `-128-nothinking` 显示为「128 · nothinking」；和日期也能叠加，`claude-opus-4-5-20251101-thinking` 显示为「20251101 · thinking」。规则顺序就是变体的显示顺序。变体规则下方有「预览」框，输入一个模型名能看到它的基础模型、合并到哪张卡（「合并为」显示的是合并用的键，不一定是卡片标题：打开「合并版本号写法」时它是小写、版本号写成点、去掉 `厂商/` 前缀的写法，例如 `claude-opus-4-5-thinking` 显示 `claude-opus-4.5`）、线路和变体名；预览不处理 `-latest`（它是否并入要看同页有没有对应的模型）。
 
 **合并的基础模型（按模型名指定）：** 同页「合并的基础模型」里每行填一个基础模型（不带 `[...]` 线路标签），例如 `gemini-4-argon`。之后名称是「基础模型 + `-` + 任意内容」的模型都会并进这张卡，`-` 后面的部分直接作为变体名：
 - `[按次]gemini-4-argon-low`、`[按量]gemini-4-argon-medium` → 卡片 `gemini-4-argon`，线路「按次」「按量」，变体 `low`、`medium`；
 - 后面还能叠加上表的规则：`gemini-4-argon-medium-nothinking` 显示为「medium · nothinking」；
-- 多个基础模型都匹配时取最长的（同时填 `gemini-4` 和 `gemini-4-argon`，`gemini-4-argon-low` 归 `gemini-4-argon`）；`gemini-4-argonx` 这种只是字母相同的不会被并入；
-- 变体顺序：标准在前，接着是只带上表规则后缀的变体（如 nothinking，按规则顺序），然后 minimal / low / medium / high / xhigh / max，其他变体名按字母排。
+- 多个基础模型都匹配时取最长的（同时填 `gemini-4` 和 `gemini-4-argon`，`gemini-4-argon-low` 归 `gemini-4-argon`）；`gemini-4-argonx` 这种只是字母相同的不会被并入 `gemini-4-argon`；
+- 打开「合并版本号写法」时，基础模型也按同样规则比较：填 `claude-opus-4-5` 会并入 `claude-opus-4.5-thinking-max` 和 `claude-opus-4-5-20251101`（后者这种写法相同的快照，两个合并开关怎么组合都会并入）；基础模型不会截断版本号：填 `claude-opus-4` 只并入 `claude-opus-4` 和它的快照 `claude-opus-4-20250514`，不会吞掉 `claude-opus-4-1`、`claude-opus-4-5-20251101` 这些新版本，填 `claude-sonnet-4` 也不会吞掉 `claude-sonnet-4-5`；关掉「合并版本号写法」时基础模型按原样比较（填 `claude-opus-4` 会并入 `claude-opus-4-1` 等所有 `claude-opus-4-` 开头的模型）；
+- 变体顺序：标准在前，接着是只带上表规则后缀的变体（如 nothinking，按规则顺序），然后 minimal / low / medium / high / xhigh / max，其他变体名按字母排，最后是 latest 和日期快照（新的在前）。
 
-适合只想合并个别模型、又不想加全局 `-low / -high` 规则（会误伤 `gpt-5.1-codex-max` 这类模型）的情况。
+适合只想合并个别模型、又不想加全局 `-low / -high` 规则（会误伤 `gpt-5.1-codex-max` 这类模型）的情况，也适合自动规则合并不了的写法（Fireworks 的 `llama-v3p1`、Azure 的 `gpt-35-turbo`、`mistral-medium-3` 与 `mistral-medium-2604` 这类别名）。名称和版本号之间的 `-`（`llama-3.3-70b` 与 `llama3.3-70b`）基础模型也合并不了。
 
 **注意：** 默认规则里**没有**单独的 `-low / -high / -max` 等后缀，因为它们会把本来不同的模型（如 `gpt-5.1-codex-max`、`qwen-max`）误归为变体；需要的话可以在设置里自己加。没有任何规则时，同一个模型不同线路（`[按次]x`、`[按量]x`）仍会合并到一张卡；要完全不合并，请关掉开关。
 
@@ -1159,3 +1194,26 @@ services:
 - 构建：前端构建结束时多一步 brotli 预压缩（约 30 秒），`web/dist`、二进制和镜像各大约多 16 MB；Dockerfile 不变。
 
 **回滚：** 回到旧版本即可，没有数据库结构变化；新增的环境变量旧版本会忽略。
+
+---
+
+## 二十一、使用日志：总数超过 1 万条时显示「10000+」
+
+**用户看到什么：** 使用日志页（管理员看全部日志，普通用户看自己的日志）分页栏的「总计」，在符合条件的日志超过 1 万条时显示「10,000+」（千位分隔符跟浏览器的语言走）；手机端的页码显示成「1 / 500+」这样的下限（每页 20 条时）。1 万条及以下（含正好 1 万条）仍显示准确条数，翻页和以前完全一样。
+
+**为什么：** 以前每次打开或翻页，服务器都要把符合条件的日志全部数一遍（普通用户是所选时间范围内自己的日志，管理员是所有人的日志）。日志表大了以后这一步要几百毫秒到几秒，并发时更慢；用户日志原来那个「最多数 1 万条」并没有生效（`LIMIT` 加在了计数结果那一行上）。现在最多只数 10001 条（`SELECT count(*) FROM (SELECT 1 FROM logs WHERE … LIMIT 10001)`），SQLite、MySQL、PostgreSQL 和 ClickHouse 日志库用的是同一条查询。本机约 30 万行日志的测试库上（MySQL 8.0，单个请求）：一个用户 30 天内约 15 万条日志，原来光计数就要 169 ms，现在计数加取一页共 14 ms；管理员看 30 天内的全部日志（约 30 万条），从 33 ms 降到 3 ms。筛选后不到 1 万条、但这个用户的日志很多时（例如只看错误日志），计数仍要把这个用户的日志过一遍，速度和以前一样。
+
+**超过 1 万条以后怎么翻页：**
+- 「下一页」照常可用，可以一直翻到 1 万条以后；翻回来的一页不满（例如每页 100 条只回来 37 条）就是最后一页，「下一页」变灰。
+- 总页数不知道，所以这时「最后一页」按钮（»）不可用；页码里最后那个数字只是目前已知的页数（每页 100 条时一开始是 100，翻过去以后会跟着往后加）。
+- 翻到很靠后（几百页以后）每页会比前面慢一些，数据库要跳过前面的行。
+- 总条数正好是每页条数的整数倍时，在最后一页点「下一页」会取回一页空白，页面随即回到这最后一页，「下一页」变灰。
+- 打开的页在最后一页之后（例如打开旧链接、在第 2000 页从「全部」切到「仅自己」、日志被清理以后），会回到第 1 页，列表超过 1 万条和不超过 1 万条（显示准确条数）时都一样。升级前遇到这种情况，标签页会卡住（不论列表有多少条），这次一并修好。
+- 每页最多 100 条：链接里的 `pageSize` 超过 100 时按 100 条显示（服务器本来就最多返回 100 条）。
+- 想看准确条数或更早的日志：缩小时间范围，或加上用户名、模型、令牌、类型等筛选条件，让结果不超过 1 万条。
+
+**不变的：** 导出日志（导出全部符合条件的日志，不受 1 万条限制）、统计（额度、RPM、TPM）、任务日志和绘图日志的列表（它们和使用日志共用页面链接，只是链接里的 `pageSize` 同样最多按 100 条）。
+
+**接口：** `GET /api/log/` 和 `GET /api/log/self` 的 `data` 里多了 `total_capped`（布尔值）。为 `true` 时 `total` 是 10000，意思是「至少 10000 条」；为 `false` 时 `total` 是准确条数。自己写脚本按 `total` 算总页数的，要先看这个字段（翻页参数 `p` 可以超过按 `total` 算出的页数）。`p` 或 `page_size` 小于 1 时按默认值（第 1 页、每页 10 条）；以前负数的 `page_size` 会让列表查询不带 `LIMIT`，一次返回全部符合条件的日志。
+
+**升级与回滚：** 没有数据库结构变化，也没有新的设置项。回滚到旧版本即恢复原来的精确计数（以及原来的速度）。

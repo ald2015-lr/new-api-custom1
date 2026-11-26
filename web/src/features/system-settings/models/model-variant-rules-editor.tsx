@@ -40,6 +40,7 @@ import { Label } from '@/components/ui/label'
 import {
   DEFAULT_MODEL_VARIANT_RULES,
   MODEL_VARIANT_RULE_LIMITS,
+  normalizeFamilyBases,
   parseModelName,
   splitFamilyBases,
 } from '@/features/pricing/lib/model-variants'
@@ -102,21 +103,44 @@ function RuleInput(props: {
   )
 }
 
-/** Type a model name to see how the current rules and bases split it. */
+/**
+ * Type a model name to see how the current rules, bases and folds split it.
+ * Without the catalogue a -latest alias never folds here.
+ */
 function RulesPreview(props: {
   rules: ModelSquareSettingsFormValues['variant_rules']
   familyBases: string
+  versionSpellingFold: boolean
+  snapshotFold: boolean
 }) {
   const { t } = useTranslation()
   const inputId = useId()
   const [name, setName] = useState('[按次]gemini-3-pro-preview-128-nothinking')
-  const parsed = parseModelName(
-    name.trim(),
-    props.rules.filter((rule) => rule.suffix && rule.label),
-    splitFamilyBases(props.familyBases)
-  )
+  const parsed = parseModelName(name.trim(), {
+    rules: props.rules.filter((rule) => rule.suffix && rule.label),
+    familyBases: normalizeFamilyBases(
+      splitFamilyBases(props.familyBases),
+      props.versionSpellingFold
+    ),
+    versionSpellingFold: props.versionSpellingFold,
+    snapshotFold: props.snapshotFold,
+  })
   const items = [
-    { label: t('Base model'), value: parsed.base },
+    // What was typed without the line tag, the suffixes, the date and a
+    // family-base variant (gemini-4-argon-medium under the base
+    // gemini-4-argon shows gemini-4-argon). The fold maps characters one to
+    // one, so cutting the variant's length keeps the typed case.
+    {
+      label: t('Base model'),
+      value: parsed.extra
+        ? parsed.spelling.slice(
+            0,
+            parsed.spelling.length - parsed.extra.length - 1
+          )
+        : parsed.spelling,
+    },
+    // The card the name joins: the folded spelling or a configured base.
+    { label: t('Merged as'), value: parsed.key },
     { label: t('Line'), value: parsed.line || t('Default') },
     { label: t('Variant'), value: parsed.label || t('Standard') },
   ]
@@ -165,6 +189,14 @@ export function ModelVariantRulesEditor(props: {
   })
   const rules = useWatch({ control: props.control, name: 'variant_rules' })
   const familyBases = useWatch({ control: props.control, name: 'family_bases' })
+  const versionSpellingFold = useWatch({
+    control: props.control,
+    name: 'version_spelling_fold_enabled',
+  })
+  const snapshotFold = useWatch({
+    control: props.control,
+    name: 'snapshot_fold_enabled',
+  })
   const { errors } = useFormState({
     control: props.control,
     name: 'variant_rules',
@@ -321,7 +353,12 @@ export function ModelVariantRulesEditor(props: {
         </Button>
       </div>
 
-      <RulesPreview rules={rules ?? []} familyBases={familyBases ?? ''} />
+      <RulesPreview
+        rules={rules ?? []}
+        familyBases={familyBases ?? ''}
+        versionSpellingFold={versionSpellingFold ?? true}
+        snapshotFold={snapshotFold ?? true}
+      />
     </div>
   )
 }

@@ -187,7 +187,15 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+  const {
+    data,
+    isLoading,
+    isFetching,
+    isPlaceholderData,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: [
       'logs',
       logCategory,
@@ -264,6 +272,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     manualPagination: true,
     manualFiltering: true,
     totalCount: data?.total || 0,
+    totalCountCapped: data?.total_capped === true,
+    isPlaceholderData,
     ensurePageInRange,
   })
 

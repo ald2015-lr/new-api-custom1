@@ -16,22 +16,40 @@ import (
 // ---------------------------------------------------------------------------
 // Model square display (root-admin configurable)
 // DB keys: model_square_setting.variant_grouping_enabled,
+//          model_square_setting.version_spelling_fold_enabled,
+//          model_square_setting.snapshot_fold_enabled,
 //          model_square_setting.variant_rules (JSON array of variant rules),
-//          model_square_setting.family_bases (JSON array of base model names)
+//          model_square_setting.family_bases (JSON array of base model names),
+//          model_square_setting.show_group_filter, .show_vendor_filter,
+//          .show_tag_filter, .show_quota_type_filter, .show_endpoint_type_filter
 //
 // The public model square groups models such as "[按次]gemini-3-pro-preview"
 // and "[按次]gemini-3-pro-preview-128-nothinking" into one family card. The
 // rules name the suffixes that mark a variant; the frontend strips them to
 // find the family. Family bases name base models outright: every model named
 // "<base>-<anything>" joins that base's card, so suffixes no rule covers
-// (gemini-4-argon-low, -medium) still fold. Display only: model names used for
-// calls and billing are never changed.
+// (gemini-4-argon-low, -medium) still fold. While grouping is on, two more
+// folds join names into one family: version spellings (claude-opus-4-5 and
+// claude-opus-4.5, letter case, one leading "org/" segment) and dated
+// snapshots (gpt-4o-mini-2024-07-18 and tts-1-1106 join gpt-4o-mini and
+// tts-1, the date becomes the variant). The show_* switches show or hide each
+// section of the filter sidebar (and the mobile filter drawer); a hidden
+// section's filter is not applied. Tags and endpoint types are hidden unless
+// an admin turns them on. Display only: model names used for calls and
+// billing are never changed.
 // ---------------------------------------------------------------------------
 
 const (
 	ModelSquareVariantGroupingEnabledOptionKey = "model_square_setting.variant_grouping_enabled"
+	ModelSquareVersionSpellingFoldOptionKey    = "model_square_setting.version_spelling_fold_enabled"
+	ModelSquareSnapshotFoldOptionKey           = "model_square_setting.snapshot_fold_enabled"
 	ModelSquareVariantRulesOptionKey           = "model_square_setting.variant_rules"
 	ModelSquareFamilyBasesOptionKey            = "model_square_setting.family_bases"
+	ModelSquareShowGroupFilterOptionKey        = "model_square_setting.show_group_filter"
+	ModelSquareShowVendorFilterOptionKey       = "model_square_setting.show_vendor_filter"
+	ModelSquareShowTagFilterOptionKey          = "model_square_setting.show_tag_filter"
+	ModelSquareShowQuotaTypeFilterOptionKey    = "model_square_setting.show_quota_type_filter"
+	ModelSquareShowEndpointTypeFilterOptionKey = "model_square_setting.show_endpoint_type_filter"
 
 	maxModelVariantRules             = 100
 	maxModelVariantSuffixLength      = 64
@@ -53,17 +71,84 @@ type ModelVariantRule struct {
 // exported to the option map. VariantRules stays a JSON string so GET
 // /api/option returns it verbatim; reads go through the parsed snapshot below.
 type ModelSquareSetting struct {
-	VariantGroupingEnabled bool   `json:"variant_grouping_enabled"`
-	VariantRules           string `json:"variant_rules"`
-	FamilyBases            string `json:"family_bases"`
+	VariantGroupingEnabled     bool   `json:"variant_grouping_enabled"`
+	VersionSpellingFoldEnabled bool   `json:"version_spelling_fold_enabled"`
+	SnapshotFoldEnabled        bool   `json:"snapshot_fold_enabled"`
+	VariantRules               string `json:"variant_rules"`
+	FamilyBases                string `json:"family_bases"`
+	ShowGroupFilter            bool   `json:"show_group_filter"`
+	ShowVendorFilter           bool   `json:"show_vendor_filter"`
+	ShowTagFilter              bool   `json:"show_tag_filter"`
+	ShowQuotaTypeFilter        bool   `json:"show_quota_type_filter"`
+	ShowEndpointTypeFilter     bool   `json:"show_endpoint_type_filter"`
+}
+
+// ModelSquareFilterSections says which sections the model square's filter
+// sidebar and mobile filter drawer show. A hidden section is not rendered and
+// its filter is not applied.
+type ModelSquareFilterSections struct {
+	Groups        bool `json:"groups"`
+	Vendors       bool `json:"vendors"`
+	Tags          bool `json:"tags"`
+	QuotaTypes    bool `json:"quota_types"`
+	EndpointTypes bool `json:"endpoint_types"`
 }
 
 // ModelSquareDisplay is the parsed model square configuration in effect, as
 // served by the public pricing endpoint.
 type ModelSquareDisplay struct {
-	VariantGroupingEnabled bool               `json:"variant_grouping_enabled"`
-	VariantRules           []ModelVariantRule `json:"variant_rules"`
-	FamilyBases            []string           `json:"family_bases"`
+	VariantGroupingEnabled     bool                      `json:"variant_grouping_enabled"`
+	VersionSpellingFoldEnabled bool                      `json:"version_spelling_fold_enabled"`
+	SnapshotFoldEnabled        bool                      `json:"snapshot_fold_enabled"`
+	VariantRules               []ModelVariantRule        `json:"variant_rules"`
+	FamilyBases                []string                  `json:"family_bases"`
+	FilterSections             ModelSquareFilterSections `json:"filter_sections"`
+}
+
+// modelSquareBoolOption describes one switch of the model square settings, so
+// validation, loading and the defaults cannot drift apart.
+type modelSquareBoolOption struct {
+	defaultValue bool
+	label        string // validation: label + "必须是 true 或 false"
+	loadName     string // load error: "加载" + loadName + "失败，使用默认值（开启|关闭）: " + err
+	apply        func(setting *ModelSquareSetting, display *ModelSquareDisplay, value bool)
+}
+
+// modelSquareBoolOptions holds every switch. A key without a stored row keeps
+// its default, so an upgraded site gets these defaults too.
+var modelSquareBoolOptions = map[string]modelSquareBoolOption{
+	ModelSquareVariantGroupingEnabledOptionKey: {true, "是否合并模型变体", "模型广场变体合并开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.VariantGroupingEnabled = v
+		d.VariantGroupingEnabled = v
+	}},
+	ModelSquareVersionSpellingFoldOptionKey: {true, "是否合并版本号写法", "模型广场版本号写法合并开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.VersionSpellingFoldEnabled = v
+		d.VersionSpellingFoldEnabled = v
+	}},
+	ModelSquareSnapshotFoldOptionKey: {true, "是否合并带日期的快照", "模型广场日期快照合并开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.SnapshotFoldEnabled = v
+		d.SnapshotFoldEnabled = v
+	}},
+	ModelSquareShowGroupFilterOptionKey: {true, "是否显示分组筛选", "模型广场分组筛选显示开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.ShowGroupFilter = v
+		d.FilterSections.Groups = v
+	}},
+	ModelSquareShowVendorFilterOptionKey: {true, "是否显示供应商筛选", "模型广场供应商筛选显示开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.ShowVendorFilter = v
+		d.FilterSections.Vendors = v
+	}},
+	ModelSquareShowTagFilterOptionKey: {false, "是否显示模型标签筛选", "模型广场模型标签筛选显示开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.ShowTagFilter = v
+		d.FilterSections.Tags = v
+	}},
+	ModelSquareShowQuotaTypeFilterOptionKey: {true, "是否显示定价类型筛选", "模型广场定价类型筛选显示开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.ShowQuotaTypeFilter = v
+		d.FilterSections.QuotaTypes = v
+	}},
+	ModelSquareShowEndpointTypeFilterOptionKey: {false, "是否显示端点类型筛选", "模型广场端点类型筛选显示开关", func(s *ModelSquareSetting, d *ModelSquareDisplay, v bool) {
+		s.ShowEndpointTypeFilter = v
+		d.FilterSections.EndpointTypes = v
+	}},
 }
 
 // defaultModelVariantRules leaves out generic effort suffixes such as -max or
@@ -82,7 +167,9 @@ var defaultModelVariantRules = []ModelVariantRule{
 	{Suffix: "-128", Label: "128", Description: "思考预算 128（最低思考强度）"},
 }
 
-var modelSquareSetting = ModelSquareSetting{VariantGroupingEnabled: true, FamilyBases: "[]"}
+// modelSquareSetting gets the switches' defaults from modelSquareBoolOptions
+// in init.
+var modelSquareSetting = ModelSquareSetting{FamilyBases: "[]"}
 
 // modelSquareDisplay is replaced atomically so the public pricing endpoint
 // reads a consistent, already parsed configuration without locking. Its rule
@@ -94,12 +181,12 @@ func init() {
 	if defaultRules, err := common.Marshal(defaultModelVariantRules); err == nil {
 		modelSquareSetting.VariantRules = string(defaultRules)
 	}
+	display := ModelSquareDisplay{VariantRules: defaultModelVariantRules, FamilyBases: []string{}}
+	for _, option := range modelSquareBoolOptions {
+		option.apply(&modelSquareSetting, &display, option.defaultValue)
+	}
 	config.GlobalConfig.Register("model_square_setting", &modelSquareSetting)
-	modelSquareDisplay.Store(&ModelSquareDisplay{
-		VariantGroupingEnabled: modelSquareSetting.VariantGroupingEnabled,
-		VariantRules:           defaultModelVariantRules,
-		FamilyBases:            []string{},
-	})
+	modelSquareDisplay.Store(&display)
 }
 
 // ParseModelVariantRules decodes and validates a variant rule list; it touches
@@ -185,18 +272,25 @@ func ParseModelFamilyBases(value string) ([]string, error) {
 }
 
 func IsModelSquareOptionKey(key string) bool {
-	return key == ModelSquareVariantGroupingEnabledOptionKey ||
-		key == ModelSquareVariantRulesOptionKey ||
-		key == ModelSquareFamilyBasesOptionKey
+	return IsModelSquareSwitchKey(key) || key == ModelSquareVariantRulesOptionKey || key == ModelSquareFamilyBasesOptionKey
+}
+
+// IsModelSquareSwitchKey reports whether key is one of the model square's
+// on/off switches, whose values strconv.ParseBool reads.
+func IsModelSquareSwitchKey(key string) bool {
+	_, ok := modelSquareBoolOptions[key]
+	return ok
 }
 
 // ValidateModelSquareOption validates a value before it is stored.
 func ValidateModelSquareOption(key string, value string) error {
-	switch key {
-	case ModelSquareVariantGroupingEnabledOptionKey:
+	if option, ok := modelSquareBoolOptions[key]; ok {
 		if _, err := strconv.ParseBool(value); err != nil {
-			return fmt.Errorf("是否合并模型变体必须是 true 或 false")
+			return fmt.Errorf("%s必须是 true 或 false", option.label)
 		}
+		return nil
+	}
+	switch key {
 	case ModelSquareVariantRulesOptionKey:
 		_, err := ParseModelVariantRules(value)
 		return err
@@ -208,20 +302,35 @@ func ValidateModelSquareOption(key string, value string) error {
 }
 
 // LoadModelSquareOption applies a stored value and publishes a new snapshot.
-// An invalid value is logged and replaced by the built-in default. Writes must
-// be serialized by the caller; the option map update holds
+// An invalid value is logged and replaced by the built-in default. A switch is
+// also written back to the option map as "true" or "false", the state applied.
+// Writes must be serialized by the caller; the option map update holds
 // common.OptionMapRWMutex.
 func LoadModelSquareOption(key string, value string) {
 	next := *modelSquareDisplay.Load()
-	switch key {
-	case ModelSquareVariantGroupingEnabledOptionKey:
+	if option, ok := modelSquareBoolOptions[key]; ok {
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {
-			common.SysError("加载模型广场变体合并开关失败，使用默认值（开启）: " + err.Error())
-			enabled = true
+			defaultName := "关闭"
+			if option.defaultValue {
+				defaultName = "开启"
+			}
+			common.SysError("加载" + option.loadName + "失败，使用默认值（" + defaultName + "）: " + err.Error())
+			enabled = option.defaultValue
 		}
-		modelSquareSetting.VariantGroupingEnabled = enabled
-		next.VariantGroupingEnabled = enabled
+		option.apply(&modelSquareSetting, &next, enabled)
+		modelSquareDisplay.Store(&next)
+		// The settings page reads a switch as on only for "true" or "1", so
+		// the option map (GET /api/option/) holds the state applied here,
+		// however the row was written: PUT /api/option/ stores "True" or "t"
+		// as sent, and other nodes reload the stored row. The caller holds
+		// common.OptionMapRWMutex.
+		if common.OptionMap != nil {
+			common.OptionMap[key] = strconv.FormatBool(enabled)
+		}
+		return
+	}
+	switch key {
 	case ModelSquareVariantRulesOptionKey:
 		rules, err := ParseModelVariantRules(value)
 		if err != nil {

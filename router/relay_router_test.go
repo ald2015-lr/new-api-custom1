@@ -2906,7 +2906,7 @@ func TestRelayHidesUpstreamQuotaErrorsBehindTheChannelMessage(t *testing.T) {
 	}
 	userView := func(t *testing.T) string {
 		t.Helper()
-		logs, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 1000)
+		logs, _, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 1000)
 		require.NoError(t, err)
 		view, err := common.Marshal(logs)
 		require.NoError(t, err)
@@ -3374,7 +3374,7 @@ func TestGeminiFreeKeyChannelFallsThroughToTheNextChannel(t *testing.T) {
 	routes := slices.Sorted(maps.Keys(requests))
 	userView := func(t *testing.T) string {
 		t.Helper()
-		logs, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 1000)
+		logs, _, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 1000)
 		require.NoError(t, err)
 		view, err := common.Marshal(logs)
 		require.NoError(t, err)
@@ -4217,7 +4217,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	}
 	userView := func(t *testing.T, id string) string {
 		t.Helper()
-		logs, _, err := model.GetUserLogs(user.Id, model.LogFilter{RequestId: id}, 0, 10)
+		logs, _, _, err := model.GetUserLogs(user.Id, model.LogFilter{RequestId: id}, 0, 10)
 		require.NoError(t, err)
 		require.NotEmpty(t, logs)
 		view, err := common.Marshal(logs)
@@ -5011,11 +5011,11 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 	t.Run("an administrator's listing finds the rows, also with the deputy filter", func(t *testing.T) {
 		recorder := chat("mod-flag", userMessage(unique("MOD-FLAG-SEXUAL listing")))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
-		logs, _, err := model.GetAllLogs(model.LogFilter{ExcludeTypes: model.RechargeLogTypes, RequestId: requestID(recorder)}, 0, 10)
+		logs, _, _, err := model.GetAllLogs(model.LogFilter{ExcludeTypes: model.RechargeLogTypes, RequestId: requestID(recorder)}, 0, 10)
 		require.NoError(t, err)
 		require.Len(t, logs, 1)
 		assert.Equal(t, model.LogTypeModeration, logs[0].Type)
-		logs, _, err = model.GetAllLogs(model.LogFilter{Type: model.LogTypeModeration}, 0, 1000)
+		logs, _, _, err = model.GetAllLogs(model.LogFilter{Type: model.LogTypeModeration}, 0, 1000)
 		require.NoError(t, err)
 		require.NotEmpty(t, logs)
 		for _, row := range logs {

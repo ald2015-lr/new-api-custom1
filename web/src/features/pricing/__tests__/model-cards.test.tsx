@@ -38,11 +38,8 @@ import {
 import { CachedPriceCell } from '../components/cached-price-cell'
 import { ModelCard } from '../components/model-card'
 import { ModelCardGrid } from '../components/model-card-grid'
-import {
-  DEFAULT_MODEL_VARIANT_RULES,
-  groupModelFamilies,
-} from '../lib/model-variants'
 import type { PricingModel } from '../types'
+import { familiesOf, LEGACY } from './model-square-test-utils'
 
 function pricingModel(overrides: Partial<PricingModel> = {}): PricingModel {
   return {
@@ -680,7 +677,7 @@ describe('model cards', () => {
         })
       )
     ).flat()
-    const families = groupModelFamilies(models, DEFAULT_MODEL_VARIANT_RULES)
+    const families = familiesOf(models, LEGACY)
     const names = families.flatMap((family) =>
       family.models.map((model) => model.model_name)
     )

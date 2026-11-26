@@ -25,6 +25,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 
 import {
   updateInviteAbuseOptions,
+  updateModelSquareOptions,
   updatePasskeyDomains,
   updateSystemOption,
 } from '../api'
@@ -99,6 +100,21 @@ export function useUpdateInviteAbuseOptions() {
   return useMutation({
     mutationFn: async (options: Record<string, UpdateOptionRequest['value']>) =>
       requireServerSuccess(await updateInviteAbuseOptions(options)),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['system-options'] })
+      toast.success(i18next.t('Setting updated successfully'))
+    },
+    onError: (error: Error) =>
+      handleServerError(error, i18next.t('Failed to update setting')),
+  })
+}
+
+/** Saves the Model Square display options together, all or none. */
+export function useUpdateModelSquareOptions() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (options: Record<string, UpdateOptionRequest['value']>) =>
+      requireServerSuccess(await updateModelSquareOptions(options)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['system-options'] })
       toast.success(i18next.t('Setting updated successfully'))

@@ -20,7 +20,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import z from 'zod'
 
 import { UsageLogs } from '@/features/usage-logs'
-import { LOG_TYPES } from '@/features/usage-logs/constants'
+import { LOG_PAGE_SIZE_MAX, LOG_TYPES } from '@/features/usage-logs/constants'
 import {
   isUsageLogsSectionId,
   USAGE_LOGS_DEFAULT_SECTION,
@@ -42,9 +42,21 @@ const logTypeSearchSchema = z
   )
   .catch([])
 
+// The server answers at most LOG_PAGE_SIZE_MAX logs per page, so a larger
+// size (from an old or edited link) is read as that maximum: a capped list
+// ends at its first short page, and every page would look short. A size that
+// is not a positive whole number falls back to the default.
+const pageSizeSearchSchema = z
+  .number()
+  .int()
+  .positive()
+  .transform((size) => Math.min(size, LOG_PAGE_SIZE_MAX))
+  .optional()
+  .catch(undefined)
+
 const usageLogsSearchSchema = z.object({
   page: z.number().optional().catch(1),
-  pageSize: z.number().optional().catch(undefined),
+  pageSize: pageSizeSearchSchema,
   type: logTypeSearchSchema.optional(),
   filter: z.string().optional().catch(''),
   model: z.string().optional().catch(''),

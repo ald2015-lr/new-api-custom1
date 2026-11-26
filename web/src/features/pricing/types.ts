@@ -149,9 +149,24 @@ export type PricingData = {
    */
   model_square?: {
     variant_grouping_enabled: boolean
+    /** Absent on older backends: version spellings are merged. */
+    version_spelling_fold_enabled?: boolean
+    /** Absent on older backends: dated snapshots are merged. */
+    snapshot_fold_enabled?: boolean
     variant_rules: { suffix: string; label: string; description?: string }[]
     /** Absent on older backends: no base model is merged by name. */
     family_bases?: string[]
+    /**
+     * Filter sections shown in the sidebar; absent on older backends, which
+     * means model tags and endpoint types hidden, the rest shown.
+     */
+    filter_sections?: {
+      groups?: boolean
+      vendors?: boolean
+      tags?: boolean
+      quota_types?: boolean
+      endpoint_types?: boolean
+    }
   }
 }
 

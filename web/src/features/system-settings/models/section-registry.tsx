@@ -131,8 +131,23 @@ const MODELS_SECTIONS = [
         defaultValues={{
           variantGroupingEnabled:
             settings['model_square_setting.variant_grouping_enabled'],
+          versionSpellingFoldEnabled:
+            settings['model_square_setting.version_spelling_fold_enabled'] ??
+            true,
+          snapshotFoldEnabled:
+            settings['model_square_setting.snapshot_fold_enabled'] ?? true,
           variantRules: settings['model_square_setting.variant_rules'],
           familyBases: settings['model_square_setting.family_bases'],
+          showGroupFilter:
+            settings['model_square_setting.show_group_filter'] ?? true,
+          showVendorFilter:
+            settings['model_square_setting.show_vendor_filter'] ?? true,
+          showTagFilter:
+            settings['model_square_setting.show_tag_filter'] ?? false,
+          showQuotaTypeFilter:
+            settings['model_square_setting.show_quota_type_filter'] ?? true,
+          showEndpointTypeFilter:
+            settings['model_square_setting.show_endpoint_type_filter'] ?? false,
         }}
       />
     ),

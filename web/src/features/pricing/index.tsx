@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
 import { PageTransition } from '@/components/page-transition'
+import { cn } from '@/lib/utils'
 
 import {
   LoadingSkeleton,
@@ -86,23 +87,20 @@ export function Pricing() {
     availableTags,
     clearFilters,
     clearSearch,
-  } = useFilters(models || [])
+    index,
+    sections,
+  } = useFilters(models || [], modelSquare)
 
   // Display-only grouping of name variants; undefined keeps one card per model.
   const families = useMemo(
     () =>
-      modelSquare.variant_grouping_enabled
-        ? sortModelFamilies(
-            groupModelFamilies(
-              filteredModels,
-              modelSquare.variant_rules,
-              modelSquare.family_bases
-            ),
-            sortBy
-          )
+      index
+        ? sortModelFamilies(groupModelFamilies(filteredModels, index), sortBy)
         : undefined,
-    [filteredModels, modelSquare, sortBy]
+    [filteredModels, index, sortBy]
   )
+  // Without any filter section the sidebar and the mobile drawer are left out.
+  const hasFilterSections = Object.values(sections).some(Boolean)
 
   const handleModelClick = useCallback((modelName: string) => {
     setSelectedModelName(modelName)
@@ -227,29 +225,37 @@ export function Pricing() {
             />
           </header>
 
-          <div className='grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]'>
-            <PricingSidebar
-              quotaTypeFilter={quotaTypeFilter}
-              endpointTypeFilter={endpointTypeFilter}
-              vendorFilter={vendorFilter}
-              groupFilter={groupFilter}
-              tagFilter={tagFilter}
-              onQuotaTypeChange={setQuotaTypeFilter}
-              onEndpointTypeChange={setEndpointTypeFilter}
-              onVendorChange={setVendorFilter}
-              onGroupChange={setGroupFilter}
-              onTagChange={setTagFilter}
-              vendors={vendors || []}
-              groups={availableGroups}
-              groupRatios={groupRatio}
-              groupAccess={groupAccess}
-              freeGroups={freeGroups}
-              tags={availableTags}
-              models={models || []}
-              hasActiveFilters={hasActiveFilters}
-              onClearFilters={clearFilters}
-              className='hover-scrollbar sticky top-20 hidden max-h-[calc(100dvh-6rem)] self-start overflow-y-auto xl:block'
-            />
+          <div
+            className={cn(
+              'grid gap-4',
+              hasFilterSections && 'xl:grid-cols-[280px_minmax(0,1fr)]'
+            )}
+          >
+            {hasFilterSections && (
+              <PricingSidebar
+                quotaTypeFilter={quotaTypeFilter}
+                endpointTypeFilter={endpointTypeFilter}
+                vendorFilter={vendorFilter}
+                groupFilter={groupFilter}
+                tagFilter={tagFilter}
+                onQuotaTypeChange={setQuotaTypeFilter}
+                onEndpointTypeChange={setEndpointTypeFilter}
+                onVendorChange={setVendorFilter}
+                onGroupChange={setGroupFilter}
+                onTagChange={setTagFilter}
+                vendors={vendors || []}
+                groups={availableGroups}
+                groupRatios={groupRatio}
+                groupAccess={groupAccess}
+                freeGroups={freeGroups}
+                tags={availableTags}
+                models={models || []}
+                hasActiveFilters={hasActiveFilters}
+                onClearFilters={clearFilters}
+                sections={sections}
+                className='hover-scrollbar sticky top-20 hidden max-h-[calc(100dvh-6rem)] self-start overflow-y-auto xl:block'
+              />
+            )}
 
             <main className='min-w-0 space-y-4'>
               <PricingToolbar
@@ -284,6 +290,7 @@ export function Pricing() {
                 hasActiveFilters={hasActiveFilters}
                 activeFilterCount={activeFilterCount}
                 onClearFilters={clearFilters}
+                sections={sections}
               />
 
               {renderPricingContent()}

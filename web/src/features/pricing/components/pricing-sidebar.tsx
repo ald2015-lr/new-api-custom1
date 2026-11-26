@@ -38,6 +38,10 @@ import {
   getQuotaTypeLabels,
 } from '../constants'
 import { getModelQuotaType, parseTags } from '../lib/filters'
+import {
+  ALL_FILTER_SECTIONS,
+  type ModelSquareFilterSections,
+} from '../lib/model-variants'
 import type {
   GroupAccessRequirement,
   PricingModel,
@@ -83,6 +87,13 @@ export interface PricingSidebarProps {
   models: PricingModel[]
   hasActiveFilters: boolean
   onClearFilters: () => void
+  /** Sections the Model Square shows; all of them when left out. */
+  sections?: ModelSquareFilterSections
+  /**
+   * Leave out the Filter heading and subtitle (the mobile drawer's own header
+   * shows them); the Reset button and the Filters active badge stay.
+   */
+  hideHeading?: boolean
   className?: string
 }
 
@@ -162,6 +173,7 @@ export const PricingSidebar = memo(function PricingSidebar(
   props: PricingSidebarProps
 ) {
   const { t } = useTranslation()
+  const sections = props.sections ?? ALL_FILTER_SECTIONS
   const counts = useMemo(() => {
     const vendors = new Map<string, number>()
     const tags = new Map<string, number>()
@@ -289,13 +301,20 @@ export const PricingSidebar = memo(function PricingSidebar(
 
   return (
     <aside className={cn('bg-card rounded-xl border p-3', props.className)}>
-      <div className='mb-2.5 flex items-center justify-between gap-2'>
-        <div>
-          <h2 className='text-foreground text-sm font-bold'>{t('Filter')}</h2>
-          <p className='text-muted-foreground mt-1 text-xs'>
-            {t('Refine models by provider, group, type, and tags.')}
-          </p>
-        </div>
+      <div
+        className={cn(
+          'mb-2.5 flex items-center gap-2',
+          props.hideHeading ? 'justify-end' : 'justify-between'
+        )}
+      >
+        {!props.hideHeading && (
+          <div>
+            <h2 className='text-foreground text-sm font-bold'>{t('Filter')}</h2>
+            <p className='text-muted-foreground mt-1 text-xs'>
+              {t('Refine the model list.')}
+            </p>
+          </div>
+        )}
         <Button
           type='button'
           variant='ghost'
@@ -316,36 +335,46 @@ export const PricingSidebar = memo(function PricingSidebar(
       )}
 
       <div className='space-y-1'>
-        <FilterSection
-          title={t('Groups')}
-          value={props.groupFilter}
-          options={groupOptions}
-          onChange={props.onGroupChange}
-        />
-        <FilterSection
-          title={t('All Vendors')}
-          value={props.vendorFilter}
-          options={vendorOptions}
-          onChange={props.onVendorChange}
-        />
-        <FilterSection
-          title={t('Model Tags')}
-          value={props.tagFilter}
-          options={tagOptions}
-          onChange={props.onTagChange}
-        />
-        <FilterSection
-          title={t('Pricing Type')}
-          value={props.quotaTypeFilter}
-          options={quotaOptions}
-          onChange={props.onQuotaTypeChange}
-        />
-        <FilterSection
-          title={t('Endpoint Type')}
-          value={props.endpointTypeFilter}
-          options={endpointOptions}
-          onChange={props.onEndpointTypeChange}
-        />
+        {sections.groups && (
+          <FilterSection
+            title={t('Groups')}
+            value={props.groupFilter}
+            options={groupOptions}
+            onChange={props.onGroupChange}
+          />
+        )}
+        {sections.vendors && (
+          <FilterSection
+            title={t('All Vendors')}
+            value={props.vendorFilter}
+            options={vendorOptions}
+            onChange={props.onVendorChange}
+          />
+        )}
+        {sections.tags && (
+          <FilterSection
+            title={t('Model Tags')}
+            value={props.tagFilter}
+            options={tagOptions}
+            onChange={props.onTagChange}
+          />
+        )}
+        {sections.quota_types && (
+          <FilterSection
+            title={t('Pricing Type')}
+            value={props.quotaTypeFilter}
+            options={quotaOptions}
+            onChange={props.onQuotaTypeChange}
+          />
+        )}
+        {sections.endpoint_types && (
+          <FilterSection
+            title={t('Endpoint Type')}
+            value={props.endpointTypeFilter}
+            options={endpointOptions}
+            onChange={props.onEndpointTypeChange}
+          />
+        )}
       </div>
     </aside>
   )
