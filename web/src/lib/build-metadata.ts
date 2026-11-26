@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { BUILD_VERSION_META_NAME } from './build-version-meta'
+
 /**
  * Build metadata helper.
  *
@@ -60,17 +62,19 @@ declare global {
   }
 }
 
-function readEnvRevision(): string | undefined {
-  // Must stay a literal member expression: the bundler only substitutes
-  // `import.meta.env.VITE_REACT_APP_VERSION` verbatim, an indirect lookup
-  // compiles to undefined.
-  const raw = import.meta.env.VITE_REACT_APP_VERSION
+function readStampedVersion(): string | undefined {
+  // The build writes VITE_REACT_APP_VERSION into index.html, not into the
+  // bundle (see build-version-meta.ts).
+  if (typeof document === 'undefined') return undefined
+  const raw = document
+    .querySelector<HTMLMetaElement>(`meta[name="${BUILD_VERSION_META_NAME}"]`)
+    ?.getAttribute('content')
   if (typeof raw === 'string' && raw.length > 0) return raw
   return undefined
 }
 
 function computeBuildRevision(): string {
-  const envRev = readEnvRevision()
+  const envRev = readStampedVersion()
   const head = envRev && envRev.length > 0 ? envRev : '0000'
   return `${BUILD_REV_PREFIX}.${head}.${BUILD_CHANNEL_TAG}`
 }
@@ -166,11 +170,11 @@ export function getBuildRevision(): string {
 }
 
 /**
- * Raw version stamped into the bundle at build time
+ * Raw version stamped into index.html at build time
  * (`VITE_REACT_APP_VERSION`), or an empty string for an unstamped build.
  * Compared against the server's `X-New-Api-Version` header to detect a
- * bundle that predates the running server.
+ * page that predates the running server.
  */
 export function getClientBuildVersion(): string {
-  return readEnvRevision() ?? ''
+  return readStampedVersion() ?? ''
 }

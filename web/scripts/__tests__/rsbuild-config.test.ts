@@ -16,9 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import createConfig from '../../rsbuild.config'
+import { BUILD_VERSION_META_NAME } from '../../src/lib/build-version-meta'
 
 type ConfigFn = (env: {
   env: string
@@ -33,6 +34,8 @@ async function productionConfig() {
     command: 'build',
   })
   return config as {
+    html: { meta: Record<string, string> }
+    source: { define?: Record<string, string> }
     splitChunks: { cacheGroups: Record<string, { chunks?: string }> }
     tools: {
       rspack: { optimization?: { runtimeChunk?: { name: string } } }
@@ -41,6 +44,31 @@ async function productionConfig() {
 }
 
 describe('rsbuild.config.ts', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  // The version goes into index.html (served no-cache), so a release does not
+  // rename the cached entry script; lib/build-metadata.ts reads it from there.
+  test('writes the build version into index.html, not into the bundle', async () => {
+    vi.stubEnv('VITE_REACT_APP_VERSION', 'v9.8.7-test')
+
+    const config = await productionConfig()
+
+    expect(config.html.meta[BUILD_VERSION_META_NAME]).toBe('v9.8.7-test')
+    expect(JSON.stringify(config.source.define ?? {})).not.toContain(
+      'v9.8.7-test'
+    )
+  })
+
+  test('adds no version tag to an unstamped build', async () => {
+    vi.stubEnv('VITE_REACT_APP_VERSION', '')
+
+    const config = await productionConfig()
+
+    expect(config.html.meta).not.toHaveProperty(BUILD_VERSION_META_NAME)
+  })
+
   // The chunk loader with its map of every chunk's file name lives in its own
   // file, and the named vendor groups only take what the first load needs.
   test('keeps the chunk map and lazy-only vendor code out of the entry', async () => {

@@ -7,6 +7,7 @@ import { pluginTailwindcss } from '@rsbuild/plugin-tailwindcss'
 import { tanstackRouter } from '@tanstack/router-plugin/rspack'
 
 import { slimTranslationSource } from './scripts/slim-locale.mjs'
+import { BUILD_VERSION_META_NAME } from './src/lib/build-version-meta'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -28,6 +29,11 @@ export default defineConfig(({ envMode }) => {
     process.env.VITE_REACT_APP_SERVER_URL ||
     env.rawPublicVars.VITE_REACT_APP_SERVER_URL ||
     'http://localhost:3000'
+  // Written into index.html, not the bundle: see src/lib/build-version-meta.ts.
+  const buildVersion = env.rawPublicVars.VITE_REACT_APP_VERSION ?? ''
+  const buildVersionMeta: Record<string, string> = buildVersion
+    ? { [BUILD_VERSION_META_NAME]: buildVersion }
+    : {}
 
   const isProd = envMode === 'production'
   const devProxy = Object.fromEntries(
@@ -88,10 +94,6 @@ export default defineConfig(({ envMode }) => {
       entry: {
         index: './src/main.tsx',
       },
-      // loadEnv only reads VITE_* vars; without this they never reach
-      // import.meta.env in the bundle (VITE_REACT_APP_VERSION is compared
-      // against the server's X-New-Api-Version header at runtime).
-      define: env.publicVars,
     },
     resolve: {
       alias: {
@@ -101,6 +103,9 @@ export default defineConfig(({ envMode }) => {
     html: {
       template: './index.html',
       favicon: './public/favicon.ico',
+      // <meta name="new-api-version" content="…"> for the stale-bundle check
+      // and the build metadata (src/lib/build-metadata.ts).
+      meta: buildVersionMeta,
       // The app stylesheets go to the end of <body>, after the boot shell of
       // index.html: a stylesheet in <head> holds back the first paint, so a
       // slow or stalled one left the page blank. The deferred scripts still
