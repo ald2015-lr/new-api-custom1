@@ -106,8 +106,15 @@ func ensureLogRequestId(log *Log) {
 // single-row INSERT is atomic and Log has no hooks, and the transaction cost
 // every relay request three more database round trips (BEGIN, the prepared
 // statement inside it, COMMIT) on top of the INSERT.
+//
+// A ClickHouse log database keeps the transaction: gorm's ClickHouse dialect
+// inserts through a prepared batch that clickhouse-go sends only when the
+// transaction commits, so outside one the row is dropped without an error.
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return LOG_DB.Create(log).Error
+	}
 	return LOG_DB.Session(&gorm.Session{SkipDefaultTransaction: true}).Create(log).Error
 }
 
