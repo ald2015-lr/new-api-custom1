@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen, within } from '@testing-library/react'
+import { render, renderHook, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -27,8 +27,21 @@ import {
   type PricingToolbarProps,
 } from '../components/pricing-toolbar'
 import { QUOTA_TYPES } from '../constants'
-import { filterByQuotaType } from '../lib/filters'
+import { useFilters } from '../hooks/use-filters'
+import { effectiveFilterValues, filterByQuotaType } from '../lib/filters'
+import {
+  ALL_FILTER_SECTIONS,
+  DEFAULT_FILTER_SECTIONS,
+  type ModelSquareFilterSections,
+} from '../lib/model-variants'
 import type { PricingModel } from '../types'
+import { squareSettings } from './model-square-test-utils'
+
+// A stale link: the tag and endpoint type sections are hidden by default.
+vi.mock('@tanstack/react-router', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@tanstack/react-router')>()),
+  useSearch: () => ({ tag: 'x', endpointType: 'openai' }),
+}))
 
 function toolbarProps(): PricingToolbarProps {
   return {
@@ -665,5 +678,133 @@ describe('pricing controls', () => {
     expect(props.onClearFilters).toHaveBeenCalledOnce()
     await user.keyboard('{Escape}')
     expect(await screen.findByRole('button', { name: /Filter/ })).toHaveFocus()
+  })
+})
+
+describe('filter sections', () => {
+  const NO_SECTIONS: ModelSquareFilterSections = {
+    groups: false,
+    vendors: false,
+    tags: false,
+    quota_types: false,
+    endpoint_types: false,
+  }
+  const sectionTitles = [
+    'Groups',
+    'All Vendors',
+    'Model Tags',
+    'Pricing Type',
+    'Endpoint Type',
+  ]
+  const shownSections = (container: HTMLElement) =>
+    sectionTitles.filter(
+      (name) => within(container).queryByRole('button', { name }) !== null
+    )
+
+  it('hides model tags and endpoint types by default in the sidebar', () => {
+    const { container } = render(
+      <PricingSidebar {...toolbarProps()} sections={DEFAULT_FILTER_SECTIONS} />
+    )
+    expect(shownSections(container)).toEqual([
+      'Groups',
+      'All Vendors',
+      'Pricing Type',
+    ])
+    expect(screen.getByText('Refine the model list.')).toBeVisible()
+  })
+
+  it('shows all five sections when every section is on or none is given', () => {
+    const view = render(
+      <PricingSidebar {...toolbarProps()} sections={ALL_FILTER_SECTIONS} />
+    )
+    expect(shownSections(view.container)).toEqual(sectionTitles)
+    view.unmount()
+    const plain = render(<PricingSidebar {...toolbarProps()} />)
+    expect(shownSections(plain.container)).toEqual(sectionTitles)
+  })
+
+  it('shows the same sections in the mobile drawer', async () => {
+    const user = userEvent.setup()
+    render(
+      <PricingToolbar {...toolbarProps()} sections={DEFAULT_FILTER_SECTIONS} />
+    )
+    await user.click(screen.getByRole('button', { name: 'Filter' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Filter' })
+    expect(shownSections(dialog)).toEqual([
+      'Groups',
+      'All Vendors',
+      'Pricing Type',
+    ])
+    expect(dialog).toHaveAccessibleDescription('Refine the model list.')
+  })
+
+  it('drops the Filter button and the drawer when no section is shown', () => {
+    render(<PricingToolbar {...toolbarProps()} sections={NO_SECTIONS} />)
+    expect(screen.queryByRole('button', { name: 'Filter' })).toBeNull()
+  })
+
+  it('ignores the value of a hidden section', () => {
+    const state = { tag: 'x', endpointType: 'openai', group: 'vip' }
+    expect(effectiveFilterValues(state, DEFAULT_FILTER_SECTIONS)).toEqual({
+      group: 'vip',
+      vendor: 'all',
+      tag: 'all',
+      quotaType: 'all',
+      endpointType: 'all',
+    })
+    expect(
+      effectiveFilterValues(state, { ...ALL_FILTER_SECTIONS, groups: false })
+    ).toEqual({
+      group: 'all',
+      vendor: 'all',
+      tag: 'x',
+      quotaType: 'all',
+      endpointType: 'openai',
+    })
+  })
+
+  it('does not apply a stale tag or endpoint type parameter of a hidden section', () => {
+    const models: PricingModel[] = [
+      {
+        id: 1,
+        model_name: 'tagged',
+        quota_type: 0,
+        model_ratio: 1,
+        completion_ratio: 1,
+        enable_groups: ['default'],
+        tags: 'x',
+        supported_endpoint_types: ['openai'],
+      },
+      {
+        id: 2,
+        model_name: 'untagged',
+        quota_type: 0,
+        model_ratio: 1,
+        completion_ratio: 1,
+        enable_groups: ['default'],
+      },
+    ]
+    const hidden = squareSettings()
+    const { result, rerender } = renderHook(
+      ({ settings }) => useFilters(models, settings),
+      { initialProps: { settings: hidden } }
+    )
+    expect(result.current.filteredModels.map((m) => m.model_name)).toEqual([
+      'tagged',
+      'untagged',
+    ])
+    expect(result.current.activeFilterCount).toBe(0)
+    expect(result.current.hasActiveFilters).toBe(false)
+    expect(result.current.tagFilter).toBe('all')
+
+    rerender({
+      settings: squareSettings({ filter_sections: ALL_FILTER_SECTIONS }),
+    })
+    expect(result.current.filteredModels.map((m) => m.model_name)).toEqual([
+      'tagged',
+    ])
+    expect(result.current.activeFilterCount).toBe(2)
+    expect(result.current.hasActiveFilters).toBe(true)
+    expect(result.current.sections).toEqual(ALL_FILTER_SECTIONS)
   })
 })

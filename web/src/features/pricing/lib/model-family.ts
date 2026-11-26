@@ -493,11 +493,11 @@ export function getFamilyUnion(family: ModelFamily): FamilyUnion {
   }
 }
 
-/** Name a family is listed under: its base, or a single model's untagged name. */
+/** Name a family is listed under: its title, or a single model's untagged name. */
 function familySortName(family: ModelFamily): string {
   return family.models.length === 1
     ? stripLineTag(family.models[0].model_name || '')
-    : family.base
+    : family.title
 }
 
 function lowestSortPrice(

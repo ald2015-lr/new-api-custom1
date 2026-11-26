@@ -37,12 +37,9 @@ import {
 } from '@/stores/system-config-store'
 
 import { ModelCardGrid } from '../components/model-card-grid'
-import {
-  DEFAULT_MODEL_VARIANT_RULES,
-  groupModelFamilies,
-  type ModelFamily,
-} from '../lib/model-variants'
+import type { ModelFamily } from '../lib/model-variants'
 import type { PricingModel } from '../types'
+import { familiesOf, LEGACY } from './model-square-test-utils'
 
 const i18n = createInstance()
 beforeAll(async () => {
@@ -138,7 +135,7 @@ function gridNode(families: ModelFamily[], models: PricingModel[]) {
 }
 
 function renderGrid(models: PricingModel[]) {
-  const families = groupModelFamilies(models, DEFAULT_MODEL_VARIANT_RULES)
+  const families = familiesOf(models, LEGACY)
   const view = render(gridNode(families, models))
   return {
     rerenderWith: (next: ModelFamily[]) =>
@@ -293,7 +290,7 @@ describe('variant panel reset', () => {
     await user.click(toggleOf('a-1'))
     expect(screen.getByRole('region')).toBeVisible()
 
-    view.rerenderWith(groupModelFamilies(models, DEFAULT_MODEL_VARIANT_RULES))
+    view.rerenderWith(familiesOf(models, LEGACY))
 
     expect(screen.queryByRole('region')).toBeNull()
     expect(toggleOf('a-1')).toHaveAttribute('aria-expanded', 'false')

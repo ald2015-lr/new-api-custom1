@@ -95,7 +95,7 @@ export const ModelFamilyPanel = memo(function ModelFamilyPanel(
           className='focus-visible:ring-ring/50 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-sm outline-none focus-visible:ring-2'
         >
           <span className='font-mono text-sm font-semibold [overflow-wrap:anywhere]'>
-            {props.family.base}
+            {props.family.title}
           </span>{' '}
           <span className='text-muted-foreground text-xs font-normal tabular-nums'>
             {t('Variants: {{count}}', { count: props.family.variants.length })}
@@ -106,7 +106,7 @@ export const ModelFamilyPanel = memo(function ModelFamilyPanel(
           variant='ghost'
           size='sm'
           className='shrink-0'
-          aria-label={`${t('Collapse')} ${props.family.base}`}
+          aria-label={`${t('Collapse')} ${props.family.title}`}
           onClick={props.onCollapse}
         >
           {t('Collapse')}

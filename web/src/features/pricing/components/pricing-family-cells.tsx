@@ -33,15 +33,24 @@ import { ModelBillingModeBadge } from './model-billing-mode-badge'
 /** A pricing table row: a model, or the parent row of a variant family. */
 export type PricingTableRow = PricingModel & { family?: ModelFamily }
 
-/** Name cell of a family parent row: expand toggle, base name, count. */
+/**
+ * Name cell of a family parent row: expand toggle, title (its tooltip names
+ * the other spellings), count.
+ */
 export function FamilyNameCell(props: {
   row: Row<PricingTableRow>
   family: ModelFamily
 }) {
   const { t } = useTranslation()
   const expanded = props.row.getIsExpanded()
-  const lead = props.family.variants[0].model
-  const iconKey = lead.icon || lead.vendor_icon
+  const family = props.family
+  const iconKey = family.lead.icon || family.vendor?.icon
+  const tooltip =
+    family.alsoWrittenAs.length > 0
+      ? `${family.title}\n${t('Also written as {{names}}', {
+          names: family.alsoWrittenAs.join(', '),
+        })}`
+      : family.title
   return (
     <div className='flex max-w-full min-w-0 items-center gap-2'>
       <Button
@@ -50,7 +59,7 @@ export function FamilyNameCell(props: {
         size='icon-sm'
         className='-ml-1.5 size-6 shrink-0'
         aria-expanded={expanded}
-        aria-label={`${expanded ? t('Collapse') : t('Expand')} ${props.family.base}`}
+        aria-label={`${expanded ? t('Collapse') : t('Expand')} ${family.title}`}
         onClick={(event) => {
           event.stopPropagation()
           props.row.toggleExpanded()
@@ -67,12 +76,12 @@ export function FamilyNameCell(props: {
       {iconKey ? getLobeIcon(iconKey, 14) : null}
       <span
         className='truncate font-mono text-sm font-semibold'
-        title={props.family.base}
+        title={tooltip}
       >
-        {props.family.base}
+        {family.title}
       </span>
       <Badge variant='secondary' className='font-normal tabular-nums'>
-        {t('Variants: {{count}}', { count: props.family.variants.length })}
+        {t('Variants: {{count}}', { count: family.variants.length })}
       </Badge>
     </div>
   )

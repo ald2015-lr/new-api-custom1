@@ -40,6 +40,7 @@ import { Label } from '@/components/ui/label'
 import {
   DEFAULT_MODEL_VARIANT_RULES,
   MODEL_VARIANT_RULE_LIMITS,
+  normalizeFamilyBases,
   parseModelName,
   splitFamilyBases,
 } from '@/features/pricing/lib/model-variants'
@@ -102,7 +103,11 @@ function RuleInput(props: {
   )
 }
 
-/** Type a model name to see how the current rules and bases split it. */
+/**
+ * Type a model name to see how the current rules and bases split it, with
+ * the version spelling and snapshot folds on. Without the catalogue a
+ * -latest alias never folds here.
+ */
 function RulesPreview(props: {
   rules: ModelSquareSettingsFormValues['variant_rules']
   familyBases: string
@@ -110,13 +115,20 @@ function RulesPreview(props: {
   const { t } = useTranslation()
   const inputId = useId()
   const [name, setName] = useState('[按次]gemini-3-pro-preview-128-nothinking')
-  const parsed = parseModelName(
-    name.trim(),
-    props.rules.filter((rule) => rule.suffix && rule.label),
-    splitFamilyBases(props.familyBases)
-  )
+  const parsed = parseModelName(name.trim(), {
+    rules: props.rules.filter((rule) => rule.suffix && rule.label),
+    familyBases: normalizeFamilyBases(
+      splitFamilyBases(props.familyBases),
+      true
+    ),
+    versionSpellingFold: true,
+    snapshotFold: true,
+  })
   const items = [
-    { label: t('Base model'), value: parsed.base },
+    // What was typed without the line tag, the suffixes and the date.
+    { label: t('Base model'), value: parsed.spelling },
+    // The card the name joins: the folded spelling or a configured base.
+    { label: t('Merged as'), value: parsed.key },
     { label: t('Line'), value: parsed.line || t('Default') },
     { label: t('Variant'), value: parsed.label || t('Standard') },
   ]
