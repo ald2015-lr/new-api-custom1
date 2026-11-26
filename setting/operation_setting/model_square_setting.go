@@ -302,8 +302,9 @@ func ValidateModelSquareOption(key string, value string) error {
 }
 
 // LoadModelSquareOption applies a stored value and publishes a new snapshot.
-// An invalid value is logged and replaced by the built-in default. Writes must
-// be serialized by the caller; the option map update holds
+// An invalid value is logged and replaced by the built-in default. A switch is
+// also written back to the option map as "true" or "false", the state applied.
+// Writes must be serialized by the caller; the option map update holds
 // common.OptionMapRWMutex.
 func LoadModelSquareOption(key string, value string) {
 	next := *modelSquareDisplay.Load()
@@ -319,6 +320,14 @@ func LoadModelSquareOption(key string, value string) {
 		}
 		option.apply(&modelSquareSetting, &next, enabled)
 		modelSquareDisplay.Store(&next)
+		// The settings page reads a switch as on only for "true" or "1", so
+		// the option map (GET /api/option/) holds the state applied here,
+		// however the row was written: PUT /api/option/ stores "True" or "t"
+		// as sent, and other nodes reload the stored row. The caller holds
+		// common.OptionMapRWMutex.
+		if common.OptionMap != nil {
+			common.OptionMap[key] = strconv.FormatBool(enabled)
+		}
 		return
 	}
 	switch key {

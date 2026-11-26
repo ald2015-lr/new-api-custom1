@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -158,4 +159,69 @@ func TestUpdateModelSquareOptionsStoresSwitchesAsTrueOrFalse(t *testing.T) {
 	assert.True(t, sections.EndpointTypes)
 	assert.False(t, sections.QuotaTypes)
 	assert.False(t, sections.Groups)
+}
+
+// PUT /api/option/ still takes every model square switch and stores the value
+// as sent ("True", "t" …). GET /api/option/ must return "true" or "false", the
+// only spellings the settings page reads, so the card shows each switch as the
+// model square applies it.
+func TestUpdateOptionReadsModelSquareSwitchesBackAsTrueOrFalse(t *testing.T) {
+	modelSquareOptionsFixture(t)
+	update := func(key, value string) {
+		t.Helper()
+		body, err := common.Marshal(OptionUpdateRequest{Key: key, Value: value})
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/option/", strings.NewReader(string(body)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("id", 9999)
+		c.Set("role", common.RoleRootUser)
+		c.Set("username", "root-operator")
+		UpdateOption(c)
+		require.Contains(t, recorder.Body.String(), `"success":true`, "%s=%q", key, value)
+	}
+	listed := func(key string) string {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/option/", nil)
+		GetOptions(c)
+		var response struct {
+			Data []model.Option `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		for _, option := range response.Data {
+			if option.Key == key {
+				return option.Value
+			}
+		}
+		t.Fatalf("GET /api/option/ does not list %s", key)
+		return ""
+	}
+	tagKey := operation_setting.ModelSquareShowTagFilterOptionKey
+	groupingKey := operation_setting.ModelSquareVariantGroupingEnabledOptionKey
+	applied := map[string]func(operation_setting.ModelSquareDisplay) bool{
+		tagKey:      func(d operation_setting.ModelSquareDisplay) bool { return d.FilterSections.Tags },
+		groupingKey: func(d operation_setting.ModelSquareDisplay) bool { return d.VariantGroupingEnabled },
+	}
+
+	for _, tc := range []struct {
+		key, value string
+		on         bool
+	}{
+		{tagKey, "True", true},
+		{tagKey, "f", false},
+		{tagKey, "t", true},
+		{groupingKey, "F", false},
+		{groupingKey, "True", true},
+		{groupingKey, "0", false},
+		{groupingKey, "t", true},
+	} {
+		update(tc.key, tc.value)
+		want := strconv.FormatBool(tc.on)
+		assert.Equal(t, want, common.OptionMap[tc.key], "%s=%q", tc.key, tc.value)
+		assert.Equal(t, want, listed(tc.key), "%s=%q", tc.key, tc.value)
+		assert.Equal(t, tc.on, applied[tc.key](operation_setting.GetModelSquareDisplay()), "%s=%q", tc.key, tc.value)
+	}
 }

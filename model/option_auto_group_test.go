@@ -202,6 +202,71 @@ func TestUpdateOptionMapAppliesModelSquareSetting(t *testing.T) {
 	}
 }
 
+// PUT /api/option/ stores a model square switch as sent ("T", "False", "0"
+// …). The option map, which GET /api/option/ returns and the settings page
+// reads (only "true" and "1" are on), must hold the state the model square
+// applies, so the card shows the switch as it works.
+func TestUpdateOptionMapReadsModelSquareSwitchesBackAsTrueOrFalse(t *testing.T) {
+	const tagKey = operation_setting.ModelSquareShowTagFilterOptionKey
+	const groupingKey = operation_setting.ModelSquareVariantGroupingEnabledOptionKey
+	applied := map[string]func(operation_setting.ModelSquareDisplay) bool{
+		tagKey:      func(d operation_setting.ModelSquareDisplay) bool { return d.FilterSections.Tags },
+		groupingKey: func(d operation_setting.ModelSquareDisplay) bool { return d.VariantGroupingEnabled },
+	}
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	previousConfig := config.GlobalConfig.ExportAllConfigs()
+	t.Cleanup(func() {
+		common.OptionMap = originalMap
+		for key := range applied {
+			operation_setting.LoadModelSquareOption(key, previousConfig[key])
+		}
+	})
+
+	for _, tc := range []struct{ key, value, want string }{
+		{tagKey, "T", "true"},
+		{tagKey, "False", "false"},
+		{tagKey, "1", "true"},
+		{groupingKey, "f", "false"},
+		{groupingKey, "TRUE", "true"},
+		{groupingKey, "0", "false"},
+		// A row the validator would refuse (stored by hand or by an older
+		// release) reads back as the default the model square applies.
+		{tagKey, "yes", "false"},
+		{groupingKey, "on", "true"},
+	} {
+		require.NoError(t, updateOptionMap(tc.key, tc.value))
+		assert.Equal(t, tc.want, common.OptionMap[tc.key], "%s=%q", tc.key, tc.value)
+		assert.Equal(t, tc.want, config.GlobalConfig.ExportAllConfigs()[tc.key], "%s=%q", tc.key, tc.value)
+		assert.Equal(t, tc.want == "true", applied[tc.key](operation_setting.GetModelSquareDisplay()), "%s=%q", tc.key, tc.value)
+	}
+}
+
+// Every node reloads the stored rows (at start and in SyncOptions): a switch
+// row stored as sent reads back as "true" or "false" there too.
+func TestLoadOptionsFromDatabaseReadsModelSquareSwitchesBackAsTrueOrFalse(t *testing.T) {
+	const key = operation_setting.ModelSquareShowEndpointTypeFilterOptionKey
+	db := useFrontendOptionMigrationDB(t)
+	require.NoError(t, db.Create(&Option{Key: key, Value: "T"}).Error)
+	previousPolicy := CurrentRequestPolicy()
+	common.OptionMapRWMutex.Lock()
+	originalMap := common.OptionMap
+	common.OptionMap = map[string]string{}
+	common.OptionMapRWMutex.Unlock()
+	previousConfig := config.GlobalConfig.ExportAllConfigs()
+	t.Cleanup(func() {
+		requestPolicySnapshot.Store(previousPolicy)
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = originalMap
+		common.OptionMapRWMutex.Unlock()
+		operation_setting.LoadModelSquareOption(key, previousConfig[key])
+	})
+
+	require.NoError(t, LoadOptionsFromDatabase())
+	assert.Equal(t, "true", common.OptionMap[key])
+	assert.True(t, operation_setting.GetModelSquareDisplay().FilterSections.EndpointTypes)
+}
+
 func TestValidateOptionValueBonusSettings(t *testing.T) {
 	invalid := map[string][]string{
 		"checkin_setting.paid_threshold_quota":    {"", "-1", "1.5", fmt.Sprint(int64(common.MaxWalletQuota) + 1)},
