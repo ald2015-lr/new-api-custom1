@@ -357,6 +357,59 @@ func TestRedisFailureFallbackLogIsThrottled(t *testing.T) {
 	assert.Contains(t, linesOf(firstMark)[1], "(mark="+firstMark+", 5 more failures since the last line)")
 }
 
+// A client that went away is still counted in Redis: net/http cancels the
+// context of a request without a body as soon as the client half-closes its
+// connection, before the handler runs, and such a request must neither get
+// this node's in-memory budget on top of the shared one nor be left
+// uncounted, nor look like a Redis failure in the log.
+func TestRedisRateLimitersCountRequestsWhoseClientWentAway(t *testing.T) {
+	redisServer, _ := useRateLimitMiniRedis(t)
+	useRateLimitRedisFailure(t, common.RateLimitRedisFailureMemory)
+	useGlobalWebRateLimit(t, 2, 600)
+	var output strings.Builder
+	previousErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &output
+	t.Cleanup(func() { gin.DefaultErrorWriter = previousErrorWriter })
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	handled := make(map[string]int)
+	accepted := func(c *gin.Context) {
+		handled[c.FullPath()]++
+		c.Status(http.StatusNoContent)
+	}
+	ipMark, userMark := uniqueRateLimitMark("GONE-IP"), uniqueRateLimitMark("GONE-USER")
+	router.GET("/ip", rateLimitFactory(2, 600, ipMark), accepted)
+	router.GET("/user", func(c *gin.Context) { c.Set("id", 7) }, userRateLimitFactory(2, 600, userMark), accepted)
+	router.GET("/page", GlobalWebRateLimit(emptyFrontendFS(t)), accepted)
+	router.GET("/email", EmailVerificationRateLimit(), accepted)
+	clientIP := uniqueTestClientIP()
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := func(path string, ctx context.Context) int {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+		req.RemoteAddr = clientIP + ":12345"
+		router.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	for path, key := range map[string]string{
+		"/ip":    redisIPRateLimitKey(ipMark, clientIP),
+		"/user":  redisUserRateLimitKey(userMark, 7),
+		"/page":  redisIPRateLimitKey("GW", clientIP),
+		"/email": redisIPRateLimitKey(EmailVerificationRateLimitMark, clientIP),
+	} {
+		codes := []int{request(path, context.Background()), request(path, context.Background()), request(path, gone), request(path, gone)}
+		assert.Equal(t, []int{http.StatusNoContent, http.StatusNoContent, http.StatusTooManyRequests, http.StatusTooManyRequests}, codes, path)
+		assert.Equal(t, 2, handled[path], "%s: the handler runs within the limit only", path)
+		count, err := redisServer.Get(key)
+		require.NoError(t, err, path)
+		assert.Equal(t, "4", count, "%s: every request is counted in Redis", path)
+	}
+	assert.NotContains(t, output.String(), "rate limit check failed")
+}
+
 // useAuthRefreshRateLimit sets the session refresh limit and the critical
 // limit (both with a 20-minute window) for one test.
 func useAuthRefreshRateLimit(t *testing.T, refreshEnabled bool, refreshNum int, criticalNum int) {

@@ -75,6 +75,17 @@ func redisReplyInteger(value any) (int64, error) {
 	}
 }
 
+// redisFixedWindowTake counts one request under key in a Redis fixed window
+// and reports whether it is within maxRequestNum, the count and the seconds
+// left in the window.
+//
+// The count does not depend on the client: net/http cancels the context of a
+// request without a body as soon as the client half-closes its connection,
+// before the handler runs, and an Eval on that context fails at once. Such a
+// request would then skip the shared counter (counted only in this node's
+// memory, or not at all where a limiter fails open) and still get its
+// response. The request context has no deadline, so go-redis's own timeouts
+// still bound the call.
 func redisFixedWindowTake(ctx context.Context, key string, maxRequestNum int, duration int64) (bool, int64, int64, error) {
 	if common.RDB == nil {
 		return false, 0, 0, errors.New("Redis client is not initialized")
@@ -90,7 +101,7 @@ func redisFixedWindowTake(ctx context.Context, key string, maxRequestNum int, du
 	}
 
 	values, err := common.RDB.Eval(
-		ctx,
+		context.WithoutCancel(ctx),
 		redisFixedWindowScript,
 		[]string{key},
 		maxRequestNum,
