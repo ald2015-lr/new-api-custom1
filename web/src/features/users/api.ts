@@ -152,7 +152,7 @@ export async function deleteUser(
   proofToken: string
 ): Promise<ApiResponse> {
   const res = await api.delete(
-    `/api/user/${id}/`,
+    `/api/user/${id}`,
     securityProofConfig(proofToken)
   )
   return res.data

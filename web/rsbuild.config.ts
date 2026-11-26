@@ -1,12 +1,26 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { defineConfig, loadEnv } from '@rsbuild/core'
+import { defineConfig, loadEnv, type RsbuildPlugin } from '@rsbuild/core'
 import { pluginReact } from '@rsbuild/plugin-react'
 import { pluginTailwindcss } from '@rsbuild/plugin-tailwindcss'
 import { tanstackRouter } from '@tanstack/router-plugin/rspack'
 
+import { slimTranslationSource } from './scripts/slim-locale.mjs'
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// Production bundles get en.json without its identity entries (key === value);
+// see scripts/slim-locale.mjs. Development keeps the full file.
+const pluginSlimEnglishLocale: RsbuildPlugin = {
+  name: 'newapi:slim-english-locale',
+  setup(api) {
+    api.transform(
+      { test: /[\\/]src[\\/]i18n[\\/]locales[\\/]en\.json$/ },
+      ({ code }) => slimTranslationSource(code)
+    )
+  },
+}
 
 export default defineConfig(({ envMode }) => {
   const env = loadEnv({ mode: envMode, prefixes: ['VITE_'] })
@@ -24,7 +38,11 @@ export default defineConfig(({ envMode }) => {
   ) as Record<string, { target: string; changeOrigin: boolean }>
 
   return {
-    plugins: [pluginReact(), pluginTailwindcss({ optimize: false })],
+    plugins: [
+      pluginReact(),
+      pluginTailwindcss({ optimize: false }),
+      ...(isProd ? [pluginSlimEnglishLocale] : []),
+    ],
     // Rsbuild 2: replaces deprecated `performance.chunkSplit` (RSPack 2 aligned)
     splitChunks: {
       preset: 'default',
@@ -69,6 +87,18 @@ export default defineConfig(({ envMode }) => {
     html: {
       template: './index.html',
       favicon: './public/favicon.ico',
+      // The app stylesheets go to the end of <body>, after the boot shell of
+      // index.html: a stylesheet in <head> holds back the first paint, so a
+      // slow or stalled one left the page blank. The deferred scripts still
+      // run only once they have loaded, so the app never renders unstyled.
+      tags: [
+        (tags) =>
+          tags.map((tag) =>
+            tag.tag === 'link' && tag.attrs?.rel === 'stylesheet'
+              ? { ...tag, head: false }
+              : tag
+          ),
+      ],
     },
     server: {
       host: '0.0.0.0',

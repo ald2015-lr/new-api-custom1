@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -71,22 +75,49 @@ func redisReplyInteger(value any) (int64, error) {
 	}
 }
 
+// invalidRateLimit is the error of a limiter redisFixedWindowTake cannot count
+// at all: an empty key, or a count or window that is not positive. It is a
+// configuration error, not a Redis failure.
+type invalidRateLimit string
+
+func (e invalidRateLimit) Error() string { return string(e) }
+
+// redisRateLimitRefused reports whether a limiter whose Redis check failed
+// with err answers an empty 500 instead of counting in memory: always for a
+// limit it cannot count (in memory a window that is not positive would let
+// every request through), and for any error with RATE_LIMIT_REDIS_FAILURE=reject.
+func redisRateLimitRefused(err error) bool {
+	var invalid invalidRateLimit
+	return errors.As(err, &invalid) || common.RateLimitRedisFailure == common.RateLimitRedisFailureReject
+}
+
+// redisFixedWindowTake counts one request under key in a Redis fixed window
+// and reports whether it is within maxRequestNum, the count and the seconds
+// left in the window.
+//
+// The count does not depend on the client: net/http cancels the context of a
+// request without a body as soon as the client half-closes its connection,
+// before the handler runs, and an Eval on that context fails at once. Such a
+// request would then skip the shared counter (counted only in this node's
+// memory, or not at all where a limiter fails open) and still get its
+// response. The request context has no deadline, so go-redis's own timeouts
+// still bound the call.
 func redisFixedWindowTake(ctx context.Context, key string, maxRequestNum int, duration int64) (bool, int64, int64, error) {
 	if common.RDB == nil {
 		return false, 0, 0, errors.New("Redis client is not initialized")
 	}
 	if key == "" {
-		return false, 0, 0, errors.New("rate limit key is empty")
+		return false, 0, 0, invalidRateLimit("rate limit key is empty")
 	}
 	if maxRequestNum <= 0 {
-		return false, 0, 0, errors.New("rate limit maximum must be positive")
+		return false, 0, 0, invalidRateLimit("rate limit maximum must be positive")
 	}
 	if duration <= 0 {
-		return false, 0, 0, errors.New("rate limit duration must be positive")
+		return false, 0, 0, invalidRateLimit("rate limit duration must be positive")
 	}
 
 	values, err := common.RDB.Eval(
-		ctx,
+		context.WithoutCancel(ctx),
 		redisFixedWindowScript,
 		[]string{key},
 		maxRequestNum,
@@ -123,14 +154,63 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 		duration,
 	)
 	if err != nil {
-		logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (mark=%s): %v", mark, err))
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		if redisRateLimitRefused(err) {
+			logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (mark=%s): %v", mark, err))
+			c.Status(http.StatusInternalServerError)
+			c.Abort()
+			return
+		}
+		logRedisRateLimitFallback(c, mark, err)
+		memoryFallbackRateLimit(c, mark+c.ClientIP(), maxRequestNum, duration)
 		return
 	}
 	if !allowed {
 		writeRateLimited(c, ttlSeconds)
 	}
+}
+
+// memoryFallbackRateLimit counts a request that Redis could not count in the
+// in-memory limiter, under the key the memory backend uses, so the limit
+// keeps holding on this node while Redis fails.
+func memoryFallbackRateLimit(c *gin.Context, key string, maxRequestNum int, duration int64) {
+	allowed, retryAfter := inMemoryRateLimiter.RequestWithRetryAfter(key, maxRequestNum, duration)
+	if !allowed {
+		writeRateLimited(c, retryAfter)
+	}
+}
+
+// redisFallbackLogInterval spaces the log lines of one limiter while Redis is
+// failing: a busy site would otherwise write a line for every request.
+const redisFallbackLogInterval = 10 * time.Second
+
+// redisFallbackLogNow is the clock of the fallback log; tests replace it.
+var redisFallbackLogNow = time.Now
+
+// redisFallbackLog is when a limiter last logged a Redis failure (Unix
+// nanoseconds) and how many failures it left out since.
+type redisFallbackLog struct {
+	loggedAt atomic.Int64
+	skipped  atomic.Int64
+}
+
+var redisFallbackLogs sync.Map // limiter mark -> *redisFallbackLog
+
+// logRedisRateLimitFallback logs that the limiter mark counts in memory
+// because Redis failed: the first failure, then at most one line per
+// redisFallbackLogInterval, saying how many failures were left out.
+func logRedisRateLimitFallback(c *gin.Context, mark string, err error) {
+	value, _ := redisFallbackLogs.LoadOrStore(mark, &redisFallbackLog{})
+	entry := value.(*redisFallbackLog)
+	now := redisFallbackLogNow().UnixNano()
+	last := entry.loggedAt.Load()
+	if (last != 0 && now-last < int64(redisFallbackLogInterval)) || !entry.loggedAt.CompareAndSwap(last, now) {
+		entry.skipped.Add(1)
+		return
+	}
+	logger.LogWarn(c.Request.Context(), common.LogText(
+		"rate limit check failed, using the in-memory limiter (mark=%s, %d more failures since the last line): %v",
+		mark, entry.skipped.Swap(0), err,
+	))
 }
 
 func memoryRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark string) {
@@ -156,13 +236,14 @@ func writeRateLimited(c *gin.Context, retryAfterSeconds int64) {
 }
 
 func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
+	// It's safe to call multi times. The Redis limiter falls back to it when
+	// Redis fails, so it is ready before the first request either way.
+	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
 			redisRateLimiter(c, maxRequestNum, duration, mark)
 		}
 	}
-	// It's safe to call multi times.
-	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
 		memoryRateLimiter(c, maxRequestNum, duration, mark)
 	}
@@ -192,10 +273,17 @@ func GlobalWebRateLimit(frontendFS static.ServeFileSystem) func(c *gin.Context) 
 
 // webTierRateLimit is rateLimitFactory for page and frontend-file requests,
 // except that it fails open: a Redis hiccup must not turn every dashboard
-// page load into an error page. API limiters stay closed.
+// page load into an error page. API limiters count in memory instead (or
+// answer 500 with RATE_LIMIT_REDIS_FAILURE=reject).
 func webTierRateLimit(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
 	if !common.RedisEnabled {
-		return rateLimitFactory(maxRequestNum, duration, mark)
+		// It's safe to call multi times.
+		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
+		return func(c *gin.Context) {
+			if !inMemoryRateLimiter.Request(mark+c.ClientIP(), maxRequestNum, duration) {
+				writeWebRateLimited(c, duration)
+			}
+		}
 	}
 	return func(c *gin.Context) {
 		allowed, _, ttlSeconds, err := redisFixedWindowTake(
@@ -209,9 +297,53 @@ func webTierRateLimit(maxRequestNum int, duration int64, mark string) func(c *gi
 			return
 		}
 		if !allowed {
-			writeRateLimited(c, ttlSeconds)
+			writeWebRateLimited(c, ttlSeconds)
 		}
 	}
+}
+
+// rateLimitedPageMaxRefresh caps the wait before the 429 page reloads itself.
+const rateLimitedPageMaxRefresh = 60
+
+// rateLimitedPage is the page a rate-limited page load gets: a short note in
+// Chinese and English, formatted with the seconds after which it reloads the
+// page.
+const rateLimitedPage = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="%[1]d">
+<title>访问过于频繁 / Too many requests</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;font-family:system-ui,sans-serif;background:#fff;color:#222}p{color:#666}@media(prefers-color-scheme:dark){body{background:#111;color:#eee}p{color:#aaa}}</style>
+</head>
+<body>
+<main>
+<h1>访问过于频繁</h1>
+<p>%[1]d 秒后自动重试</p>
+<p>Too many requests. Retrying automatically in %[1]d seconds.</p>
+</main>
+</body>
+</html>
+`
+
+// writeWebRateLimited is writeRateLimited for the page and static limiters.
+// A page load (GET or HEAD that accepts HTML) gets rateLimitedPage instead
+// of an empty body, which browsers show as a blank error page; scripts,
+// styles and API requests keep the empty 429.
+func writeWebRateLimited(c *gin.Context, retryAfterSeconds int64) {
+	method := c.Request.Method
+	if (method != http.MethodGet && method != http.MethodHead) || !strings.Contains(c.GetHeader("Accept"), "text/html") {
+		writeRateLimited(c, retryAfterSeconds)
+		return
+	}
+	if retryAfterSeconds > 0 {
+		c.Header("Retry-After", strconv.FormatInt(retryAfterSeconds, 10))
+	}
+	c.Header("Cache-Control", "no-store")
+	refresh := min(max(retryAfterSeconds, 1), rateLimitedPageMaxRefresh)
+	c.Data(http.StatusTooManyRequests, "text/html; charset=utf-8", fmt.Appendf(nil, rateLimitedPage, refresh))
+	c.Abort()
 }
 
 func GlobalAPIRateLimit() func(c *gin.Context) {
@@ -224,6 +356,18 @@ func GlobalAPIRateLimit() func(c *gin.Context) {
 func CriticalRateLimit() func(c *gin.Context) {
 	if common.CriticalRateLimitEnable {
 		return rateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, "CT")
+	}
+	return defNext
+}
+
+// AuthRefreshRateLimit limits session refreshes per IP in a budget of their
+// own (RF, AUTH_REFRESH_RATE_LIMIT*). Every hard page load of a signed-in
+// user refreshes the session; in the critical budget, about 20 page loads
+// from one IP signed the user out and then left sign-in itself rate limited.
+// Sign-in, logout and the other critical routes keep CriticalRateLimit.
+func AuthRefreshRateLimit() func(c *gin.Context) {
+	if common.AuthRefreshRateLimitEnable {
+		return rateLimitFactory(common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration, "RF")
 	}
 	return defNext
 }
@@ -251,6 +395,9 @@ func UploadRateLimit() func(c *gin.Context) {
 // instead of client IP, making it resistant to proxy rotation attacks.
 // Must be used AFTER authentication middleware (UserAuth).
 func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
+	// It's safe to call multi times. The Redis limiter falls back to it when
+	// Redis fails, so it is ready before the first request either way.
+	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
 			userID := c.GetInt("id")
@@ -259,11 +406,9 @@ func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c
 				c.Abort()
 				return
 			}
-			userRedisRateLimiter(c, maxRequestNum, duration, redisUserRateLimitKey(mark, userID))
+			userRedisRateLimiter(c, maxRequestNum, duration, mark, userID)
 		}
 	}
-	// It's safe to call multi times.
-	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
 		userID := c.GetInt("id")
 		if userID == 0 {
@@ -271,22 +416,32 @@ func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c
 			c.Abort()
 			return
 		}
-		key := fmt.Sprintf("%s:user:%d", mark, userID)
-		if !inMemoryRateLimiter.Request(key, maxRequestNum, duration) {
+		if !inMemoryRateLimiter.Request(memoryUserRateLimitKey(mark, userID), maxRequestNum, duration) {
 			writeRateLimited(c, duration)
 			return
 		}
 	}
 }
 
-// userRedisRateLimiter is like redisRateLimiter but accepts a pre-built key
-// (to support user-ID-based keys).
-func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key string) {
+// memoryUserRateLimitKey is the in-memory key of a per-user limiter.
+func memoryUserRateLimitKey(mark string, userID int) string {
+	return fmt.Sprintf("%s:user:%d", mark, userID)
+}
+
+// userRedisRateLimiter is redisRateLimiter for a per-user limiter: it counts
+// the user instead of the client IP.
+func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark string, userID int) {
+	key := redisUserRateLimitKey(mark, userID)
 	allowed, _, ttlSeconds, err := redisFixedWindowTake(c.Request.Context(), key, maxRequestNum, duration)
 	if err != nil {
-		logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (key=%s): %v", key, err))
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		if redisRateLimitRefused(err) {
+			logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (key=%s): %v", key, err))
+			c.Status(http.StatusInternalServerError)
+			c.Abort()
+			return
+		}
+		logRedisRateLimitFallback(c, mark, err)
+		memoryFallbackRateLimit(c, memoryUserRateLimitKey(mark, userID), maxRequestNum, duration)
 		return
 	}
 	if !allowed {

@@ -19,11 +19,20 @@ For commercial licensing, please contact support@quantumnous.com
 import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query'
 
 import { handleServerError } from './handle-server-error'
-import { getServerErrorStatus } from './server-error-message'
+import {
+  getServerErrorStatus,
+  isRetryableQueryError,
+  queryRetryDelay,
+} from './server-error-message'
 
 interface ErrorNotificationMeta extends Record<string, unknown> {
   /** Disable automatic notifications when a caller presents the failure itself. */
   errorToast?: boolean
+  /**
+   * `false` for optional queries (side panels, badges, status): a 500 then
+   * fails in place instead of replacing the whole page with /500.
+   */
+  errorPage?: boolean
 }
 
 declare module '@tanstack/react-query' {
@@ -39,10 +48,9 @@ export function createAppQueryClient(
   const client: QueryClient = new QueryClient({
     defaultOptions: {
       queries: {
-        retry: (failureCount, error) => {
-          if (import.meta.env.DEV || failureCount > 3) return false
-          return ![401, 403].includes(getServerErrorStatus(error) ?? 0)
-        },
+        retry: (failureCount, error) =>
+          !import.meta.env.DEV && isRetryableQueryError(error, failureCount),
+        retryDelay: queryRetryDelay,
         refetchOnWindowFocus: false,
         staleTime: 10 * 1000,
       },
@@ -62,7 +70,12 @@ export function createAppQueryClient(
     queryCache: new QueryCache({
       onError: (error, query) => {
         if (query.meta?.errorToast !== false) handleServerError(error)
-        if (getServerErrorStatus(error) === 500) onInternalServerError?.()
+        if (
+          getServerErrorStatus(error) === 500 &&
+          query.meta?.errorPage !== false
+        ) {
+          onInternalServerError?.()
+        }
       },
     }),
   })

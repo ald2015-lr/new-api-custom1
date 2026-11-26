@@ -46,6 +46,7 @@ import type {
   SidebarBadges,
   SidebarData,
 } from '@/components/layout/types'
+import { prefetchDashboardSection } from '@/features/dashboard/lib/section-chunks'
 import { useStatus } from '@/hooks/use-status'
 import {
   ADMIN_PERMISSION_ACTIONS,
@@ -106,6 +107,8 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Dashboard'),
             url: '/dashboard/models',
             icon: LayoutDashboard,
+            // Its charts are lazy chunks of the dashboard route.
+            prefetch: () => prefetchDashboardSection('models'),
           },
           ...modelSquare,
           {

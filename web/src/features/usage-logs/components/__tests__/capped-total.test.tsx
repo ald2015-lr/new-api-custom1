@@ -78,7 +78,7 @@ type Server = {
 function mockServer(server: Server) {
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
     const ownList = url.startsWith('/api/log/self?')
-    if (ownList || url.startsWith('/api/log?')) {
+    if (ownList || url.startsWith('/api/log/?')) {
       const params = new URLSearchParams(url.split('?')[1])
       const page = Number(params.get('p'))
       const size = Math.min(
@@ -189,7 +189,7 @@ function listRequests() {
   return vi
     .mocked(api.get)
     .mock.calls.map(([url]) => url)
-    .filter((url) => /^\/api\/log(\/self)?\?/.test(url))
+    .filter((url) => /^\/api\/log\/(self)?\?/.test(url))
     .map((url) => {
       const params = new URLSearchParams(url.split('?')[1])
       const view = url.startsWith('/api/log/self?') ? 'self' : 'all'

@@ -70,7 +70,6 @@ require (
 )
 
 require (
-	github.com/ClickHouse/ch-go v0.71.0 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
 	github.com/casbin/govaluate v1.10.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.1 // indirect
@@ -167,6 +166,7 @@ require (
 )
 
 require (
+	github.com/ClickHouse/ch-go v0.71.0
 	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
 	github.com/HugoSmits86/nativewebp v1.3.0
 	github.com/MoeForge/moego v0.1.0-alpha.3

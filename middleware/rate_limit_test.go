@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -201,33 +202,346 @@ func TestRedisFixedWindowRepairsCounterWithoutTTL(t *testing.T) {
 	assert.False(t, redisServer.Exists(key), "a recovered counter must not remain permanently rate-limited")
 }
 
-func TestRedisFailurePolicies(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	_, redisClient := useRateLimitMiniRedis(t)
-	require.NoError(t, redisClient.Close())
+// useRateLimitRedisFailure sets RATE_LIMIT_REDIS_FAILURE for one test.
+func useRateLimitRedisFailure(t *testing.T, policy string) {
+	t.Helper()
+	previous := common.RateLimitRedisFailure
+	common.RateLimitRedisFailure = policy
+	t.Cleanup(func() { common.RateLimitRedisFailure = previous })
+}
 
+// uniqueRateLimitMark gives a limiter its own in-memory counters in every
+// run, so repeated runs in one process do not share them.
+func uniqueRateLimitMark(base string) string {
+	return base + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+var authRefreshTestIPs atomic.Uint32
+
+// uniqueTestClientIP gives a test run client IPs of its own: the in-memory
+// limiter keeps its counters for the whole test process.
+func uniqueTestClientIP() string {
+	n := uint32(time.Now().UnixMicro()) + authRefreshTestIPs.Add(1)
+	return fmt.Sprintf("10.%d.%d.%d", byte(n>>16), byte(n>>8), byte(n))
+}
+
+// newRedisFailureRouter wires an IP limiter, a per-user limiter (user 7) and
+// the email code limiter, each allowing one request per 30 seconds.
+func newRedisFailureRouter(t *testing.T, ipMark, userMark string) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	require.NoError(t, router.SetTrustedProxies(nil))
-	router.GET("/ip", rateLimitFactory(1, 30, "FAIL-IP"), func(c *gin.Context) {
+	router.GET("/ip", rateLimitFactory(1, 30, ipMark), func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
 	router.GET(
 		"/user",
 		func(c *gin.Context) { c.Set("id", 7) },
-		userRateLimitFactory(1, 30, "FAIL-USER"),
+		userRateLimitFactory(1, 30, userMark),
 		func(c *gin.Context) { c.Status(http.StatusNoContent) },
 	)
 	router.GET("/email", EmailVerificationRateLimit(), func(c *gin.Context) {
 		c.Status(http.StatusNoContent)
 	})
+	return router
+}
 
-	ipResponse := performRateLimitRequest(router, "/ip", "192.0.2.60:12345")
-	assert.Equal(t, http.StatusInternalServerError, ipResponse.Code)
-	assert.Empty(t, ipResponse.Body.String())
-	userResponse := performRateLimitRequest(router, "/user", "192.0.2.61:12345")
-	assert.Equal(t, http.StatusInternalServerError, userResponse.Code)
-	assert.Empty(t, userResponse.Body.String())
-	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", "192.0.2.62:12345").Code)
+// While Redis fails, the API and per-user limiters count in this node's
+// memory instead (RATE_LIMIT_REDIS_FAILURE=memory, the default): requests pass
+// up to the limit and then get the usual 429 with Retry-After, keyed like the
+// memory backend (the IP, or the user wherever the request comes from).
+func TestRedisFailurePolicies(t *testing.T) {
+	_, redisClient := useRateLimitMiniRedis(t)
+	require.NoError(t, redisClient.Close())
+	useRateLimitRedisFailure(t, common.RateLimitRedisFailureMemory)
+	ipMark, userMark := uniqueRateLimitMark("FAIL-IP"), uniqueRateLimitMark("FAIL-USER")
+	router := newRedisFailureRouter(t, ipMark, userMark)
+	clientIP := uniqueTestClientIP()
+
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/ip", clientIP+":12345").Code)
+	ipLimited := performRateLimitRequest(router, "/ip", clientIP+":12345")
+	assert.Equal(t, http.StatusTooManyRequests, ipLimited.Code)
+	assert.Equal(t, "no-store", ipLimited.Header().Get("Cache-Control"))
+	retryAfter, err := strconv.Atoi(ipLimited.Header().Get("Retry-After"))
+	require.NoError(t, err)
+	assert.Positive(t, retryAfter)
+	assert.LessOrEqual(t, retryAfter, 30)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/ip", uniqueTestClientIP()+":12345").Code, "another IP has its own count")
+
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/user", uniqueTestClientIP()+":12345").Code)
+	userLimited := performRateLimitRequest(router, "/user", uniqueTestClientIP()+":12345")
+	assert.Equal(t, http.StatusTooManyRequests, userLimited.Code, "the user is counted wherever the request comes from")
+	assert.NotEmpty(t, userLimited.Header().Get("Retry-After"))
+
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", uniqueTestClientIP()+":12345").Code)
+}
+
+// RATE_LIMIT_REDIS_FAILURE=reject restores the behaviour before the memory
+// fallback: every request the API and per-user limiters cannot count in
+// Redis gets an empty 500, and nothing is counted in memory.
+func TestRedisFailureRejectModeKeepsOldBehaviour(t *testing.T) {
+	_, redisClient := useRateLimitMiniRedis(t)
+	require.NoError(t, redisClient.Close())
+	useRateLimitRedisFailure(t, common.RateLimitRedisFailureReject)
+	ipMark, userMark := uniqueRateLimitMark("REJECT-IP"), uniqueRateLimitMark("REJECT-USER")
+	router := newRedisFailureRouter(t, ipMark, userMark)
+	clientIP := uniqueTestClientIP()
+
+	for range 2 {
+		ipResponse := performRateLimitRequest(router, "/ip", clientIP+":12345")
+		assert.Equal(t, http.StatusInternalServerError, ipResponse.Code)
+		assert.Empty(t, ipResponse.Body.String())
+		userResponse := performRateLimitRequest(router, "/user", clientIP+":12345")
+		assert.Equal(t, http.StatusInternalServerError, userResponse.Code)
+		assert.Empty(t, userResponse.Body.String())
+	}
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", clientIP+":12345").Code)
+
+	// Back on the default, the first requests are counted in memory only now.
+	common.RateLimitRedisFailure = common.RateLimitRedisFailureMemory
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/ip", clientIP+":12345").Code)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/user", clientIP+":12345").Code)
+}
+
+// The fallback logs the first Redis failure of a limiter, then at most one
+// line per 10 seconds, saying how many failures it left out; each limiter
+// has its own interval.
+func TestRedisFailureFallbackLogIsThrottled(t *testing.T) {
+	_, redisClient := useRateLimitMiniRedis(t)
+	require.NoError(t, redisClient.Close())
+	useRateLimitRedisFailure(t, common.RateLimitRedisFailureMemory)
+	now := time.Unix(1_800_000_000, 0)
+	previousNow := redisFallbackLogNow
+	redisFallbackLogNow = func() time.Time { return now }
+	var output strings.Builder
+	previousErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &output
+	t.Cleanup(func() {
+		redisFallbackLogNow = previousNow
+		gin.DefaultErrorWriter = previousErrorWriter
+	})
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	firstMark, secondMark := uniqueRateLimitMark("LOG-A"), uniqueRateLimitMark("LOG-B")
+	clientIP := uniqueTestClientIP()
+	router.GET("/a", rateLimitFactory(100, 60, firstMark), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	router.GET("/b", rateLimitFactory(100, 60, secondMark), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	linesOf := func(mark string) []string {
+		var lines []string
+		for _, line := range strings.Split(output.String(), "\n") {
+			if strings.Contains(line, "mark="+mark+",") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+
+	for range 5 {
+		require.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/a", clientIP+":12345").Code)
+	}
+	require.Len(t, linesOf(firstMark), 1)
+	assert.Contains(t, linesOf(firstMark)[0], "[WARN]")
+	assert.Contains(t, linesOf(firstMark)[0], "using the in-memory limiter (mark="+firstMark+", 0 more failures since the last line)")
+
+	now = now.Add(9 * time.Second)
+	performRateLimitRequest(router, "/a", clientIP+":12345")
+	assert.Len(t, linesOf(firstMark), 1, "no second line within 10 seconds")
+	performRateLimitRequest(router, "/b", clientIP+":12345")
+	assert.Len(t, linesOf(secondMark), 1, "another limiter logs on its own")
+
+	now = now.Add(time.Second)
+	performRateLimitRequest(router, "/a", clientIP+":12345")
+	require.Len(t, linesOf(firstMark), 2)
+	assert.Contains(t, linesOf(firstMark)[1], "(mark="+firstMark+", 5 more failures since the last line)")
+}
+
+// A client that went away is still counted in Redis: net/http cancels the
+// context of a request without a body as soon as the client half-closes its
+// connection, before the handler runs, and such a request must neither get
+// this node's in-memory budget on top of the shared one nor be left
+// uncounted, nor look like a Redis failure in the log.
+func TestRedisRateLimitersCountRequestsWhoseClientWentAway(t *testing.T) {
+	redisServer, _ := useRateLimitMiniRedis(t)
+	useRateLimitRedisFailure(t, common.RateLimitRedisFailureMemory)
+	useGlobalWebRateLimit(t, 2, 600)
+	var output strings.Builder
+	previousErrorWriter := gin.DefaultErrorWriter
+	gin.DefaultErrorWriter = &output
+	t.Cleanup(func() { gin.DefaultErrorWriter = previousErrorWriter })
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	handled := make(map[string]int)
+	accepted := func(c *gin.Context) {
+		handled[c.FullPath()]++
+		c.Status(http.StatusNoContent)
+	}
+	ipMark, userMark := uniqueRateLimitMark("GONE-IP"), uniqueRateLimitMark("GONE-USER")
+	router.GET("/ip", rateLimitFactory(2, 600, ipMark), accepted)
+	router.GET("/user", func(c *gin.Context) { c.Set("id", 7) }, userRateLimitFactory(2, 600, userMark), accepted)
+	router.GET("/page", GlobalWebRateLimit(emptyFrontendFS(t)), accepted)
+	router.GET("/email", EmailVerificationRateLimit(), accepted)
+	clientIP := uniqueTestClientIP()
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := func(path string, ctx context.Context) int {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+		req.RemoteAddr = clientIP + ":12345"
+		router.ServeHTTP(recorder, req)
+		return recorder.Code
+	}
+
+	for path, key := range map[string]string{
+		"/ip":    redisIPRateLimitKey(ipMark, clientIP),
+		"/user":  redisUserRateLimitKey(userMark, 7),
+		"/page":  redisIPRateLimitKey("GW", clientIP),
+		"/email": redisIPRateLimitKey(EmailVerificationRateLimitMark, clientIP),
+	} {
+		codes := []int{request(path, context.Background()), request(path, context.Background()), request(path, gone), request(path, gone)}
+		assert.Equal(t, []int{http.StatusNoContent, http.StatusNoContent, http.StatusTooManyRequests, http.StatusTooManyRequests}, codes, path)
+		assert.Equal(t, 2, handled[path], "%s: the handler runs within the limit only", path)
+		count, err := redisServer.Get(key)
+		require.NoError(t, err, path)
+		assert.Equal(t, "4", count, "%s: every request is counted in Redis", path)
+	}
+	assert.NotContains(t, output.String(), "rate limit check failed")
+}
+
+// A limiter whose count or window is not positive (CRITICAL_RATE_LIMIT_DURATION=0,
+// say) answers an empty 500 under either RATE_LIMIT_REDIS_FAILURE policy, as
+// before the memory fallback: the fallback is for Redis failures, and such a
+// window would let every request through in memory.
+func TestRedisRateLimitersRefuseALimitThatIsNotPositive(t *testing.T) {
+	useRateLimitMiniRedis(t)
+	gin.SetMode(gin.TestMode)
+	accepted := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	for _, policy := range []string{common.RateLimitRedisFailureMemory, common.RateLimitRedisFailureReject} {
+		for _, limit := range []struct {
+			num    int
+			window int64
+		}{{2, 0}, {2, -1}, {0, 60}} {
+			useRateLimitRedisFailure(t, policy)
+			router := gin.New()
+			require.NoError(t, router.SetTrustedProxies(nil))
+			router.GET("/ip", rateLimitFactory(limit.num, limit.window, uniqueRateLimitMark("BAD-IP")), accepted)
+			router.GET("/user", func(c *gin.Context) { c.Set("id", 7) }, userRateLimitFactory(limit.num, limit.window, uniqueRateLimitMark("BAD-USER")), accepted)
+			for _, path := range []string{"/ip", "/user"} {
+				for range 3 {
+					response := performRateLimitRequest(router, path, uniqueTestClientIP()+":12345")
+					assert.Equal(t, http.StatusInternalServerError, response.Code, "%s %s %+v", policy, path, limit)
+					assert.Empty(t, response.Body.String())
+				}
+			}
+		}
+	}
+}
+
+// useAuthRefreshRateLimit sets the session refresh limit and the critical
+// limit (both with a 20-minute window) for one test.
+func useAuthRefreshRateLimit(t *testing.T, refreshEnabled bool, refreshNum int, criticalNum int) {
+	t.Helper()
+	previousRefresh := []any{common.AuthRefreshRateLimitEnable, common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration}
+	previousCritical := []any{common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration}
+	common.AuthRefreshRateLimitEnable, common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration = refreshEnabled, refreshNum, 20*60
+	common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = true, criticalNum, 20*60
+	t.Cleanup(func() {
+		common.AuthRefreshRateLimitEnable, common.AuthRefreshRateLimitNum, common.AuthRefreshRateLimitDuration = previousRefresh[0].(bool), previousRefresh[1].(int), previousRefresh[2].(int64)
+		common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = previousCritical[0].(bool), previousCritical[1].(int), previousCritical[2].(int64)
+	})
+}
+
+// newAuthRefreshLimitRouter wires sign-in and refresh with their limiters as
+// the API router does.
+func newAuthRefreshLimitRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	accepted := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+	router.POST("/api/user/login", CriticalRateLimit(), accepted)
+	router.POST("/api/user/auth/refresh", AuthRefreshRateLimit(), accepted)
+	return router
+}
+
+func postFrom(router http.Handler, path string, remoteAddr string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, path, nil)
+	request.RemoteAddr = remoteAddr
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+// Session refreshes count in a per-IP budget of their own (RF): once the
+// critical budget of an IP is used up, its refreshes still pass, up to the
+// refresh limit, which then answers 429 with Retry-After like the others.
+func TestAuthRefreshRateLimitHasItsOwnBucket(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		t.Run(backend, func(t *testing.T) {
+			var redisServer *miniredis.Miniredis
+			clientIP, otherIP := "192.0.2.110", "198.51.100.110"
+			if backend == "redis" {
+				redisServer, _ = useRateLimitMiniRedis(t)
+			} else {
+				useMemoryRateLimitBackend(t)
+				clientIP, otherIP = uniqueTestClientIP(), uniqueTestClientIP()
+			}
+			useAuthRefreshRateLimit(t, true, 300, 20)
+			router := newAuthRefreshLimitRouter(t)
+			remoteAddr := clientIP + ":4321"
+
+			for i := range 20 {
+				require.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", remoteAddr).Code, "login %d", i+1)
+			}
+			require.Equal(t, http.StatusTooManyRequests, postFrom(router, "/api/user/login", remoteAddr).Code, "the critical budget is used up")
+
+			for i := range 300 {
+				require.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", remoteAddr).Code, "refresh %d", i+1)
+			}
+			limited := postFrom(router, "/api/user/auth/refresh", remoteAddr)
+			assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+			assert.Equal(t, "no-store", limited.Header().Get("Cache-Control"))
+			retryAfter, err := strconv.Atoi(limited.Header().Get("Retry-After"))
+			require.NoError(t, err)
+			assert.Positive(t, retryAfter)
+			assert.LessOrEqual(t, retryAfter, 20*60)
+
+			// Another IP has both budgets untouched.
+			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", otherIP+":4321").Code)
+			assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", otherIP+":4321").Code)
+
+			if redisServer == nil {
+				return
+			}
+			refreshKey := redisIPRateLimitKey("RF", clientIP)
+			assert.Equal(t, "rateLimit:v2:ip:RF:"+clientIP, refreshKey)
+			count, err := redisServer.Get(refreshKey)
+			require.NoError(t, err)
+			assert.Equal(t, "301", count)
+			assert.Equal(t, 20*time.Minute, redisServer.TTL(refreshKey))
+			criticalCount, err := redisServer.Get(redisIPRateLimitKey("CT", clientIP))
+			require.NoError(t, err)
+			assert.Equal(t, "21", criticalCount, "refreshes do not count against the critical budget")
+		})
+	}
+}
+
+// Refreshes, unlike sign-in, are not limited at all while
+// AUTH_REFRESH_RATE_LIMIT_ENABLE is off.
+func TestAuthRefreshRateLimitDisabled(t *testing.T) {
+	redisServer, _ := useRateLimitMiniRedis(t)
+	useAuthRefreshRateLimit(t, false, 1, 1)
+	router := newAuthRefreshLimitRouter(t)
+	const clientIP = "192.0.2.112"
+
+	for i := range 5 {
+		assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/auth/refresh", clientIP+":4321").Code, "refresh %d", i+1)
+	}
+	assert.False(t, redisServer.Exists(redisIPRateLimitKey("RF", clientIP)))
+	assert.Equal(t, http.StatusNoContent, postFrom(router, "/api/user/login", clientIP+":4321").Code)
+	assert.Equal(t, http.StatusTooManyRequests, postFrom(router, "/api/user/login", clientIP+":4321").Code)
 }
 
 func useGlobalWebRateLimit(t *testing.T, maxRequestNum int, duration int64) {
@@ -270,8 +584,8 @@ func TestGlobalWebRateLimitUsesRedisWindowWithGWMark(t *testing.T) {
 }
 
 // The web tier fails open when Redis is unavailable: a Redis restart must not
-// turn every dashboard page load into an error page. API limiters keep the
-// fail-closed policy asserted by TestRedisFailurePolicies.
+// turn every dashboard page load into an error page. API limiters count in
+// memory instead, as TestRedisFailurePolicies asserts.
 func TestGlobalWebRateLimitFailsOpenOnRedisError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	_, redisClient := useRateLimitMiniRedis(t)
@@ -356,6 +670,76 @@ func TestGlobalWebRateLimitCountsFrontendFilesInStaticBucket(t *testing.T) {
 func emptyFrontendFS(t *testing.T) static.ServeFileSystem {
 	t.Helper()
 	return static.LocalFile(t.TempDir(), false)
+}
+
+func performWebLimitRequest(router http.Handler, method, accept, remoteAddr string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, "/console/log", nil)
+	request.RemoteAddr = remoteAddr
+	if accept != "" {
+		request.Header.Set("Accept", accept)
+	}
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+const browserPageAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+// A rate-limited page load (GET or HEAD that accepts HTML) gets a short page
+// in Chinese and English that reloads itself after Retry-After, at most 60
+// seconds, instead of the empty body browsers show as an error page. Other
+// requests keep the empty 429. Both backends answer the same way.
+func TestGlobalWebRateLimitAnswersPageLoadsWithARetryPage(t *testing.T) {
+	for _, backend := range []string{"redis", "memory"} {
+		for _, window := range []int64{45, 180} {
+			t.Run(fmt.Sprintf("%s/%ds", backend, window), func(t *testing.T) {
+				if backend == "redis" {
+					useRateLimitMiniRedis(t)
+				} else {
+					useMemoryRateLimitBackend(t)
+				}
+				useGlobalWebRateLimit(t, 1, window)
+				gin.SetMode(gin.TestMode)
+				router := gin.New()
+				require.NoError(t, router.SetTrustedProxies(nil))
+				router.Any("/console/log", GlobalWebRateLimit(emptyFrontendFS(t)), func(c *gin.Context) {
+					c.Status(http.StatusNoContent)
+				})
+				remoteAddr := uniqueTestClientIP() + ":4321"
+				require.Equal(t, http.StatusNoContent, performWebLimitRequest(router, http.MethodGet, browserPageAccept, remoteAddr).Code)
+
+				page := performWebLimitRequest(router, http.MethodGet, browserPageAccept, remoteAddr)
+				assert.Equal(t, http.StatusTooManyRequests, page.Code)
+				assert.Equal(t, "text/html; charset=utf-8", page.Header().Get("Content-Type"))
+				assert.Equal(t, "no-store", page.Header().Get("Cache-Control"))
+				assert.Equal(t, fmt.Sprint(window), page.Header().Get("Retry-After"))
+				refresh := min(window, 60)
+				body := page.Body.String()
+				assert.Contains(t, body, fmt.Sprintf(`<meta http-equiv="refresh" content="%d">`, refresh))
+				assert.Contains(t, body, "访问过于频繁")
+				assert.Contains(t, body, fmt.Sprintf("%d 秒后自动重试", refresh))
+				assert.Contains(t, body, fmt.Sprintf("Too many requests. Retrying automatically in %d seconds.", refresh))
+				assert.Less(t, len(body), 1024)
+
+				head := performWebLimitRequest(router, http.MethodHead, browserPageAccept, remoteAddr)
+				assert.Equal(t, http.StatusTooManyRequests, head.Code)
+				assert.Equal(t, "text/html; charset=utf-8", head.Header().Get("Content-Type"))
+
+				for _, other := range []struct{ method, accept string }{
+					{http.MethodGet, "application/json, text/plain, */*"},
+					{http.MethodGet, "*/*"},
+					{http.MethodGet, ""},
+					{http.MethodPost, browserPageAccept},
+				} {
+					response := performWebLimitRequest(router, other.method, other.accept, remoteAddr)
+					assert.Equal(t, http.StatusTooManyRequests, response.Code, "%s %q", other.method, other.accept)
+					assert.Empty(t, response.Body.String(), "%s %q", other.method, other.accept)
+					assert.Equal(t, fmt.Sprint(window), response.Header().Get("Retry-After"))
+					assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+				}
+			})
+		}
+	}
 }
 
 // useRegisterRateLimit sets the per-network registration limit for one test.

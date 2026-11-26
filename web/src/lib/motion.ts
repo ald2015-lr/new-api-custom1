@@ -36,17 +36,14 @@ export const MOTION_TRANSITION: Record<string, Transition> = {
 }
 
 export const MOTION_VARIANTS = {
+  // Opacity and a small slide only: a CSS filter on the page container makes
+  // the browser repaint the whole page on every frame of the transition, which
+  // is slow on phones, and a blur that ended at exactly zero blanked the page
+  // on some Android renderers.
   pageEnter: {
-    initial: { opacity: 0, y: 8, filter: 'blur(4px)' },
-    animate: {
-      opacity: 1,
-      y: 0,
-      // Exact zero blur can blank the page on some Android renderers.
-      // Preserve the blur animation, then release the filter after it finishes.
-      filter: 'blur(0.01px)',
-      transitionEnd: { filter: 'none' },
-    },
-    exit: { opacity: 0, y: -4, filter: 'blur(2px)' },
+    initial: { opacity: 0, y: 8 },
+    animate: { opacity: 1, y: 0 },
+    exit: { opacity: 0, y: -4 },
   },
   fadeIn: {
     initial: { opacity: 0 },

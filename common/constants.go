@@ -305,6 +305,14 @@ var (
 	CriticalRateLimitNum            = 20
 	CriticalRateLimitDuration int64 = 20 * 60
 
+	// Session refreshes per IP have a budget of their own (AuthRefreshRateLimit):
+	// every hard page load of a signed-in user refreshes the session, so in
+	// the critical budget they used up the sign-in attempts of everyone behind
+	// the same IP.
+	AuthRefreshRateLimitEnable         = true
+	AuthRefreshRateLimitNum            = 300
+	AuthRefreshRateLimitDuration int64 = 20 * 60
+
 	UploadRateLimitNum            = 10
 	UploadRateLimitDuration int64 = 60
 
@@ -318,6 +326,18 @@ var (
 )
 
 var RateLimitKeyExpirationDuration = 20 * time.Minute
+
+// What the API and per-user rate limiters do when Redis fails
+// (RATE_LIMIT_REDIS_FAILURE): RateLimitRedisFailureMemory counts the request
+// in this node's memory instead, so the limit still holds on each node;
+// RateLimitRedisFailureReject answers 500, as before the fallback existed. The
+// page and static limiters let requests through either way.
+const (
+	RateLimitRedisFailureMemory = "memory"
+	RateLimitRedisFailureReject = "reject"
+)
+
+var RateLimitRedisFailure = RateLimitRedisFailureMemory
 
 const (
 	UserStatusEnabled  = 1 // don't use 0, 0 is the default value!

@@ -382,7 +382,7 @@ type ModelPricingIssue struct {
 func GetModelPricingIssues(pluginKey string) ([]ModelPricingIssue, error) {
 	generation := jsplugin.DefaultRegistry.Generation()
 	served := make(map[string]bool)
-	for _, name := range GetEnabledModels() {
+	for _, name := range GetEnabledModelsCached() {
 		if declared, ok := generation.CanonicalModel(name); ok {
 			served[declared] = true
 		} else if target, ok := ResolveTaskModelAlias(generation, name); ok && target.Declared != "" {

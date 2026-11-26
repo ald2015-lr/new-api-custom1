@@ -99,6 +99,7 @@ func TestKlingNativeRouteSubmitPollSettleAndQuery(t *testing.T) {
 	previousRedisEnabled := common.RedisEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
+	keepOneInMemoryConnection(t, database)
 	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
 	model.DB = database
 	model.LOG_DB = database
@@ -287,6 +288,7 @@ func TestDoubaoRelayedImageStreamSettlement(t *testing.T) {
 	previousDeadline := constant.TaskPluginProtocolTimeoutSeconds
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
+	keepOneInMemoryConnection(t, database)
 	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
 	model.DB = database
 	model.LOG_DB = database
@@ -444,6 +446,7 @@ func TestKlingNativeRouteHidesTheUpstreamBalanceError(t *testing.T) {
 	previousErrorLog, previousRetryTimes := constant.ErrorLogEnabled, common.RetryTimes
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
+	keepOneInMemoryConnection(t, database)
 	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
 	model.DB, model.LOG_DB = database, database
 	common.MemoryCacheEnabled, common.RedisEnabled = false, false
@@ -673,6 +676,7 @@ func TestTaskSubmissionRunsRequestPlugins(t *testing.T) {
 	previousMemoryCache, previousBatchUpdate, previousLogConsume, previousRedis, previousErrorLog := common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled, constant.ErrorLogEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
+	keepOneInMemoryConnection(t, database)
 	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
 	model.DB, model.LOG_DB = database, database
 	common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled, constant.ErrorLogEnabled = false, false, true, false, true
@@ -819,6 +823,7 @@ func TestNativeRouteDecodesTheIngressBody(t *testing.T) {
 	previousMemoryCache, previousBatchUpdate, previousLogConsume, previousRedis := common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
+	keepOneInMemoryConnection(t, database)
 	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
 	model.DB, model.LOG_DB = database, database
 	common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled = false, false, false, false
@@ -876,4 +881,34 @@ export function ingress(ctx, req) {
 	require.Nil(t, taskErr)
 	assert.Equal(t, "task: mail [email] a lighthouse", gjson.Get(sent, "prompt").Str, sent)
 	assert.Equal(t, "kling-v3", gjson.Get(sent, "model_name").Str)
+}
+
+// keepOneInMemoryConnection keeps the pool of an in-memory SQLite database at
+// one connection. Every connection to ":memory:" is a database of its own, so
+// a background query (the channel quota limit reload) that found the only
+// connection busy would open an empty second database under the test.
+func keepOneInMemoryConnection(t *testing.T, database *gorm.DB) {
+	t.Helper()
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+}
+
+// While a background query holds the only connection, the test's own query
+// waits for it instead of opening a second, empty in-memory database.
+func TestKeepOneInMemoryConnectionKeepsTheTablesWhileABackgroundQueryRuns(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	keepOneInMemoryConnection(t, database)
+	require.NoError(t, database.AutoMigrate(&model.Task{}))
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+
+	background, err := sqlDB.Conn(context.Background())
+	require.NoError(t, err)
+	time.AfterFunc(50*time.Millisecond, func() { _ = background.Close() })
+
+	var count int64
+	require.NoError(t, database.Model(&model.Task{}).Count(&count).Error)
+	assert.Equal(t, 1, sqlDB.Stats().OpenConnections)
 }

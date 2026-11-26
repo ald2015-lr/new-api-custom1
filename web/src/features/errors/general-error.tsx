@@ -26,6 +26,10 @@ import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import {
+  isAuthSessionUnavailableError,
+  retryAuthentication,
+} from '@/lib/auth-session'
+import {
   isChunkLoadError,
   reloadOnceForChunkError,
 } from '@/lib/chunk-load-error'
@@ -53,8 +57,9 @@ export function GeneralError({
 }: GeneralErrorProps) {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const { history } = useRouter()
+  const router = useRouter()
   const [reloading, setReloading] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const status = getHttpStatus(error)
   const isRateLimited = status === 429
   const isChunkError = isChunkLoadError(error)
@@ -69,6 +74,51 @@ export function GeneralError({
   }, [error, isChunkError])
 
   if (reloading) return null
+
+  // The session check failed for a temporary reason (rate limit, server or
+  // network trouble); the session itself may be fine. Not a chunk error, so
+  // no reload: retry the check, or let the user sign in again.
+  if (isAuthSessionUnavailableError(error)) {
+    const retry = async () => {
+      setRetrying(true)
+      try {
+        await retryAuthentication()
+        await router.invalidate()
+      } finally {
+        setRetrying(false)
+      }
+    }
+    return (
+      <div className={cn('h-svh w-full', className)}>
+        <div className='m-auto flex h-full w-full flex-col items-center justify-center gap-2 px-4'>
+          <span className='font-medium'>
+            {t('Unable to restore your sign-in right now')}
+          </span>
+          <p className='text-muted-foreground text-center'>
+            {t(
+              'The network or server is busy. You are still signed in; please try again shortly.'
+            )}
+          </p>
+          <div className='mt-6 flex flex-wrap justify-center gap-4'>
+            <Button
+              variant='outline'
+              onClick={() =>
+                navigate({
+                  to: '/sign-in',
+                  search: { redirect: router.state.location.href },
+                })
+              }
+            >
+              {t('Go to sign in')}
+            </Button>
+            <Button disabled={retrying} onClick={() => void retry()}>
+              {t('Retry')}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   let title: string
   let description: string
@@ -102,7 +152,7 @@ export function GeneralError({
         )}
         {!minimal && (
           <div className='mt-6 flex flex-wrap justify-center gap-4'>
-            <Button variant='outline' onClick={() => history.go(-1)}>
+            <Button variant='outline' onClick={() => router.history.go(-1)}>
               {t('Go Back')}
             </Button>
             <Button variant='outline' onClick={() => window.location.reload()}>

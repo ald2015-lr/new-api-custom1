@@ -3952,6 +3952,26 @@ func (u *moderationUpstream) since(mark int, path string) []moderationUpstreamRe
 	return requests
 }
 
+// lockedLogBuffer collects what the gin log writers receive. The request and
+// background tasks (such as the channel quota limit reload) log at the same
+// time, and a bare bytes.Buffer is not safe for that.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // An OpenAI channel with content moderation on checks every attempt before
 // anything reaches its upstream: rules first, then OpenAI's moderation model
 // with the attempt's own key. A rejection is answered with a generic message,
@@ -4277,7 +4297,7 @@ func TestRelayModeratesOpenAIChannels(t *testing.T) {
 
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("a flagged request is rejected, refunded and recorded (stream %t)", stream), func(t *testing.T) {
-			var logs bytes.Buffer
+			var logs lockedLogBuffer
 			if !stream {
 				common.LogWriterMu.Lock()
 				infoWriter, errorWriter := gin.DefaultWriter, gin.DefaultErrorWriter

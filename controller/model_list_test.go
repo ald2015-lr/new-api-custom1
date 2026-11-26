@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -265,6 +266,62 @@ func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 	require.Len(t, models, 3)
 	assert.ElementsMatch(t, []string{"zz-vip-model", "zz-shared-model"}, models[:2])
 	assert.Equal(t, "zz-default-model", models[2])
+}
+
+// /api/user/models lists the same models in the same order on both paths
+// (the dashboard picks the first one): from the memory channel cache without
+// any abilities query while it is on, and with one query per group from the
+// database while it is off.
+func TestGetUserModelsReadsTheMemoryCacheWhenOn(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	t.Cleanup(func() {
+		// Leave an empty channel cache behind for the next tests.
+		common.MemoryCacheEnabled = true
+		db.Exec("DELETE FROM abilities")
+		model.InitChannelCache()
+		common.MemoryCacheEnabled = originalMemoryCacheEnabled
+	})
+	require.NoError(t, db.Create(&model.User{
+		Id:       1004,
+		Username: "cached-model-user",
+		Password: "password",
+		Group:    "default",
+		Status:   common.UserStatusEnabled,
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-4o", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "claude-sonnet-4", ChannelId: 2, Enabled: true},
+		{Group: "default", Model: "gpt-4o", ChannelId: 2, Enabled: true},
+		{Group: "default", Model: "disabled-model", ChannelId: 3, Enabled: false},
+		{Group: "vip", Model: "vip-model", ChannelId: 4, Enabled: true},
+	}).Error)
+	var abilityQueries atomic.Int32
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:count_ability_queries", func(tx *gorm.DB) {
+		if tx.Statement.Table == "abilities" {
+			abilityQueries.Add(1)
+		}
+	}))
+	userModels := func() []string {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodGet, "/api/user/models?group=default", nil)
+		context.Set("id", 1004)
+		GetUserModels(context)
+		return decodeUserModelsResponse(t, recorder)
+	}
+
+	common.MemoryCacheEnabled = false
+	fromDatabase := userModels()
+	assert.Equal(t, []string{"claude-sonnet-4", "gpt-4o"}, fromDatabase)
+	assert.EqualValues(t, 1, abilityQueries.Load(), "one query for the group")
+
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
+	abilityQueries.Store(0)
+	fromCache := userModels()
+	assert.Equal(t, fromDatabase, fromCache)
+	assert.Zero(t, abilityQueries.Load(), "no abilities query while the memory cache is on")
 }
 
 func TestListModelsIncludesTieredBillingModel(t *testing.T) {

@@ -139,6 +139,8 @@ func InitEnv() {
 	CriticalRateLimitEnable = GetEnvOrDefaultBool("CRITICAL_RATE_LIMIT_ENABLE", true)
 	CriticalRateLimitNum = GetEnvOrDefault("CRITICAL_RATE_LIMIT", 20)
 	CriticalRateLimitDuration = int64(GetEnvOrDefault("CRITICAL_RATE_LIMIT_DURATION", 20*60))
+	initAuthRefreshRateLimitEnv()
+	RateLimitRedisFailure = rateLimitRedisFailureFromEnv()
 
 	SearchRateLimitEnable = GetEnvOrDefaultBool("SEARCH_RATE_LIMIT_ENABLE", true)
 	SearchRateLimitNum = GetEnvOrDefault("SEARCH_RATE_LIMIT", 10)
@@ -181,6 +183,59 @@ func positiveUserSessionEnv(name string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+// initAuthRefreshRateLimitEnv reads the session refresh limit. It is on
+// whenever the critical limit is, unless AUTH_REFRESH_RATE_LIMIT_ENABLE says
+// otherwise, so a site that switched the critical limit off keeps refreshes
+// unlimited as before.
+//
+// Refreshes used to share the critical limit. Without AUTH_REFRESH_RATE_LIMIT
+// they get 300 per window, or what CRITICAL_RATE_LIMIT allowed in that window
+// where a site raised it beyond that, so no site gives refreshes less than
+// before.
+func initAuthRefreshRateLimitEnv() {
+	AuthRefreshRateLimitEnable = GetEnvOrDefaultBool("AUTH_REFRESH_RATE_LIMIT_ENABLE", CriticalRateLimitEnable)
+	AuthRefreshRateLimitDuration = int64(positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT_DURATION", 20*60))
+	defaultNum := 300
+	if CriticalRateLimitNum > 0 && CriticalRateLimitDuration > 0 {
+		critical := (int64(CriticalRateLimitNum)*AuthRefreshRateLimitDuration + CriticalRateLimitDuration - 1) / CriticalRateLimitDuration
+		if critical > int64(defaultNum) {
+			defaultNum = int(min(critical, math.MaxInt32))
+			if os.Getenv("AUTH_REFRESH_RATE_LIMIT") == "" {
+				SysLog(LogText(
+					"AUTH_REFRESH_RATE_LIMIT is not set: session refreshes keep what CRITICAL_RATE_LIMIT=%d per %d seconds allowed them, %d per %d seconds",
+					CriticalRateLimitNum, CriticalRateLimitDuration, defaultNum, AuthRefreshRateLimitDuration,
+				))
+			}
+		}
+	}
+	AuthRefreshRateLimitNum = positiveRateLimitEnv("AUTH_REFRESH_RATE_LIMIT", defaultNum)
+}
+
+// positiveRateLimitEnv reads a rate limit count or window, which must be positive.
+func positiveRateLimitEnv(name string, fallback int) int {
+	value := GetEnvOrDefault(name, fallback)
+	if value <= 0 {
+		SysError(LogText("%s must be positive, using default value: %d", name, fallback))
+		return fallback
+	}
+	return value
+}
+
+// rateLimitRedisFailureFromEnv reads RATE_LIMIT_REDIS_FAILURE: memory (the
+// default) or reject.
+func rateLimitRedisFailureFromEnv() string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("RATE_LIMIT_REDIS_FAILURE")))
+	switch value {
+	case "", RateLimitRedisFailureMemory:
+		return RateLimitRedisFailureMemory
+	case RateLimitRedisFailureReject:
+		return RateLimitRedisFailureReject
+	default:
+		SysError(LogText("invalid RATE_LIMIT_REDIS_FAILURE %q (allowed: memory, reject), using memory", value))
+		return RateLimitRedisFailureMemory
+	}
 }
 
 func initConstantEnv() {

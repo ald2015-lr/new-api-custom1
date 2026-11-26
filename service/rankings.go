@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -133,8 +134,18 @@ type vendorAggregate struct {
 var (
 	rankingCacheMu sync.Mutex
 	rankingCache   = map[string]rankingCacheItem{}
+	// rankingBuilds runs one build per period at a time: concurrent requests
+	// for a period without a usable snapshot wait for the same build instead of
+	// each running the heavy quota_data aggregations.
+	rankingBuilds singleflight.Group
+	// buildRankings builds a snapshot; tests replace it.
+	buildRankings = buildRankingsSnapshot
 )
 
+// GetRankingsSnapshot returns the rankings of a period from the cache. A
+// snapshot that expired less than rankingCacheTTL ago is still returned at
+// once while one background build replaces it; without a snapshot, or with an
+// older one, the caller waits for the shared build.
 func GetRankingsSnapshot(period string) (*RankingsResponse, error) {
 	config, err := rankingConfig(period)
 	if err != nil {
@@ -143,24 +154,52 @@ func GetRankingsSnapshot(period string) (*RankingsResponse, error) {
 
 	now := time.Now()
 	rankingCacheMu.Lock()
-	if item, ok := rankingCache[config.id]; ok && now.Before(item.expiresAt) {
-		rankingCacheMu.Unlock()
+	item, ok := rankingCache[config.id]
+	rankingCacheMu.Unlock()
+	if ok && now.Before(item.expiresAt) {
 		return item.data, nil
 	}
-	rankingCacheMu.Unlock()
+	if ok && now.Before(item.expiresAt.Add(rankingCacheTTL)) {
+		// The result channel is buffered, so nobody needs to read it.
+		rankingBuilds.DoChan(config.id, func() (any, error) { return buildAndCacheRankings(config) })
+		return item.data, nil
+	}
 
-	data, err := buildRankingsSnapshot(config, now)
+	value, err, _ := rankingBuilds.Do(config.id, func() (any, error) { return buildAndCacheRankings(config) })
 	if err != nil {
 		return nil, err
 	}
+	return value.(*RankingsResponse), nil
+}
 
+// buildAndCacheRankings builds the snapshot of a period and caches it. A
+// failed build caches nothing, so the next request tries again. A panic is
+// returned as an error: a background build has no request to recover it.
+func buildAndCacheRankings(config rankingPeriodConfig) (data *RankingsResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			data, err = nil, fmt.Errorf("building the %s rankings panicked: %v", config.id, r)
+		}
+	}()
+	now := time.Now()
+	// A build that finished after the caller read the cache has already
+	// replaced the snapshot: use it rather than build again.
+	rankingCacheMu.Lock()
+	item, ok := rankingCache[config.id]
+	rankingCacheMu.Unlock()
+	if ok && now.Before(item.expiresAt) {
+		return item.data, nil
+	}
+	data, err = buildRankings(config, now)
+	if err != nil {
+		return nil, err
+	}
 	rankingCacheMu.Lock()
 	rankingCache[config.id] = rankingCacheItem{
 		expiresAt: now.Add(rankingCacheTTL),
 		data:      data,
 	}
 	rankingCacheMu.Unlock()
-
 	return data, nil
 }
 

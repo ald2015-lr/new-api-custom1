@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -11,6 +13,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -402,4 +406,189 @@ func TestADeploymentWithoutGeminiFreeKeyChannelsKeepsTheLimiterInactive(t *testi
 	assert.False(t, limiter.Active())
 	limiter.MarkActive()
 	assert.Equal(t, inactive+1, selectionQueries(), "only an active limiter reads the Gemini channels")
+}
+
+// countAbilityQueries counts the queries of the abilities table from now on.
+func countAbilityQueries(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var queries atomic.Int32
+	require.NoError(t, DB.Callback().Query().Before("gorm:query").Register("test:count_ability_queries", func(tx *gorm.DB) {
+		if tx.Statement.Table == "abilities" {
+			queries.Add(1)
+		}
+	}))
+	t.Cleanup(func() { _ = DB.Callback().Query().Remove("test:count_ability_queries") })
+	return &queries
+}
+
+// forEachChannelCacheDatabase runs test with the memory cache on and DB set to
+// empty channels and abilities tables on SQLite and, when TEST_MYSQL_DSN and
+// TEST_POSTGRES_DSN are set, on MySQL and PostgreSQL.
+func forEachChannelCacheDatabase(t *testing.T, test func(t *testing.T, dialect string)) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(":memory:")
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN is not configured")
+				}
+				driver = postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true})
+			}
+			db, err := gorm.Open(driver, &gorm.Config{})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(1)
+			previousDB, previousType, previousMemoryCache := DB, common.MainDatabaseType(), common.MemoryCacheEnabled
+			DB = db
+			common.SetMainDatabaseType(common.DatabaseType(dialect))
+			initCol()
+			common.MemoryCacheEnabled = true
+			t.Cleanup(func() {
+				db.Exec("DELETE FROM abilities")
+				db.Exec("DELETE FROM channels")
+				DB = previousDB
+				common.SetMainDatabaseType(previousType)
+				initCol()
+				InitChannelCache()
+				common.MemoryCacheEnabled = previousMemoryCache
+				assert.NoError(t, sqlDB.Close())
+			})
+			require.NoError(t, db.AutoMigrate(&Channel{}, &Ability{}))
+			require.NoError(t, db.Exec("DELETE FROM abilities").Error)
+			require.NoError(t, db.Exec("DELETE FROM channels").Error)
+			test(t, dialect)
+		})
+	}
+}
+
+// groupModelsInModelOrder is GetGroupEnabledModels sorted by the database's
+// own ordering of the model column.
+func groupModelsInModelOrder(t *testing.T, group string) []string {
+	t.Helper()
+	var models []string
+	require.NoError(t, DB.Table("abilities").Where(commonGroupCol+" = ? and enabled = ?", group, true).
+		Distinct("model").Order("model").Pluck("model", &models).Error)
+	return models
+}
+
+// The memory cache lists what the abilities queries return: per group the
+// distinct models of the enabled abilities in the same order (the model
+// pickers list them as they come, and the dashboard takes the first), and the
+// same models over all groups. An edited channel writes its abilities again
+// after the others, and letter case orders models as the database does.
+func TestEnabledModelsCacheMatchesTheAbilitiesQueries(t *testing.T) {
+	forEachChannelCacheDatabase(t, func(t *testing.T, dialect string) {
+		require.NoError(t, DB.Create(&[]Ability{
+			{Group: "default", Model: "gpt-4o", ChannelId: 1, Enabled: true},
+			{Group: "default", Model: "gpt-4o", ChannelId: 2, Enabled: true},
+			{Group: "default", Model: "claude-sonnet-4", ChannelId: 2, Enabled: true},
+			{Group: "default", Model: "disabled-only", ChannelId: 3, Enabled: false},
+			{Group: "default", Model: "Qwen-Max", ChannelId: 3, Enabled: true},
+			{Group: "vip", Model: "gpt-4o", ChannelId: 4, Enabled: true},
+			{Group: "vip", Model: "vip-only", ChannelId: 4, Enabled: true},
+			{Group: "vip", Model: "disabled-only", ChannelId: 5, Enabled: false},
+		}).Error)
+		require.NoError(t, DB.Where("channel_id = ?", 1).Delete(&Ability{}).Error)
+		require.NoError(t, DB.Create(&[]Ability{
+			{Group: "default", Model: "gpt-4o", ChannelId: 1, Enabled: true},
+			{Group: "default", Model: "deepseek-chat", ChannelId: 1, Enabled: true},
+		}).Error)
+		InitChannelCache()
+
+		for _, group := range []string{"default", "vip"} {
+			cached := GetGroupEnabledModelsCached(group)
+			assert.Equal(t, groupModelsInModelOrder(t, group), cached, group)
+			// PostgreSQL's plain DISTINCT has no defined order.
+			if dialect != "postgres" {
+				assert.Equal(t, GetGroupEnabledModels(group), cached, group)
+			}
+		}
+		assert.ElementsMatch(t, []string{"Qwen-Max", "claude-sonnet-4", "deepseek-chat", "gpt-4o"}, GetGroupEnabledModelsCached("default"))
+		assert.Equal(t, []string{"gpt-4o", "vip-only"}, GetGroupEnabledModelsCached("vip"))
+		assert.Empty(t, GetGroupEnabledModelsCached("missing"))
+		assert.ElementsMatch(t, GetEnabledModels(), GetEnabledModelsCached())
+	})
+}
+
+// A channel that failing requests disable automatically leaves the cached
+// model lists at once, as it leaves channel selection and the abilities
+// queries (the periodic sync reloads the cache only later): a single-key
+// channel, and a multi-key channel once its last key is disabled. A model
+// another enabled channel serves stays.
+func TestEnabledModelsCacheDropsAnAutomaticallyDisabledChannel(t *testing.T) {
+	forEachChannelCacheDatabase(t, func(t *testing.T, dialect string) {
+		create := func(id int, key string, models string, info ChannelInfo) {
+			channel := &Channel{Id: id, Type: constant.ChannelTypeOpenAI, Key: key, Status: common.ChannelStatusEnabled,
+				Name: fmt.Sprintf("auto-%d", id), Models: models, Group: "default,vip", ChannelInfo: info}
+			require.NoError(t, DB.Create(channel).Error)
+			require.NoError(t, channel.AddAbilities(nil))
+		}
+		create(77001, "sk-solo", "solo-model,shared-model", ChannelInfo{})
+		create(77002, "sk-a\nsk-b", "multi-model,shared-model", ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModeRandom})
+		create(77003, "sk-other", "shared-model", ChannelInfo{})
+		InitChannelCache()
+		matchTheDatabase := func(step string) {
+			t.Helper()
+			for _, group := range []string{"default", "vip"} {
+				assert.Equal(t, groupModelsInModelOrder(t, group), GetGroupEnabledModelsCached(group), "%s: %s", step, group)
+			}
+			assert.ElementsMatch(t, GetEnabledModels(), GetEnabledModelsCached(), step)
+		}
+		matchTheDatabase("reloaded")
+		require.Equal(t, []string{"multi-model", "shared-model", "solo-model"}, GetGroupEnabledModelsCached("vip"))
+
+		require.True(t, UpdateChannelStatus(77001, "sk-solo", common.ChannelStatusAutoDisabled, "upstream error"))
+		matchTheDatabase("single-key channel disabled")
+		assert.Equal(t, []string{"multi-model", "shared-model"}, GetGroupEnabledModelsCached("default"))
+
+		UpdateChannelStatus(77002, "sk-a", common.ChannelStatusAutoDisabled, "upstream error")
+		matchTheDatabase("one key of two disabled")
+		assert.Equal(t, []string{"multi-model", "shared-model"}, GetGroupEnabledModelsCached("default"))
+		require.True(t, UpdateChannelStatus(77002, "sk-b", common.ChannelStatusAutoDisabled, "upstream error"))
+		matchTheDatabase("every key disabled")
+		assert.Equal(t, []string{"shared-model"}, GetGroupEnabledModelsCached("default"))
+		assert.Equal(t, []string{"shared-model"}, GetEnabledModelsCached())
+	})
+}
+
+// While the memory cache is on, the lists come from the last channel cache
+// reload without a query, and callers get copies; while it is off they are
+// read from the database.
+func TestEnabledModelsCacheServesTheLastReloadWithoutQueries(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+	// Rebuild the cache from the emptied tables when the test ends.
+	t.Cleanup(func() { common.MemoryCacheEnabled = true })
+	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "gpt-4o", ChannelId: 1, Enabled: true}).Error)
+	InitChannelCache()
+	queries := countAbilityQueries(t)
+
+	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "gpt-4.1", ChannelId: 2, Enabled: true}).Error)
+	assert.Equal(t, []string{"gpt-4o"}, GetGroupEnabledModelsCached("default"), "a new ability shows after the next reload")
+	assert.Equal(t, []string{"gpt-4o"}, GetEnabledModelsCached())
+	assert.Zero(t, queries.Load(), "no query while the memory cache is on")
+
+	models := GetGroupEnabledModelsCached("default")
+	models[0] = "changed"
+	assert.Equal(t, []string{"gpt-4o"}, GetGroupEnabledModelsCached("default"), "callers get a copy")
+
+	InitChannelCache()
+	assert.ElementsMatch(t, []string{"gpt-4o", "gpt-4.1"}, GetGroupEnabledModelsCached("default"))
+
+	common.MemoryCacheEnabled = false
+	queries.Store(0)
+	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "o3", ChannelId: 3, Enabled: true}).Error)
+	assert.ElementsMatch(t, []string{"gpt-4o", "gpt-4.1", "o3"}, GetGroupEnabledModelsCached("default"))
+	assert.ElementsMatch(t, []string{"gpt-4o", "gpt-4.1", "o3"}, GetEnabledModelsCached())
+	assert.EqualValues(t, 2, queries.Load(), "the database is read while the memory cache is off")
 }

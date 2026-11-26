@@ -59,20 +59,46 @@ func TestWebRouterServesHashedAssetsAsImmutableWithETag(t *testing.T) {
 	assert.Equal(t, http.StatusNotModified, revalidated.Code)
 	assert.Empty(t, revalidated.Body.String())
 
-	// Browsers send Accept-Encoding: gzip, which takes the precompressed path.
+	// A client with gzip but without brotli takes the precompressed gzip path;
+	// each encoding has its own entity tag.
 	gzipped := performWebRequest(engine, "/static/js/app.js", "192.0.2.10:1234", map[string]string{
-		"Accept-Encoding": "gzip, deflate, br",
+		"Accept-Encoding": "gzip, deflate",
 	})
 	require.Equal(t, http.StatusOK, gzipped.Code)
 	assert.Equal(t, "gzip", gzipped.Header().Get("Content-Encoding"))
-	assert.Equal(t, `"static/js/app.js"`, gzipped.Header().Get("ETag"))
+	assert.Equal(t, `"static/js/app.js-gzip"`, gzipped.Header().Get("ETag"))
+	assert.Equal(t, "Accept-Encoding", gzipped.Header().Get("Vary"))
+	// A copy stored under the tag servers sent with gzip bodies before
+	// per-encoding tags still revalidates.
 	gzipRevalidated := performWebRequest(engine, "/static/js/app.js", "192.0.2.10:1234", map[string]string{
-		"Accept-Encoding": "gzip, deflate, br",
+		"Accept-Encoding": "gzip, deflate",
 		"If-None-Match":   `W/"other", "static/js/app.js"`,
 	})
 	assert.Equal(t, http.StatusNotModified, gzipRevalidated.Code)
 	assert.Empty(t, gzipRevalidated.Body.String())
 	assert.Empty(t, gzipRevalidated.Header().Get("Content-Encoding"))
+
+	// Browsers accept brotli and get the embedded app.js.br the web build
+	// wrote next to the file.
+	brotli := performWebRequest(engine, "/static/js/app.js", "192.0.2.10:1234", map[string]string{
+		"Accept-Encoding": "gzip, deflate, br, zstd",
+	})
+	require.Equal(t, http.StatusOK, brotli.Code)
+	assert.Equal(t, "br", brotli.Header().Get("Content-Encoding"))
+	assert.Equal(t, `"static/js/app.js-br"`, brotli.Header().Get("ETag"))
+	assert.Equal(t, "Accept-Encoding", brotli.Header().Get("Vary"))
+	assert.Equal(t, "public, max-age=31536000, immutable", brotli.Header().Get("Cache-Control"))
+	assert.Contains(t, brotli.Header().Get("Content-Type"), "javascript")
+	embeddedBrotli, err := webRouterTestFS.ReadFile("testdata/dist/static/js/app.js.br")
+	require.NoError(t, err)
+	assert.Equal(t, embeddedBrotli, brotli.Body.Bytes())
+	brotliRevalidated := performWebRequest(engine, "/static/js/app.js", "192.0.2.10:1234", map[string]string{
+		"Accept-Encoding": "gzip, deflate, br, zstd",
+		"If-None-Match":   `"static/js/app.js-br"`,
+	})
+	assert.Equal(t, http.StatusNotModified, brotliRevalidated.Code)
+	assert.Equal(t, `"static/js/app.js-br"`, brotliRevalidated.Header().Get("ETag"))
+	assert.Empty(t, brotliRevalidated.Body.String())
 }
 
 func TestWebRouterMissingChunkIs404NotIndexHTML(t *testing.T) {

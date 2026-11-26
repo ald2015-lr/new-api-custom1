@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { useEffect, useState } from 'react'
 import type { IconBaseProps, IconType } from 'react-icons'
 
+import { PRESET_REACT_ICONS } from './react-icon-presets'
+
 type IconPackModule = Record<string, unknown>
 type IconPackLoader = () => Promise<IconPackModule>
 
@@ -145,6 +147,9 @@ type ResolvedIconState = {
 
 export function ReactIconByName({ name, ...props }: ReactIconByNameProps) {
   const iconName = normalizeIconName(name)
+  // The editor's and the default payment icons render in the first paint and
+  // without downloading their pack; every other name loads its pack.
+  const PresetIcon = iconName ? PRESET_REACT_ICONS.get(iconName) : undefined
   const [resolvedIcon, setResolvedIcon] = useState<ResolvedIconState | null>(
     null
   )
@@ -152,7 +157,7 @@ export function ReactIconByName({ name, ...props }: ReactIconByNameProps) {
   useEffect(() => {
     let cancelled = false
 
-    if (!iconName) return
+    if (!iconName || PresetIcon) return
 
     void resolveReactIcon(iconName).then((Icon) => {
       if (!cancelled) setResolvedIcon({ iconName, Icon })
@@ -161,7 +166,9 @@ export function ReactIconByName({ name, ...props }: ReactIconByNameProps) {
     return () => {
       cancelled = true
     }
-  }, [iconName])
+  }, [iconName, PresetIcon])
+
+  if (PresetIcon) return <PresetIcon {...props} />
 
   if (!iconName || resolvedIcon?.iconName !== iconName || !resolvedIcon.Icon) {
     return null

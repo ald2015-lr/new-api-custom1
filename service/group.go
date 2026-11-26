@@ -112,10 +112,21 @@ func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
 
 // GetGroupsEnabledModels 按 groups 顺序获取各分组启用的模型并去重
 func GetGroupsEnabledModels(groups []string) []string {
+	return groupsEnabledModels(groups, model.GetGroupEnabledModels)
+}
+
+// GetGroupsEnabledModelsCached is GetGroupsEnabledModels read from the memory
+// channel cache while it is on (model.GetGroupEnabledModelsCached), instead of
+// one database query per group.
+func GetGroupsEnabledModelsCached(groups []string) []string {
+	return groupsEnabledModels(groups, model.GetGroupEnabledModelsCached)
+}
+
+func groupsEnabledModels(groups []string, groupModels func(group string) []string) []string {
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
 	for _, group := range groups {
-		for _, modelName := range model.GetGroupEnabledModels(group) {
+		for _, modelName := range groupModels(group) {
 			if _, ok := seen[modelName]; !ok {
 				seen[modelName] = struct{}{}
 				models = append(models, modelName)

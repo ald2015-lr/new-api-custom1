@@ -31,11 +31,260 @@
         document.documentElement.classList.add(theme)
       })()
     </script>
+    <!-- Boot shell: painted with the HTML and hidden by CSS as soon as React
+         renders into #root, so a slow or failed start is never a blank page.
+         The app stylesheet comes after it, at the end of the body
+         (rsbuild.config.ts), so a slow stylesheet does not hold it back. -->
+    <style>
+      #boot-shell {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        padding: 24px 16px;
+        background: #fff;
+        color: #0a0a0a;
+        font:
+          14px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          Roboto,
+          'PingFang SC',
+          'Hiragino Sans GB',
+          'Microsoft YaHei',
+          sans-serif;
+        text-align: center;
+      }
+      html.dark #boot-shell {
+        background: #1e1e1e;
+        color: #f3f3f3;
+      }
+      #root:not(:empty) ~ #boot-shell,
+      #boot-shell [hidden],
+      #boot-shell-name:empty,
+      #boot-shell-message:empty {
+        display: none;
+      }
+      #boot-shell-name {
+        margin-bottom: 16px;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      #boot-shell-spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid rgba(128, 128, 128, 0.25);
+        border-top-color: #808080;
+        border-radius: 50%;
+        animation: boot-shell-spin 0.9s linear infinite;
+      }
+      @keyframes boot-shell-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-shell-spinner {
+          animation: none;
+        }
+      }
+      #boot-shell-message {
+        max-width: 420px;
+        margin: 16px 0 0;
+      }
+      #boot-shell-reload {
+        margin-top: 16px;
+        padding: 8px 20px;
+        border: 0;
+        border-radius: 6px;
+        background: #0a0a0a;
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      html.dark #boot-shell-reload {
+        background: #f3f3f3;
+        color: #1e1e1e;
+      }
+    </style>
+    <noscript>
+      <style>
+        #boot-shell {
+          display: none;
+        }
+      </style>
+    </noscript>
     <!--umami-->
     <!--Google Analytics-->
   </head>
 
   <body>
     <div id="root" translate="no" class="notranslate"></div>
+    <div id="boot-shell" role="status" aria-live="polite">
+      <div id="boot-shell-name"></div>
+      <div id="boot-shell-spinner" aria-hidden="true"></div>
+      <p id="boot-shell-message"></p>
+      <button id="boot-shell-reload" type="button" hidden></button>
+    </div>
+    <!-- Boot watchdog: explains a slow or failed start in the shell. It never
+         reloads by itself and stops once the app has rendered into #root.
+         It runs before i18n, hence its own Chinese and English text. It runs
+         right after the shell markup: the build puts the app stylesheet at
+         the end of the body, and while that loads the parser waits there. -->
+    <script id="boot-watchdog">
+      ;(function () {
+        var lang = ''
+        try {
+          lang = localStorage.getItem('i18nextLng') || ''
+        } catch (e) {}
+        var zh = /^zh/i.test(lang || navigator.language || '')
+        var text = zh
+          ? {
+              resource: '页面资源加载失败',
+              boot: '页面启动出错',
+              browser: '浏览器版本过低，请升级或换用系统浏览器打开',
+              slow: '网络较慢，仍在加载…',
+              reload: '重新加载',
+            }
+          : {
+              resource: 'Some page files failed to load',
+              boot: 'The page failed to start',
+              browser:
+                'This browser is too old. Please update it or open the page in your system browser.',
+              slow: 'The network is slow, still loading…',
+              reload: 'Reload',
+            }
+        var rank = { '': 0, slow: 1, boot: 2, resource: 3, browser: 4 }
+        var state = ''
+        var reloadable = false
+        var done = false
+        var timers = []
+        var observer = null
+
+        function byId(id) {
+          return document.getElementById(id)
+        }
+        function mounted() {
+          var root = byId('root')
+          return !!(root && root.firstChild)
+        }
+        function render() {
+          if (done) return
+          if (mounted()) return stop()
+          var message = byId('boot-shell-message')
+          var spinner = byId('boot-shell-spinner')
+          var button = byId('boot-shell-reload')
+          if (!message || !spinner || !button) return
+          message.textContent = state ? text[state] : ''
+          spinner.hidden = state !== '' && state !== 'slow'
+          button.textContent = text.reload
+          button.hidden = !reloadable || state === 'browser'
+        }
+        function show(next, canReload) {
+          if (done) return
+          if (rank[next] > rank[state]) state = next
+          if (canReload) reloadable = true
+          render()
+        }
+        function fromStatic(url) {
+          return typeof url === 'string' && url.indexOf('/static/') !== -1
+        }
+        function onError(event) {
+          var target = event.target
+          var tag = target && target.tagName
+          if (tag === 'SCRIPT' || tag === 'LINK') {
+            if (
+              fromStatic(target.src || target.href) &&
+              (tag === 'SCRIPT' || /stylesheet/i.test(target.rel || ''))
+            ) {
+              show('resource', true)
+            }
+            return
+          }
+          if (fromStatic(event.filename)) show('boot', true)
+        }
+        function onRejection(event) {
+          var reason = event.reason
+          if (reason && fromStatic(String(reason.request || reason.stack))) {
+            show('boot', true)
+          }
+        }
+        function stop() {
+          done = true
+          for (var i = 0; i < timers.length; i++) clearTimeout(timers[i])
+          window.removeEventListener('error', onError, true)
+          window.removeEventListener('unhandledrejection', onRejection)
+          if (observer) observer.disconnect()
+          // The shell shows again only if #root empties later (a reload in
+          // progress); without the watchdog, a spinner would promise too much.
+          var spinner = byId('boot-shell-spinner')
+          if (spinner) spinner.hidden = true
+        }
+        function start() {
+          var button = byId('boot-shell-reload')
+          if (button) {
+            button.onclick = function () {
+              location.reload()
+            }
+          }
+          var name = byId('boot-shell-name')
+          try {
+            var status = JSON.parse(localStorage.getItem('status') || 'null')
+            if (name && status && typeof status.system_name === 'string') {
+              name.textContent = status.system_name
+            }
+          } catch (e) {}
+          var root = byId('root')
+          if (root && window.MutationObserver) {
+            observer = new MutationObserver(render)
+            observer.observe(root, { childList: true })
+          }
+          render()
+        }
+
+        window.addEventListener('error', onError, true)
+        window.addEventListener('unhandledrejection', onRejection)
+        // The build targets current browsers and ships no polyfills.
+        var modern = false
+        try {
+          modern =
+            typeof Array.prototype.at === 'function' &&
+            typeof Object.hasOwn === 'function' &&
+            typeof window.fetch === 'function' &&
+            'noModule' in HTMLScriptElement.prototype
+        } catch (e) {}
+        if (!modern) state = 'browser'
+        timers.push(
+          setTimeout(function () {
+            show('slow')
+          }, 15000)
+        )
+        timers.push(
+          setTimeout(function () {
+            show('', true)
+          }, 45000)
+        )
+        start()
+      })()
+    </script>
+    <noscript>
+      <p
+        style="
+          margin: 40vh 16px 0;
+          font: 14px/1.6 sans-serif;
+          text-align: center;
+        "
+      >
+        本网站需要启用 JavaScript 才能使用，请在浏览器设置中开启后刷新页面。<br />
+        This site needs JavaScript. Please enable it in your browser settings
+        and reload the page.
+      </p>
+    </noscript>
   </body>
 </html>

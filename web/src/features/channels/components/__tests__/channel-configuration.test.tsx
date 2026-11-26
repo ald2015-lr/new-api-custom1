@@ -217,7 +217,7 @@ beforeEach(() => {
     if (url === '/api/group/') {
       return { data: { success: true, data: ['default', 'premium'] } }
     }
-    if (url === '/api/prefill_group') {
+    if (url === '/api/prefill_group/') {
       return { data: { success: true, data: [] } }
     }
     throw new Error(`Unexpected GET ${url}`)
@@ -479,7 +479,7 @@ test('selecting a plugin opens a prefilled channel and creates its explicit bind
   await user.click(screen.getByRole('button', { name: 'Create Channel' }))
   await waitFor(() => expect(post).toHaveBeenCalled())
   const [url, payload] = post.mock.calls[0]
-  expect(url).toBe('/api/channel')
+  expect(url).toBe('/api/channel/')
   expect(payload).toMatchObject({
     mode: 'single',
     channel: {
@@ -717,7 +717,7 @@ test('creating a migrated provider uses its plugin binding instead of the legacy
   await user.click(screen.getByRole('button', { name: 'Create Channel' }))
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
-      '/api/channel',
+      '/api/channel/',
       expect.objectContaining({
         channel: expect.objectContaining({ type: 61 }),
       }),
@@ -832,7 +832,7 @@ test.each(['create', 'edit'])(
     if (mode === 'create') {
       await waitFor(() =>
         expect(post).toHaveBeenCalledWith(
-          '/api/channel',
+          '/api/channel/',
           expect.objectContaining({
             channel: expect.objectContaining({
               type: 1,
@@ -1030,7 +1030,7 @@ test('loading a replacement plugin preserves an already selected legacy creation
   await user.click(screen.getByRole('button', { name: 'Create Channel' }))
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
-      '/api/channel',
+      '/api/channel/',
       expect.objectContaining({
         channel: expect.objectContaining({ type: 55, name: 'Legacy draft' }),
       }),
@@ -1087,7 +1087,7 @@ test.each([
   await user.click(screen.getByRole('button', { name: 'Create Channel' }))
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
-      '/api/channel',
+      '/api/channel/',
       expect.objectContaining({
         mode,
         channel: expect.objectContaining({
@@ -6012,7 +6012,7 @@ const redirectStart = {
 test('a login plugin saves without a key, then logs in on the new channel', async () => {
   pluginOptions = [...plugins, loginPlugin]
   const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
-    if (url === '/api/channel') {
+    if (url === '/api/channel/') {
       return { data: { success: true, message: '', data: { ids: [77] } } }
     }
     if (url === '/api/channel/77/plugin_login') return redirectStart
@@ -6059,7 +6059,7 @@ test('a login plugin saves without a key, then logs in on the new channel', asyn
   })
   expect(post).toHaveBeenNthCalledWith(
     1,
-    '/api/channel',
+    '/api/channel/',
     expect.objectContaining({
       mode: 'single',
       channel: expect.objectContaining({ type: 61, key: null }),

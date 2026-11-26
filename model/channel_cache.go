@@ -16,6 +16,8 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+
+	"gorm.io/gorm/clause"
 )
 
 var group2model2channels map[string]map[string][]int // enabled channel
@@ -24,6 +26,14 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
+
+// abilityPrimaryKeyOrder orders abilities by their primary key (group, model,
+// channel_id).
+var abilityPrimaryKeyOrder = clause.OrderBy{Columns: []clause.OrderByColumn{
+	{Column: clause.Column{Name: "group"}},
+	{Column: clause.Column{Name: "model"}},
+	{Column: clause.Column{Name: "channel_id"}},
+}}
 
 // channelCacheReloadLock runs one channel cache reload at a time, so a reload
 // that read the database earlier never publishes over a later one.
@@ -54,8 +64,11 @@ func InitChannelCache() {
 			}
 		}
 	}
+	// In primary key order, the order GetGroupEnabledModels' DISTINCT walks
+	// them in, so the per-group model lists of the snapshot below come out in
+	// the order that query returns them. The dialect quotes the columns.
 	var abilities []*Ability
-	if err := DB.Find(&abilities).Error; err != nil {
+	if err := DB.Order(abilityPrimaryKeyOrder).Find(&abilities).Error; err != nil {
 		common.SysError(common.LogText("failed to load abilities, keeping the previous channel cache: %s", err.Error()))
 		return
 	}
@@ -98,7 +111,7 @@ func InitChannelCache() {
 		}
 	}
 
-	swapChannelCache(newGroup2model2channels, newChannelId2channel, newChannel2advancedCustomConfig)
+	swapChannelCache(newGroup2model2channels, newChannelId2channel, newChannel2advancedCustomConfig, buildEnabledAbilityModels(abilities))
 	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
 	// GetPricing (holding updatePricingLock) nests channelSyncLock.RLock via
 	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before
@@ -109,11 +122,14 @@ func InitChannelCache() {
 }
 
 // swapChannelCache installs a freshly built cache. The deferred unlock keeps
-// channelSyncLock from staying held if anything here panics.
-func swapChannelCache(newGroup2model2channels map[string]map[string][]int, newChannelId2channel map[int]*Channel, newChannel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig) {
+// channelSyncLock from staying held if anything here panics. The enabled
+// models snapshot changes under the same lock, so CacheUpdateChannelStatus
+// always prunes the snapshot that belongs to the routing table it changes.
+func swapChannelCache(newGroup2model2channels map[string]map[string][]int, newChannelId2channel map[int]*Channel, newChannel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig, enabledModels *enabledAbilityModels) {
 	channelSyncLock.Lock()
 	defer channelSyncLock.Unlock()
 	group2model2channels = newGroup2model2channels
+	enabledModelsSnapshot.Store(enabledModels)
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {
@@ -327,16 +343,30 @@ func CacheUpdateChannelStatus(id int, status int) {
 	}
 	if status != common.ChannelStatusEnabled {
 		// delete the channel from group2model2channels
+		unserved := make(map[string]map[string]bool) // group -> models left without an enabled channel
 		for group, model2channels := range group2model2channels {
 			for model, channels := range model2channels {
 				for i, channelId := range channels {
 					if channelId == id {
 						// remove the channel from the slice
 						group2model2channels[group][model] = append(channels[:i], channels[i+1:]...)
+						if len(group2model2channels[group][model]) == 0 {
+							if unserved[group] == nil {
+								unserved[group] = make(map[string]bool)
+							}
+							unserved[group][model] = true
+						}
 						break
 					}
 				}
 			}
+		}
+		// The abilities queries stop listing these models once the channel's
+		// abilities are disabled; an automatic disable reloads the cache only
+		// at the next periodic sync. Re-enabling waits for a reload, as the
+		// routing table does.
+		if snapshot := enabledModelsSnapshot.Load(); snapshot != nil && len(unserved) > 0 {
+			enabledModelsSnapshot.Store(snapshot.withoutUnservedModels(unserved))
 		}
 	}
 }
