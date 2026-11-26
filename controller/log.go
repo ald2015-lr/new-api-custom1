@@ -67,8 +67,23 @@ type logPage struct {
 	TotalCapped bool `json:"total_capped"`
 }
 
-func GetAllLogs(c *gin.Context) {
+// logPageQuery is common.GetPageQuery for the usage-log lists, with a page or
+// page size below 1 read as the default. GetPageQuery keeps a negative
+// page_size, and a list query with it has no LIMIT: one request would answer
+// every matching log.
+func logPageQuery(c *gin.Context) *common.PageInfo {
 	pageInfo := common.GetPageQuery(c)
+	if pageInfo.Page < 1 {
+		pageInfo.Page = 1
+	}
+	if pageInfo.PageSize < 1 {
+		pageInfo.PageSize = common.ItemsPerPage
+	}
+	return pageInfo
+}
+
+func GetAllLogs(c *gin.Context) {
+	pageInfo := logPageQuery(c)
 	logs, total, totalCapped, err := model.GetAllLogs(logFilterFromQuery(c, true), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
@@ -86,7 +101,7 @@ func GetAllLogs(c *gin.Context) {
 }
 
 func GetUserLogs(c *gin.Context) {
-	pageInfo := common.GetPageQuery(c)
+	pageInfo := logPageQuery(c)
 	filter := logFilterFromQuery(c, false)
 	if c.GetInt("role") < common.RoleAdminUser {
 		startTimestamp, err := limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp)

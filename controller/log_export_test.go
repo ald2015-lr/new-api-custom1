@@ -237,6 +237,44 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			model.LogCountCap = 2
 			assert.Equal(t, everything, exportedRequestIds(callLogHandler(t, ExportAllLogs, root, common.RoleRootUser, query)), "exports are not capped")
 			assert.Len(t, exportedRequestIds(callLogHandler(t, ExportUserLogs, 2, common.RoleCommonUser, query)), 3, "exports are not capped")
+
+			// A page or page size below 1 is the default, like a missing one:
+			// a page size below 1 would leave the list query without a LIMIT
+			// and answer every matching log at once.
+			model.LogCountCap = previousCap
+			previousPerPage := common.ItemsPerPage
+			common.ItemsPerPage = 2
+			t.Cleanup(func() { common.ItemsPerPage = previousPerPage })
+			for _, tc := range []struct {
+				name         string
+				handler      gin.HandlerFunc
+				viewer, role int
+				params       string
+			}{
+				{"own logs, page size -1", GetUserLogs, 2, common.RoleCommonUser, "&page_size=-1"},
+				{"own logs, page -3", GetUserLogs, 2, common.RoleCommonUser, "&p=-3"},
+				{"all logs, page size -1", GetAllLogs, root, common.RoleRootUser, "&page_size=-1"},
+				{"all logs, page -3 and page size -5", GetAllLogs, root, common.RoleRootUser, "&p=-3&page_size=-5"},
+			} {
+				listed := callLogHandler(t, tc.handler, tc.viewer, tc.role, query+tc.params)[0]
+				require.Equal(t, true, listed["success"], tc.name)
+				data := listed["data"].(map[string]any)
+				assert.EqualValues(t, 1, data["page"], tc.name)
+				assert.EqualValues(t, 2, data["page_size"], tc.name)
+				items, _ := data["items"].([]any)
+				require.Len(t, items, 2, tc.name)
+				if tc.viewer == 2 {
+					assert.EqualValues(t, 1, items[0].(map[string]any)["id"], "%s: user lists number their rows from the first", tc.name)
+				}
+			}
+			// The model bounds a page whatever its caller passes.
+			allLogs, _, _, err := model.GetAllLogs(model.LogFilter{}, -8, -1)
+			require.NoError(t, err)
+			assert.Len(t, allLogs, 2)
+			ownLogs, _, _, err := model.GetUserLogs(2, model.LogFilter{}, -8, -1)
+			require.NoError(t, err)
+			require.Len(t, ownLogs, 2)
+			assert.Equal(t, 1, ownLogs[0].Id, "user lists number their rows from the first")
 		})
 	}
 }

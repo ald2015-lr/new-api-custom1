@@ -583,9 +583,21 @@ func countLogsUpToCap(tx *gorm.DB) (total int64, capped bool, err error) {
 	return total, false, nil
 }
 
+// boundLogPage keeps a log page bounded whatever the caller passes: a page
+// size below 1 is the default size, and an offset below 0 starts at the first
+// log. gorm writes no LIMIT for a negative size, so the page would be every
+// matching log.
+func boundLogPage(startIdx int, num int) (int, int) {
+	if num < 1 {
+		num = common.ItemsPerPage
+	}
+	return max(startIdx, 0), num
+}
+
 // GetAllLogs returns a page of the logs matching filter, newest first, and
 // their count up to LogCountCap; totalCapped reports that more match.
 func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, totalCapped bool, err error) {
+	startIdx, num = boundLogPage(startIdx, num)
 	tx, err := filter.apply(LOG_DB)
 	if err != nil {
 		return nil, 0, false, err
@@ -651,6 +663,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 
 // GetUserLogs is GetAllLogs for one user's own logs, shaped for that user.
 func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, totalCapped bool, err error) {
+	startIdx, num = boundLogPage(startIdx, num)
 	tx, err := filter.apply(LOG_DB.Where("logs.user_id = ?", userId))
 	if err != nil {
 		return nil, 0, false, err
