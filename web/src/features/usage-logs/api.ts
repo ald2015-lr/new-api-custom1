@@ -37,12 +37,36 @@ import type {
 // Generic API Helpers
 // ============================================================================
 
-function buildApiPath(endpoint: string, isAdmin: boolean): string {
-  return isAdmin ? endpoint : `${endpoint}/self`
+type LogCollection = 'log' | 'mj' | 'task'
+
+/**
+ * Admin list URL of each log collection. The server registers /api/log/ and
+ * /api/mj/ with the trailing slash (the bare path costs a redirect round
+ * trip); /api/task is registered without it and must stay so.
+ */
+const ADMIN_LIST_PATHS: Record<LogCollection, string> = {
+  log: '/api/log/',
+  mj: '/api/mj/',
+  task: '/api/task',
+}
+
+/** Base of the collection's sub-resources (stat, export). */
+function buildApiPath(collection: LogCollection, isAdmin: boolean): string {
+  return isAdmin ? `/api/${collection}` : `/api/${collection}/self`
+}
+
+/** URL of a page of logs: the admin list, or the user's own logs. */
+function buildLogsListPath(
+  collection: LogCollection,
+  isAdmin: boolean
+): string {
+  return isAdmin
+    ? ADMIN_LIST_PATHS[collection]
+    : buildApiPath(collection, isAdmin)
 }
 
 async function fetchLogs<T>(
-  endpoint: string,
+  collection: LogCollection,
   params: T,
   isAdmin: boolean
 ): Promise<GetLogsResponse> {
@@ -52,20 +76,20 @@ async function fetchLogs<T>(
     page_size: paramRecord.page_size || 20,
     ...params,
   })
-  const path = buildApiPath(endpoint, isAdmin)
+  const path = buildLogsListPath(collection, isAdmin)
   const res = await api.get(`${path}?${queryParams}`)
   return res.data
 }
 
 async function fetchLogStats<T>(
-  endpoint: string,
+  collection: LogCollection,
   params: T,
   isAdmin: boolean
 ): Promise<GetLogStatsResponse> {
   const queryParams = buildQueryParams(
     params as unknown as Record<string, unknown>
   )
-  const path = buildApiPath(endpoint, isAdmin)
+  const path = buildApiPath(collection, isAdmin)
   const res = await api.get(`${path}/stat?${queryParams}`)
   return res.data
 }
@@ -75,18 +99,18 @@ async function fetchLogStats<T>(
 // ============================================================================
 
 export const getAllLogs = (params: GetLogsParams = {}) =>
-  fetchLogs('/api/log', params, true)
+  fetchLogs('log', params, true)
 
 export const getUserLogs = (
   params: Omit<GetLogsParams, 'username' | 'channel'> = {}
-) => fetchLogs('/api/log', params, false)
+) => fetchLogs('log', params, false)
 
 export const getLogStats = (params: GetLogStatsParams = {}) =>
-  fetchLogStats('/api/log', params, true)
+  fetchLogStats('log', params, true)
 
 export const getUserLogStats = (
   params: Omit<GetLogStatsParams, 'username' | 'channel'> = {}
-) => fetchLogStats('/api/log', params, false)
+) => fetchLogStats('log', params, false)
 
 /**
  * Stream the logs matching params, newest first. The server sends one JSON
@@ -102,7 +126,7 @@ export async function exportLogs(
     params as unknown as Record<string, unknown>
   )
   const response = await fetch(
-    `${buildApiPath('/api/log', isAdmin)}/export?${queryParams}`,
+    `${buildApiPath('log', isAdmin)}/export?${queryParams}`,
     {
       credentials: 'include',
       headers: await getFreshAuthHeaders(),
@@ -154,20 +178,20 @@ export async function getUserInfo(
 // ============================================================================
 
 export const getAllMidjourneyLogs = (params: GetMidjourneyLogsParams) =>
-  fetchLogs('/api/mj', params, true)
+  fetchLogs('mj', params, true)
 
 export const getUserMidjourneyLogs = (params: GetMidjourneyLogsParams) =>
-  fetchLogs('/api/mj', params, false)
+  fetchLogs('mj', params, false)
 
 // ============================================================================
 // Task Logs API
 // ============================================================================
 
 export const getAllTaskLogs = (params: GetTaskLogsParams) =>
-  fetchLogs('/api/task', params, true)
+  fetchLogs('task', params, true)
 
 export const getUserTaskLogs = (params: GetTaskLogsParams) =>
-  fetchLogs('/api/task', params, false)
+  fetchLogs('task', params, false)
 
 const taskArtifactRequestConfig = {
   skipBusinessError: true,

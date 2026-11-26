@@ -134,7 +134,7 @@ async function renderFilter(
     if (url === '/api/group/') data = []
     if (url === '/api/subscription/plans') data = []
     if (url === '/api/subscription/self') data = { subscriptions: [] }
-    if (url.startsWith('/api/log?') || url.startsWith('/api/log/self?')) {
+    if (url.startsWith('/api/log/?') || url.startsWith('/api/log/self?')) {
       // Like the server, which returns no row for a type it filters out.
       const type = new URLSearchParams(url.split('?')[1]).get('type')
       let items = type === '1' ? [] : [consumeLog]
@@ -330,7 +330,7 @@ it("a deputy admin who filtered their own Top-up logs and switches to every user
   await userEvent.click(screen.getByRole('button', { name: 'Switch scope' }))
 
   expect(await screen.findByText('$0.01')).toBeVisible()
-  expect(lastLogRequest('/api/log?').get('type')).toBe('0')
+  expect(lastLogRequest('/api/log/?').get('type')).toBe('0')
   expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(
     'All Types'
   )
@@ -349,15 +349,15 @@ it("an admin opening a Top-up logs link of every user's logs keeps asking for To
     path: '/usage-logs/common?type=%5B%221%22%5D',
   })
 
-  await waitFor(() => expect(lastLogRequest('/api/log?').get('type')).toBe('1'))
+  await waitFor(() => expect(lastLogRequest('/api/log/?').get('type')).toBe('1'))
   expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(
     'Top-up'
   )
 })
 
 it.each([
-  ['an admin', adminViewer('admin'), '/api/log?'],
-  ['a deputy admin without billing read', adminViewer('deputy'), '/api/log?'],
+  ['an admin', adminViewer('admin'), '/api/log/?'],
+  ['a deputy admin without billing read', adminViewer('deputy'), '/api/log/?'],
 ])(
   '%s is offered Moderation and selecting it asks for type 100',
   async (_kind, user, endpoint) => {
@@ -401,7 +401,7 @@ it('opening a Moderation logs link keeps the type and asks for type 100', async 
   })
 
   await waitFor(() =>
-    expect(lastLogRequest('/api/log?').get('type')).toBe('100')
+    expect(lastLogRequest('/api/log/?').get('type')).toBe('100')
   )
   expect(router.state.location.search).toMatchObject({ type: ['100'] })
   expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(

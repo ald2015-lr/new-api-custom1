@@ -104,7 +104,7 @@ async function renderLogs(props: {
         all_subscriptions: [{ subscription: { status: 'expired' } }],
       }
     } else if (
-      url.startsWith('/api/log?') ||
+      url.startsWith('/api/log/?') ||
       url.startsWith('/api/log/self?')
     ) {
       data = { items: records, total: records.length }
