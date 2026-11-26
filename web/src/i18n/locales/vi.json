@@ -5529,7 +5529,7 @@
     "Pricing rule {{number}}": "Quy tắc định giá {{number}}",
     "Pricing rules": "Quy tắc định giá",
     "Pricing tier {{name}}": "Bậc giá {{name}}",
-    "Pricing Type": "Price type",
+    "Pricing Type": "Loại định giá",
     "Primary Model": "Mô hình chính",
     "Primary Passkey domain": "Tên miền chính",
     "Prioritize reusing the last successful channel based on keys extracted from request context (sticky routing)": "Ưu tiên sử dụng lại kênh thành công gần nhất dựa trên các khóa trích xuất từ ngữ cảnh yêu cầu (định tuyến dính)",
