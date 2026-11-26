@@ -89,6 +89,11 @@ export interface PricingSidebarProps {
   onClearFilters: () => void
   /** Sections the Model Square shows; all of them when left out. */
   sections?: ModelSquareFilterSections
+  /**
+   * Leave out the Filter heading and subtitle (the mobile drawer's own header
+   * shows them); the Reset button and the Filters active badge stay.
+   */
+  hideHeading?: boolean
   className?: string
 }
 
@@ -296,13 +301,20 @@ export const PricingSidebar = memo(function PricingSidebar(
 
   return (
     <aside className={cn('bg-card rounded-xl border p-3', props.className)}>
-      <div className='mb-2.5 flex items-center justify-between gap-2'>
-        <div>
-          <h2 className='text-foreground text-sm font-bold'>{t('Filter')}</h2>
-          <p className='text-muted-foreground mt-1 text-xs'>
-            {t('Refine the model list.')}
-          </p>
-        </div>
+      <div
+        className={cn(
+          'mb-2.5 flex items-center gap-2',
+          props.hideHeading ? 'justify-end' : 'justify-between'
+        )}
+      >
+        {!props.hideHeading && (
+          <div>
+            <h2 className='text-foreground text-sm font-bold'>{t('Filter')}</h2>
+            <p className='text-muted-foreground mt-1 text-xs'>
+              {t('Refine the model list.')}
+            </p>
+          </div>
+        )}
         <Button
           type='button'
           variant='ghost'

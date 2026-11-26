@@ -271,6 +271,7 @@ export function PricingToolbar(props: PricingToolbarProps) {
                 hasActiveFilters={props.hasActiveFilters}
                 onClearFilters={props.onClearFilters}
                 sections={sections}
+                hideHeading
                 className='border-0 bg-transparent p-0 shadow-none'
               />
             </div>

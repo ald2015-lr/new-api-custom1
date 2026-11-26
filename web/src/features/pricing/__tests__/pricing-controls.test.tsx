@@ -710,6 +710,7 @@ describe('filter sections', () => {
       'All Vendors',
       'Pricing Type',
     ])
+    expect(screen.getByRole('heading', { name: 'Filter' })).toBeVisible()
     expect(screen.getByText('Refine the model list.')).toBeVisible()
   })
 
@@ -736,6 +737,16 @@ describe('filter sections', () => {
       'Pricing Type',
     ])
     expect(dialog).toHaveAccessibleDescription('Refine the model list.')
+    // The drawer's own header names it; the sidebar inside does not repeat it.
+    expect(
+      within(dialog).getAllByRole('heading', { name: 'Filter' })
+    ).toHaveLength(1)
+    expect(within(dialog).getAllByText('Refine the model list.')).toHaveLength(
+      1
+    )
+    expect(
+      within(dialog).getByRole('button', { name: 'Reset' })
+    ).toBeInTheDocument()
   })
 
   it('drops the Filter button and the drawer when no section is shown', () => {
