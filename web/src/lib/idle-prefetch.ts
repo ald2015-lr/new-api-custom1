@@ -26,7 +26,8 @@ type IdleWindow = Window & {
 
 type NetworkInformationLike = { saveData?: boolean; effectiveType?: string }
 
-function prefersLessData(): boolean {
+/** Whether the browser asks to save data or reports a 2G connection. */
+export function prefersLessData(): boolean {
   const connection = (
     navigator as Navigator & { connection?: NetworkInformationLike }
   ).connection
@@ -62,5 +63,44 @@ export function prefetchWhenIdle(prefetch: () => void): () => void {
   return () => {
     window.clearTimeout(timer)
     if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle)
+  }
+}
+
+/**
+ * How long the pointer or the keyboard focus has to rest on a control before
+ * an intent prefetch starts. Long enough to skip a control the pointer only
+ * crosses on its way to another one (about 100-150 ms for a tab).
+ */
+export const INTENT_PREFETCH_DELAY_MS = 200
+
+export type IntentPrefetch = {
+  /** Prefetch after INTENT_PREFETCH_DELAY_MS, replacing one still waiting. */
+  start: (prefetch: () => void) => void
+  /** Drop a prefetch that is still waiting (pointer left, focus moved on). */
+  cancel: () => void
+}
+
+/**
+ * Prefetch on intent: when the pointer or focus rests on a control, not when
+ * it passes over it. Skipped when the browser asks to save data or reports a
+ * 2G connection; opening the control still loads what it needs.
+ */
+export function createIntentPrefetch(): IntentPrefetch {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const cancel = () => {
+    if (timer === undefined) return
+    clearTimeout(timer)
+    timer = undefined
+  }
+  return {
+    start: (prefetch) => {
+      cancel()
+      if (prefersLessData()) return
+      timer = setTimeout(() => {
+        timer = undefined
+        prefetch()
+      }, INTENT_PREFETCH_DELAY_MS)
+    },
+    cancel,
   }
 }

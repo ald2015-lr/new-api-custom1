@@ -47,6 +47,7 @@ import {
   getSuccessRateTextClass,
 } from '@/features/performance-metrics/lib/format'
 import { PluginIcon } from '@/features/task-plugins/components/plugin-icon'
+import { useIntentPrefetch } from '@/hooks/use-intent-prefetch'
 import { getLobeIcon } from '@/lib/lobe-icon'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -1529,6 +1530,10 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
     !baseModel.billing_usage_schema ||
     simpleTaskPricing ||
     taskTiers.length === 0
+  // A tab's chunk (charts, code highlighter) is fetched once the pointer or
+  // focus rests on the tab; crossing it on the way to another tab loads
+  // nothing. Selecting a tab loads its chunk in any case.
+  const tabPrefetch = useIntentPrefetch()
 
   return (
     <div className='@container/details space-y-4'>
@@ -1543,8 +1548,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
                 key={value}
                 value={value}
                 className='h-8 min-w-0 gap-1.5 rounded-md px-3 text-xs sm:text-sm'
-                onPointerEnter={() => prefetchModelDetailsTab(value)}
-                onFocus={() => prefetchModelDetailsTab(value)}
+                {...tabPrefetch.handlers(() => prefetchModelDetailsTab(value))}
               >
                 <Icon className='size-3.5' />
                 <span className='truncate'>{t(TAB_META[value].labelKey)}</span>

@@ -31,6 +31,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { useIntentPrefetch } from '@/hooks/use-intent-prefetch'
 import { ROLE } from '@/lib/roles'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -221,6 +222,9 @@ export function Dashboard() {
     }
   )
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
+  // A section's charts are fetched once the pointer or focus rests on its
+  // tab, not when it crosses the tab on the way to another one.
+  const sectionPrefetch = useIntentPrefetch()
 
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
     setModelFilters(filters)
@@ -338,8 +342,9 @@ export function Dashboard() {
                     <TabsTrigger
                       key={section}
                       value={section}
-                      onPointerEnter={() => prefetchDashboardSection(section)}
-                      onFocus={() => prefetchDashboardSection(section)}
+                      {...sectionPrefetch.handlers(() =>
+                        prefetchDashboardSection(section)
+                      )}
                     >
                       {t(SECTION_META[section].titleKey)}
                     </TabsTrigger>

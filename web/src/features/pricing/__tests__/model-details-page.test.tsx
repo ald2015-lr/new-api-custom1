@@ -163,6 +163,7 @@ afterEach(() => {
   navigate.mockReset()
   useAuthStore.setState({ auth: originalAuth })
   vi.mocked(refreshAuthentication).mockReset()
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
 
@@ -170,30 +171,37 @@ function withClient(children: ReactNode) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>
 }
 
-describe('model details tabs', () => {
-  test('the charts and the code highlighter load only for their tabs, from pointing or focus on', async () => {
-    const user = userEvent.setup()
-    render(
-      withClient(
-        <ModelDetailsContent
-          model={model}
-          groupRatio={{ default: 1 }}
-          usableGroup={{ default: { desc: 'Default', ratio: 1 } }}
-          endpointMap={{
-            openai: { path: '/v1/chat/completions', method: 'POST' },
-          }}
-          autoGroups={[]}
-          priceRate={1}
-          usdExchangeRate={1}
-          tokenUnit='M'
-        />
-      )
+function renderContent() {
+  return render(
+    withClient(
+      <ModelDetailsContent
+        model={model}
+        groupRatio={{ default: 1 }}
+        usableGroup={{ default: { desc: 'Default', ratio: 1 } }}
+        endpointMap={{
+          openai: { path: '/v1/chat/completions', method: 'POST' },
+        }}
+        autoGroups={[]}
+        priceRate={1}
+        usdExchangeRate={1}
+        tokenUnit='M'
+      />
     )
+  )
+}
+
+describe('model details tabs', () => {
+  test('the charts and the code highlighter load only for their tabs, from resting the pointer or focus on them', async () => {
+    const user = userEvent.setup()
+    renderContent()
     await screen.findByRole('tab', { name: 'Overview' })
     expect(loaded).toEqual([])
 
-    fireEvent.pointerEnter(screen.getByRole('tab', { name: 'Performance' }))
+    const performanceTab = screen.getByRole('tab', { name: 'Performance' })
+    fireEvent.pointerEnter(performanceTab)
+    expect(loaded).toEqual([])
     await waitFor(() => expect(loaded).toEqual(['charts']))
+    fireEvent.pointerLeave(performanceTab)
 
     const apiTab = screen.getByRole('tab', { name: 'API' })
     act(() => apiTab.focus())
