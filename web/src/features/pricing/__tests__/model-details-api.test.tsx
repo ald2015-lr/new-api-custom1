@@ -114,7 +114,8 @@ describe('model details image code sample', () => {
       render(<ModelDetailsApi model={imageModel} endpointMap={endpointMap} />)
 
       await user.click(screen.getByRole('tab', { name: sample.tab }))
-      await user.click(screen.getByRole('button', { name: 'Copy code' }))
+      // The highlighted sample and its copy button are a chunk of their own.
+      await user.click(await screen.findByRole('button', { name: 'Copy code' }))
       const code = await navigator.clipboard.readText()
       const lines = code.split('\n')
 

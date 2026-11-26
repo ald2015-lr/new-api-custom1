@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
@@ -31,11 +31,15 @@ import {
   PricingSidebar,
   PricingToolbar,
   ModelCardGrid,
-  ModelDetailsDrawer,
 } from './components'
+import { ModelDetailsDrawer } from './components/model-details-drawer'
 import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
 import { useFilters } from './hooks/use-filters'
 import { usePricingData } from './hooks/use-pricing-data'
+import {
+  prefetchModelDetails,
+  prefetchModelDetailsWhenIdle,
+} from './lib/model-details-chunks'
 import { sortModelFamilies } from './lib/model-family'
 import { groupModelFamilies } from './lib/model-variants'
 
@@ -128,6 +132,14 @@ export function Pricing() {
     clearFilters()
     clearSearch()
   }, [clearFilters, clearSearch])
+
+  // The details of a model are a chunk of their own: fetch it once the list
+  // is on screen, so that opening a model rarely waits for it.
+  const listShown = !isLoading
+  useEffect(() => {
+    if (!listShown) return
+    return prefetchModelDetailsWhenIdle()
+  }, [listShown])
 
   const renderPricingContent = () => {
     if (filteredModels.length === 0) {
@@ -293,7 +305,13 @@ export function Pricing() {
                 sections={sections}
               />
 
-              {renderPricingContent()}
+              {/* Pointing at or focusing a model starts loading its details. */}
+              <div
+                onPointerOver={prefetchModelDetails}
+                onFocus={prefetchModelDetails}
+              >
+                {renderPricingContent()}
+              </div>
             </main>
           </div>
 
