@@ -16,6 +16,8 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+
+	"gorm.io/gorm/clause"
 )
 
 var group2model2channels map[string]map[string][]int // enabled channel
@@ -24,6 +26,14 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
+
+// abilityPrimaryKeyOrder orders abilities by their primary key (group, model,
+// channel_id).
+var abilityPrimaryKeyOrder = clause.OrderBy{Columns: []clause.OrderByColumn{
+	{Column: clause.Column{Name: "group"}},
+	{Column: clause.Column{Name: "model"}},
+	{Column: clause.Column{Name: "channel_id"}},
+}}
 
 // channelCacheReloadLock runs one channel cache reload at a time, so a reload
 // that read the database earlier never publishes over a later one.
@@ -56,9 +66,9 @@ func InitChannelCache() {
 	}
 	// In primary key order, the order GetGroupEnabledModels' DISTINCT walks
 	// them in, so the per-group model lists of the snapshot below come out in
-	// the order that query returns them.
+	// the order that query returns them. The dialect quotes the columns.
 	var abilities []*Ability
-	if err := DB.Order(commonGroupCol + ", model, channel_id").Find(&abilities).Error; err != nil {
+	if err := DB.Order(abilityPrimaryKeyOrder).Find(&abilities).Error; err != nil {
 		common.SysError(common.LogText("failed to load abilities, keeping the previous channel cache: %s", err.Error()))
 		return
 	}
