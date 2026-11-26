@@ -16,10 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { prefetchWhenIdle } from '@/lib/idle-prefetch'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import type { DashboardSectionId } from '../section-registry'
+
+export { IDLE_PREFETCH_DELAY_MS } from '@/lib/idle-prefetch'
 
 // The dashboard sections other than the overview render their charts from
 // lazy chunks nested in the dashboard route (the chart library alone is about
@@ -65,52 +68,11 @@ export function prefetchDashboardSection(section: string): void {
   for (const load of loaders) load().catch(() => undefined)
 }
 
-type IdleWindow = Window & {
-  requestIdleCallback?: (
-    callback: () => void,
-    options?: { timeout: number }
-  ) => number
-  cancelIdleCallback?: (handle: number) => void
-}
-
-type NetworkInformationLike = { saveData?: boolean; effectiveType?: string }
-
-function prefersLessData(): boolean {
-  const connection = (
-    navigator as Navigator & { connection?: NetworkInformationLike }
-  ).connection
-  return (
-    connection?.saveData === true ||
-    connection?.effectiveType === 'slow-2g' ||
-    connection?.effectiveType === '2g'
-  )
-}
-
-/** Delay before an idle prefetch, so the page's own requests go first. */
-export const IDLE_PREFETCH_DELAY_MS = 2000
-
 /**
- * Prefetch a section's charts once the page has settled: after
- * IDLE_PREFETCH_DELAY_MS, at the browser's next idle period. Skipped when the
- * browser asks to save data or reports a 2G connection. Returns a function
- * that cancels the prefetch if it has not started yet.
+ * Prefetch a section's charts once the page has settled (see
+ * prefetchWhenIdle). Returns a function that cancels the prefetch if it has
+ * not started yet.
  */
 export function prefetchDashboardSectionWhenIdle(section: string): () => void {
-  if (typeof window === 'undefined' || prefersLessData()) return () => undefined
-
-  const idleWindow = window as IdleWindow
-  let idleHandle: number | undefined
-  const timer = window.setTimeout(() => {
-    const run = () => prefetchDashboardSection(section)
-    if (idleWindow.requestIdleCallback) {
-      idleHandle = idleWindow.requestIdleCallback(run, { timeout: 5000 })
-    } else {
-      run()
-    }
-  }, IDLE_PREFETCH_DELAY_MS)
-
-  return () => {
-    window.clearTimeout(timer)
-    if (idleHandle !== undefined) idleWindow.cancelIdleCallback?.(idleHandle)
-  }
+  return prefetchWhenIdle(() => prefetchDashboardSection(section))
 }
