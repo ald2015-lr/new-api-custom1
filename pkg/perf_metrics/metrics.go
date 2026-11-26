@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/go-redis/redis/v8"
 )
 
 var hotBuckets sync.Map
@@ -141,8 +142,17 @@ func Record(sample Sample) {
 	}
 	actual, _ := hotBuckets.LoadOrStore(key, &atomicBucket{})
 	actual.(*atomicBucket).add(sample)
+	// The Redis switch and client are read here, before Record returns, and
+	// not in the background task. They are set once at startup, but tests
+	// switch them between requests, and a late task would read them while
+	// the next test changes them. Without Redis there is nothing to send, so
+	// no task is started.
+	if !common.RedisEnabled || common.RDB == nil {
+		return
+	}
+	rdb := common.RDB
 	gopool.Go(func() {
-		recordRedis(key, sample)
+		recordRedis(rdb, key, sample)
 	})
 }
 
@@ -567,15 +577,12 @@ func avgTps(value counters) float64 {
 	return float64(value.outputTokens) / (float64(value.generationMs) / 1000)
 }
 
-func recordRedis(key bucketKey, sample Sample) {
-	if !common.RedisEnabled || common.RDB == nil {
-		return
-	}
+func recordRedis(rdb *redis.Client, key bucketKey, sample Sample) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	redisKey := redisBucketKey(key)
-	pipe := common.RDB.TxPipeline()
+	pipe := rdb.TxPipeline()
 	pipe.HIncrBy(ctx, redisKey, "req", 1)
 	if sample.Success {
 		pipe.HIncrBy(ctx, redisKey, "ok", 1)
