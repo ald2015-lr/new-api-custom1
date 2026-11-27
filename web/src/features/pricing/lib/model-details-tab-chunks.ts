@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-
 // The performance charts (the chart library alone is about 560 KB) and the
 // highlighted code samples (an editor of about 175 KB) are chunks of their
 // own: they load when the Performance or API tab of the model details opens
