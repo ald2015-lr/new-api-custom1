@@ -217,6 +217,7 @@
     "A name must be at most 64 characters": "Название должно быть не длиннее 64 символов",
     "A new version is available. Reload to update.": "Доступна новая версия. Перезагрузите страницу, чтобы обновить.",
     "A new version may have been deployed. Please reload the page.": "Возможно, была развёрнута новая версия. Пожалуйста, перезагрузите страницу.",
+    "Check your network connection and try again. If the site was just updated, reload the page.": "Проверьте подключение к сети и повторите попытку. Если сайт только что обновился, перезагрузите страницу.",
     "A number": "Цифра",
     "A number (such as -128) is a thinking token budget. Models that only accept thinking levels (Gemini 3 and later) get the level that matches the budget, with 128 mapping to low.": "Число (например, -128) — бюджет токенов на размышления. Для моделей, которые принимают только уровни размышлений (Gemini 3 и новее), бюджет переводится в соответствующий уровень: 128 соответствует low.",
     "A Passkey created for www.example.com cannot be used on example.com. Keep the old website available so users can still verify there.": "Ключ доступа, созданный для www.example.com, не работает на example.com. Сохраните доступ к прежнему сайту, чтобы пользователи могли проходить проверку на нём.",

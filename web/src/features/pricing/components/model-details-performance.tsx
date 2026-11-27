@@ -42,7 +42,10 @@ import { cn } from '@/lib/utils'
 
 import type { UptimeDayPoint } from '../lib/mock-stats'
 import type { PricingModel } from '../types'
-import { LatencyTrendChart, UptimeTrendChart } from './model-details-charts'
+import {
+  LazyLatencyTrendChart,
+  LazyUptimeTrendChart,
+} from './model-details-lazy'
 import { UptimeSparkline } from './model-details-uptime-sparkline'
 
 function StatCard(props: {
@@ -266,7 +269,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
           title={t('Latency trend (last 24h)')}
           description={t('Average TTFT')}
         />
-        <LatencyTrendChart series={latencySeries} />
+        <LazyLatencyTrendChart series={latencySeries} />
       </section>
 
       <section>
@@ -287,7 +290,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
             ) : null
           }
         />
-        <UptimeTrendChart series={uptimeSeries} />
+        <LazyUptimeTrendChart series={uptimeSeries} />
       </section>
     </div>
   )

@@ -72,6 +72,7 @@ import {
   isChannelEnabled,
   isMultiKeyChannel,
 } from '../lib'
+import { prefetchChannelMutateDrawer } from '../lib/channel-dialog-chunks'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
@@ -185,6 +186,8 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
                   e.stopPropagation()
                   handleEdit()
                 }}
+                onPointerEnter={prefetchChannelMutateDrawer}
+                onFocus={prefetchChannelMutateDrawer}
                 aria-label={t('Edit')}
               />
             }
@@ -275,7 +278,11 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         </DropdownMenuTrigger>
         <DropdownMenuContent align='end' className='w-48'>
           {layout === 'card' && (
-            <DropdownMenuItem onClick={handleEdit}>
+            <DropdownMenuItem
+              onClick={handleEdit}
+              onPointerEnter={prefetchChannelMutateDrawer}
+              onFocus={prefetchChannelMutateDrawer}
+            >
               {t('Edit')}
               <DropdownMenuShortcut>
                 <Pencil size={16} />

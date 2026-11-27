@@ -6,9 +6,20 @@ import { pluginReact } from '@rsbuild/plugin-react'
 import { pluginTailwindcss } from '@rsbuild/plugin-tailwindcss'
 import { tanstackRouter } from '@tanstack/router-plugin/rspack'
 
+import { isConsoleChunk } from './scripts/console-chunks.mjs'
 import { slimTranslationSource } from './scripts/slim-locale.mjs'
+import { BUILD_VERSION_META_NAME } from './src/lib/build-version-meta'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// html-rspack-plugin writes attribute values into index.html as they are: a
+// quote in the value would end the attribute, and `&…;` would be decoded.
+const escapeHtmlAttribute = (value: string) =>
+  value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
 
 // Production bundles get en.json without its identity entries (key === value);
 // see scripts/slim-locale.mjs. Development keeps the full file.
@@ -28,6 +39,11 @@ export default defineConfig(({ envMode }) => {
     process.env.VITE_REACT_APP_SERVER_URL ||
     env.rawPublicVars.VITE_REACT_APP_SERVER_URL ||
     'http://localhost:3000'
+  // Written into index.html, not the bundle: see src/lib/build-version-meta.ts.
+  const buildVersion = env.rawPublicVars.VITE_REACT_APP_VERSION ?? ''
+  const buildVersionMeta: Record<string, string> = buildVersion
+    ? { [BUILD_VERSION_META_NAME]: escapeHtmlAttribute(buildVersion) }
+    : {}
 
   const isProd = envMode === 'production'
   const devProxy = Object.fromEntries(
@@ -44,28 +60,62 @@ export default defineConfig(({ envMode }) => {
       ...(isProd ? [pluginSlimEnglishLocale] : []),
     ],
     // Rsbuild 2: replaces deprecated `performance.chunkSplit` (RSPack 2 aligned)
+    // React itself is in the preset's `lib-react` chunk.
     splitChunks: {
       preset: 'default',
+      // Fewer, larger lazy chunks, so that a cold load of a console page
+      // stays at about 20 JS/CSS files: over HTTP/1.1 a browser opens only six
+      // connections per host and queues the rest. Sizes are before
+      // minification. Shared vendor code gets a chunk of its own from 200 KB;
+      // shared app code (the `default` group below) only from 600 KB, below
+      // that it is copied into the chunks of the pages that use it, except
+      // for the code the console pages share (the `console-*` groups).
+      minSize: 200_000,
       cacheGroups: {
-        'vendor-react': {
-          test: /node_modules[\\/](react|react-dom)[\\/]/,
-          name: 'vendor-react',
-          chunks: 'all',
-          priority: 0,
-          enforce: true,
+        // Rspack's built-in `default` group with a higher minSize. A group
+        // given here replaces the built-in one, so all its fields are listed.
+        default: {
+          idHint: '',
+          minChunks: 2,
+          priority: -20,
+          reuseExistingChunk: true,
+          minSize: 600_000,
         },
-        'vendor-ui-primitives': {
-          test: /node_modules[\\/](@base-ui|@radix-ui)[\\/]/,
-          name: 'vendor-ui-primitives',
-          chunks: 'all',
-          priority: 0,
-          enforce: true,
-        },
+        // Only what the entry needs: with `chunks: 'all'` every module of
+        // the package used anywhere (tables, editors) would be forced into
+        // the first load. The few @base-ui modules of the first load stay in
+        // its vendor chunk: a file of their own (8 KB) would only add a
+        // request to the first load.
         'vendor-tanstack': {
           test: /node_modules[\\/]@tanstack[\\/]/,
           name: 'vendor-tanstack',
-          chunks: 'all',
+          chunks: 'initial',
           priority: 0,
+          enforce: true,
+        },
+        // Code the console pages share, in chunks of its own instead of a
+        // copy in every page chunk (each console navigation downloaded those
+        // copies again). Only console chunks take part (see
+        // scripts/console-chunks.mjs): the public pages (home, sign-in, model
+        // square) keep their smaller copies and never load these files. The
+        // UI kit serves nearly every console page, the data tables only the
+        // list pages.
+        'console-kit': {
+          test: /[\\/]src[\\/]components[\\/]ui[\\/]|[\\/]node_modules[\\/](@base-ui|@floating-ui|react-hook-form|@hookform)[\\/]/,
+          name: 'console-kit',
+          chunks: isConsoleChunk,
+          minChunks: 3,
+          priority: -5,
+          reuseExistingChunk: true,
+          enforce: true,
+        },
+        'console-table': {
+          test: /[\\/]src[\\/]components[\\/]data-table[\\/]|[\\/]node_modules[\\/]@tanstack[\\/](react-table|table-core)[\\/]/,
+          name: 'console-table',
+          chunks: isConsoleChunk,
+          minChunks: 3,
+          priority: -4,
+          reuseExistingChunk: true,
           enforce: true,
         },
       },
@@ -74,10 +124,6 @@ export default defineConfig(({ envMode }) => {
       entry: {
         index: './src/main.tsx',
       },
-      // loadEnv only reads VITE_* vars; without this they never reach
-      // import.meta.env in the bundle (VITE_REACT_APP_VERSION is compared
-      // against the server's X-New-Api-Version header at runtime).
-      define: env.publicVars,
     },
     resolve: {
       alias: {
@@ -87,6 +133,9 @@ export default defineConfig(({ envMode }) => {
     html: {
       template: './index.html',
       favicon: './public/favicon.ico',
+      // <meta name="new-api-version" content="…"> for the stale-bundle check
+      // and the build metadata (src/lib/build-metadata.ts).
+      meta: buildVersionMeta,
       // The app stylesheets go to the end of <body>, after the boot shell of
       // index.html: a stylesheet in <head> holds back the first paint, so a
       // slow or stalled one left the page blank. The deferred scripts still
@@ -131,6 +180,12 @@ export default defineConfig(({ envMode }) => {
             autoCodeSplitting: isProd,
           }),
         ],
+        optimization: {
+          // The chunk loader and its map of every chunk's file name in a file
+          // of its own: the map changes with any chunk, so inside index.js it
+          // would make every deploy re-download the whole entry.
+          runtimeChunk: { name: 'runtime' },
+        },
       },
     },
   }

@@ -35,18 +35,9 @@ import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
 import { StaticDataTable } from '@/components/data-table'
-import { sideDrawerContentClassName } from '@/components/drawer-layout'
 import { GroupBadge } from '@/components/group-badge'
 import { PublicLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { getPerfMetrics } from '@/features/performance-metrics/api'
 import {
@@ -56,6 +47,7 @@ import {
   getSuccessRateTextClass,
 } from '@/features/performance-metrics/lib/format'
 import { PluginIcon } from '@/features/task-plugins/components/plugin-icon'
+import { useIntentPrefetch } from '@/hooks/use-intent-prefetch'
 import { getLobeIcon } from '@/lib/lobe-icon'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -63,6 +55,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import { useBillingTime } from '../hooks/use-billing-time'
+import { usePricingAccessRedirect } from '../hooks/use-pricing-access-redirect'
 import { usePricingData } from '../hooks/use-pricing-data'
 import type { ParsedTaskTier } from '../lib/billing-expr'
 import { formatBillingCondition } from '../lib/billing-expression/condition-display'
@@ -78,6 +71,7 @@ import {
   type DynamicPriceEntry,
 } from '../lib/dynamic-price'
 import { parseTags } from '../lib/filters'
+import { prefetchModelDetailsTab } from '../lib/model-details-tab-chunks'
 import { getAvailableGroups, isTokenBasedModel } from '../lib/model-helpers'
 import {
   withBasePricing,
@@ -111,6 +105,8 @@ import { GroupAccessBadge } from './group-access-badge'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
 import { ModelDetailsPerformance } from './model-details-performance'
+import { ModelDetailsSkeleton } from './model-details-skeleton'
+import { PricingLoadError } from './pricing-load-error'
 
 // ----------------------------------------------------------------------------
 // Local UI helpers
@@ -216,7 +212,6 @@ const MODALITY_LABEL_KEYS: Record<string, string> = {
 const TOKEN_FORMAT = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 })
-const MODEL_DETAILS_SKELETON_KEYS = ['first', 'second', 'third', 'fourth']
 
 function formatCatalogTokenCount(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens <= 0) return ''
@@ -1535,6 +1530,10 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
     !baseModel.billing_usage_schema ||
     simpleTaskPricing ||
     taskTiers.length === 0
+  // A tab's chunk (charts, code highlighter) is fetched once the pointer or
+  // focus rests on the tab; crossing it on the way to another tab loads
+  // nothing. Selecting a tab loads its chunk in any case.
+  const tabPrefetch = useIntentPrefetch()
 
   return (
     <div className='@container/details space-y-4'>
@@ -1549,6 +1548,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
                 key={value}
                 value={value}
                 className='h-8 min-w-0 gap-1.5 rounded-md px-3 text-xs sm:text-sm'
+                {...tabPrefetch.handlers(() => prefetchModelDetailsTab(value))}
               >
                 <Icon className='size-3.5' />
                 <span className='truncate'>{t(TAB_META[value].labelKey)}</span>
@@ -1615,37 +1615,8 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
 }
 
 // ----------------------------------------------------------------------------
-// Drawer & page wrappers
+// Page wrapper (the drawer is model-details-drawer.tsx)
 // ----------------------------------------------------------------------------
-
-export interface ModelDetailsDrawerProps extends ModelDetailsContentProps {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}
-
-export function ModelDetailsDrawer(props: ModelDetailsDrawerProps) {
-  const { t } = useTranslation()
-  const { open, onOpenChange, ...contentProps } = props
-
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side='right'
-        className={sideDrawerContentClassName(
-          'sm:max-w-2xl lg:max-w-3xl xl:max-w-4xl 2xl:max-w-5xl'
-        )}
-      >
-        <SheetHeader className='sr-only'>
-          <SheetTitle>{props.model.model_name}</SheetTitle>
-          <SheetDescription>{t('Model details')}</SheetDescription>
-        </SheetHeader>
-        <div className='flex-1 overflow-y-auto px-4 pt-11 pb-5 sm:px-6 sm:pt-12 sm:pb-6'>
-          <ModelDetailsContent {...contentProps} />
-        </div>
-      </SheetContent>
-    </Sheet>
-  )
-}
 
 export function ModelDetails() {
   const { t } = useTranslation()
@@ -1662,9 +1633,13 @@ export function ModelDetails() {
     groupAccess,
     freeGroups,
     isLoading,
+    error,
+    hasData,
+    refetch,
     priceRate,
     usdExchangeRate,
   } = usePricingData()
+  const redirecting = usePricingAccessRedirect(error)
 
   const tokenUnit: TokenUnit =
     search.tokenUnit === 'K' ? 'K' : DEFAULT_TOKEN_UNIT
@@ -1678,26 +1653,22 @@ export function ModelDetails() {
     navigate({ to: '/pricing', search })
   }
 
-  if (isLoading) {
+  if (isLoading || redirecting) {
     return (
       <PublicLayout>
         <div className='mx-auto max-w-5xl px-4 sm:px-6'>
-          <Skeleton className='mb-4 h-5 w-16' />
-          <div className='space-y-2'>
-            <Skeleton className='h-7 w-64' />
-            <Skeleton className='h-4 w-40' />
-            <Skeleton className='h-4 w-full max-w-md' />
-          </div>
-          <div className='mt-6 grid grid-cols-2 gap-2 sm:grid-cols-4'>
-            {MODEL_DETAILS_SKELETON_KEYS.map((key) => (
-              <Skeleton key={`metric-${key}`} className='h-16 w-full' />
-            ))}
-          </div>
-          <div className='mt-6 space-y-3'>
-            {MODEL_DETAILS_SKELETON_KEYS.map((key) => (
-              <Skeleton key={`section-${key}`} className='h-24 w-full' />
-            ))}
-          </div>
+          <ModelDetailsSkeleton backLink />
+        </div>
+      </PublicLayout>
+    )
+  }
+
+  // A failed request is not a missing model: say so and offer a retry.
+  if (error && !hasData) {
+    return (
+      <PublicLayout>
+        <div className='mx-auto max-w-5xl px-4 sm:px-6'>
+          <PricingLoadError error={error} onRetry={() => void refetch()} />
         </div>
       </PublicLayout>
     )

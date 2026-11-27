@@ -16,29 +16,91 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { LazyDialog } from '@/components/lazy-dialog'
+import { lazyWithRetry } from '@/lib/lazy-with-retry'
+
 import { CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG } from '../constants'
+import { loadChannelMutateDrawer } from '../lib/channel-dialog-chunks'
 import { useChannels } from './channels-provider'
-import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
-import { ChannelQuotaLimitDialog } from './dialogs/channel-quota-limit-dialog'
-import { ChannelTestDialog } from './dialogs/channel-test-dialog'
-import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
-import { EditTagDialog } from './dialogs/edit-tag-dialog'
-import { FetchModelsDialog } from './dialogs/fetch-models-dialog'
-import { InferenceStatusDialog } from './dialogs/inference-status-dialog'
-import { MultiKeyManageDialog } from './dialogs/multi-key-manage-dialog'
-import { OllamaModelsDialog } from './dialogs/ollama-models-dialog'
-import { TagBatchEditDialog } from './dialogs/tag-batch-edit-dialog'
-import { UpstreamUpdateDialog } from './dialogs/upstream-update-dialog'
-import { ChannelMutateDrawer } from './drawers/channel-mutate-drawer'
+
+// Every dialog and drawer is a chunk of its own, loaded when it first opens
+// (see LazyDialog; after a failed load, the next opening loads it again), so
+// the channel list does not download them, nor the code editor of the
+// balance query, up front.
+const ChannelMutateDrawer = lazyWithRetry(() =>
+  loadChannelMutateDrawer().then((module) => ({
+    default: module.ChannelMutateDrawer,
+  }))
+)
+const BalanceQueryDialog = lazyWithRetry(() =>
+  import('./dialogs/balance-query-dialog').then((module) => ({
+    default: module.BalanceQueryDialog,
+  }))
+)
+const ChannelQuotaLimitDialog = lazyWithRetry(() =>
+  import('./dialogs/channel-quota-limit-dialog').then((module) => ({
+    default: module.ChannelQuotaLimitDialog,
+  }))
+)
+const ChannelTestDialog = lazyWithRetry(() =>
+  import('./dialogs/channel-test-dialog').then((module) => ({
+    default: module.ChannelTestDialog,
+  }))
+)
+const CopyChannelDialog = lazyWithRetry(() =>
+  import('./dialogs/copy-channel-dialog').then((module) => ({
+    default: module.CopyChannelDialog,
+  }))
+)
+const EditTagDialog = lazyWithRetry(() =>
+  import('./dialogs/edit-tag-dialog').then((module) => ({
+    default: module.EditTagDialog,
+  }))
+)
+const FetchModelsDialog = lazyWithRetry(() =>
+  import('./dialogs/fetch-models-dialog').then((module) => ({
+    default: module.FetchModelsDialog,
+  }))
+)
+const InferenceStatusDialog = lazyWithRetry(() =>
+  import('./dialogs/inference-status-dialog').then((module) => ({
+    default: module.InferenceStatusDialog,
+  }))
+)
+const MultiKeyManageDialog = lazyWithRetry(() =>
+  import('./dialogs/multi-key-manage-dialog').then((module) => ({
+    default: module.MultiKeyManageDialog,
+  }))
+)
+const OllamaModelsDialog = lazyWithRetry(() =>
+  import('./dialogs/ollama-models-dialog').then((module) => ({
+    default: module.OllamaModelsDialog,
+  }))
+)
+const TagBatchEditDialog = lazyWithRetry(() =>
+  import('./dialogs/tag-batch-edit-dialog').then((module) => ({
+    default: module.TagBatchEditDialog,
+  }))
+)
+const UpstreamUpdateDialog = lazyWithRetry(() =>
+  import('./dialogs/upstream-update-dialog').then((module) => ({
+    default: module.UpstreamUpdateDialog,
+  }))
+)
 
 export function ChannelsDialogs() {
   const { open, setOpen, currentRow, upstream } = useChannels()
+  const close = () => setOpen(null)
+  const showInferenceStatus =
+    open === 'inference-status' &&
+    currentRow !== null &&
+    [CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG].includes(currentRow.type)
+  const showQuotaLimit = open === 'quota-limit' && currentRow !== null
 
   return (
     <>
-      {open === 'inference-status' &&
-        currentRow &&
-        [CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG].includes(currentRow.type) && (
+      {showInferenceStatus && (
+        <LazyDialog open onLoadError={close}>
           <InferenceStatusDialog
             key={currentRow.id}
             provider={
@@ -46,75 +108,104 @@ export function ChannelsDialogs() {
             }
             channelId={currentRow.id}
             channelName={currentRow.name}
-            onClose={() => setOpen(null)}
+            onClose={close}
             onSyncModels={() => setOpen('fetch-models')}
             onTestChannel={() => setOpen('test-channel')}
           />
-        )}
-      {open === 'quota-limit' && currentRow && (
-        <ChannelQuotaLimitDialog
-          key={currentRow.id}
-          channel={currentRow}
-          onOpenChange={(v) => !v && setOpen(null)}
-        />
+        </LazyDialog>
+      )}
+      {showQuotaLimit && (
+        <LazyDialog open onLoadError={close}>
+          <ChannelQuotaLimitDialog
+            key={currentRow.id}
+            channel={currentRow}
+            onOpenChange={(v) => !v && close()}
+          />
+        </LazyDialog>
       )}
       {/* Channel Create/Update Drawer */}
-      <ChannelMutateDrawer
+      <LazyDialog
         open={open === 'create-channel' || open === 'update-channel'}
-        onOpenChange={(v) => !v && setOpen(null)}
-        currentRow={open === 'update-channel' ? currentRow : null}
-      />
+        onLoadError={close}
+      >
+        <ChannelMutateDrawer
+          open={open === 'create-channel' || open === 'update-channel'}
+          onOpenChange={(v) => !v && close()}
+          currentRow={open === 'update-channel' ? currentRow : null}
+        />
+      </LazyDialog>
 
       {/* Test Channel Dialog */}
-      <ChannelTestDialog
-        open={open === 'test-channel'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'test-channel'} onLoadError={close}>
+        <ChannelTestDialog
+          open={open === 'test-channel'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Balance Query Dialog */}
-      <BalanceQueryDialog
-        open={open === 'balance-query'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'balance-query'} onLoadError={close}>
+        <BalanceQueryDialog
+          open={open === 'balance-query'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Fetch Models Dialog */}
-      <FetchModelsDialog
-        open={open === 'fetch-models'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'fetch-models'} onLoadError={close}>
+        <FetchModelsDialog
+          open={open === 'fetch-models'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Ollama Models Dialog */}
-      <OllamaModelsDialog
-        open={open === 'ollama-models'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'ollama-models'} onLoadError={close}>
+        <OllamaModelsDialog
+          open={open === 'ollama-models'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Copy Channel Dialog */}
-      <CopyChannelDialog
-        open={open === 'copy-channel'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'copy-channel'} onLoadError={close}>
+        <CopyChannelDialog
+          open={open === 'copy-channel'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Multi-Key Management Dialog */}
-      <MultiKeyManageDialog
-        open={open === 'multi-key-manage'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'multi-key-manage'} onLoadError={close}>
+        <MultiKeyManageDialog
+          open={open === 'multi-key-manage'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Tag Batch Edit Dialog */}
-      <TagBatchEditDialog
-        open={open === 'tag-batch-edit'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'tag-batch-edit'} onLoadError={close}>
+        <TagBatchEditDialog
+          open={open === 'tag-batch-edit'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Edit Tag Dialog */}
-      <EditTagDialog
-        open={open === 'edit-tag'}
-        onOpenChange={(v) => !v && setOpen(null)}
-      />
+      <LazyDialog open={open === 'edit-tag'} onLoadError={close}>
+        <EditTagDialog
+          open={open === 'edit-tag'}
+          onOpenChange={(v) => !v && close()}
+        />
+      </LazyDialog>
 
       {/* Upstream Model Update Dialog */}
-      <UpstreamUpdateDialog upstream={upstream} />
+      <LazyDialog
+        open={upstream.showModal && Boolean(upstream.channel)}
+        onLoadError={upstream.closeModal}
+      >
+        <UpstreamUpdateDialog upstream={upstream} />
+      </LazyDialog>
     </>
   )
 }

@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
@@ -31,11 +31,17 @@ import {
   PricingSidebar,
   PricingToolbar,
   ModelCardGrid,
-  ModelDetailsDrawer,
 } from './components'
+import { ModelDetailsDrawer } from './components/model-details-drawer'
+import { PricingLoadError } from './components/pricing-load-error'
 import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
 import { useFilters } from './hooks/use-filters'
+import { usePricingAccessRedirect } from './hooks/use-pricing-access-redirect'
 import { usePricingData } from './hooks/use-pricing-data'
+import {
+  prefetchModelDetails,
+  prefetchModelDetailsWhenIdle,
+} from './lib/model-details-chunks'
 import { sortModelFamilies } from './lib/model-family'
 import { groupModelFamilies } from './lib/model-variants'
 
@@ -56,9 +62,14 @@ export function Pricing() {
     freeGroups,
     modelSquare,
     isLoading,
+    error,
+    hasData,
+    refetch,
     priceRate,
     usdExchangeRate,
   } = usePricingData()
+  const redirecting = usePricingAccessRedirect(error)
+  const failed = Boolean(error) && !hasData
 
   const {
     searchInput,
@@ -129,6 +140,14 @@ export function Pricing() {
     clearSearch()
   }, [clearFilters, clearSearch])
 
+  // The details of a model are a chunk of their own: fetch it once the list
+  // is on screen, so that opening a model rarely waits for it.
+  const listShown = !isLoading && !failed
+  useEffect(() => {
+    if (!listShown) return
+    return prefetchModelDetailsWhenIdle()
+  }, [listShown])
+
   const renderPricingContent = () => {
     if (filteredModels.length === 0) {
       return (
@@ -171,11 +190,27 @@ export function Pricing() {
     )
   }
 
-  if (isLoading) {
+  if (isLoading || redirecting) {
     return (
       <PublicLayout showMainContainer={false}>
         <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
           <LoadingSkeleton viewMode={viewMode} />
+        </div>
+      </PublicLayout>
+    )
+  }
+
+  // A failed request is not an empty catalogue: say so and offer a retry.
+  if (failed) {
+    return (
+      <PublicLayout showMainContainer={false}>
+        <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
+          <header className='mx-auto mb-5 max-w-3xl pt-5 text-center sm:mb-10 sm:pt-10'>
+            <h1 className='text-[clamp(2rem,5.5vw,3.5rem)] leading-[1.15] font-bold tracking-tight'>
+              {t('Model Square')}
+            </h1>
+          </header>
+          <PricingLoadError error={error} onRetry={() => void refetch()} />
         </div>
       </PublicLayout>
     )
@@ -293,7 +328,13 @@ export function Pricing() {
                 sections={sections}
               />
 
-              {renderPricingContent()}
+              {/* Pointing at or focusing a model starts loading its details. */}
+              <div
+                onPointerOver={prefetchModelDetails}
+                onFocus={prefetchModelDetails}
+              >
+                {renderPricingContent()}
+              </div>
             </main>
           </div>
 
