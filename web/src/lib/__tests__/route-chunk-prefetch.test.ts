@@ -26,6 +26,7 @@ import {
   Outlet,
   redirect,
 } from '@tanstack/react-router'
+import { toast } from 'sonner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { prefetchRouteChunks } from '../route-chunk-prefetch'
@@ -177,6 +178,7 @@ describe('prefetchRouteChunks', () => {
   test('a failed download stays silent, and the navigation loads the chunk again', async () => {
     const consoleError = vi.spyOn(console, 'error')
     const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    const toastCount = toast.getHistory().length
     const { router, spies } = createTestRouter({
       section: vi
         .fn<() => Promise<Page>>()
@@ -194,6 +196,7 @@ describe('prefetchRouteChunks', () => {
     expect(spies.section).toHaveBeenCalledTimes(1)
     expect(spies.keys).toHaveBeenCalledTimes(1)
     expect(consoleError).not.toHaveBeenCalled()
+    expect(toast.getHistory().slice(toastCount)).toEqual([])
     // No reload: both reload-once guards write their marker first.
     expect(storageWrite).not.toHaveBeenCalled()
     expect(router.state.location.href).toBe('/sign-in')

@@ -28,10 +28,11 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 import { act, render, screen } from '@testing-library/react'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
-import { api } from '@/lib/api'
+import { api, clearAuthentication } from '@/lib/api'
 import { IDLE_PREFETCH_DELAY_MS } from '@/lib/idle-prefetch'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -42,8 +43,18 @@ type Page = { default: () => null }
 
 const page = (): Promise<Page> => Promise.resolve({ default: () => null })
 
+/** A failed chunk download, as the rspack chunk loader rejects it. */
+function chunkLoadError(chunk: string) {
+  return Object.assign(new Error(`Loading chunk ${chunk} failed.`), {
+    name: 'ChunkLoadError',
+    request: `http://localhost/static/js/async/${chunk}.js`,
+  })
+}
+
 const clients: QueryClient[] = []
-// Every request the pages send, in order.
+// Every request the pages send, in order: through the app's API client, any
+// other XMLHttpRequest (such as the session refresh, which has a client of
+// its own in lib/auth-session.ts) and fetch.
 let requests: string[] = []
 
 function recordRequest(method: string) {
@@ -56,18 +67,50 @@ function recordRequest(method: string) {
   }
 }
 
+function recordXhr(method: string, url: string | URL) {
+  requests.push(`XHR ${method} ${String(url)}`)
+  throw new Error(`Unexpected XHR ${method} ${String(url)}`)
+}
+
+/**
+ * Watch the page from now on. The returned function stops watching and
+ * reports what happened meanwhile: the requests sent, each change of the
+ * session state (by its bootstrap state) and the toasts raised.
+ */
+function watchPage() {
+  const requestCount = requests.length
+  const toastCount = toast.getHistory().length
+  const sessionChanges: string[] = []
+  const unsubscribe = useAuthStore.subscribe((state) => {
+    sessionChanges.push(state.auth.bootstrapState)
+  })
+  return () => {
+    unsubscribe()
+    return {
+      requests: requests.slice(requestCount),
+      sessionChanges,
+      toasts: toast.getHistory().slice(toastCount),
+    }
+  }
+}
+
+const NOTHING_HAPPENED = { requests: [], sessionChanges: [], toasts: [] }
+
 /**
  * The sign-in and sign-up pages in a router shaped like the app's: the
  * console pages sit behind a layout route with a session guard, and each one
  * is a lazy chunk as in a production build. The spies record each guard,
  * loader and download.
  */
-async function renderPage(path: string) {
+async function renderPage(
+  path: string,
+  load: { dashboard?: () => Promise<Page> } = {}
+) {
   const spies = {
     guard: vi.fn(),
     loader: vi.fn(),
     layout: vi.fn(page),
-    dashboard: vi.fn(page),
+    dashboard: vi.fn(load.dashboard ?? page),
     keys: vi.fn(page),
   }
   const root = createRootRoute({ component: Outlet })
@@ -172,12 +215,17 @@ beforeEach(() => {
   // and the fake clock instead.
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+  // The session is not known yet, as before its first check: anything that
+  // checked it now (resolveAuthentication, a route guard) would send the
+  // session refresh.
+  clearAuthentication(false, 'idle')
   requests = []
   vi.spyOn(api, 'get').mockImplementation(recordRequest('GET'))
   vi.spyOn(api, 'post').mockImplementation(recordRequest('POST'))
   vi.spyOn(api, 'put').mockImplementation(recordRequest('PUT'))
   vi.spyOn(api, 'patch').mockImplementation(recordRequest('PATCH'))
   vi.spyOn(api, 'delete').mockImplementation(recordRequest('DELETE'))
+  vi.spyOn(XMLHttpRequest.prototype, 'open').mockImplementation(recordXhr)
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: unknown) => {
@@ -197,9 +245,9 @@ afterEach(() => {
 })
 
 describe('sign-in page', () => {
-  it('downloads the code of the dashboard once the page has settled, with no request, guard or loader', async () => {
+  it('downloads the code of the dashboard once the page has settled, with no request, guard, loader, session check or toast', async () => {
     const { router, spies } = await renderPage('/sign-in')
-    const pageRequests = [...requests]
+    const watch = watchPage()
 
     await act(() => vi.advanceTimersByTimeAsync(IDLE_PREFETCH_DELAY_MS - 100))
     expect(spies.layout).not.toHaveBeenCalled()
@@ -215,14 +263,36 @@ describe('sign-in page', () => {
     expect(spies.dashboard).toHaveBeenCalledTimes(1)
     expect(spies.guard).not.toHaveBeenCalled()
     expect(spies.loader).not.toHaveBeenCalled()
-    expect(requests).toEqual(pageRequests)
+    expect(watch()).toEqual(NOTHING_HAPPENED)
     expect(router.state.location.href).toBe('/sign-in')
     expect(useAuthStore.getState().auth).toMatchObject({
       user: null,
       accessToken: null,
       session: null,
       pendingLoginVerification: null,
+      bootstrapState: 'idle',
     })
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Sign in' })
+    ).toBeInTheDocument()
+  })
+
+  it('leaves the page as it is when the download fails', async () => {
+    const { router, spies } = await renderPage('/sign-in', {
+      dashboard: () => Promise.reject(chunkLoadError('42')),
+    })
+    const consoleError = vi.spyOn(console, 'error')
+    const storageWrite = vi.spyOn(Storage.prototype, 'setItem')
+    const watch = watchPage()
+
+    await waitPastPrefetchDelay()
+
+    expect(spies.dashboard).toHaveBeenCalledTimes(1)
+    expect(watch()).toEqual(NOTHING_HAPPENED)
+    expect(consoleError).not.toHaveBeenCalled()
+    // No reload: both reload-once guards write their marker first.
+    expect(storageWrite).not.toHaveBeenCalled()
+    expect(router.state.location.href).toBe('/sign-in')
     expect(
       screen.getByRole('heading', { level: 2, name: 'Sign in' })
     ).toBeInTheDocument()
@@ -305,7 +375,7 @@ describe('sign-up page', () => {
   // A WeChat sign-in from this page goes straight to the dashboard.
   it('downloads the code of the dashboard once the page has settled', async () => {
     const { spies } = await renderPage('/sign-up')
-    const pageRequests = [...requests]
+    const watch = watchPage()
 
     await waitPastPrefetchDelay()
 
@@ -313,6 +383,6 @@ describe('sign-up page', () => {
     expect(spies.dashboard).toHaveBeenCalledTimes(1)
     expect(spies.guard).not.toHaveBeenCalled()
     expect(spies.loader).not.toHaveBeenCalled()
-    expect(requests).toEqual(pageRequests)
+    expect(watch()).toEqual(NOTHING_HAPPENED)
   })
 })
