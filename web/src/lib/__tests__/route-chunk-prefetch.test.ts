@@ -22,6 +22,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  isRedirect,
   lazyRouteComponent,
   Outlet,
   redirect,
@@ -29,7 +30,33 @@ import {
 import { toast } from 'sonner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
+import { DEFAULT_AUTH_REDIRECT } from '@/features/auth/lib/auth-redirect'
+import { Route as appDashboardIndexRoute } from '@/routes/_authenticated/dashboard/index'
+import type { FileRoutesById } from '@/routeTree.gen'
+
 import { prefetchRouteChunks } from '../route-chunk-prefetch'
+
+/**
+ * The routes of the page a sign-in lands on by default (DEFAULT_AUTH_REDIRECT)
+ * in the app's route tree, which the test router below copies. `satisfies`
+ * makes the type check fail when the generated tree (routeTree.gen.ts) no
+ * longer has them, for example after the section route was renamed: the
+ * prefetch would then no longer find the dashboard page (see routesForHref).
+ */
+const APP_DASHBOARD_ROUTE_IDS = {
+  index: '/_authenticated/dashboard/',
+  section: '/_authenticated/dashboard/$section',
+} as const satisfies Record<string, keyof FileRoutesById>
+
+/** Where the guard of a route that takes no arguments redirects to. */
+function redirectTarget(route: { options: { beforeLoad?: unknown } }) {
+  try {
+    ;(route.options.beforeLoad as () => void)()
+  } catch (error) {
+    if (isRedirect(error)) return error.options.to
+  }
+  return undefined
+}
 
 type Page = { default: () => null }
 
@@ -209,5 +236,23 @@ describe('prefetchRouteChunks', () => {
       routeId: '/_authenticated/dashboard/$section',
       status: 'success',
     })
+  })
+})
+
+describe('the page a sign-in lands on by default', () => {
+  test('is a section index in the app, so the prefetch adds its section page', async () => {
+    // In the app, the index has no page of its own: it redirects to its
+    // default section, the `$section` route next to it.
+    expect(appDashboardIndexRoute.options.component).toBeUndefined()
+    expect(redirectTarget(appDashboardIndexRoute)).toBe('/dashboard/$section')
+    const { router, spies } = createTestRouter()
+    expect(Object.keys(router.routesById)).toEqual(
+      expect.arrayContaining(Object.values(APP_DASHBOARD_ROUTE_IDS))
+    )
+
+    await prefetchRouteChunks(router, DEFAULT_AUTH_REDIRECT)
+
+    expect(spies.layout).toHaveBeenCalledTimes(1)
+    expect(spies.section).toHaveBeenCalledTimes(1)
   })
 })
