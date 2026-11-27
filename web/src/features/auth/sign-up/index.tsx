@@ -23,11 +23,14 @@ import { useStatus } from '@/hooks/use-status'
 
 import { AuthLayout } from '../auth-layout'
 import { TermsFooter } from '../components/terms-footer'
+import { usePostLoginPrefetch } from '../hooks/use-post-login-prefetch'
 import { SignUpForm } from './components/sign-up-form'
 
 export function SignUp() {
   const { t } = useTranslation()
   const { status } = useStatus()
+  // A WeChat sign-in on this page goes straight to the dashboard.
+  usePostLoginPrefetch()
 
   return (
     <AuthLayout>

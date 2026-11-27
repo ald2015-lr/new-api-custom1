@@ -20,6 +20,9 @@ import type { AuthUser } from '@/stores/auth-store'
 
 const allowedRedirectProtocols = new Set(['http:', 'https:'])
 
+/** Where a sign-in lands without a safe redirect target. */
+export const DEFAULT_AUTH_REDIRECT = '/dashboard'
+
 export function getSavedLanguage(user: AuthUser): string | undefined {
   if (typeof user.language === 'string') {
     return user.language

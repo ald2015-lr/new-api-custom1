@@ -23,12 +23,14 @@ import { useStatus } from '@/hooks/use-status'
 
 import { AuthLayout } from '../auth-layout'
 import { TermsFooter } from '../components/terms-footer'
+import { usePostLoginPrefetch } from '../hooks/use-post-login-prefetch'
 import { UserAuthForm } from './components/user-auth-form'
 
 export function SignIn() {
   const { t } = useTranslation()
   const { redirect } = useSearch({ from: '/(auth)/sign-in' })
   const { status } = useStatus()
+  usePostLoginPrefetch(redirect)
 
   return (
     <AuthLayout>
