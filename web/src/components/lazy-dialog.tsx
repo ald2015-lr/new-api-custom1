@@ -16,12 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Loader2 } from 'lucide-react'
 import { Suspense, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { LazyChunkBoundary } from '@/components/lazy-chunk-boundary'
+import { LoadingState } from '@/components/loading-state'
 
 function LazyDialogLoading() {
   const { t } = useTranslation()
@@ -31,7 +31,7 @@ function LazyDialogLoading() {
       aria-live='polite'
       className='bg-popover text-popover-foreground fixed top-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-md border px-3 py-2 text-sm shadow-md'
     >
-      <Loader2 aria-hidden className='size-4 animate-spin' />
+      <LoadingState inline size='sm' />
       {t('Loading...')}
     </div>
   )

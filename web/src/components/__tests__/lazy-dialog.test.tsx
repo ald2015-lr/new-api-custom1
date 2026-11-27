@@ -92,6 +92,11 @@ describe('LazyDialog', () => {
     )
     expect(load).toHaveBeenCalledTimes(1)
     expect(screen.getByRole('status')).toHaveTextContent('Loading...')
+    // The spinner is decoration: assistive technology reads only the text.
+    expect(screen.getByRole('status').querySelector('svg')).toHaveAttribute(
+      'aria-hidden',
+      'true'
+    )
 
     await act(async () => settle().resolve())
     expect(screen.getByRole('dialog')).toHaveAttribute('data-open', 'true')
