@@ -23,7 +23,7 @@ import { createSectionMeta } from '../utils/section-meta'
  * components. The route guards and the sidebar import this file instead of
  * section-registry.tsx, so the settings code stays in the settings chunks.
  * Keep it in step with section-registry.tsx (same ids, order and default;
- * checked by section-meta-parity.test.ts).
+ * checked by ../__tests__/section-meta.test.tsx).
  */
 const SITE_SECTIONS = [
   { id: 'system-info', titleKey: 'System Information' },
