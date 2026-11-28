@@ -2,7 +2,10 @@ package model
 
 import (
 	"bytes"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -98,17 +101,6 @@ func TestInitSessionSecretKeepsTheKeyAcrossRestarts(t *testing.T) {
 	}
 }
 
-func TestInitSessionSecretKeepsCryptoSecretFromEnv(t *testing.T) {
-	db := useSessionSecretTestDB(t)
-	common.CryptoSecret, common.CryptoSecretFromEnv = "crypto-from-env", true
-
-	InitSessionSecret()
-	assert.Regexp(t, keptSessionSecretPattern, common.SessionSecret)
-	assert.Equal(t, "crypto-from-env", common.CryptoSecret)
-	assert.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
-	assert.Len(t, keptSessionSecrets(t, db), 1)
-}
-
 func TestInitSessionSecretOffKeepsTheRandomKeyAndDeletesTheKeptOne(t *testing.T) {
 	db := useSessionSecretTestDB(t)
 	InitSessionSecret()
@@ -133,20 +125,56 @@ func TestInitSessionSecretOffKeepsTheRandomKeyAndDeletesTheKeptOne(t *testing.T)
 	assert.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
 }
 
-func TestInitSessionSecretFromEnvDeletesTheKeptKey(t *testing.T) {
-	db := useSessionSecretTestDB(t)
-	InitSessionSecret()
-	require.Len(t, keptSessionSecrets(t, db), 1)
+// The start in the order of main.go with SESSION_SECRET or CRYPTO_SECRET set
+// and a key already kept: common.InitEnv records that the secret came from the
+// environment, so InitSessionSecret keeps SESSION_SECRET and deletes the kept
+// key (removing SESSION_SECRET later must not bring an old key back), and the
+// kept key never replaces CRYPTO_SECRET. InitEnv also parses the flags and sets
+// many other globals, so each case runs in a child process of this test.
+func TestStartUsesTheSecretsSetInTheEnvironment(t *testing.T) {
+	kept := strings.Repeat("0123456789abcdef", 4)
+	type start struct {
+		name, sessionSecretEnv, cryptoSecretEnv string
+		session, crypto, fingerprintKey         string
+		source                                  common.SecretSource
+		keptRows                                int
+	}
+	tests := []start{
+		{name: "SESSION_SECRET", sessionSecretEnv: "session-from-env",
+			session: "session-from-env", crypto: "session-from-env", fingerprintKey: "session-from-env",
+			source: common.SessionSecretSourceEnv, keptRows: 0},
+		{name: "CRYPTO_SECRET", cryptoSecretEnv: "crypto-from-env",
+			session: kept, crypto: "crypto-from-env", fingerprintKey: "crypto-from-env",
+			source: common.SessionSecretSourceDatabase, keptRows: 1},
+	}
+	if child := os.Getenv("KEEP_LOGIN_TEST_START"); child != "" {
+		i := slices.IndexFunc(tests, func(tc start) bool { return tc.name == child })
+		require.NotEqual(t, -1, i, "unknown case %q", child)
+		tc := tests[i]
+		db := useSessionSecretTestDB(t)
+		require.NoError(t, db.Create(&ServerSecret{Name: sessionSecretName, Value: kept}).Error)
 
-	common.SessionSecret, common.CryptoSecret = "from-env", "from-env"
-	common.SessionSecretSource = common.SessionSecretSourceEnv
-	InitSessionSecret()
-	assert.Equal(t, "from-env", common.SessionSecret)
-	assert.Equal(t, "from-env", common.CryptoSecret)
-	assert.Equal(t, common.SessionSecretSourceEnv, common.SessionSecretSource)
-	assert.True(t, common.CryptoSecretSurvivesRestart())
-	assert.Equal(t, "from-env", common.AuditFingerprintSecret(), "SESSION_SECRET is never stored, so it keys the audit fingerprints")
-	assert.Empty(t, keptSessionSecrets(t, db), "removing SESSION_SECRET later must not bring an old key back")
+		common.InitEnv()
+		InitSessionSecret()
+		assert.Equal(t, tc.session, common.SessionSecret)
+		assert.Equal(t, tc.crypto, common.CryptoSecret)
+		assert.Equal(t, tc.source, common.SessionSecretSource)
+		assert.True(t, common.CryptoSecretSurvivesRestart())
+		assert.Equal(t, tc.fingerprintKey, common.AuditFingerprintSecret(), "a key set in the environment is never stored, so it keys the audit fingerprints")
+		assert.Len(t, keptSessionSecrets(t, db), tc.keptRows)
+		return
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// -log-dir keeps InitEnv from making ./logs in this package.
+			child := exec.Command(os.Args[0], "-test.run=^TestStartUsesTheSecretsSetInTheEnvironment$", "-test.v", "-log-dir="+t.TempDir())
+			child.Env = append(os.Environ(), "KEEP_LOGIN_TEST_START="+tc.name,
+				"SESSION_SECRET="+tc.sessionSecretEnv, "CRYPTO_SECRET="+tc.cryptoSecretEnv)
+			output, err := child.CombinedOutput()
+			require.NoError(t, err, "%s", output)
+			assert.Contains(t, string(output), "--- PASS: TestStartUsesTheSecretsSetInTheEnvironment")
+		})
+	}
 }
 
 func TestInitSessionSecretFallsBackToTheRandomKey(t *testing.T) {
