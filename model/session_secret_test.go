@@ -77,6 +77,11 @@ func TestInitSessionSecretKeepsTheKeyAcrossRestarts(t *testing.T) {
 			assert.Equal(t, kept, common.CryptoSecret, "CryptoSecret follows the kept key while CRYPTO_SECRET is unset")
 			assert.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
 			assert.True(t, common.CryptoSecretSurvivesRestart())
+			// CryptoSecret is now the kept key, which a database copy holds next
+			// to the audit fingerprints.
+			fingerprintKey := common.AuditFingerprintSecret()
+			assert.Regexp(t, keptSessionSecretPattern, fingerprintKey, "audit fingerprints use a random key of this run")
+			assert.NotEqual(t, kept, fingerprintKey, "audit fingerprints are never keyed with the kept key")
 			rows := keptSessionSecrets(t, db)
 			require.Len(t, rows, 1)
 			assert.Equal(t, sessionSecretName, rows[0].Name)
@@ -117,6 +122,7 @@ func TestInitSessionSecretOffKeepsTheRandomKeyAndDeletesTheKeptOne(t *testing.T)
 	assert.Equal(t, "random-at-start-2", common.CryptoSecret)
 	assert.Equal(t, common.SessionSecretSourceRandom, common.SessionSecretSource)
 	assert.False(t, common.CryptoSecretSurvivesRestart())
+	assert.Equal(t, "random-at-start-2", common.AuditFingerprintSecret(), "a random CryptoSecret is never stored, so it keys the audit fingerprints")
 	assert.Empty(t, keptSessionSecrets(t, db))
 
 	saveKeepLoginOption(t, db, "true")
@@ -139,6 +145,7 @@ func TestInitSessionSecretFromEnvDeletesTheKeptKey(t *testing.T) {
 	assert.Equal(t, "from-env", common.CryptoSecret)
 	assert.Equal(t, common.SessionSecretSourceEnv, common.SessionSecretSource)
 	assert.True(t, common.CryptoSecretSurvivesRestart())
+	assert.Equal(t, "from-env", common.AuditFingerprintSecret(), "SESSION_SECRET is never stored, so it keys the audit fingerprints")
 	assert.Empty(t, keptSessionSecrets(t, db), "removing SESSION_SECRET later must not bring an old key back")
 }
 
