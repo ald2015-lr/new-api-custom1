@@ -642,7 +642,7 @@ export const ChannelModerationSettings = memo(
                   </FormLabel>
                   <FormDescription>
                     {t(
-                      'Sets safety_identifier on Chat Completions and Responses requests (also with request body passthrough) to a hashed ID of the user, the same for every request of the user, replacing any value the client sent, so OpenAI can attribute abuse to one user, which lowers the risk for the whole organization. Set CRYPTO_SECRET or SESSION_SECRET on the server so the ID stays the same after a restart.'
+                      'Sets safety_identifier on Chat Completions and Responses requests (also with request body passthrough) to a hashed ID of the user, the same for every request of the user, replacing any value the client sent, so OpenAI can attribute abuse to one user, which lowers the risk for the whole organization. The ID stays the same after a restart while "Keep users signed in after restarts" is on (the default), or when CRYPTO_SECRET or SESSION_SECRET is set on the server.'
                     )}
                   </FormDescription>
                 </div>

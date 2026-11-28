@@ -6556,7 +6556,7 @@
     "Set these values in the provider application before enabling login.": "启用登录前，请先在提供商应用中设置这些值。",
     "Set up model redirects": "设置模型重定向",
     "Set up redirect": "设置重定向",
-    "Sets safety_identifier on Chat Completions and Responses requests (also with request body passthrough) to a hashed ID of the user, the same for every request of the user, replacing any value the client sent, so OpenAI can attribute abuse to one user, which lowers the risk for the whole organization. Set CRYPTO_SECRET or SESSION_SECRET on the server so the ID stays the same after a restart.": "在 Chat Completions 和 Responses 请求（包括透传请求体时）中把 safety_identifier 设为用户 ID 的哈希值（同一用户始终相同），覆盖客户端传入的值，便于 OpenAI 把违规归因到具体用户，降低整个组织受处罚的风险。请在服务器上设置 CRYPTO_SECRET 或 SESSION_SECRET，否则重启后标识会改变。",
+    "Sets safety_identifier on Chat Completions and Responses requests (also with request body passthrough) to a hashed ID of the user, the same for every request of the user, replacing any value the client sent, so OpenAI can attribute abuse to one user, which lowers the risk for the whole organization. The ID stays the same after a restart while \"Keep users signed in after restarts\" is on (the default), or when CRYPTO_SECRET or SESSION_SECRET is set on the server.": "在 Chat Completions 和 Responses 请求（包括透传请求体时）中把 safety_identifier 设为用户 ID 的哈希值（同一用户始终相同），覆盖客户端传入的值，便于 OpenAI 把违规归因到具体用户，降低整个组织受处罚的风险。「重启或更新后保持用户登录」开着（默认）或服务器上设置了 CRYPTO_SECRET 或 SESSION_SECRET 时，重启后标识不变。",
     "Setting Key": "配置项",
     "Setting saved": "设置已保存",
     "Setting up 2FA...": "正在设置 2FA...",

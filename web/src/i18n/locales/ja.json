@@ -6556,7 +6556,7 @@
     "Set these values in the provider application before enabling login.": "ログインを有効にする前に、プロバイダーアプリでこれらの値を設定してください。",
     "Set up model redirects": "モデルのリダイレクトを設定",
     "Set up redirect": "リダイレクトを設定",
-    "Sets safety_identifier on Chat Completions and Responses requests (also with request body passthrough) to a hashed ID of the user, the same for every request of the user, replacing any value the client sent, so OpenAI can attribute abuse to one user, which lowers the risk for the whole organization. Set CRYPTO_SECRET or SESSION_SECRET on the server so the ID stays the same after a restart.": "Chat Completions と Responses のリクエスト（ボディをパススルーする場合も含む）で、safety_identifier をユーザー ID のハッシュ値（同じユーザーなら常に同じ値）に設定し、クライアントが送った値を上書きします。これにより OpenAI は不正利用を個々のユーザーに帰属でき、組織全体のリスクが下がります。再起動後も識別子が変わらないよう、サーバーに CRYPTO_SECRET または SESSION_SECRET を設定してください。",
+    "Sets safety_identifier on Chat Completions and Responses requests (also with request body passthrough) to a hashed ID of the user, the same for every request of the user, replacing any value the client sent, so OpenAI can attribute abuse to one user, which lowers the risk for the whole organization. The ID stays the same after a restart while \"Keep users signed in after restarts\" is on (the default), or when CRYPTO_SECRET or SESSION_SECRET is set on the server.": "Chat Completions と Responses のリクエスト（ボディをパススルーする場合も含む）で、safety_identifier をユーザー ID のハッシュ値（同じユーザーなら常に同じ値）に設定し、クライアントが送った値を上書きします。これにより OpenAI は不正利用を個々のユーザーに帰属でき、組織全体のリスクが下がります。「再起動・更新後もログインを維持」がオン（既定）の間、またはサーバーに CRYPTO_SECRET か SESSION_SECRET が設定されている場合、再起動後も識別子は変わりません。",
     "Setting Key": "設定キー",
     "Setting saved": "設定が保存されました",
     "Setting up 2FA...": "2FAを設定中...",
