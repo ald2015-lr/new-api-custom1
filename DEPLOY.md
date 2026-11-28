@@ -1265,7 +1265,7 @@ services:
 **升级说明：**
 - **第一次升级到这个版本时，所有用户还会被退出一次**（旧版本的随机密钥没有保存下来，没法沿用），之后的重启和更新不再退出。
 - 数据库新增 `server_secrets` 表（启动时自动创建，只有一行 `session_secret`），没有其他结构变化。多节点时先升级主节点（只有主节点建表）。
-- `deploy/docker-compose.yml` 现在透传 `SESSION_SECRET`（`deploy/.env` 里不写或留空就是没设置）。不用 `SESSION_SECRET`（默认）时服务器上的旧 compose 文件照常能用；要用它时，先按下面「设置或更换 `SESSION_SECRET`」换上新的 compose 文件。原来在别处给容器设置过 `SESSION_SECRET` 的，把同一个值写进 `deploy/.env`，否则切换后所有用户要重新登录一次。
+- `deploy/docker-compose.yml` 现在透传 `SESSION_SECRET`（`deploy/.env` 里不写或留空就是没设置）。不用 `SESSION_SECRET`（默认）时服务器上的旧 compose 文件照常能用；要用它时，先按下面「设置或更换 `SESSION_SECRET`」在服务器的 compose 文件里加上那一行。原来在别处给容器设置过 `SESSION_SECRET` 的，把同一个值写进 `deploy/.env`，否则切换后所有用户要重新登录一次。
 - 没有设置 `CRYPTO_SECRET` 时，加密密钥跟随登录签名密钥，所以开关开着时，发给 OpenAI 的用户安全标识（第十八节）和任务结果下载链接在重启后也保持不变。审计里的「输入内容指纹」（第十九节）例外：指纹对应的常常是输错位置的密码，密钥不能和指纹放在同一个数据库里，所以不用这把密钥；没有设置 `CRYPTO_SECRET` 和 `SESSION_SECRET` 时，指纹密钥照旧每次启动随机生成，重启前后的指纹对不上。
 
 **想让所有人立即退出登录（例如怀疑登录被盗用）：**
@@ -1273,10 +1273,12 @@ services:
 - 设置了 `SESSION_SECRET` 的：在 `deploy/.env` 里换一个新值，再执行 `docker compose up -d`。不能用 `docker compose restart`，它不会读新值（见下面「设置或更换 `SESSION_SECRET`」）。
 - 关掉开关再重启也会让所有人退出，但之后每次重启都会退出，直到重新打开（重新打开后的第一次重启还会再退出一次）。
 
-没有设置 `CRYPTO_SECRET` 时，加密密钥就是登录签名密钥，所以上面三种做法都会同时换掉加密密钥：之前发出的任务结果（视频、图片）下载链接失效（返回 404，客户端要重新查询任务拿新链接），发给 OpenAI 的用户安全标识也全部改变（第十八节）；开关关着时每次重启都是这样（和以前一样）。想让换登录密钥不影响这两样，事先在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（第十八节），再执行 `docker compose up -d`；第一次设置时这两样也会变一次，之后就不再跟着登录密钥变。
+没有设置 `CRYPTO_SECRET` 时，加密密钥就是登录签名密钥，所以上面三种做法都会同时换掉加密密钥：之前发出的任务结果（视频、图片）下载链接失效（返回 404，客户端要重新查询任务拿新链接），发给 OpenAI 的用户安全标识也全部改变（第十八节）；开关关着时每次重启都是这样（和以前一样）。想让换登录密钥不影响这两样，事先在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（第十八节），再执行 `docker compose up -d`（compose 文件里要有 `CRYPTO_SECRET` 那一行，见下面「设置或更换 `SESSION_SECRET`」第 1 条）；第一次设置时这两样也会变一次，之后就不再跟着登录密钥变。
+
+这三种做法都只让网页登录失效：用户创建的「访问令牌」和 `sk-` 令牌照常能用，改密码也不会让「访问令牌」失效。怀疑账号被盗用时，还要在这个账号里检查并删除可疑的「访问令牌」和 `sk-` 令牌（管理员也可以先禁用这个用户），并看看有没有多出来的管理员。
 
 **设置或更换 `SESSION_SECRET`：**
-1. 服务器上的 `deploy/docker-compose.yml` 必须是新版本，里面有 `- SESSION_SECRET=${SESSION_SECRET:-}` 这一行。按第三节只执行 `docker compose pull` 更新的服务器上还是旧文件，`.env` 里的值传不进容器：用 `git clone` 部署的先在仓库目录里 `git pull`，手动复制的把新文件再复制一次。
+1. 服务器上的 compose 文件里，`new-api` 的 `environment` 下要有 `- SESSION_SECRET=${SESSION_SECRET:-}` 这一行。按第三节只执行 `docker compose pull` 更新的服务器上还是旧文件，没有这一行，`.env` 里的值传不进容器，也没有任何提示：手动加上这一行。不要把整份文件换成仓库里的 `deploy/docker-compose.yml`：服务器上的这份可能按第二十节第 4 条改过（`stop_grace_period`、`SHUTDOWN_TIMEOUT_SECONDS`、日志上限、`TRUSTED_PROXIES` 等），整份覆盖会把这些改动丢掉。用 `git clone` 部署、没改过这个文件的，也可以在仓库目录里 `git pull`。要设置 `CRYPTO_SECRET` 的也一样，文件里要有 `- CRYPTO_SECRET=${CRYPTO_SECRET:-}`（2026-11-20 之前复制的 compose 文件里没有）。
 2. 改好 `deploy/.env` 后执行 `docker compose up -d`，它会用新的 `.env` 重建容器（多节点要在每个节点上都做）。`docker compose restart` 不会重新读取 `.env`，容器里还是旧值，而且没有任何提示。
 3. 确认生效：`docker compose logs new-api | grep SESSION_SECRET` 能看到 `SESSION_SECRET is set`（中文日志「已设置 SESSION_SECRET」）；设置页的开关变灰，显示「由环境变量 SESSION_SECRET 固定，此开关不生效」。换了新值时，之前登录的浏览器都要重新登录（可以事先在另一个浏览器里登录一个账号，换完后刷新它来确认）。
 
@@ -1286,7 +1288,7 @@ services:
 
 **启动时读写数据库失败：** 服务照常启动，这次用随机密钥（和以前一样：之前登录的用户要重新登录，这次启动后登录的用户在下次重启后也要再登录一次）。日志里有一行 `keep users signed in after restarts: could not load the login signing key (…)`（`DEFAULT_LANGUAGE=zh-CN` 时是「重启或更新后保持用户登录：无法读取或保存登录签名密钥（…）…」）。这一行写在错误输出里，行首和其他系统日志一样是 `[SYS]`，没有 ERROR 字样，要按上面这段文字搜；括号里只有数据库的错误码，例如表还没建好时是 `mysql error 1146`、`postgres error SQLSTATE 42P01` 或 `sqlite error 1`。设置页的开关下方提示「本次启动没有使用保存的密钥」。数据库恢复后再重启一次即可。日志里不会打印密钥。
 
-**回滚：** 旧版本不认识这个开关和 `server_secrets` 表，表留在库里没有影响。没有设置 `SESSION_SECRET` 时，回滚那一次和旧版本之后的每次重启都会让所有用户退出登录；设置了 `SESSION_SECRET` 时（服务器上已是新的 compose 文件，回滚只改 `NEW_API_TAG`），旧版本也用它，回滚和之后的重启都不会让用户退出。没有设置 `SESSION_SECRET` 时，之后再升级回来会继续用表里原来那把密钥：回滚之前登录、还没过期也没退出的会话会恢复有效；不希望这样，就在升级回来之前执行上面的 `DELETE`。从备份恢复数据库也是这样：备份时还有效的会话（登录后 30 天内、当时还没有退出）会和备份里的密钥一起回来（设置了 `SESSION_SECRET` 时，只要它没变也一样），备份之后做过的退出登录和吊销都会丢失。因为安全问题恢复备份时，恢复后按上面「想让所有人立即退出登录」的办法换一把新密钥。
+**回滚：** 旧版本不认识这个开关和 `server_secrets` 表，表留在库里没有影响。没有设置 `SESSION_SECRET` 时，回滚那一次和旧版本之后的每次重启都会让所有用户退出登录；设置了 `SESSION_SECRET` 时（服务器的 compose 文件里已有那一行，回滚只改 `NEW_API_TAG`），旧版本也用它，回滚和之后的重启都不会让用户退出。没有设置 `SESSION_SECRET` 时，之后再升级回来会继续用表里原来那把密钥：回滚之前登录、还没过期也没退出的会话会恢复有效；不希望这样，就在升级回来之前执行上面的 `DELETE`。从备份恢复数据库也是这样：备份时还有效的会话（登录后 30 天内、当时还没有退出）会和备份里的密钥一起回来（设置了 `SESSION_SECRET` 时，只要它没变也一样），备份之后做过的退出登录和吊销都会丢失。因为安全问题恢复备份时，恢复后按上面「想让所有人立即退出登录」的办法换一把新密钥。
 
 **排查：** 重启后用户还是被退出：
 1. 是不是第一次升级到这个版本（会退出一次）。
