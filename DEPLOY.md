@@ -889,7 +889,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 和审查开关相互独立，也只对 OpenAI 类型的渠道有效。打开后，发往上游的 Chat Completions 和 Responses 请求里的 `safety_identifier` 一律换成网关按用户生成的标识（`u_` 加 32 位十六进制，同一用户永远相同，无法反推出用户是谁），客户端自己传的值会被覆盖（管理员自己配置的参数覆盖和请求处理插件规则例外，见限制 12）。OpenAI 据此只封禁违规的那个用户，而不是整个组织。
 - 打开「透传请求体」时也生效：只改写 `safety_identifier` 这一个字段，其他字节原样转发。
 - 打开后，「允许透传 safety_identifier」不再起作用。
-- **请在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（例如 `openssl rand -hex 32` 生成），之后不要再改**，多节点设成一样的值。没有设置 `CRYPTO_SECRET` 时用登录签名密钥：设置了 `SESSION_SECRET` 就用它；没有设置时，「重启或更新后保持用户登录」开着（默认）就用数据库里保存的那把，重启后不变（第二十二节）；只有开关关着、或启动时读不到保存的密钥时，才每次重启随机生成，发给 OpenAI 的标识也随之改变（服务器日志会提示一次）。改动 `CRYPTO_SECRET` 会让所有用户的标识变化，Redis 里的令牌缓存键也会换一批（无害）；改动前发出的任务结果（视频、图片）下载链接（`/v1/tasks/…/artifacts/…/content?access=…`、`/v1/videos/…/content?access=…`）也会失效（返回 404），客户端需要重新查询任务拿新链接。已经设置了 `SESSION_SECRET` 的部署可以让 `CRYPTO_SECRET` 留空，或设成与 `SESSION_SECRET` 相同的值，这样密钥不变；两者都没设、开关又关着的部署每次重启本来就会让这些链接失效，设置后反而稳定。`deploy/docker-compose.yml` 已经透传这个变量，留空时行为和以前一样。
+- **请在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（例如 `openssl rand -hex 32` 生成），之后不要再改**，多节点设成一样的值。没有设置 `CRYPTO_SECRET` 时用登录签名密钥：设置了 `SESSION_SECRET` 就用它；没有设置时，「重启或更新后保持用户登录」开着（默认）就用数据库里保存的那把，重启后不变，但按第二十二节换登录签名密钥（让所有人退出登录）时会跟着换；只有开关关着、或启动时读不到保存的密钥时，才每次重启随机生成，发给 OpenAI 的标识也随之改变（服务器日志会提示一次）。改动 `CRYPTO_SECRET` 会让所有用户的标识变化，Redis 里的令牌缓存键也会换一批（无害）；改动前发出的任务结果（视频、图片）下载链接（`/v1/tasks/…/artifacts/…/content?access=…`、`/v1/videos/…/content?access=…`）也会失效（返回 404），客户端需要重新查询任务拿新链接。已经设置了 `SESSION_SECRET` 的部署可以让 `CRYPTO_SECRET` 留空，或设成与 `SESSION_SECRET` 相同的值，这样密钥不变；两者都没设、开关又关着的部署每次重启本来就会让这些链接失效，设置后反而稳定。`deploy/docker-compose.yml` 已经透传这个变量，留空时行为和以前一样。
 - 不覆盖的接口：Realtime、图片、旧版 Completions、Responses compact、任务插件。
 
 **限制（请先读完再决定是否「审查失败时放行」）：**
@@ -1256,8 +1256,10 @@ services:
 
 **想让所有人立即退出登录（例如怀疑登录被盗用）：**
 - 只退出一次、之后照常保持登录：删除保存的密钥再重启，启动时会生成一把新的。三种数据库都是同一句：`DELETE FROM server_secrets WHERE name = 'session_secret';`，然后 `docker compose restart new-api`（多节点要重启所有节点）。
-- 设置了 `SESSION_SECRET` 的：在 `deploy/.env` 里换一个新值，再执行 `docker compose up -d`。不能用 `docker compose restart`，它不会读新值（见下一段）。
+- 设置了 `SESSION_SECRET` 的：在 `deploy/.env` 里换一个新值，再执行 `docker compose up -d`。不能用 `docker compose restart`，它不会读新值（见下面「设置或更换 `SESSION_SECRET`」）。
 - 关掉开关再重启也会让所有人退出，但之后每次重启都会退出，直到重新打开（重新打开后的第一次重启还会再退出一次）。
+
+没有设置 `CRYPTO_SECRET` 时，加密密钥就是登录签名密钥，所以上面三种做法都会同时换掉加密密钥：之前发出的任务结果（视频、图片）下载链接失效（返回 404，客户端要重新查询任务拿新链接），发给 OpenAI 的用户安全标识也全部改变（第十八节）；开关关着时每次重启都是这样（和以前一样）。想让换登录密钥不影响这两样，事先在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（第十八节），再执行 `docker compose up -d`；第一次设置时这两样也会变一次，之后就不再跟着登录密钥变。
 
 **设置或更换 `SESSION_SECRET`：**
 1. 服务器上的 `deploy/docker-compose.yml` 必须是新版本，里面有 `- SESSION_SECRET=${SESSION_SECRET:-}` 这一行。按第三节只执行 `docker compose pull` 更新的服务器上还是旧文件，`.env` 里的值传不进容器：用 `git clone` 部署的先在仓库目录里 `git pull`，手动复制的把新文件再复制一次。
