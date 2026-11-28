@@ -2,7 +2,6 @@ package common
 
 import (
 	"context"
-	"os"
 	"strconv"
 	"sync"
 
@@ -33,9 +32,9 @@ func ApplyGatewaySafetyIdentifier(jsonData []byte, info *RelayInfo) ([]byte, err
 	if !ojson.ValidBytes(jsonData) || !ojson.ParseBytes(jsonData).IsObject() {
 		return jsonData, nil
 	}
-	if os.Getenv("CRYPTO_SECRET") == "" && os.Getenv("SESSION_SECRET") == "" {
+	if !common.CryptoSecretSurvivesRestart() {
 		unstableSafetyIdentifierWarning.Do(func() {
-			logger.LogWarn(context.Background(), common.LogText("send_safety_identifier is on for channel #%d but neither CRYPTO_SECRET nor SESSION_SECRET is set; the identifier sent to OpenAI changes at every restart", info.ChannelId))
+			logger.LogWarn(context.Background(), common.LogText("send_safety_identifier is on for channel #%d but the crypto secret is random for this start (no CRYPTO_SECRET or SESSION_SECRET, and no login signing key kept in the database is in use); the identifier sent to OpenAI changes after a restart", info.ChannelId))
 		})
 	}
 	doc := ojson.NewDoc(jsonData)

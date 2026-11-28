@@ -391,6 +391,11 @@ func InitResources() error {
 	}
 	model.InitOptionMap()
 
+	// Decide the login signing key (common.SessionSecret, and CryptoSecret
+	// unless CRYPTO_SECRET is set) before Redis, the routes and the background
+	// tasks: they all sign or cache with it, and nothing above reads it.
+	model.InitSessionSecret()
+
 	// 清理旧的磁盘缓存文件
 	common.CleanupOldCacheFiles()
 

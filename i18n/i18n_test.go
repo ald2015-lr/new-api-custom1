@@ -206,7 +206,9 @@ func TestServerLogLanguage(t *testing.T) {
 	assert.Equal(t, "渠道 #3 的内容审查失败（timeout），该渠道设置了审查失败时放行，请求已发送", common.LogText("content moderation failed on channel #%d (%s); the request was sent because the channel lets requests through on failure", 3, "timeout"))
 	assert.Equal(t, "渠道 #3 的一条内容审查规则不是有效的正则表达式，已跳过", common.LogText("content moderation rule of channel #%d is not a valid regular expression and is skipped", 3))
 	assert.Equal(t, "渠道 #3 的审查接口测试：ok（状态 200，12 毫秒）", common.LogText("content moderation probe of channel #%d: %s (status %d, %d ms)", 3, "ok", 200, 12))
-	assert.Equal(t, "渠道 #3 开启了向 OpenAI 发送用户安全标识，但未设置 CRYPTO_SECRET 或 SESSION_SECRET，发送给 OpenAI 的标识每次重启都会改变", common.LogText("send_safety_identifier is on for channel #%d but neither CRYPTO_SECRET nor SESSION_SECRET is set; the identifier sent to OpenAI changes at every restart", 3))
+	assert.Equal(t, "渠道 #3 开启了向 OpenAI 发送用户安全标识，但本次启动的加密密钥是随机的（没有设置 CRYPTO_SECRET 或 SESSION_SECRET，也没有使用数据库里保存的登录签名密钥），发送给 OpenAI 的标识重启后会改变", common.LogText("send_safety_identifier is on for channel #%d but the crypto secret is random for this start (no CRYPTO_SECRET or SESSION_SECRET, and no login signing key kept in the database is in use); the identifier sent to OpenAI changes after a restart", 3))
+	assert.Equal(t, "已设置 SESSION_SECRET：用它签名登录，「重启或更新后保持用户登录」开关不起作用", common.LogText("SESSION_SECRET is set: it signs logins, and the keep users signed in after restarts setting has no effect"))
+	assert.Equal(t, "重启或更新后保持用户登录：无法读取或保存登录签名密钥（sqlite error 1），本次启动使用随机密钥，所有用户现在要重新登录，下次重启后也要再登录一次", common.LogText("keep users signed in after restarts: could not load the login signing key (%s); this start uses a random key, so every user must sign in again now and after the next restart", "sqlite error 1"))
 	common.SetLogLanguage("en")
 	assert.Equal(t, "channel #7 has 2 unfinished tasks", common.LogText(line, 7, 2))
 }
