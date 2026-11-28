@@ -1270,13 +1270,13 @@ services:
 
 **多节点：** 所有节点连同一个数据库时，自动共用数据库里的这一把密钥，在一个节点登录后换到其他节点也有效（以前没设 `SESSION_SECRET` 的多节点部署做不到）；几个节点同时第一次启动也只会生成一把。也可以给所有节点设置相同的 `SESSION_SECRET`，但不要一部分节点设置、一部分不设置。改了开关之后要把所有节点都重启。
 
-**启动时读写数据库失败：** 服务照常启动，这次用随机密钥（和以前一样：之前登录的用户要重新登录，这次启动后登录的用户在下次重启后也要再登录一次）。日志里有一行 ERROR `keep users signed in after restarts: could not load the login signing key (…)`（`DEFAULT_LANGUAGE=zh-CN` 时是「重启或更新后保持用户登录：无法读取或保存登录签名密钥（…）…」），设置页的开关下方提示「本次启动没有使用保存的密钥」。数据库恢复后再重启一次即可。日志里不会打印密钥。
+**启动时读写数据库失败：** 服务照常启动，这次用随机密钥（和以前一样：之前登录的用户要重新登录，这次启动后登录的用户在下次重启后也要再登录一次）。日志里有一行 `keep users signed in after restarts: could not load the login signing key (…)`（`DEFAULT_LANGUAGE=zh-CN` 时是「重启或更新后保持用户登录：无法读取或保存登录签名密钥（…）…」）。这一行写在错误输出里，行首和其他系统日志一样是 `[SYS]`，没有 ERROR 字样，要按上面这段文字搜；括号里只有数据库的错误码，例如表还没建好时是 `mysql error 1146`、`postgres error SQLSTATE 42P01` 或 `sqlite error 1`。设置页的开关下方提示「本次启动没有使用保存的密钥」。数据库恢复后再重启一次即可。日志里不会打印密钥。
 
 **回滚：** 旧版本不认识这个开关和 `server_secrets` 表，每次重启照旧让所有用户退出登录；表留在库里没有影响。之后再升级回来时会继续用表里原来那把密钥：回滚之前登录、还没过期也没退出的会话会恢复有效；不希望这样，就在升级回来之前执行上面的 `DELETE`。
 
 **排查：** 重启后用户还是被退出：
 1. 是不是第一次升级到这个版本（会退出一次）。
-2. 看开关下方的提示：「已保存为关闭」→ 打开并保存，下次重启后生效；「由环境变量 SESSION_SECRET 固定」→ 确认每次启动 `deploy/.env` 里的 `SESSION_SECRET` 都没变；「本次启动没有使用保存的密钥」→ 看启动日志里的 ERROR。
+2. 看开关下方的提示：「已保存为关闭」→ 打开并保存，下次重启后生效；「由环境变量 SESSION_SECRET 固定」→ 确认每次启动 `deploy/.env` 里的 `SESSION_SECRET` 都没变；「本次启动没有使用保存的密钥」→ 在启动日志里找 `could not load the login signing key`（中文日志「无法读取或保存登录签名密钥」）那一行，看括号里的数据库错误码。
 3. 启动日志：`docker compose logs new-api | grep -iE 'signing key|SESSION_SECRET'`（中文日志搜「登录签名密钥」或 `SESSION_SECRET`）。正常时是 `using the login signing key kept in the database`（「使用数据库里保存的登录签名密钥」），第一次是 `saved a new login signing key in the database`。
 4. 查数据库里有没有这一行（只查这两列，不要查 `value`，也不要把它贴到任何地方）：`SELECT name, created_at FROM server_secrets;`。日志说密钥无效（`the kept login signing key is invalid`）时，执行上面的 `DELETE` 再重启。
 5. 多节点：所有节点都已升级并重启；`SESSION_SECRET` 要么都设成同一个值，要么都不设。
