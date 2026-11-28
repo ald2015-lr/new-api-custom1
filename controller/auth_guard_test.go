@@ -424,6 +424,15 @@ func TestPasswordResetCompletionAuditsAndEndsTheLock(t *testing.T) {
 	response = env.login("reset-carol", reset.Data, solvedCaptcha())
 	assert.True(t, loginSucceeded(t, response), "the new password signs in at once: %s", response.Body.String())
 
+	// The link is single use: sending its token again resets nothing and is
+	// audited like any invalid link.
+	response = env.request(http.MethodPost, "/api/user/reset", fmt.Sprintf(`{"email":"carol@example.com","token":%q}`, token))
+	assert.JSONEq(t, `{"success":false,"message":"Password reset link is invalid or has expired","message_key":"Password reset link is invalid or has expired"}`, response.Body.String())
+	assert.Equal(t, map[string]any{"email": "carol@example.com", "reason": "invalid_link"}, lastAuthGuardAudit(t, "user.password_reset_failed").Params)
+	var stored model.User
+	require.NoError(t, env.db.First(&stored, carol.Id).Error)
+	assert.True(t, common.ValidatePasswordAndHash(reset.Data, stored.Password), "a replayed link does not set another password")
+
 	var rows []model.AuditLog
 	require.NoError(t, model.LOG_DB.Find(&rows).Error)
 	for _, row := range rows {

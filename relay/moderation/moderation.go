@@ -150,20 +150,38 @@ func CheckAttempt(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 	return check(c, info, ex, state, audit, started)
 }
 
-// CheckTask is CheckAttempt for a task submission (Sora on an OpenAI
-// channel): it reads the prompt that ValidateRequestAndSetAction stored as
-// "task_request". info must already hold the attempt's channel.
-func CheckTask(c *gin.Context, info *relaycommon.RelayInfo) *taskdto.TaskError {
-	if !moderated(c) || info.ChannelMeta == nil || info.ApiKey == "" {
+// soraTaskPlugin is the one task plugin whose request moderation knows: the
+// text Sora sends is its prompt. Since rc.52 (#8335) any task plugin may
+// declare the OpenAI channel type next to Sora, and such a plugin may send
+// text from any field of its request.
+const soraTaskPlugin = "sora"
+
+// CheckTask is CheckAttempt for a task submission on an OpenAI channel:
+// plugin is the key of the task plugin that builds the attempt's request.
+// For Sora it checks the prompt that ValidateRequestAndSetAction stored as
+// "task_request"; a submission of any other plugin is rejected as
+// unsupported, as Realtime is, because its text cannot be found before it is
+// sent. info must already hold the attempt's channel.
+func CheckTask(c *gin.Context, info *relaycommon.RelayInfo, plugin string) *taskdto.TaskError {
+	if !moderated(c) || info.ChannelMeta == nil {
 		return nil
 	}
 	state := stateOf(c)
-	// An attempt's late request plugins may change the prompt
-	// (requestplugin.TaskAttempt), so each attempt checks the prompt it sends.
-	if prompt, _ := taskPrompt(c); state.task == nil || prompt != state.taskPrompt {
-		state.task, state.taskPrompt = extractTask(c), prompt
+	var apiErr *types.NewAPIError
+	switch {
+	case plugin != soraTaskPlugin:
+		apiErr = rejectUnsupported(c, info, newAudit(info), time.Now(), relaycommon.ModerationDetailRequestType)
+	case info.ApiKey == "":
+		return nil // nothing to protect: the upstream call fails anyway
+	default:
+		// An attempt's late request plugins may change the prompt
+		// (requestplugin.TaskAttempt), so each attempt checks the prompt it
+		// sends.
+		if prompt, _ := taskPrompt(c); state.task == nil || prompt != state.taskPrompt {
+			state.task, state.taskPrompt = extractTask(c), prompt
+		}
+		apiErr = check(c, info, state.task, state, newAudit(info), time.Now())
 	}
-	apiErr := check(c, info, state.task, state, newAudit(info), time.Now())
 	if apiErr == nil {
 		return nil
 	}

@@ -211,6 +211,23 @@ describe('model square list', () => {
     expect(drawer.querySelector('[aria-busy="true"]')).not.toBeNull()
     expect(loadModelDetails).toHaveBeenCalled()
   })
+
+  test('the cards follow the recommended order the server sends, by default', async () => {
+    pricingAnswers.push(() => ({
+      ...pricingPayload,
+      model_order: { recommended: ['beta-model'], requests: [], tokens: [] },
+    }))
+    renderPricing()
+
+    const beta = await screen.findByText('beta-model')
+    const alpha = screen.getByText('alpha-model')
+    expect(
+      beta.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'Recommended' })
+    ).toBeInTheDocument()
+  })
 })
 
 describe('model square errors', () => {

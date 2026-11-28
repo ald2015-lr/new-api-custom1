@@ -93,7 +93,7 @@ test.each([
   async (_, Panel) => {
     render(<Panel />, { wrapper })
 
-    await queryFailed(['perf-metrics-summary', 24])
+    await queryFailed(['dashboard-perf-metrics-summary', 24])
 
     expect(openErrorPage).not.toHaveBeenCalled()
   }

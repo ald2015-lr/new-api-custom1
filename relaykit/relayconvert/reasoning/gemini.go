@@ -525,16 +525,18 @@ func geminiLevelForEffort(model string, effort Effort) (string, error) {
 			return string(EffortLow), nil
 		}
 		return string(EffortHigh), nil
-	case strings.HasPrefix(model, "gemini-4-hydrogen"):
-		// Hydrogen takes low, medium, high and xhigh; minimal is refused.
+	case strings.HasPrefix(model, "gemini-4-"):
+		// Gemini 4 refuses minimal; Neon and Hydrogen also take xhigh.
 		switch effort {
 		case EffortMinimal:
 			return string(EffortLow), nil
 		case EffortXHigh, EffortMax:
-			return string(EffortXHigh), nil
+			if strings.HasPrefix(model, "gemini-4-neon") || strings.HasPrefix(model, "gemini-4-hydrogen") {
+				return string(EffortXHigh), nil
+			}
+			return string(EffortHigh), nil
 		}
 	case strings.HasPrefix(model, "gemini-3.1-pro"), model == "gemini-pro-latest",
-		strings.HasPrefix(model, "gemini-4-"),
 		strings.HasPrefix(model, "gemini-3.7-flash") && !strings.HasPrefix(model, "gemini-3.7-flash-lite"),
 		strings.HasPrefix(model, "gemini-3.8-flash") && !strings.HasPrefix(model, "gemini-3.8-flash-lite"):
 		// These take low, medium and high; minimal is refused with a 400.

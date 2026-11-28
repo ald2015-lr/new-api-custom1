@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,6 +36,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"

@@ -250,8 +250,13 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		return nil, taskErr
 	}
 	// A moderated OpenAI channel checks the prompt before pricing,
-	// pre-consume and send; a rejection is already recorded.
-	if taskErr := moderation.CheckTask(c, info); taskErr != nil {
+	// pre-consume and send; a rejection is already recorded. The check knows
+	// the request of one task plugin only, so it is told whose this is.
+	var taskPlugin string
+	if keyed, ok := adaptor.(interface{ PluginKey() string }); ok {
+		taskPlugin = keyed.PluginKey()
+	}
+	if taskErr := moderation.CheckTask(c, info, taskPlugin); taskErr != nil {
 		return nil, taskErr
 	}
 

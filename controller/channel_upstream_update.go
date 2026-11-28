@@ -534,7 +534,7 @@ func fetchProviderPluginUpstreamModelIDs(channel *model.Channel, plugin *jsplugi
 		return nil, err
 	}
 	settings := channel.GetOtherSettings()
-	settings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(settings.PluginConfig))
+	settings.AdvancedCustom = plugin.Meta.ChannelRelayConfig(plugin.ChannelConfigFor(settings.PluginConfig), settings.PluginRoutes)
 	info := &relaycommon.RelayInfo{
 		RelayFormat:    types.RelayFormatOpenAI,
 		RelayMode:      relayconstant.RelayModeUnknown,

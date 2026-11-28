@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -94,6 +95,34 @@ func (s *RequestPolicyState) BeginAttempt(channel *model.Channel, group string) 
 	s.AddEvent(PolicyEvent{ChannelID: channel.Id, Decision: PolicyDecision{Action: "attempt", Reason: "channel_selected", Source: "routing"}})
 }
 
+// RelayErrorSource tells where a failed attempt went wrong: "channel" for the
+// channel's own key or config (channel:* codes), "transport" when the
+// upstream could not be reached, "local" for an error new-api raised itself
+// before or without an upstream answer, and "upstream" for an upstream error
+// response. Adaptors also report what the upstream answered with new-api
+// error values, so the response codes count as upstream, and a local error
+// that wraps another relay error takes that error's source.
+func RelayErrorSource(err *types.NewAPIError) string {
+	switch {
+	case types.IsChannelError(err):
+		return "channel"
+	case err.GetErrorCode() == types.ErrorCodeDoRequestFailed:
+		return "transport"
+	case err.GetErrorType() != types.ErrorTypeNewAPIError:
+		return "upstream"
+	}
+	switch err.GetErrorCode() {
+	case types.ErrorCodeReadResponseBodyFailed, types.ErrorCodeBadResponseStatusCode, types.ErrorCodeBadResponse,
+		types.ErrorCodeBadResponseBody, types.ErrorCodeEmptyResponse, types.ErrorCodeAwsInvokeError:
+		return "upstream"
+	}
+	var inner *types.NewAPIError
+	if errors.As(err.Unwrap(), &inner) && inner != err {
+		return RelayErrorSource(inner)
+	}
+	return "local"
+}
+
 // RecordPolicyFailure appends the failed attempt and the retry decision made
 // for it. The health entry mirrors the check in ProcessChannelError, which
 // performs the actual disable.
@@ -101,18 +130,11 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 	if c == nil || err == nil {
 		return
 	}
-	source := "upstream"
-	switch {
-	case ClientGone(c):
+	source := RelayErrorSource(err)
+	if ClientGone(c) {
 		// The client's disconnect cancelled the upstream request, so the
 		// relay skips ProcessChannelError for it.
 		source = "client"
-	case types.IsChannelError(err):
-		source = "channel"
-	case err.GetErrorCode() == types.ErrorCodeDoRequestFailed:
-		source = "transport"
-	case err.GetErrorType() == types.ErrorTypeNewAPIError:
-		source = "local"
 	}
 	state := RequestPolicy(c)
 	event := PolicyEvent{ChannelID: channelID, Status: err.StatusCode, ErrorCode: string(err.GetErrorCode()), ErrorSource: source, Decision: PolicyDecision{Action: "failure", Reason: "upstream_failure", Source: source}}
@@ -124,7 +146,8 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 	}
 	state.AddEvent(event)
 	event.Decision, event.Health = decision, "unchanged"
-	if source != "local" && source != "client" && c.GetBool("auto_ban") && ShouldDisableChannel(err) {
+	// ShouldDisableChannel already refuses local errors.
+	if source != "client" && c.GetBool("auto_ban") && ShouldDisableChannel(err) {
 		event.Health = "channel_disable_requested"
 		if common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
 			event.Health = "key_disable_requested"
