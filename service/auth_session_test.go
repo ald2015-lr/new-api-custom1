@@ -442,3 +442,116 @@ func TestUserAuthVersionInvalidatesExistingSession(t *testing.T) {
 	_, err = CreateLoginSessionAtAuthVersion(user.Id, identity.UserAuthVersion, "2fa", "127.0.0.1", "test-agent")
 	assert.ErrorIs(t, err, ErrLoginSessionRevoked, "a pending 2FA flow must not survive an auth-version change")
 }
+
+// startWithoutSessionSecretEnv runs what a process start without SESSION_SECRET
+// and CRYPTO_SECRET does to the secrets: InitEnv leaves one random key for both,
+// then model.InitSessionSecret decides the login signing key.
+func startWithoutSessionSecretEnv(t *testing.T, random string) {
+	t.Helper()
+	common.SessionSecret, common.CryptoSecret = random, random
+	common.SessionSecretSource = common.SessionSecretSourceRandom
+	common.CryptoSecretFromEnv = false
+	model.InitSessionSecret()
+}
+
+// useRestartRedis is one Redis that outlives the restart, with the default
+// cache lifetime (60 seconds), so entries cannot expire during the test.
+func useRestartRedis(t *testing.T) *miniredis.Miniredis {
+	t.Helper()
+	previousRedisEnabled, previousRDB := common.RedisEnabled, common.RDB
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	common.RedisEnabled, common.RDB = true, client
+	t.Cleanup(func() {
+		_ = client.Close()
+		common.RedisEnabled, common.RDB = previousRedisEnabled, previousRDB
+	})
+	return server
+}
+
+func sessionCacheKeys(server *miniredis.Miniredis) []string {
+	var keys []string
+	for _, key := range server.Keys() {
+		if strings.HasPrefix(key, "auth:session:") {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func TestLoginSessionSurvivesARestartOnlyWhileKeepLoginIsOn(t *testing.T) {
+	tests := []struct {
+		name      string
+		keepLogin string // saved before the restart; "" = never saved (on)
+		redis     bool
+		survives  bool
+	}{
+		{name: "on without Redis", survives: true},
+		{name: "on with Redis", keepLogin: "true", redis: true, survives: true},
+		{name: "off", keepLogin: "false", survives: false},
+		{name: "off with Redis", keepLogin: "false", redis: true, survives: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			user := setupAuthSessionTestDB(t)
+			require.NoError(t, model.DB.AutoMigrate(&model.Option{}, &model.ServerSecret{}))
+			previousSessionSecret, previousCryptoSecret := common.SessionSecret, common.CryptoSecret
+			previousSource, previousCryptoFromEnv := common.SessionSecretSource, common.CryptoSecretFromEnv
+			t.Cleanup(func() {
+				common.SessionSecret, common.CryptoSecret = previousSessionSecret, previousCryptoSecret
+				common.SessionSecretSource, common.CryptoSecretFromEnv = previousSource, previousCryptoFromEnv
+			})
+			var server *miniredis.Miniredis
+			if tc.redis {
+				server = useRestartRedis(t)
+			}
+
+			startWithoutSessionSecretEnv(t, "random-at-start-1")
+			bundle, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+			require.NoError(t, err)
+			identity, err := ParseAccessToken(bundle.AccessToken)
+			require.NoError(t, err)
+			_, _, err = ValidateLoginSession(identity)
+			require.NoError(t, err)
+			var cached []string
+			var cachedMAC string
+			if tc.redis {
+				cached = sessionCacheKeys(server)
+				require.Len(t, cached, 1)
+				cachedMAC = server.HGet(cached[0], "CacheMAC")
+				require.NotEmpty(t, cachedMAC)
+			}
+
+			if tc.keepLogin != "" {
+				require.NoError(t, model.DB.Save(&model.Option{Key: model.KeepLoginAcrossRestartOptionKey, Value: tc.keepLogin}).Error)
+			}
+			startWithoutSessionSecretEnv(t, "random-at-start-2")
+
+			restored, err := ParseAccessToken(bundle.AccessToken)
+			if !tc.survives {
+				assert.ErrorIs(t, err, ErrAuthTokenInvalid)
+				_, _, err = RefreshLoginSession(bundle.RefreshToken, bundle.Session.SID, "127.0.0.1", "test-agent")
+				assert.ErrorIs(t, err, ErrRefreshTokenInvalid)
+				stored, err := model.GetUserSessionBySID(bundle.Session.SID)
+				require.NoError(t, err)
+				assert.Equal(t, model.UserSessionStatusActive, stored.Status, "the restart signs the user out without revoking the session row")
+				assert.Zero(t, stored.RevokedAt)
+				return
+			}
+			require.NoError(t, err, "the access token issued before the restart must still verify")
+			assert.Equal(t, identity, restored)
+			_, cachedUser, err := ValidateLoginSession(restored)
+			require.NoError(t, err)
+			assert.Equal(t, user.Id, cachedUser.Id)
+			if tc.redis {
+				// A key or MAC mismatch would miss and write a new entry.
+				assert.Equal(t, cached, sessionCacheKeys(server), "the session cache entry written before the restart is used again")
+				assert.Equal(t, cachedMAC, server.HGet(cached[0], "CacheMAC"), "its MAC must still verify after the restart")
+			}
+			refreshed, _, err := RefreshLoginSession(bundle.RefreshToken, bundle.Session.SID, "127.0.0.1", "test-agent")
+			require.NoError(t, err, "the refresh cookie issued before the restart must still work")
+			assert.Equal(t, bundle.Session.SID, refreshed.Session.SID)
+			assert.NotEqual(t, bundle.RefreshToken, refreshed.RefreshToken)
+		})
+	}
+}
