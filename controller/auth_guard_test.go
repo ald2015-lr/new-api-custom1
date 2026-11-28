@@ -654,6 +654,56 @@ func TestLoginLookupErrorLogsNoTypedName(t *testing.T) {
 	assert.NotContains(t, output.String(), "S3cret!pass")
 }
 
+// With "keep users signed in after restarts" on and neither SESSION_SECRET
+// nor CRYPTO_SECRET set, CryptoSecret is the key kept in server_secrets, in
+// the database that holds the audit rows. A masked input is often a password
+// typed into the name box, so the fingerprint must not be keyed with the kept
+// key: a copy of the database could then test guesses at HMAC speed.
+// CRYPTO_SECRET is never stored, so with it the fingerprint stays keyed with
+// CryptoSecret and comparable across restarts.
+func TestAuditFingerprintIsNotKeyedWithTheKeptLoginKey(t *testing.T) {
+	const typed = "Summer2024!"
+	keyedWith := func(secret string) string {
+		return common.GenerateHMACWithKey([]byte("audit-identifier-v1:"+secret), typed)[:8]
+	}
+	for _, cryptoFromEnv := range []bool{false, true} {
+		t.Run(fmt.Sprintf("CRYPTO_SECRET set %t", cryptoFromEnv), func(t *testing.T) {
+			env := setupAuthGuardTest(t)
+			common.LoginCaptchaEnabled = false
+			require.NoError(t, env.db.AutoMigrate(&model.ServerSecret{}))
+			previousSessionSecret, previousCryptoSecret := common.SessionSecret, common.CryptoSecret
+			previousSource, previousCryptoFromEnv := common.SessionSecretSource, common.CryptoSecretFromEnv
+			t.Cleanup(func() {
+				common.SessionSecret, common.CryptoSecret = previousSessionSecret, previousCryptoSecret
+				common.SessionSecretSource, common.CryptoSecretFromEnv = previousSource, previousCryptoFromEnv
+			})
+			// What InitEnv leaves without SESSION_SECRET, then the start step.
+			common.SessionSecret, common.SessionSecretSource = "random-at-start", common.SessionSecretSourceRandom
+			common.CryptoSecret, common.CryptoSecretFromEnv = "random-at-start", false
+			if cryptoFromEnv {
+				common.CryptoSecret, common.CryptoSecretFromEnv = "crypto-from-env", true
+			}
+			model.InitSessionSecret()
+			require.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
+			var kept model.ServerSecret
+			require.NoError(t, env.db.Where("name = ?", "session_secret").First(&kept).Error)
+			require.Equal(t, kept.Value, common.SessionSecret)
+
+			env.login(" "+typed+" ", "wrong", "")
+			row := lastAuthGuardAudit(t, "user.login_failed")
+			require.Equal(t, "…", row.Params["identifier"])
+			fingerprint := row.Params["identifier_fingerprint"]
+			assert.Regexp(t, `^[0-9a-f]{8}$`, fingerprint)
+			assert.NotEqual(t, keyedWith(kept.Value), fingerprint, "the key kept in the database must not reproduce the fingerprint")
+			env.login(typed, "wrong", "")
+			assert.Equal(t, fingerprint, lastAuthGuardAudit(t, "user.login_failed").Params["identifier_fingerprint"], "the same value gives the same fingerprint within a run")
+			if cryptoFromEnv {
+				assert.Equal(t, keyedWith("crypto-from-env"), fingerprint, "CRYPTO_SECRET keys the fingerprint, so it stays the same after a restart")
+			}
+		})
+	}
+}
+
 // Concurrent wrong passwords for one account: at most the maximum of them
 // reach the password check; the rest are refused as locked.
 func TestLoginLockoutHoldsUnderConcurrentRequests(t *testing.T) {

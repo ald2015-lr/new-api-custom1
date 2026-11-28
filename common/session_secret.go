@@ -1,5 +1,10 @@
 package common
 
+import (
+	"crypto/rand"
+	"encoding/hex"
+)
+
 // SecretSource says where this run's SessionSecret, the key that signs
 // logins, came from.
 type SecretSource string
@@ -37,4 +42,27 @@ func UsePersistedSessionSecret(secret string) {
 // after a restart: CRYPTO_SECRET is set, or SessionSecret is not random.
 func CryptoSecretSurvivesRestart() bool {
 	return CryptoSecretFromEnv || SessionSecretSource != SessionSecretSourceRandom
+}
+
+// auditFingerprintRunSecret is made at this start and never stored; see
+// AuditFingerprintSecret.
+var auditFingerprintRunSecret = func() string {
+	random := make([]byte, 32)
+	_, _ = rand.Read(random) // never fails since Go 1.24
+	return hex.EncodeToString(random)
+}()
+
+// AuditFingerprintSecret is the key of the audit "input fingerprints": a
+// login or password reset input that is neither an account name nor an email
+// address is stored only as a fingerprint, since it is often a password typed
+// into the wrong box. It is CryptoSecret, unless that is the key kept in the
+// database: the fingerprints are in the same database (audit_logs), so a copy
+// or backup of it would let its holder test guesses offline. Then it is a key
+// made at this start and never stored, and fingerprints match within one run
+// only, as they did before the key was kept.
+func AuditFingerprintSecret() string {
+	if SessionSecretSource == SessionSecretSourceDatabase && !CryptoSecretFromEnv {
+		return auditFingerprintRunSecret
+	}
+	return CryptoSecret
 }
