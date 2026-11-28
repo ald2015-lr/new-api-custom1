@@ -32,6 +32,7 @@ const AUTH_SECTIONS = [
     build: (settings: AuthSettings) => (
       <BasicAuthSection
         defaultValues={{
+          KeepLoginAcrossRestartEnabled: settings.KeepLoginAcrossRestartEnabled,
           PasswordLoginEnabled: settings.PasswordLoginEnabled,
           PasswordRegisterEnabled: settings.PasswordRegisterEnabled,
           EmailVerificationEnabled: settings.EmailVerificationEnabled,
@@ -41,6 +42,7 @@ const AUTH_SECTIONS = [
           EmailQQNumericOnlyEnabled: settings.EmailQQNumericOnlyEnabled,
           EmailDomainWhitelist: settings.EmailDomainWhitelist,
         }}
+        keepLoginSource={settings.KeepLoginAcrossRestartSource}
       />
     ),
   },

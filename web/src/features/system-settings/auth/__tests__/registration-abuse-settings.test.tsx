@@ -198,6 +198,7 @@ describe('QQ mail rule in basic authentication', () => {
     await renderSection(
       <BasicAuthSection
         defaultValues={{
+          KeepLoginAcrossRestartEnabled: true,
           PasswordLoginEnabled: true,
           PasswordRegisterEnabled: true,
           EmailVerificationEnabled: true,
@@ -207,6 +208,7 @@ describe('QQ mail rule in basic authentication', () => {
           EmailQQNumericOnlyEnabled: true,
           EmailDomainWhitelist: 'qq.com',
         }}
+        keepLoginSource='database'
       />
     )
 

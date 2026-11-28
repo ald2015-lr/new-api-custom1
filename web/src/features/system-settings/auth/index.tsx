@@ -25,6 +25,8 @@ import {
 } from './section-registry.tsx'
 
 const defaultAuthSettings: AuthSettings = {
+  KeepLoginAcrossRestartEnabled: true,
+  KeepLoginAcrossRestartSource: '',
   PasswordLoginEnabled: true,
   PasswordRegisterEnabled: true,
   EmailVerificationEnabled: false,

@@ -157,6 +157,10 @@ export type SiteSettings = {
 }
 
 export type AuthSettings = {
+  /** Keep users signed in after restarts; the server reads it at its next start */
+  KeepLoginAcrossRestartEnabled: boolean
+  /** Read-only: 'env' | 'database' | 'random' — where this server run's login signing key came from; '' if unknown */
+  KeepLoginAcrossRestartSource: string
   PasswordLoginEnabled: boolean
   PasswordRegisterEnabled: boolean
   EmailVerificationEnabled: boolean
