@@ -111,14 +111,14 @@ SELECT `key`, `value` FROM options WHERE `key` LIKE 'WaffoPancake%';
 
 ## 三、合并上游更新并重新构建
 
-当前基线：`v1.0.0-rc.51`（2026-11-25 合并）。历次同步：rc.30 → rc.40（2026-09-27）→ rc.41（2026-10-01）→ rc.42 + 上游 `main` 到 `7aa3531ef` 的 1 个修复提交（2026-10-08）→ rc.46（2026-10-22）→ rc.49（2026-11-11）→ rc.51（2026-11-25），每次都以合并提交进入 `main`，保留上游的提交历史。上游发新版时：
+当前基线：`v1.0.0-rc.52`（2026-11-28 合并）。历次同步：rc.30 → rc.40（2026-09-27）→ rc.41（2026-10-01）→ rc.42 + 上游 `main` 到 `7aa3531ef` 的 1 个修复提交（2026-10-08）→ rc.46（2026-10-22）→ rc.49（2026-11-11）→ rc.51（2026-11-25）→ rc.52（2026-11-28），每次都以合并提交进入 `main`，保留上游的提交历史。上游发新版时：
 
 ```bash
 git remote add upstream https://github.com/QuantumNous/new-api.git   # 只需一次
 git fetch upstream --tags
 
 git checkout main
-git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 upstream/main
+git merge v1.0.0-rc.52        # 换成上游最新的 release tag，不要用 upstream/main
 ```
 
 冲突大概率出现在这几个文件（就是定制改动所在的位置）：
@@ -150,7 +150,8 @@ git merge v1.0.0-rc.51        # 换成上游最新的 release tag，不要用 up
 | `model/model_pricing_conversion.go`（`ConvertAllModelPricing`）、`controller/model_pricing_config.go`、`router/api-router.go`、`pkg/billingexpr/fixed.go`、`model/pricing.go`；前端 `features/model-pricing`、`features/system-settings/models`、`features/pricing` | 一键把旧定价全部转为计费表达式；修复编辑器把占位表达式 `p * 0 + c * 0` 存成 $0 计费；按次表达式在模型广场归入「按次计费」（见第十二节） |
 | 新文件 `relay/helper/keepalive_writer.go`，以及 `controller/relay.go`（安装保活写出器、出错时按已提交的格式写错误）、`relay/channel/api_request.go`、`relay/channel/providerplugin/stream.go`（rc.51 起）与 `relay/helper/stream_scanner.go`（装了写出器时跳过旧的 ping；`keepAliveWriterOf` 沿 `Unwrap` 穿过前面包着的 writer 找保活写出器）、`setting/operation_setting/general_setting.go`、`model/option.go`、`controller/plugin_protocol{,_image}.go`（插件同步任务）；前端 `features/system-settings/models/global-settings-card.tsx` | 长请求保活：流式按客户端协议发心跳（Claude 发 `event: ping`，Responses 在第一个事件之后发 `event: keepalive`，其余发 `: PING`）、非流式发前导换行，只发过心跳时仍可重试（见第十三节） |
 | `relay/channel/api_request.go`（`DoApiRequest` / `DoFormRequest` 用 `http.NewRequestWithContext`）、`relay/channel/providerplugin/chain.go`（rc.51 起，provider 插件转换路由的 `sendStep` 同样用 `http.NewRequestWithContext(c.Request.Context(), …)`）、`service/relay_error.go`（`ClientGone`，`DecideRelayRetry` 的 `client_gone`）、`service/request_policy.go`、`controller/relay.go`（客户端已断开时不调用 `processChannelError`）、`relay/helper/stream_scanner.go`（读上游出错时先看客户端是否已断开）、`relay/responses_websocket.go`（WebSocket 连接上游失败时同样跳过 `ProcessChannelError`）、`relay/channel/{ollama/stream.go,coze/relay-coze.go,zhipu/relay-zhipu.go,cloudflare/relay_cloudflare.go,openai/audio.go}`（自己读上游的处理器：客户端断开后按已收到的文本结算、不记 ERR，TTS 非流式退款）；前端 `features/system-settings/request-policies/policy-label.ts` | 客户端断开时取消上游请求，不重试、不算渠道错误、退还预扣额度（见第十三节） |
-| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`、`model/pricing_default.go`（按名称识别供应商的有序规则、供应商别名）、`controller/model_square_option.go`、`router/api-router.go` 与 `middleware/access_token_routes.go`（`PUT /api/option/model_square`）；前端 `features/pricing/lib/model-variants.ts`、`lib/model-name-fold.ts`、`lib/filters.ts`、`hooks/use-filters.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`components/pricing-sidebar.tsx`、`components/pricing-toolbar.tsx`、`features/system-settings/models/model-square-*`、`features/system-settings/api.ts` 与 `hooks/use-update-option.ts` | 模型广场按基础模型合并变体（见第十四节）；rc.51 起系列卡片、线路价格、分组价格和缓存价格列都先经上游的 `withBasePricing`，普通请求按模型价格计费的模型（`ordinary_pricing`）显示和单模型卡片一样的价格；合并版本号写法和带日期的快照、左侧筛选项开关、设置一次保存、按名称识别供应商（见第十四节） |
+| 新文件 `setting/operation_setting/model_square_setting.go`，以及 `controller/pricing.go`（`model_square` 字段）、`model/option.go`、`model/pricing_default.go`（按名称识别供应商的有序规则、供应商别名）、`controller/model_square_option.go`、`router/api-router.go` 与 `middleware/access_token_routes.go`（`PUT /api/option/model_square`）；前端 `features/pricing/lib/model-variants.ts`、`lib/model-name-fold.ts`、`lib/model-family.ts`、`lib/filters.ts`、`hooks/use-filters.ts`、`model-family*.tsx`、`model-variant-list.tsx`、`pricing-family-cells.tsx`、`components/pricing-sidebar.tsx`、`components/pricing-toolbar.tsx`、`features/system-settings/models/model-square-*`、`features/system-settings/api.ts` 与 `hooks/use-update-option.ts` | 模型广场按基础模型合并变体（见第十四节）；rc.51 起系列卡片、线路价格、分组价格和缓存价格列都先经上游的 `withBasePricing`，普通请求按模型价格计费的模型（`ordinary_pricing`）显示和单模型卡片一样的价格；合并版本号写法和带日期的快照、左侧筛选项开关、设置一次保存、按名称识别供应商（见第十四节）。rc.52 起上游也有一个同名的 `model_square_setting.go`（推荐排序 `sort_mode` / `sort_metric` / `sort_days` / `sort_models`），两边合成一个结构：显示设置照旧由 `IsModelSquareOptionKey` 和 `PUT /api/option/model_square` 处理，排序设置走上游的通用配置和 `PUT /api/option/`；`/api/pricing` 同时返回 `model_square` 和上游的 `model_order`，系列卡片由 `lib/model-family.ts` 的 `sortModelFamilies` 按 `model_order` 排序 |
+| `pluginkit/host.go`（rc.52 起上游拆出的 `pluginkit` 模块） | `newAPIReservedKeys`（插件 key 不能使用的路径第一段）加了 `"ai"`：定制版的 NovelAI 原生接口 `/ai/generate-image` 等占用了 `/ai`。`router` 包的 `TestNewAPIReservedKeysMatchHostRoutes` 检查这个列表和全部路由的第一段一致，定制版以后新增顶层路由时同样要加进去 |
 | `web/src/features/home/components/sections/hero.tsx` | 首页按钮：登录后显示「前往仪表盘 / 模型广场 / 文档」 |
 | `web/src/lib/{chunk-load-error,stale-bundle}.ts`、`features/errors/general-error.tsx`、`i18n/config.ts`、`main.tsx`、`lib/http-client.ts`、`rsbuild.config.ts` | 前端自愈刷新、新版本提示、语言包懒加载（见第六节） |
 | 新文件 `web/src/features/system-settings/*/section-meta.ts`（8 个设置页各一个）、`features/system-settings/utils/section-meta.ts`、`web/src/lib/build-version-meta.ts`，以及 `features/system-settings/utils/section-registry.ts`、`web/src/routes/_authenticated/system-settings/` 下的 15 个路由文件（`request-policies/index.tsx` 只做跳转，不引用注册表，没有改）、`components/layout/config/system-settings.config.ts`、`lib/build-metadata.ts`、`rsbuild.config.ts`（`splitChunks` 含 `console-kit` / `console-table` 两组、`runtimeChunk`、`html.meta`）、新文件 `web/scripts/console-chunks.{mjs,d.mts}` | 系统设置代码不进首屏（见第六节）：路由守卫和侧栏只引用各设置页的 `section-meta.ts`。上游给某个设置页的 `section-registry.tsx` 增删或调整分区时，同步改旁边的 `section-meta.ts`，`section-meta.test.tsx` 会检查两者的分区 id、顺序、默认分区和侧栏链接是否一致；路由文件或侧栏重新引用 `section-registry` 时测试会失败。构建版本号写在 `index.html` 的 `<meta name="new-api-version">` 里（写入前做 HTML 转义），不再编进 JS。控制台页面共用的界面组件和数据表格由 `console-kit`、`console-table` 两组单独成块，只在控制台的 chunk 之间共用：`scripts/console-chunks.mjs` 按 TanStack Router 代码分割的路由文件（`src/routes/_authenticated/` 下的 `?tsr-split=`）判断哪些 chunk 属于控制台，上游调整路由目录或代码分割方式时用 `scripts/__tests__/console-chunks.test.ts` 和构建结果确认这两个文件仍然生成 |
@@ -194,6 +195,16 @@ rc.49 → rc.51（2026-11-25，合并提交 `4cdc46af5`）：上游这一版的�
 - i18n：后端 `i18n/keys.go` 和三个 yaml、前端 7 个语言包都按 key 取并集，合并后 `node scripts/sync-i18n.mjs` 无差异。
 
 下次合并要注意：同步分支经 PR 合入 `main` 时选「Create a merge commit」，不要 Squash，否则丢掉上游父提交，下一次同步会把上游整段历史都当成冲突；上游新增的管理接口要同时出现在 `middleware/access_token_routes.go` 里（`router` 包的 `TestAccessTokenRouteRulesCoverEveryDashboardRoute` 会检查），并确认副管理员拿不到充值数据（第十七节）；上游每多一个能改写请求体的插件阶段，都要确认它在审查之前还是之后（第十八节），以及 NovelAI `n_samples` 这类计费数量在改写之后仍被校验；上游新加的 ping，或新包在 `c.Writer` 外面的 writer，都要确认装了保活写出器时不会再发第二路心跳（writer 要实现 `Unwrap`）；上游新增的、不经过 `DoApiRequest` 自己构建上游请求的代码，都要用 `http.NewRequestWithContext(c.Request.Context(), …)` 绑定客户端的请求，否则客户端断开后上游照样把回答生成完，还可能照常计费（provider 插件路由由 `router` 包 `TestPluginConverterCancelsTheUpstreamWhenTheClientLeaves` 覆盖）。
+
+rc.51 → rc.52（2026-11-28，合并提交 `0ab02e0fc`）：上游这一版有一个找回密码的安全修复，插件 API 拆成了独立的 `pluginkit` 模块，provider 插件路由可以按渠道开关，模型广场加了推荐排序。32 个文件冲突（后端 19、前端 13）：
+- 找回密码与登录（`common/verification.go`、`controller/misc.go`、`model/user.go`）：上游的修复（重置令牌和链接都用账号里存的邮箱、邮件发到这个地址、令牌由 `ConsumeCodeWithKey` 校验时即作废、登录时精确匹配邮箱）和第十九节的验证码、每邮箱限额、审计、登录锁定并存。定制版的登录走 `FindPasswordLoginUser`，上游的精确邮箱查找放进了这里，只改 `ValidateAndFill` 对实际登录不起作用。
+- 模型广场：两边都新建了 `setting/operation_setting/model_square_setting.go`，类型、变量、配置名和校验函数都同名，合成一个结构（见上表）。上游新的默认排序「推荐」在没设推荐顺序时和原来的按名称排序一样，系列卡片的排法见第十四节。
+- 选渠道：上游重构了 `CacheGetRandomSatisfiedChannel`，模型不在任何可用分组时返回 404、否则 503；定制的已试渠道和渠道限额用完的 429 都保留，429 在上游的判断之前。`ShouldDisableChannel`、`RecordPolicyFailure` 改用上游的 `RelayErrorSource`，NovelAI / Gemini 免费 key 忙碌仍不禁用渠道，客户端断开仍单独归类。
+- relaykit 的 Gemini 转换：思考和正文照旧分字段，同时用上游的逐字拼接文本和 grounding 偏移（只按正文计算）。
+- 上游 #8474 让 Claude 格式的每个事件只以一个空行结尾，定制版的流内错误事件（`WriteStreamError`）跟着变。上游新的 Gemini 音频计费测试假设流里的 `{"error":…}` 被丢掉、照常计费；定制版按上游给的状态码报错（第七节），和 Claude 流内的 `error` 事件一样退还预扣额度，出错前已输出的部分不计费，这个测试改成期望报错。
+- i18n：前端 7 个语言包按 key 取并集，没有两边都改过的 key，`node scripts/sync-i18n.mjs` 无差异。
+
+下次合并还要注意：上游再改找回密码或登录时，确认改动落在定制版实际调用的 `FindPasswordLoginUser` 和 `SendPasswordResetEmail` 的分支里，每个请求仍写一条审计、未注册的邮箱仍得到同样的回答；上游的测试连续给同一邮箱发重置邮件时，要在测试里关掉定制的找回密码验证码和每邮箱限额（`controller/email_delivery_test.go` 就是这样做的）；上游给 `model_square_setting.go` 加设置项时，分清它属于显示设置还是排序设置，两者各走各的保存接口；上游改模型广场的排序时，同时看 `lib/model-family.ts` 里系列卡片的排序；定制版或上游新增顶层路由时，同步 `pluginkit/host.go` 的 `newAPIReservedKeys`。
 
 解冲突的原则：**保留定制改动，接受上游其他部分**。解完必须验证：
 
@@ -608,6 +619,8 @@ curl -N https://<你的域名>/v1/chat/completions \
 
 **左侧筛选栏：** 可以单独显示或隐藏「分组」「供应商」「模型标签」「定价类型」「端点类型」五个筛选项，手机上的「筛选」抽屉也跟着变。默认显示分组、供应商、定价类型，隐藏模型标签和端点类型（老站点升级后也是这样，需要时手动打开）。隐藏的筛选项不显示也不生效：链接里带的 `?tag=`、`?endpointType=` 等参数会被忽略。五个都隐藏时左侧栏整个不显示。
 
+**排序（rc.52 起）：** 排序菜单多了上游的「推荐」「请求最多」「Token 最多」，默认是「推荐」。推荐顺序由 root 在 控制台 → 模型 →「模型广场排序」里设置（手动排序、使用最多、置顶 + 使用最多）；没设置时（默认手动排序、列表为空）卡片顺序和原来默认的按名称排序一样。系列卡片排在它当前显示出来的成员里排名最靠前的那个的位置（例如把 `[按次]x-thinking` 排在第一，整张 `x` 卡片就排在最前），没有成员在列表里的卡片按名称排在后面；卡片里线路和变体的顺序不变。接口只给顺序、不给用量数字，所以不能按一张卡所有变体的用量之和来排。「请求最多」「Token 最多」「使用最多」按最近 1 / 7 / 30 天（默认 7 天）的用量排，用量来自数据看板的统计（`DataExportEnabled`，默认开），没有用量数据时按名称排。关掉「合并模型变体」时按上游的规则逐个模型排序。
+
 **在哪设置：** 系统设置 → 模型 → 模型广场显示（点「保存」时一次提交，全部生效或全部不生效）：
 - 「合并模型变体」开关（默认开），关掉即恢复成每个模型名一张卡（下面两个合并开关随之失效）；
 - 「合并版本号写法」（默认开）：上面说的 `-`/`.`、大小写、`厂商/` 前缀；
@@ -905,7 +918,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 12. 用户安全标识的覆盖范围见上一节。设置标识之后才执行的渠道参数覆盖、请求处理插件的 outbound 阶段（包括 rc.51 的「全局参数覆盖」插件）和渠道绑定实例的 ingress 能改掉或删除它，例如「全局参数覆盖」里一条删除 `safety_identifier` 的规则会让所有 OpenAI 渠道都不再发送标识；开启这个开关时不要在这些规则里改 `safety_identifier`。Chat Completions 转 Responses 时，这些规则都在设置标识之前执行，无法改掉它。
 13. 同一个 OpenAI 组织下所有 KEY 共用审查额度。一个用户连续发大段新内容就可能在一分钟内用光额度：这时所有「失败时拒绝」的渠道对所有用户都返回 503，「失败时放行」的渠道则不经审查转发。OpenAI SDK、Claude Code、Codex 遇到 503 会自动重试，会进一步放大审查调用量。v1 没有按用户的审查额度，也没有熔断。
 14. 「审查失败时放行」对所有失败原因都放行，包括请求本身造成的失败：例如图片地址 OpenAI 下载不了、data URL 格式错误。在放行的渠道上，这样的请求（连同图片）会不经审查转发；在拒绝的渠道上返回 503。
-15. 参数覆盖在审查之后执行：如果覆盖规则把客户端的请求头或未检查的字段复制进 `messages`、`input`、`instructions`，这部分不会被审查。渠道的系统提示词、参数覆盖里写的内容也不检查。rc.51 起的请求处理插件同理：全局实例和请求所在分组的实例在请求开始时 ingress 阶段的改写会被审查；渠道绑定的实例（渠道的「请求处理插件」）和自动分组跨分组重试后才生效的分组实例，它们的 ingress 在每次尝试的审查之后才执行，和 outbound 阶段的改写一样不会被审查（视频任务 `/v1/videos` 例外：每次尝试先执行这些 ingress，再按改写后的提示词审查）。插件只有 root 能配置；不要把会添加、解码或还原文字的插件绑定到开启审查的渠道上。
+15. 参数覆盖在审查之后执行：如果覆盖规则把客户端的请求头或未检查的字段复制进 `messages`、`input`、`instructions`，这部分不会被审查。渠道的系统提示词、参数覆盖里写的内容也不检查。rc.51 起的请求处理插件同理：全局实例和请求所在分组的实例在请求开始时 ingress 阶段的改写会被审查；渠道绑定的实例（渠道的「请求处理插件」）和自动分组跨分组重试后才生效的分组实例，它们的 ingress 在每次尝试的审查之后才执行，和 outbound 阶段的改写一样不会被审查（视频任务 `/v1/videos` 例外：每次尝试先执行这些 ingress，再按改写后的提示词审查）。rc.52 起插件可以声明作用范围（root 确认一次后自动生效）：只限定模型的实例和全局实例一样在请求开始时执行 ingress，会被审查；限定了渠道类型的实例要等选定渠道后才生效，它的 ingress 和渠道绑定的实例一样在审查之后执行，不会被审查（`/v1/videos` 的例外同上）。插件只有 root 能配置；不要把会添加、解码或还原文字的插件绑定到开启审查的渠道上，也不要让这类插件的作用范围包含开启审查的渠道类型。
 16. OpenAI 自 2026-11-20 起对「模型接入中间商」的使用政策调整（需要事先获批）不是代码能解决的，请自行评估。
 
 **以后可能加的选项（v1 没有）：** 「无法完整审查时拒绝请求」（超出字数、图片被跳过、有无法检查的内容时一律拒绝）；按用户的审查额度。需要时提出来。
@@ -956,7 +969,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 只给和账号邮箱**完全相同**的地址（不区分大小写）发重置链接：带重音或全角字母、只是被 MySQL 排序规则当作相同的写法不再算这个账号的邮箱，也不会收到它的重置链接。
 - **已知取舍：** 任何人都能用掉某个邮箱当天的 5 封。邮箱主人只能等待，或请管理员在用户管理里点「解除登录锁定」（同时清除这个邮箱的重置邮件计数），或由管理员直接改密码。
 - 通过邮件链接重置成功后，这个账号的登录锁定也会解除。
-- 重置链接发出后 10 分钟内有效（没有改变）；每次新申请都会让同一邮箱之前的链接失效。
+- 重置链接发出后 10 分钟内有效（没有改变）；每次新申请都会让同一邮箱之前的链接失效。rc.52 起（上游的安全修复）链接只能用一次，用它重置时就作废，之后即使服务器出错也要重新申请；邮件没发出去时，这封邮件里的链接随即作废；链接里的邮箱和收件地址都用账号里保存的地址。
 
 **登录验证码：**
 - 每次用户名 + 密码登录都要填（包括开启了密码加密传输的情况）；两步验证那一步、Passkey、第三方登录不需要。验证码错误不算密码错误，不计入锁定，但会写一条审计。
