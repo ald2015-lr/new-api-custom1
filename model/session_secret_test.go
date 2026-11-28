@@ -135,17 +135,15 @@ func TestStartUsesTheSecretsSetInTheEnvironment(t *testing.T) {
 	kept := strings.Repeat("0123456789abcdef", 4)
 	type start struct {
 		name, sessionSecretEnv, cryptoSecretEnv string
-		session, crypto, fingerprintKey         string
+		session, crypto                         string
 		source                                  common.SecretSource
 		keptRows                                int
 	}
 	tests := []start{
 		{name: "SESSION_SECRET", sessionSecretEnv: "session-from-env",
-			session: "session-from-env", crypto: "session-from-env", fingerprintKey: "session-from-env",
-			source: common.SessionSecretSourceEnv, keptRows: 0},
+			session: "session-from-env", crypto: "session-from-env", source: common.SessionSecretSourceEnv, keptRows: 0},
 		{name: "CRYPTO_SECRET", cryptoSecretEnv: "crypto-from-env",
-			session: kept, crypto: "crypto-from-env", fingerprintKey: "crypto-from-env",
-			source: common.SessionSecretSourceDatabase, keptRows: 1},
+			session: kept, crypto: "crypto-from-env", source: common.SessionSecretSourceDatabase, keptRows: 1},
 	}
 	if child := os.Getenv("KEEP_LOGIN_TEST_START"); child != "" {
 		i := slices.IndexFunc(tests, func(tc start) bool { return tc.name == child })
@@ -160,7 +158,7 @@ func TestStartUsesTheSecretsSetInTheEnvironment(t *testing.T) {
 		assert.Equal(t, tc.crypto, common.CryptoSecret)
 		assert.Equal(t, tc.source, common.SessionSecretSource)
 		assert.True(t, common.CryptoSecretSurvivesRestart())
-		assert.Equal(t, tc.fingerprintKey, common.AuditFingerprintSecret(), "a key set in the environment is never stored, so it keys the audit fingerprints")
+		assert.Equal(t, tc.crypto, common.AuditFingerprintSecret(), "CryptoSecret comes from the environment and is never stored, so it keys the audit fingerprints")
 		assert.Len(t, keptSessionSecrets(t, db), tc.keptRows)
 		return
 	}
