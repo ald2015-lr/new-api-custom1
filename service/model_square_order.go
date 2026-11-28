@@ -2,7 +2,9 @@ package service
 
 import (
 	"cmp"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"golang.org/x/sync/singleflight"
 )
 
 // ModelSquareOrder lists model names for the model square sorts. Models
@@ -29,10 +32,20 @@ type modelUsageCacheItem struct {
 var (
 	modelUsageCacheMu sync.Mutex
 	modelUsageCache   = map[int]modelUsageCacheItem{}
+	// modelUsageLoads runs one usage query per period at a time, as
+	// rankingBuilds does for the rankings: the public /api/pricing asks for
+	// the usage on every model square visit, so concurrent visits without
+	// usable totals wait for the same quota_data aggregation.
+	modelUsageLoads singleflight.Group
+	// loadModelUsageTotals queries the usage; tests replace it.
+	loadModelUsageTotals = model.GetModelUsageTotals
 )
 
 // GetModelUsageTotals returns each model's usage over the last days, cached
-// like the rankings. Without dashboard data there is no usage.
+// like the rankings: totals that expired less than rankingCacheTTL ago are
+// returned at once while one background query replaces them; without totals,
+// or with older ones, the caller waits for the shared query. Without
+// dashboard data there is no usage.
 func GetModelUsageTotals(days int) ([]model.ModelUsageTotal, error) {
 	if !common.DataExportEnabled {
 		return nil, nil
@@ -44,8 +57,39 @@ func GetModelUsageTotals(days int) ([]model.ModelUsageTotal, error) {
 	if ok && now.Before(item.expiresAt) {
 		return item.totals, nil
 	}
+	key := strconv.Itoa(days)
+	if ok && now.Before(item.expiresAt.Add(rankingCacheTTL)) {
+		// The result channel is buffered, so nobody needs to read it.
+		modelUsageLoads.DoChan(key, func() (any, error) { return loadAndCacheModelUsage(days) })
+		return item.totals, nil
+	}
 
-	totals, err := model.GetModelUsageTotals(now.AddDate(0, 0, -days).Unix(), now.Unix())
+	value, err, _ := modelUsageLoads.Do(key, func() (any, error) { return loadAndCacheModelUsage(days) })
+	if err != nil {
+		return nil, err
+	}
+	return value.([]model.ModelUsageTotal), nil
+}
+
+// loadAndCacheModelUsage queries the usage of a period and caches it. A
+// failed query caches nothing, so the next request tries again. A panic is
+// returned as an error: a background query has no request to recover it.
+func loadAndCacheModelUsage(days int) (totals []model.ModelUsageTotal, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			totals, err = nil, fmt.Errorf("loading the model usage of %d days panicked: %v", days, r)
+		}
+	}()
+	now := time.Now()
+	// A query that finished after the caller read the cache has already
+	// replaced the totals: use them rather than query again.
+	modelUsageCacheMu.Lock()
+	item, ok := modelUsageCache[days]
+	modelUsageCacheMu.Unlock()
+	if ok && now.Before(item.expiresAt) {
+		return item.totals, nil
+	}
+	totals, err = loadModelUsageTotals(now.AddDate(0, 0, -days).Unix(), now.Unix())
 	if err != nil {
 		return nil, err
 	}
