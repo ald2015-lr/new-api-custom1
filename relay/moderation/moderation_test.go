@@ -2303,7 +2303,7 @@ func TestCheckAttemptRejectsAndRecords(t *testing.T) {
 	task := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, nil)
 	task.info.InitChannelMeta(task.c)
 	task.c.Set("task_request", relaycommon.TaskSubmitReq{Prompt: "MOD-FLAG-SEXUAL video"})
-	taskErr := CheckTask(task.c, task.info)
+	taskErr := CheckTask(task.c, task.info, "sora")
 	require.NotNil(t, taskErr)
 	assert.Equal(t, "content_moderation_flagged", taskErr.Code)
 	assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
@@ -2311,8 +2311,65 @@ func TestCheckAttemptRejectsAndRecords(t *testing.T) {
 	assert.Equal(t, "The request was rejected by content moderation", taskErr.Message)
 	task.c.Set(string(constant.ContextKeyModerationState), nil)
 	clean.c.Set("task_request", map[string]any{"prompt": "a calm sea"})
-	assert.Nil(t, CheckTask(clean.c, clean.info))
+	assert.Nil(t, CheckTask(clean.c, clean.info, "sora"))
 	assert.Len(t, moderationRows(t), 2)
+}
+
+// Only Sora's task request is known: its text is the prompt. Since rc.52 any
+// task plugin may run on an OpenAI channel, and its text may be in any field,
+// so on a moderated channel a submission that another plugin builds, or one
+// whose plugin is unknown, is rejected as unsupported whatever its prompt
+// says, before any rule or moderation call, and even without a key. A channel
+// without moderation is not touched.
+func TestCheckTaskKnowsOnlySora(t *testing.T) {
+	setupModerationDB(t)
+	memoryStore(t)
+	fake := newFakeModeration(t)
+	submission := func(options ...attemptOption) *attempt {
+		a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, nil, options...)
+		a.info.InitChannelMeta(a.c)
+		a.c.Set("task_request", map[string]any{"prompt": "a calm sea", "text": "MOD-FLAG-SEXUAL video"})
+		return a
+	}
+
+	for _, tc := range []struct {
+		plugin  string
+		options []attemptOption
+	}{
+		{plugin: "kling"},
+		{plugin: "Sora"},
+		{plugin: ""},
+		{plugin: "kling", options: []attemptOption{withChannel(7, "")}},
+	} {
+		a := submission(tc.options...)
+		taskErr := CheckTask(a.c, a.info, tc.plugin)
+		require.NotNil(t, taskErr, tc.plugin)
+		assert.Equal(t, "content_moderation_unsupported", taskErr.Code)
+		assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+		assert.True(t, taskErr.LocalError)
+		assert.False(t, TaskKeyFailed(a.c, taskErr))
+		assert.Equal(t, "This endpoint is not available on channels with content moderation", taskErr.Message)
+		assert.True(t, a.info.PerformanceBusinessRejection)
+	}
+	assert.Zero(t, fake.calls.Load(), "no moderation call")
+	rows := moderationRows(t)
+	require.Len(t, rows, 4)
+	for _, row := range rows {
+		assert.Equal(t, "Rejected: endpoint not available with content moderation", row.Content)
+		audit := rowAudit(t, row)
+		assert.Equal(t, "unsupported", audit["source"])
+		assert.Equal(t, "request_type", audit["detail"])
+	}
+
+	off := submission()
+	common.SetContextKey(off.c, constant.ContextKeyChannelOtherSetting, dto.ChannelOtherSettings{})
+	assert.Nil(t, CheckTask(off.c, off.info, "kling"))
+	keyless := submission(withChannel(7, ""))
+	assert.Nil(t, CheckTask(keyless.c, keyless.info, "sora"), "nothing to protect: Sora's upstream call fails without a key")
+	sora := submission()
+	assert.Nil(t, CheckTask(sora.c, sora.info, "sora"), "Sora's prompt is checked")
+	assert.Equal(t, []string{"a calm sea"}, fake.sentTexts())
+	assert.Len(t, moderationRows(t), 4)
 }
 
 // A moderation call that says the key or its OpenAI account is unusable, on
@@ -2455,7 +2512,7 @@ func TestKeyFailures(t *testing.T) {
 		a := newAttempt(t, dto.ChannelOtherSettings{}, fake.server.URL, nil, withChannel(7, "sk-banned"))
 		a.info.InitChannelMeta(a.c)
 		a.c.Set("task_request", relaycommon.TaskSubmitReq{Prompt: "a quiet harbour"})
-		taskErr := CheckTask(a.c, a.info)
+		taskErr := CheckTask(a.c, a.info, "sora")
 		require.NotNil(t, taskErr)
 		assert.True(t, TaskKeyFailed(a.c, taskErr))
 		assert.False(t, taskErr.LocalError, "handled as the upstream's answer")

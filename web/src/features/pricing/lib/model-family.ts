@@ -23,10 +23,11 @@ import type { SuccessRatePoint } from '@/features/performance-metrics/types'
 import {
   EXCLUDED_GROUPS,
   FILTER_ALL,
+  MODEL_ORDER_SORTS,
   QUOTA_TYPE_VALUES,
   SORT_OPTIONS,
 } from '../constants'
-import type { PricingModel } from '../types'
+import type { ModelOrder, PricingModel } from '../types'
 import {
   getDynamicDisplayGroupRatio,
   getDynamicPricingSummary,
@@ -510,6 +511,14 @@ function lowestSortPrice(
   return prices.length > 0 ? Math.min(...prices) : undefined
 }
 
+/** The Name sort of families: by shown title, then by first member name. */
+function compareFamilyNames(a: ModelFamily, b: ModelFamily): number {
+  return (
+    familySortName(a).localeCompare(familySortName(b)) ||
+    (a.models[0].model_name || '').localeCompare(b.models[0].model_name || '')
+  )
+}
+
 /**
  * Order families for the active sort. Grouping keeps the order in which each
  * family's first member appears, which is right for a Low to High price sort
@@ -517,19 +526,39 @@ function lowestSortPrice(
  * the line tag, so the A-Z order does not restart once per line. A High to Low
  * price sort ranks by the lowest member price of that kind, the one the
  * family's chips show; families without that price stay last.
+ *
+ * The server-ordered sorts (Recommended, Most requests, Most tokens) place a
+ * family where its best-placed shown member is in that order: a pinned or
+ * most-used variant brings its whole card up. Families without a listed
+ * member follow like the Name sort, so with no order configured (the
+ * default) Recommended shows the cards as the Name sort does.
  */
 export function sortModelFamilies(
   families: ModelFamily[],
-  sortBy: string
+  sortBy: string,
+  modelOrder?: ModelOrder
 ): ModelFamily[] {
-  if (sortBy === SORT_OPTIONS.NAME) {
+  if (MODEL_ORDER_SORTS.has(sortBy)) {
+    const order = modelOrder?.[sortBy as keyof ModelOrder] ?? []
+    const rank = new Map(order.map((name, index) => [name, index]))
+    const best = new Map(
+      families.map((family) => [
+        family,
+        Math.min(
+          ...family.models.map(
+            (model) => rank.get(model.model_name) ?? order.length
+          )
+        ),
+      ])
+    )
     return [...families].sort(
       (a, b) =>
-        familySortName(a).localeCompare(familySortName(b)) ||
-        (a.models[0].model_name || '').localeCompare(
-          b.models[0].model_name || ''
-        )
+        (best.get(a) ?? order.length) - (best.get(b) ?? order.length) ||
+        compareFamilyNames(a, b)
     )
+  }
+  if (sortBy === SORT_OPTIONS.NAME) {
+    return [...families].sort(compareFamilyNames)
   }
   const priceSort = getPriceSort(sortBy)
   if (priceSort?.dir === -1) {

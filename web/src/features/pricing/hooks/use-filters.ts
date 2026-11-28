@@ -39,7 +39,7 @@ import {
   buildModelSquareIndex,
   type ModelSquareSettings,
 } from '../lib/model-variants'
-import type { PricingModel, TokenUnit } from '../types'
+import type { ModelOrder, PricingModel, TokenUnit } from '../types'
 
 type FilterState = {
   search?: string
@@ -65,11 +65,13 @@ function normalizeViewMode(value: unknown): ViewMode {
  * Filter state of the Model Square, read once from the route's search params.
  * A filter whose sidebar section the admin hid is not applied (its value is
  * kept). With grouping on, `index` parses the whole catalogue once: families,
- * titles and the folded search read it.
+ * titles and the folded search read it. `modelOrder` is the server's order
+ * for the Recommended and usage sorts.
  */
 export function useFilters(
   models: PricingModel[],
-  modelSquare: ModelSquareSettings
+  modelSquare: ModelSquareSettings,
+  modelOrder?: ModelOrder
 ) {
   const search = useSearch({ from: '/pricing/' })
   const [filterState, setFilterState] = useState<FilterState>(() => ({
@@ -87,7 +89,7 @@ export function useFilters(
 
   const searchInput = filterState.search || ''
   const debouncedSearchInput = useDebounce(searchInput, 200)
-  const sortBy = filterState.sort || SORT_OPTIONS.NAME
+  const sortBy = filterState.sort || SORT_OPTIONS.RECOMMENDED
   const sections = modelSquare.filter_sections
   const {
     vendor: vendorFilter,
@@ -119,7 +121,7 @@ export function useFilters(
   )
   const setSortBy = useCallback(
     (v: string) =>
-      updateFilters({ sort: v === SORT_OPTIONS.NAME ? undefined : v }),
+      updateFilters({ sort: v === SORT_OPTIONS.RECOMMENDED ? undefined : v }),
     [updateFilters]
   )
   const setVendorFilter = useCallback(
@@ -188,12 +190,14 @@ export function useFilters(
         endpointType: endpointTypeFilter,
         tag: tagFilter,
         sortBy,
+        modelOrder,
       },
       index
     )
   }, [
     models,
     index,
+    modelOrder,
     debouncedSearchInput,
     vendorFilter,
     groupFilter,

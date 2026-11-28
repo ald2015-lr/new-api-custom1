@@ -22,6 +22,10 @@ import (
 //          model_square_setting.family_bases (JSON array of base model names),
 //          model_square_setting.show_group_filter, .show_vendor_filter,
 //          .show_tag_filter, .show_quota_type_filter, .show_endpoint_type_filter
+// and upstream's Recommended order (model_square_setting.sort_mode,
+// .sort_metric, .sort_days, .sort_models; GetModelSquareSetting), which the
+// generic config path loads: IsModelSquareOptionKey covers only the display
+// options above.
 //
 // The public model square groups models such as "[按次]gemini-3-pro-preview"
 // and "[按次]gemini-3-pro-preview-128-nothinking" into one family card. The
@@ -59,6 +63,15 @@ const (
 	maxModelFamilyBaseLength         = 128
 )
 
+const (
+	ModelSquareSortManual = "manual"
+	ModelSquareSortUsage  = "usage"
+	ModelSquareSortMixed  = "mixed"
+
+	ModelSquareMetricRequests = "requests"
+	ModelSquareMetricTokens   = "tokens"
+)
+
 // ModelVariantRule maps a model name suffix to the variant label shown in the
 // model square. Rule order is the display order of variants.
 type ModelVariantRule struct {
@@ -70,6 +83,8 @@ type ModelVariantRule struct {
 // ModelSquareSetting is registered with the config manager so the options are
 // exported to the option map. VariantRules stays a JSON string so GET
 // /api/option returns it verbatim; reads go through the parsed snapshot below.
+// The Sort* fields are upstream's Recommended order of the model square; the
+// config manager loads them and GetModelSquareSetting reads them.
 type ModelSquareSetting struct {
 	VariantGroupingEnabled     bool   `json:"variant_grouping_enabled"`
 	VersionSpellingFoldEnabled bool   `json:"version_spelling_fold_enabled"`
@@ -81,6 +96,11 @@ type ModelSquareSetting struct {
 	ShowTagFilter              bool   `json:"show_tag_filter"`
 	ShowQuotaTypeFilter        bool   `json:"show_quota_type_filter"`
 	ShowEndpointTypeFilter     bool   `json:"show_endpoint_type_filter"`
+
+	SortMode   string   `json:"sort_mode"`   // manual, usage or mixed
+	SortMetric string   `json:"sort_metric"` // usage metric: requests or tokens
+	SortDays   int      `json:"sort_days"`   // usage period in days: 1, 7 or 30
+	SortModels []string `json:"sort_models"` // manual order, or the pinned models in mixed mode
 }
 
 // ModelSquareFilterSections says which sections the model square's filter
@@ -168,8 +188,14 @@ var defaultModelVariantRules = []ModelVariantRule{
 }
 
 // modelSquareSetting gets the switches' defaults from modelSquareBoolOptions
-// in init.
-var modelSquareSetting = ModelSquareSetting{FamilyBases: "[]"}
+// in init. An empty manual list keeps the model square in name order.
+var modelSquareSetting = ModelSquareSetting{
+	FamilyBases: "[]",
+	SortMode:    ModelSquareSortManual,
+	SortMetric:  ModelSquareMetricTokens,
+	SortDays:    7,
+	SortModels:  []string{},
+}
 
 // modelSquareDisplay is replaced atomically so the public pricing endpoint
 // reads a consistent, already parsed configuration without locking. Its rule
@@ -187,6 +213,12 @@ func init() {
 	}
 	config.GlobalConfig.Register("model_square_setting", &modelSquareSetting)
 	modelSquareDisplay.Store(&display)
+}
+
+// GetModelSquareSetting returns the registered settings; upstream's model
+// square order reads its Sort* fields.
+func GetModelSquareSetting() *ModelSquareSetting {
+	return &modelSquareSetting
 }
 
 // ParseModelVariantRules decodes and validates a variant rule list; it touches
@@ -282,7 +314,9 @@ func IsModelSquareSwitchKey(key string) bool {
 	return ok
 }
 
-// ValidateModelSquareOption validates a value before it is stored.
+// ValidateModelSquareOption validates a value before it is stored: the
+// display options above, then upstream's Recommended order values. Any other
+// model_square_setting.* key is refused, as upstream does.
 func ValidateModelSquareOption(key string, value string) error {
 	if option, ok := modelSquareBoolOptions[key]; ok {
 		if _, err := strconv.ParseBool(value); err != nil {
@@ -297,6 +331,25 @@ func ValidateModelSquareOption(key string, value string) error {
 	case ModelSquareFamilyBasesOptionKey:
 		_, err := ParseModelFamilyBases(value)
 		return err
+	}
+	setting, ok := strings.CutPrefix(key, "model_square_setting.")
+	if !ok {
+		return nil
+	}
+	valid := false
+	switch setting {
+	case "sort_mode":
+		valid = slices.Contains([]string{ModelSquareSortManual, ModelSquareSortUsage, ModelSquareSortMixed}, value)
+	case "sort_metric":
+		valid = value == ModelSquareMetricRequests || value == ModelSquareMetricTokens
+	case "sort_days":
+		valid = slices.Contains([]string{"1", "7", "30"}, value)
+	case "sort_models":
+		var names []string
+		valid = common.UnmarshalJsonStr(value, &names) == nil
+	}
+	if !valid {
+		return common.NewMessage("Invalid model square order setting")
 	}
 	return nil
 }
