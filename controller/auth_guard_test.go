@@ -675,39 +675,23 @@ func TestAuditFingerprintIsNotKeyedWithTheKeptLoginKey(t *testing.T) {
 	keyedWith := func(secret string) string {
 		return common.GenerateHMACWithKey([]byte("audit-identifier-v1:"+secret), typed)[:8]
 	}
-	for _, cryptoFromEnv := range []bool{false, true} {
-		t.Run(fmt.Sprintf("CRYPTO_SECRET set %t", cryptoFromEnv), func(t *testing.T) {
+	for _, cryptoSecretEnv := range []string{"", "crypto-from-env"} {
+		t.Run("CRYPTO_SECRET="+cryptoSecretEnv, func(t *testing.T) {
 			env := setupAuthGuardTest(t)
 			common.LoginCaptchaEnabled = false
 			require.NoError(t, env.db.AutoMigrate(&model.ServerSecret{}))
-			previousSessionSecret, previousCryptoSecret := common.SessionSecret, common.CryptoSecret
-			previousSource, previousCryptoFromEnv := common.SessionSecretSource, common.CryptoSecretFromEnv
-			t.Cleanup(func() {
-				common.SessionSecret, common.CryptoSecret = previousSessionSecret, previousCryptoSecret
-				common.SessionSecretSource, common.CryptoSecretFromEnv = previousSource, previousCryptoFromEnv
-			})
-			// What InitEnv leaves without SESSION_SECRET, then the start step.
-			common.SessionSecret, common.SessionSecretSource = "random-at-start", common.SessionSecretSourceRandom
-			common.CryptoSecret, common.CryptoSecretFromEnv = "random-at-start", false
-			if cryptoFromEnv {
-				common.CryptoSecret, common.CryptoSecretFromEnv = "crypto-from-env", true
-			}
-			model.InitSessionSecret()
-			require.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
-			var kept model.ServerSecret
-			require.NoError(t, env.db.Where("name = ?", "session_secret").First(&kept).Error)
-			require.Equal(t, kept.Value, common.SessionSecret)
+			kept := startWithKeptLoginKey(t, cryptoSecretEnv)
 
 			env.login(" "+typed+" ", "wrong", "")
 			row := lastAuthGuardAudit(t, "user.login_failed")
 			require.Equal(t, "…", row.Params["identifier"])
 			fingerprint := row.Params["identifier_fingerprint"]
 			assert.Regexp(t, `^[0-9a-f]{8}$`, fingerprint)
-			assert.NotEqual(t, keyedWith(kept.Value), fingerprint, "the key kept in the database must not reproduce the fingerprint")
+			assert.NotEqual(t, keyedWith(kept), fingerprint, "the key kept in the database must not reproduce the fingerprint")
 			env.login(typed, "wrong", "")
 			assert.Equal(t, fingerprint, lastAuthGuardAudit(t, "user.login_failed").Params["identifier_fingerprint"], "the same value gives the same fingerprint within a run")
-			if cryptoFromEnv {
-				assert.Equal(t, keyedWith("crypto-from-env"), fingerprint, "CRYPTO_SECRET keys the fingerprint, so it stays the same after a restart")
+			if cryptoSecretEnv != "" {
+				assert.Equal(t, keyedWith(cryptoSecretEnv), fingerprint, "CRYPTO_SECRET keys the fingerprint, so it stays the same after a restart")
 			}
 		})
 	}

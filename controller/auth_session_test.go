@@ -155,10 +155,34 @@ func TestSessionLimitDoesNotRecordRejectedLoginAsSuccessful(t *testing.T) {
 	assert.Equal(t, previousLastLoginAt, stored.LastLoginAt)
 }
 
-func TestOptionsNeverReturnTheLoginSigningKey(t *testing.T) {
-	previousDB, previousRedis := model.DB, common.RedisEnabled
+// startWithKeptLoginKey does to the secrets what a start without
+// SESSION_SECRET does on model.DB: InitEnv leaves one random key, or
+// cryptoSecretEnv as CRYPTO_SECRET when it is not empty, then
+// model.InitSessionSecret makes the key kept in server_secrets the login
+// signing key. It returns that key and restores the secrets after the test.
+func startWithKeptLoginKey(t *testing.T, cryptoSecretEnv string) string {
+	t.Helper()
 	previousSessionSecret, previousCryptoSecret := common.SessionSecret, common.CryptoSecret
 	previousSource, previousCryptoFromEnv := common.SessionSecretSource, common.CryptoSecretFromEnv
+	t.Cleanup(func() {
+		common.SessionSecret, common.CryptoSecret = previousSessionSecret, previousCryptoSecret
+		common.SessionSecretSource, common.CryptoSecretFromEnv = previousSource, previousCryptoFromEnv
+	})
+	common.SessionSecret, common.SessionSecretSource = "random-at-start", common.SessionSecretSourceRandom
+	common.CryptoSecret, common.CryptoSecretFromEnv = "random-at-start", false
+	if cryptoSecretEnv != "" {
+		common.CryptoSecret, common.CryptoSecretFromEnv = cryptoSecretEnv, true
+	}
+	model.InitSessionSecret()
+	var kept model.ServerSecret
+	require.NoError(t, model.DB.Where("name = ?", "session_secret").First(&kept).Error)
+	require.Equal(t, kept.Value, common.SessionSecret)
+	require.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
+	return kept.Value
+}
+
+func TestOptionsNeverReturnTheLoginSigningKey(t *testing.T) {
+	previousDB, previousRedis := model.DB, common.RedisEnabled
 	common.OptionMapRWMutex.Lock()
 	previousOptions := common.OptionMap
 	common.OptionMap = map[string]string{
@@ -174,21 +198,14 @@ func TestOptionsNeverReturnTheLoginSigningKey(t *testing.T) {
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.ServerSecret{}, &model.SystemTask{}))
 	model.DB, common.RedisEnabled = db, false
-	common.SessionSecret, common.CryptoSecret = "random-at-start", "random-at-start"
-	common.SessionSecretSource, common.CryptoSecretFromEnv = common.SessionSecretSourceRandom, false
 	t.Cleanup(func() {
 		model.DB, common.RedisEnabled = previousDB, previousRedis
-		common.SessionSecret, common.CryptoSecret = previousSessionSecret, previousCryptoSecret
-		common.SessionSecretSource, common.CryptoSecretFromEnv = previousSource, previousCryptoFromEnv
 		common.OptionMapRWMutex.Lock()
 		common.OptionMap = previousOptions
 		common.OptionMapRWMutex.Unlock()
 		_ = sqlDB.Close()
 	})
-	model.InitSessionSecret()
-	var kept model.ServerSecret
-	require.NoError(t, db.First(&kept).Error)
-	require.Equal(t, kept.Value, common.SessionSecret)
+	kept := startWithKeptLoginKey(t, "")
 
 	gin.SetMode(gin.TestMode)
 	response := httptest.NewRecorder()
@@ -200,8 +217,8 @@ func TestOptionsNeverReturnTheLoginSigningKey(t *testing.T) {
 	assert.Contains(t, body, `{"key":"KeepLoginAcrossRestartEnabled","value":"true"}`)
 	assert.Contains(t, body, `{"key":"KeepLoginAcrossRestartSource","value":"database"}`)
 	assert.Equal(t, 1, strings.Count(body, `"key":"KeepLoginAcrossRestartSource"`))
-	for i := 0; i+16 <= len(kept.Value); i++ {
-		require.NotContains(t, body, kept.Value[i:i+16], "no part of the login signing key may be returned")
+	for i := range len(kept) - 15 {
+		require.NotContains(t, body, kept[i:i+16], "no 16-character piece of the login signing key may be returned")
 	}
 
 	put := func(request string) string {
@@ -222,7 +239,7 @@ func TestOptionsNeverReturnTheLoginSigningKey(t *testing.T) {
 	var saved []model.Option
 	require.NoError(t, db.Order("key").Find(&saved).Error)
 	assert.Equal(t, []model.Option{{Key: model.KeepLoginAcrossRestartOptionKey, Value: "false"}}, saved)
-	assert.Equal(t, kept.Value, common.SessionSecret, "saving the switch changes nothing until the next restart")
+	assert.Equal(t, kept, common.SessionSecret, "saving the switch changes nothing until the next restart")
 	assert.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
 	var keptRows int64
 	require.NoError(t, db.Model(&model.ServerSecret{}).Count(&keptRows).Error)
