@@ -1,10 +1,11 @@
 package controller
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -320,11 +321,19 @@ func SendPasswordResetEmail(c *gin.Context) {
 	}
 	user, err := model.GetUniqueUserByEmail(email)
 	switch {
+	case err == nil && model.NormalizeEmail(user.Email) != email:
+		// GetUniqueUserByEmail only returns the account whose stored address
+		// is this one; anything else gets no mail.
+		logger.LogWarn(c.Request.Context(), common.LogText("skip password reset email for %s: the stored address differs", email))
+		request.outcome, request.detail = "send_failed", "lookup_error"
 	case err == nil:
+		// The token is keyed and the link built with the stored address (the
+		// same as email here), and the mail goes to the address on file.
+		storedEmail := model.NormalizeEmail(user.Email)
 		request.user, request.outcome = user, "sent"
 		code := common.GenerateVerificationCode(0)
-		common.RegisterVerificationCodeWithKey(email, code, common.PasswordResetPurpose)
-		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, email, code)
+		common.RegisterVerificationCodeWithKey(storedEmail, code, common.PasswordResetPurpose)
+		link := fmt.Sprintf("%s/user/reset?email=%s&token=%s", system_setting.ServerAddress, url.QueryEscape(storedEmail), url.QueryEscape(code))
 		lang := user.GetSetting().Language
 		if lang == "" {
 			lang = i18n.StatedLang(c)
@@ -340,8 +349,11 @@ func SendPasswordResetEmail(c *gin.Context) {
 			i18n.Translate(lang, i18n.MsgEmailPasswordResetLink, linkParams),
 			i18n.Translate(lang, i18n.MsgEmailPasswordResetLinkFallback, linkParams),
 			i18n.Translate(lang, i18n.MsgEmailPasswordResetValidity, map[string]any{"Minutes": common.VerificationValidMinutes}))
-		if err := common.SendEmail(subject, email, content); err != nil {
-			logger.LogError(c.Request.Context(), common.LogText("failed to send password reset email to %s: %s", email, err.Error()))
+		// Keep the mailbox spelling on file for delivery, including legacy mixed-case local parts.
+		if err := common.SendEmail(subject, strings.TrimSpace(user.Email), content); err != nil {
+			// Revoke the undelivered code; a newer delivery may already have replaced it.
+			common.ConsumeCodeWithKey(storedEmail, code, common.PasswordResetPurpose)
+			logger.LogError(c.Request.Context(), common.LogText("failed to send password reset email to %s: %s", storedEmail, err.Error()))
 			request.outcome, request.detail = "send_failed", "smtp_error"
 		}
 	case errors.Is(err, model.ErrEmailNotFound):
@@ -368,7 +380,7 @@ type PasswordResetRequest struct {
 // writes one audit row; success also ends the login lock of the account.
 func ResetPassword(c *gin.Context) {
 	var req PasswordResetRequest
-	err := json.NewDecoder(c.Request.Body).Decode(&req)
+	err := common.DecodeJson(c.Request.Body, &req)
 	if err != nil {
 		common.ApiError(c, err)
 		recordPasswordResetAudit(c, model.NormalizeEmail(req.Email), nil, "invalid_request")
@@ -380,7 +392,7 @@ func ResetPassword(c *gin.Context) {
 		recordPasswordResetAudit(c, req.Email, nil, "invalid_request")
 		return
 	}
-	if !common.VerifyCodeWithKey(req.Email, req.Token, common.PasswordResetPurpose) {
+	if !common.ConsumeCodeWithKey(req.Email, req.Token, common.PasswordResetPurpose) {
 		common.ApiErrorT(c, "Password reset link is invalid or has expired")
 		recordPasswordResetAudit(c, req.Email, nil, "invalid_link")
 		return
@@ -397,7 +409,6 @@ func ResetPassword(c *gin.Context) {
 		recordPasswordResetAudit(c, req.Email, nil, "server_error")
 		return
 	}
-	common.DeleteKey(req.Email, common.PasswordResetPurpose)
 	middleware.ClearLoginLockout(c.Request.Context(), user.Id, user.Username, user.Email)
 	recordPasswordResetAudit(c, req.Email, user, "")
 	c.JSON(http.StatusOK, gin.H{

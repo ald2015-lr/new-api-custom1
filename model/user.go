@@ -1250,21 +1250,35 @@ func (user *User) ValidateAndFill() (err error) {
 }
 
 // FindPasswordLoginUser returns the account a password login names by
-// username or email, nil when none does.
+// username or email, nil when none does. A username is looked up first, as
+// the database compares it; an identifier with "@" that names no username
+// must then be the exact stored address of one account (GetUniqueUserByEmail):
+// a look-alike an accent-insensitive collation matches, or an address several
+// accounts share, names no account.
 func FindPasswordLoginUser(identifier string) (*User, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return nil, ErrUserEmptyCredentials
 	}
 	var user User
-	err := DB.Where("username = ? OR email = ?", identifier, identifier).First(&user).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	err := DB.Where("username = ?", identifier).First(&user).Error
+	if err == nil {
+		return &user, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
+	}
+	if !strings.Contains(identifier, "@") {
+		return nil, nil
+	}
+	found, err := GetUniqueUserByEmail(identifier)
+	if errors.Is(err, ErrEmailNotFound) || errors.Is(err, ErrEmailAmbiguous) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
 	}
-	return &user, nil
+	return found, nil
 }
 
 // CheckLoginPassword checks the password of a password login. It returns
@@ -1317,7 +1331,11 @@ func (user *User) FillUserByEmail() error {
 	if user.Email == "" {
 		return common.NewMessage("Email is empty!")
 	}
-	DB.Where(User{Email: user.Email}).First(user)
+	matched, err := GetUniqueUserByEmail(user.Email)
+	if err != nil {
+		return err
+	}
+	*user = *matched
 	return nil
 }
 
@@ -1379,23 +1397,25 @@ func GetUniqueUserByEmail(email string) (*User, error) {
 		return nil, ErrEmailNotFound
 	}
 	var candidates []User
-	if err := DB.Where("LOWER(email) = ?", email).Limit(10).Find(&candidates).Error; err != nil {
+	if err := DB.Where("LOWER(email) = ?", email).Find(&candidates).Error; err != nil {
 		return nil, err
 	}
-	users := candidates[:0]
-	for _, user := range candidates {
-		if NormalizeEmail(user.Email) == email {
-			users = append(users, user)
+	// Compare normalized emails in Go so accent-insensitive database collations
+	// (such as MySQL's utf8mb4_0900_ai_ci) cannot match look-alike addresses.
+	var matched *User
+	for i := range candidates {
+		if NormalizeEmail(candidates[i].Email) != email {
+			continue
 		}
+		if matched != nil {
+			return nil, ErrEmailAmbiguous
+		}
+		matched = &candidates[i]
 	}
-	switch len(users) {
-	case 0:
+	if matched == nil {
 		return nil, ErrEmailNotFound
-	case 1:
-		return &users[0], nil
-	default:
-		return nil, ErrEmailAmbiguous
 	}
+	return matched, nil
 }
 
 // The Is*IdAlreadyTaken lookups include deleted accounts: signing in with the

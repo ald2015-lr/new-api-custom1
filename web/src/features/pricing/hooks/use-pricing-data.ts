@@ -87,6 +87,7 @@ export function usePricingData(enabled = true) {
     groupAccess: data?.group_access ?? EMPTY_GROUP_ACCESS,
     freeGroups: data?.free_groups ?? EMPTY_FREE_GROUPS,
     modelSquare,
+    modelOrder: data?.model_order,
     isLoading,
     error,
     /** Whether pricing data arrived; a failed refresh keeps the last data. */

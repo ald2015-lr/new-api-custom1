@@ -22,7 +22,7 @@ import { SORT_OPTIONS } from '../constants'
 import { sortModels } from '../lib/filters'
 import { sortModelFamilies } from '../lib/model-family'
 import type { ModelSquareSettings } from '../lib/model-variants'
-import type { PricingModel } from '../types'
+import type { ModelOrder, PricingModel } from '../types'
 import { familiesOf, LEGACY, squareModel } from './model-square-test-utils'
 
 let nextId = 1
@@ -53,11 +53,13 @@ function tokenModel(name: string, ratio: number): PricingModel {
 function familyTitles(
   models: PricingModel[],
   sortBy: string,
-  settings: Partial<ModelSquareSettings> = LEGACY
+  settings: Partial<ModelSquareSettings> = LEGACY,
+  modelOrder?: ModelOrder
 ): string[] {
   const families = sortModelFamilies(
-    familiesOf(sortModels(models, sortBy), settings),
-    sortBy
+    familiesOf(sortModels(models, sortBy, modelOrder), settings),
+    sortBy,
+    modelOrder
   )
   return families.map((family) =>
     family.models.length === 1 ? family.models[0].model_name : family.title
@@ -184,5 +186,112 @@ describe('sortModelFamilies', () => {
       SORT_OPTIONS.REQUEST_PRICE_HIGH
     )
     expect(titles).toEqual(['[按次]beta-1', 'alpha-1'])
+  })
+
+  describe('server-ordered sorts', () => {
+    const catalogue = () => [
+      model('[按次]claude-opus-4-6'),
+      model('[按次]claude-opus-4-6-thinking'),
+      model('[按次]zeta-1'),
+      model('[按量]claude-sonnet-4-5'),
+      model('[按量]claude-sonnet-4-5-thinking'),
+      model('alpha-1'),
+      model('gpt-5.4'),
+    ]
+    const byName = [
+      'alpha-1',
+      'claude-opus-4-6',
+      'claude-sonnet-4-5',
+      'gpt-5.4',
+      '[按次]zeta-1',
+    ]
+
+    const unconfigured: { label: string; modelOrder?: ModelOrder }[] = [
+      { label: 'without an order', modelOrder: undefined },
+      {
+        label: 'with an empty order',
+        modelOrder: { recommended: [], requests: [], tokens: [] },
+      },
+    ]
+
+    it.each(unconfigured)(
+      'shows Recommended like the Name sort $label',
+      ({ modelOrder }) => {
+        expect(familyTitles(catalogue(), SORT_OPTIONS.NAME)).toEqual(byName)
+        expect(
+          familyTitles(
+            catalogue(),
+            SORT_OPTIONS.RECOMMENDED,
+            LEGACY,
+            modelOrder
+          )
+        ).toEqual(byName)
+      }
+    )
+
+    it('places a family where its best-placed member is in the Recommended order', () => {
+      const order: ModelOrder = {
+        // A variant brings its whole card up; unlisted cards follow by name.
+        recommended: ['gpt-5.4', '[按次]claude-opus-4-6-thinking', 'retired'],
+        requests: [],
+        tokens: [],
+      }
+      expect(
+        familyTitles(catalogue(), SORT_OPTIONS.RECOMMENDED, LEGACY, order)
+      ).toEqual([
+        'gpt-5.4',
+        'claude-opus-4-6',
+        'alpha-1',
+        'claude-sonnet-4-5',
+        '[按次]zeta-1',
+      ])
+    })
+
+    it('ranks families by their most used member with Most requests and Most tokens', () => {
+      const order: ModelOrder = {
+        recommended: [],
+        requests: ['[按次]zeta-1', '[按量]claude-sonnet-4-5-thinking'],
+        tokens: ['[按次]claude-opus-4-6', 'alpha-1', '[按量]claude-sonnet-4-5'],
+      }
+      expect(
+        familyTitles(catalogue(), SORT_OPTIONS.MOST_REQUESTS, LEGACY, order)
+      ).toEqual([
+        '[按次]zeta-1',
+        'claude-sonnet-4-5',
+        'alpha-1',
+        'claude-opus-4-6',
+        'gpt-5.4',
+      ])
+      expect(
+        familyTitles(catalogue(), SORT_OPTIONS.MOST_TOKENS, LEGACY, order)
+      ).toEqual([
+        'claude-opus-4-6',
+        'alpha-1',
+        'claude-sonnet-4-5',
+        'gpt-5.4',
+        '[按次]zeta-1',
+      ])
+    })
+
+    it('ranks by the shown members only', () => {
+      const order: ModelOrder = {
+        recommended: ['[按次]claude-opus-4-6-thinking', 'gpt-5.4'],
+        requests: [],
+        tokens: [],
+      }
+      // Filtered out: the pinned variant no longer lifts its card.
+      const shown = catalogue().filter(
+        (m) => m.model_name !== '[按次]claude-opus-4-6-thinking'
+      )
+      expect(
+        familyTitles(shown, SORT_OPTIONS.RECOMMENDED, LEGACY, order)
+      ).toEqual([
+        'gpt-5.4',
+        'alpha-1',
+        '[按次]claude-opus-4-6',
+        'claude-sonnet-4-5',
+        '[按次]zeta-1',
+      ])
+    })
   })
 })

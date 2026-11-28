@@ -130,6 +130,9 @@ export type GroupAccessRequirement = {
   whitelist_only: boolean
 }
 
+/** Model names in each server-ordered sort; unlisted models follow by name. */
+export type ModelOrder = Record<'recommended' | 'requests' | 'tokens', string[]>
+
 export type PricingData = {
   success: boolean
   message?: string
@@ -168,6 +171,7 @@ export type PricingData = {
       endpoint_types?: boolean
     }
   }
+  model_order?: ModelOrder
 }
 
 export type TokenUnit = 'M' | 'K'

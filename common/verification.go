@@ -52,7 +52,8 @@ func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
 
 // VerifyCodeWithKey reports whether code is the unexpired code stored for
 // key. A correct guess leaves the code as it is; callers delete a code once it
-// has served its purpose.
+// has served its purpose (single-use password reset tokens are checked with
+// ConsumeCodeWithKey instead).
 //
 // Wrong guesses at a registration code are counted, and the
 // verificationMaxFailures-th one deletes the code: it has only 6 hexadecimal
@@ -92,6 +93,29 @@ func VerifyCodeWithKey(key string, code string, purpose string) bool {
 	}
 	verificationMap[mapKey] = value
 	return false
+}
+
+// ConsumeCodeWithKey atomically verifies and removes a single-use code so
+// concurrent requests cannot replay the same token. A wrong code leaves the
+// stored one in place (guesses at reset tokens are not counted, see
+// VerifyCodeWithKey); an expired code is removed.
+func ConsumeCodeWithKey(key string, code string, purpose string) bool {
+	verificationMutex.Lock()
+	defer verificationMutex.Unlock()
+	mapKey := purpose + key
+	value, okay := verificationMap[mapKey]
+	now := time.Now()
+	if !okay || int(now.Sub(value.time).Seconds()) >= VerificationValidMinutes*60 {
+		if okay {
+			delete(verificationMap, mapKey)
+		}
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(code), []byte(value.code)) != 1 {
+		return false
+	}
+	delete(verificationMap, mapKey)
+	return true
 }
 
 func DeleteKey(key string, purpose string) {

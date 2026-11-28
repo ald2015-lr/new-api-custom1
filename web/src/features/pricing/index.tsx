@@ -61,6 +61,7 @@ export function Pricing() {
     groupAccess,
     freeGroups,
     modelSquare,
+    modelOrder,
     isLoading,
     error,
     hasData,
@@ -100,15 +101,19 @@ export function Pricing() {
     clearSearch,
     index,
     sections,
-  } = useFilters(models || [], modelSquare)
+  } = useFilters(models || [], modelSquare, modelOrder)
 
   // Display-only grouping of name variants; undefined keeps one card per model.
   const families = useMemo(
     () =>
       index
-        ? sortModelFamilies(groupModelFamilies(filteredModels, index), sortBy)
+        ? sortModelFamilies(
+            groupModelFamilies(filteredModels, index),
+            sortBy,
+            modelOrder
+          )
         : undefined,
-    [filteredModels, index, sortBy]
+    [filteredModels, index, sortBy, modelOrder]
   )
   // Without any filter section the sidebar and the mobile drawer are left out.
   const hasFilterSections = Object.values(sections).some(Boolean)
