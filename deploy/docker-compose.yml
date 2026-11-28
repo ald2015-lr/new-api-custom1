@@ -29,8 +29,16 @@ services:
       - USER_CONTENT_REQUEST_TIMEOUT=60
       - SQL_MAX_OPEN_CONNS=10000
       - GLOBAL_API_RATE_LIMIT=18000
+      # 登录签名密钥（可选，在 .env 里设置）。留空时由后台「系统设置 → 身份验证 →
+      # 基本身份验证 → 重启或更新后保持用户登录」决定：默认开，密钥保存在数据库里，
+      # 重启和更新不会让用户退出登录。设置后以它为准，那个开关不再起作用。
+      # 生成：openssl rand -hex 32；设置或改动它会让所有用户退出登录一次，设好后不要再改。
+      # 改了 .env 里的它或 CRYPTO_SECRET 之后要执行 docker compose up -d（重建容器），
+      # docker compose restart 不会重新读取 .env，容器里还是旧值。
+      - SESSION_SECRET=${SESSION_SECRET:-}
       # 加密密钥：在 .env 里设一个长随机串（openssl rand -hex 32）后不要再改。
-      # 留空时沿用 SESSION_SECRET，两者都没设则每次重启随机生成，
+      # 留空时沿用登录签名密钥（SESSION_SECRET，没设时用数据库里保存的那把），
+      # 只有「重启或更新后保持用户登录」关着时才每次重启随机生成，
       # 渠道「向 OpenAI 发送用户安全标识」发出的标识会随之改变。
       # 改动它会让之前发出的任务结果下载链接失效；已设 SESSION_SECRET 的
       # 部署可以留空或设成与它相同的值。

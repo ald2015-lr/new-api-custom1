@@ -383,6 +383,7 @@ func migrateDB() error {
 		&BonusGrant{},
 		&InviteReward{},
 		&InviteAbuseBan{},
+		&ServerSecret{},
 	)
 	if err != nil {
 		return err

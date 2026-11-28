@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,4 +153,95 @@ func TestSessionLimitDoesNotRecordRejectedLoginAsSuccessful(t *testing.T) {
 	var stored model.User
 	require.NoError(t, db.First(&stored, user.Id).Error)
 	assert.Equal(t, previousLastLoginAt, stored.LastLoginAt)
+}
+
+// startWithKeptLoginKey does to the secrets what a start without
+// SESSION_SECRET does on model.DB: InitEnv leaves one random key, or
+// cryptoSecretEnv as CRYPTO_SECRET when it is not empty, then
+// model.InitSessionSecret makes the key kept in server_secrets the login
+// signing key. It returns that key and restores the secrets after the test.
+func startWithKeptLoginKey(t *testing.T, cryptoSecretEnv string) string {
+	t.Helper()
+	previousSessionSecret, previousCryptoSecret := common.SessionSecret, common.CryptoSecret
+	previousSource, previousCryptoFromEnv := common.SessionSecretSource, common.CryptoSecretFromEnv
+	t.Cleanup(func() {
+		common.SessionSecret, common.CryptoSecret = previousSessionSecret, previousCryptoSecret
+		common.SessionSecretSource, common.CryptoSecretFromEnv = previousSource, previousCryptoFromEnv
+	})
+	common.SessionSecret, common.SessionSecretSource = "random-at-start", common.SessionSecretSourceRandom
+	common.CryptoSecret, common.CryptoSecretFromEnv = "random-at-start", false
+	if cryptoSecretEnv != "" {
+		common.CryptoSecret, common.CryptoSecretFromEnv = cryptoSecretEnv, true
+	}
+	model.InitSessionSecret()
+	var kept model.ServerSecret
+	require.NoError(t, model.DB.Where("name = ?", "session_secret").First(&kept).Error)
+	require.Equal(t, kept.Value, common.SessionSecret)
+	require.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
+	return kept.Value
+}
+
+func TestOptionsNeverReturnTheLoginSigningKey(t *testing.T) {
+	previousDB, previousRedis := model.DB, common.RedisEnabled
+	common.OptionMapRWMutex.Lock()
+	previousOptions := common.OptionMap
+	common.OptionMap = map[string]string{
+		model.KeepLoginAcrossRestartOptionKey: "true",
+		// A stray stored value must never be echoed.
+		model.KeepLoginAcrossRestartSourceOptionKey: "x",
+	}
+	common.OptionMapRWMutex.Unlock()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.ServerSecret{}, &model.SystemTask{}))
+	model.DB, common.RedisEnabled = db, false
+	t.Cleanup(func() {
+		model.DB, common.RedisEnabled = previousDB, previousRedis
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = previousOptions
+		common.OptionMapRWMutex.Unlock()
+		_ = sqlDB.Close()
+	})
+	kept := startWithKeptLoginKey(t, "")
+
+	gin.SetMode(gin.TestMode)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/option/", nil)
+	GetOptions(c)
+	require.Equal(t, http.StatusOK, response.Code)
+	body := response.Body.String()
+	assert.Contains(t, body, `{"key":"KeepLoginAcrossRestartEnabled","value":"true"}`)
+	assert.Contains(t, body, `{"key":"KeepLoginAcrossRestartSource","value":"database"}`)
+	assert.Equal(t, 1, strings.Count(body, `"key":"KeepLoginAcrossRestartSource"`))
+	for i := range len(kept) - 15 {
+		require.NotContains(t, body, kept[i:i+16], "no 16-character piece of the login signing key may be returned")
+	}
+
+	put := func(request string) string {
+		response := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(response)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/option/", strings.NewReader(request))
+		UpdateOption(c)
+		return response.Body.String()
+	}
+	readOnly := put(`{"key":"KeepLoginAcrossRestartSource","value":"env"}`)
+	assert.Contains(t, readOnly, `"success":false`)
+	assert.Contains(t, readOnly, `"message_key":"The source of the login signing key is read-only"`)
+	invalid := put(`{"key":"KeepLoginAcrossRestartEnabled","value":"maybe"}`)
+	assert.Contains(t, invalid, `"success":false`)
+	assert.Contains(t, invalid, `"message_key":"Value must be true or false"`)
+	assert.Contains(t, put(`{"key":"KeepLoginAcrossRestartEnabled","value":false}`), `"success":true`)
+
+	var saved []model.Option
+	require.NoError(t, db.Order("key").Find(&saved).Error)
+	assert.Equal(t, []model.Option{{Key: model.KeepLoginAcrossRestartOptionKey, Value: "false"}}, saved)
+	assert.Equal(t, kept, common.SessionSecret, "saving the switch changes nothing until the next restart")
+	assert.Equal(t, common.SessionSecretSourceDatabase, common.SessionSecretSource)
+	var keptRows int64
+	require.NoError(t, db.Model(&model.ServerSecret{}).Count(&keptRows).Error)
+	assert.Equal(t, int64(1), keptRows, "the next start deletes the key, not the save")
 }

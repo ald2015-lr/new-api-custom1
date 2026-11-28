@@ -64,7 +64,7 @@ docker inspect new-api-alpha-us --format '{{json .Config.Env}}' | tr ',' '\n'
 docker inspect new-api-alpha-us --format '{{json .Mounts}}' | tr ',' '\n'
 ```
 
-对照 `deploy/docker-compose.yml`，确认环境变量和你现在跑的一致（尤其是 `SQL_DSN`、`SESSION_SECRET` 如果有的话）。**旧容器的 `./data` 目录要一起带过来**——里面有上传的文件和本地缓存，虽然主数据在 MySQL，但丢了会导致图片/附件 404：
+对照 `deploy/docker-compose.yml`，确认环境变量和你现在跑的一致（尤其是 `SQL_DSN`；旧容器设置了 `SESSION_SECRET` 的，把同一个值写进 `deploy/.env`，否则切换后所有用户要重新登录一次，见第二十二节）。**旧容器的 `./data` 目录要一起带过来**——里面有上传的文件和本地缓存，虽然主数据在 MySQL，但丢了会导致图片/附件 404：
 
 ```bash
 cp -a /旧目录/data  /新目录/deploy/data
@@ -174,6 +174,8 @@ git merge v1.0.0-rc.52        # 换成上游最新的 release tag，不要用 up
 | `web/src/features/usage-logs/lib/format.ts`（`getLogOther`），以及日志列、手机卡片、详情弹窗和 `usage-logs-table.tsx` | 使用日志每行的 `other` 只解析一次 |
 | 新文件 `web/src/features/dashboard/lib/section-chunks.ts`，以及 `features/dashboard/index.tsx`、`features/dashboard/components/overview/overview-dashboard.tsx`、`components/layout/types.ts`（`NavLink.prefetch`）、`components/layout/components/nav-group.tsx`、`hooks/use-sidebar-data.ts` | 数据看板各分区的分块在悬停或聚焦侧栏「数据看板」和分区标签时预取，概览页打开 2 秒后空闲时也预取图表（省流量模式和 2G 网络不预取，没有权限的分区不预取） |
 | 新文件 `web/scripts/precompress.mjs`（及 `.d.mts`）、`web/package.json`（`build` 改为 `rsbuild build && bun scripts/precompress.mjs`）、`web/vitest.config.ts`、`web/tsconfig.node.json`（测试和类型检查包含 `scripts/__tests__`） | 前端构建结束时给 `dist/static` 下大于 1 KB 的 JS、CSS、SVG、JSON 生成 brotli（质量 11）的 `<文件>.br`，后端对接受 brotli 的浏览器优先返回它（见第六节）。只用 `node:zlib`，Dockerfile 不变；构建多约 30 秒，`dist` 和二进制、镜像各大约 16 MB。上游改了 `build` 脚本时保留后半段 |
+| 新文件 `common/session_secret.go`、`model/session_secret.go`（`server_secrets` 表、`InitSessionSecret`），以及 `common/init.go`（`InitEnv` 记下密钥是否来自 `SESSION_SECRET` / `CRYPTO_SECRET`）、`main.go`（`model.InitOptionMap()` 之后调用 `model.InitSessionSecret()`）、`model/main.go`（`AutoMigrate` 加 `ServerSecret`）、`model/option.go`（`KeepLoginAcrossRestartEnabled` 默认值与校验，`KeepLoginAcrossRestartSource` 只读）、`controller/option.go`（`GET /api/option` 返回 `KeepLoginAcrossRestartSource`）、`relay/common/safety_identifier.go`（「标识重启后会变」的提示改看 `common.CryptoSecretSurvivesRestart()`）、`controller/auth_guard.go`（审计「输入内容指纹」的密钥改用 `common.AuditFingerprintSecret()`）、`common/log_text.zh-CN.json`、`i18n/i18n_test.go`，测试 `model/session_secret_test.go`、`service/auth_session_test.go`、`controller/auth_session_test.go`、`controller/auth_guard_test.go`（`TestAuditFingerprintIsNotKeyedWithTheKeptLoginKey`） | 重启或更新后保持用户登录（见第二十二节），新增 `server_secrets` 表。上游调整 `InitResources` 的启动顺序时，`InitSessionSecret` 要留在第一个读 `common.SessionSecret` / `common.CryptoSecret` 的地方之前（现在是 `InitRedisClient` 和路由）；上游新增读这两个变量、或在 `init()` / 包变量里用它们算值的代码时，确认它不会在这之前运行。`server_secrets` 不能并进 `options` 表。`CryptoSecret` 可能就是数据库里保存的那把密钥：对用户输入的内容（可能是密码）算指纹再存进数据库或日志的代码要用 `common.AuditFingerprintSecret()` |
+| 新文件 `web/src/features/system-settings/auth/keep-login-field.tsx`，以及 `auth/basic-auth-section.tsx`（把它放在第一项）、`auth/section-registry.tsx`、`auth/index.tsx`、`features/system-settings/types.ts`、`features/channels/components/channel-moderation-settings.tsx`（安全标识说明），测试 `auth/__tests__/keep-login-settings.test.tsx`、`auth/__tests__/registration-abuse-settings.test.tsx` | 「重启或更新后保持用户登录」开关、`SESSION_SECRET` 覆盖提示和「下次重启生效」提示（见第二十二节）。上游改基本身份验证设置页时保留这一项 |
 
 rc.30 → rc.40 这次合并的经验：上游把重试判断从 `controller/relay.go` 挪到了 `service/relay_error.go`，重构了 `web/src/lib/http-client.ts` 和登录跳转 hook，`main.tsx` 里 `i18next` 的导入被上游删掉了（我们的 `ensureLocale(i18next.language)` 还要用，合并后要补回来）。解冲突时以上游为主体，把上表里的定制点重新加回去。
 
@@ -901,7 +903,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - 和审查开关相互独立，也只对 OpenAI 类型的渠道有效。打开后，发往上游的 Chat Completions 和 Responses 请求里的 `safety_identifier` 一律换成网关按用户生成的标识（`u_` 加 32 位十六进制，同一用户永远相同，无法反推出用户是谁），客户端自己传的值会被覆盖（管理员自己配置的参数覆盖和请求处理插件规则例外，见限制 12）。OpenAI 据此只封禁违规的那个用户，而不是整个组织。
 - 打开「透传请求体」时也生效：只改写 `safety_identifier` 这一个字段，其他字节原样转发。
 - 打开后，「允许透传 safety_identifier」不再起作用。
-- **请在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（例如 `openssl rand -hex 32` 生成），之后不要再改**，多节点设成一样的值。没有设置 `CRYPTO_SECRET` 也没有设置 `SESSION_SECRET` 时，每次重启都会随机生成密钥，发给 OpenAI 的标识也随之改变（服务器日志会提示一次）。改动 `CRYPTO_SECRET` 会让所有用户的标识变化，Redis 里的令牌缓存键也会换一批（无害）；改动前发出的任务结果（视频、图片）下载链接（`/v1/tasks/…/artifacts/…/content?access=…`、`/v1/videos/…/content?access=…`）也会失效（返回 404），客户端需要重新查询任务拿新链接。已经设置了 `SESSION_SECRET` 的部署可以让 `CRYPTO_SECRET` 留空，或设成与 `SESSION_SECRET` 相同的值，这样密钥不变；两者都没设的部署每次重启本来就会让这些链接失效，设置后反而稳定。`deploy/docker-compose.yml` 已经透传这个变量，留空时行为和以前一样。
+- **请在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（例如 `openssl rand -hex 32` 生成），之后不要再改**，多节点设成一样的值。没有设置 `CRYPTO_SECRET` 时用登录签名密钥：设置了 `SESSION_SECRET` 就用它；没有设置时，「重启或更新后保持用户登录」开着（默认）就用数据库里保存的那把，重启后不变，但按第二十二节换登录签名密钥（让所有人退出登录）时会跟着换；只有开关关着、或启动时读不到保存的密钥时，才每次重启随机生成，发给 OpenAI 的标识也随之改变（服务器日志会提示一次）。改动 `CRYPTO_SECRET` 会让所有用户的标识变化，Redis 里的令牌缓存键也会换一批（无害）；改动前发出的任务结果（视频、图片）下载链接（`/v1/tasks/…/artifacts/…/content?access=…`、`/v1/videos/…/content?access=…`）也会失效（返回 404），客户端需要重新查询任务拿新链接。已经设置了 `SESSION_SECRET` 的部署可以让 `CRYPTO_SECRET` 留空，或设成与 `SESSION_SECRET` 相同的值，这样密钥不变；两者都没设、开关又关着的部署每次重启本来就会让这些链接失效，设置后反而稳定。`deploy/docker-compose.yml` 已经透传这个变量，留空时行为和以前一样。
 - 不覆盖的接口：Realtime、图片、旧版 Completions、Responses compact、任务插件。
 
 **限制（请先读完再决定是否「审查失败时放行」）：**
@@ -985,7 +987,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 - **已知取舍：** 知道用户名的人可以故意把某个账号（例如 `root`）一直锁住（默认每 15 分钟 10 次错误密码就够，IP 限流挡不住）。建议：给 root 绑定 Passkey 并开启 Passkey 登录（被锁时的正门）；root 和管理员开启两步验证；root 不要用默认用户名 `root`；必要时调大失败次数或缩短锁定时长。真被锁且进不去时按下一条操作。
 
 **被锁且进不去时的应急办法**（在 `deploy` 目录执行）：
-- 还有一个已登录的 root 会话（锁定不会让已登录的会话下线；但没有设置 `SESSION_SECRET` 时，重启或升级后所有会话都会失效，只有之后登录的会话可用）：用户管理 → 找到自己 → 「解除登录锁定」（二次验证可以用两步验证、Passkey 或密码，锁定不影响二次验证）。
+- 还有一个已登录的 root 会话（锁定不会让已登录的会话下线；「重启或更新后保持用户登录」开着（默认）或设置了 `SESSION_SECRET` 时，重启和升级也不会让它下线，见第二十二节）：用户管理 → 找到自己 → 「解除登录锁定」（二次验证可以用两步验证、Passkey 或密码，锁定不影响二次验证）。
 - 用了 Redis（本仓库的 compose 默认有）：清除所有登录锁定和失败计数（不影响重置邮件计数）：
   `docker compose exec -T redis redis-cli --scan --pattern 'authguard:v1:login:*' | xargs -r docker compose exec -T redis redis-cli del`
   （Redis 设了密码时两处 `redis-cli` 后面都加 `-a <密码>`；服务名以 compose 文件为准。）
@@ -1002,7 +1004,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 **审计日志：**
 - 控制台 → 审计日志，类别「登录」。事件：申请重置密码 + 结果（已发送邮件、该邮箱未注册、邮件发送失败（附原因：邮件服务器出错 / 该邮箱对应多个账号 / 查询账号失败）、申请过于频繁、已达每日上限、验证码缺失或错误、邮箱格式无效）、通过邮件链接重置密码成功 / 失败、登录失败 + 原因（用户名或密码错误、账号已禁用、失败次数过多已锁定、验证码缺失或错误、请求无效；达到失败次数的那一次标「已锁定密码登录」）、登录时两步验证失败、解除登录锁定（类别「操作」，记在操作的管理员名下）。
 - 可以按事件、IP、邮箱（只查找回密码相关的记录）、用户名、结果、时间筛选。
-- 登录失败时输入的内容如果不是任何账号的用户名或邮箱、也不是邮箱格式（常见情况是把密码输进了用户名框；找回密码时填的不是邮箱格式的内容也一样），这段内容本身不保存，root 也看不到，数据库和备份里也没有：记录里只有「…」、长度和「输入内容指纹」。指纹是以 `CRYPTO_SECRET`（没设时用 `SESSION_SECRET`）为密钥，对去掉首尾空格的内容（找回密码时先转成小写）算出的 HMAC-SHA256 的前 8 位十六进制：同一段内容的指纹总是相同，能看出是不是在反复试同一个值，但不能从指纹还原出内容（拿到了密钥的人可以拿猜测的值逐个去对）。两个变量都没设时每次重启密钥都会变，重启前后的指纹对不上（设置方法见上面 `CRYPTO_SECRET` 的说明）。登录时查账号出错写的服务器日志里也只有这个指纹。找回密码是 GET 请求，填的内容和以前一样会出现在访问日志的请求地址里。审计里不记录密码框里的内容、验证码和重置令牌。
+- 登录失败时输入的内容如果不是任何账号的用户名或邮箱、也不是邮箱格式（常见情况是把密码输进了用户名框；找回密码时填的不是邮箱格式的内容也一样），这段内容本身不保存，root 也看不到，数据库和备份里也没有：记录里只有「…」、长度和「输入内容指纹」。指纹是以 `CRYPTO_SECRET`（没设时用 `SESSION_SECRET`）为密钥，对去掉首尾空格的内容（找回密码时先转成小写）算出的 HMAC-SHA256 的前 8 位十六进制：同一段内容的指纹总是相同，能看出是不是在反复试同一个值，但不能从指纹还原出内容（拿到了密钥的人可以拿猜测的值逐个去对）。两个变量都没设时，每次启动随机生成一把指纹密钥，重启前后的指纹对不上（设置方法见第十八节 `CRYPTO_SECRET` 的说明）；「重启或更新后保持用户登录」开着时也一样：数据库里保存的那把登录签名密钥不用来算指纹（第二十二节），所以数据库副本和备份里没有能核对指纹的密钥。登录时查账号出错写的服务器日志里也只有这个指纹。找回密码是 GET 请求，填的内容和以前一样会出现在访问日志的请求地址里。审计里不记录密码框里的内容、验证码和重置令牌。
 - 谁能看到：root 看全部；管理员和有「审计日志」权限的副管理员看普通用户、管理员和匿名请求的记录；与 root 账号有关的记录（包括针对 root 的登录失败）只有 root 能看；用户在自己的审计记录里能看到针对自己账号的记录。
 - 不写审计的请求：被 IP 限流或 Turnstile 拦下的（只在访问日志里）；管理员关闭了密码登录时的登录请求；查账号时数据库出错的登录请求；两步验证那一步的登录流程已失效或两步验证已被锁定时。
 
@@ -1013,7 +1015,7 @@ SELECT v0 FROM casbin_rule WHERE ptype = 'g' AND v1 = 'role:deputy';
 
 **升级说明：**
 - 没有数据库结构变化；升级后四个开关默认开启（登录验证码、找回密码验证码、重置邮件限额、登录失败锁定）。
-- **升级前：** ① 给 root 绑定 Passkey 并在设置里开启 Passkey 登录，或确认 root 有能收信的邮箱且 SMTP 正常；② 升级前确认 ① 已经生效（root 能用 Passkey 登录，或能收到重置邮件）。本仓库的 `deploy/docker-compose.yml` 没有传 `SESSION_SECRET`，每次升级或重启容器都会让所有登录会话失效，所以升级前保留的 root 会话不能当作退路；③ 考虑把 root 的用户名改掉；④ 通知用脚本登录的用户（`sk-` API 密钥和访问令牌不受影响）。
+- **升级前：** ① 给 root 绑定 Passkey 并在设置里开启 Passkey 登录，或确认 root 有能收信的邮箱且 SMTP 正常；② 升级前确认 ① 已经生效（root 能用 Passkey 登录，或能收到重置邮件）。从还没有第二十二节功能的版本升级时，所有登录会话照样会失效一次，所以升级前保留的 root 会话不能当作退路（升级到那个版本以后，「重启或更新后保持用户登录」开着时，之后的重启和升级不再让会话失效）；③ 考虑把 root 的用户名改掉；④ 通知用脚本登录的用户（`sk-` API 密钥和访问令牌不受影响）。
 - **升级后：** 已经打开的浏览器页面还是旧的前端脚本，登录 / 找回密码会提示「请先完成图形验证码。」（英文界面 `Please complete the captcha.`）却没有验证码输入框，刷新页面即可。
 
 **回滚：** 旧版本不认识这些设置，忽略它们（没有验证码、限额和锁定，失败登录不写审计，验证码图片又不限流）。已经写入的审计记录保留，旧版本控制台显示原始事件名。Redis 里的 `authguard:v1:*` 键会自动过期，不需要清理。
@@ -1245,3 +1247,52 @@ services:
 **接口：** `GET /api/log/` 和 `GET /api/log/self` 的 `data` 里多了 `total_capped`（布尔值）。为 `true` 时 `total` 是 10000，意思是「至少 10000 条」；为 `false` 时 `total` 是准确条数。自己写脚本按 `total` 算总页数的，要先看这个字段（翻页参数 `p` 可以超过按 `total` 算出的页数）。`p` 或 `page_size` 小于 1 时按默认值（第 1 页、每页 10 条）；以前负数的 `page_size` 会让列表查询不带 `LIMIT`，一次返回全部符合条件的日志。
 
 **升级与回滚：** 没有数据库结构变化，也没有新的设置项。回滚到旧版本即恢复原来的精确计数（以及原来的速度）。
+
+---
+
+## 二十二、重启或更新后保持用户登录
+
+**是什么：** 以前每次重启或更新容器，所有用户（包括 root）都会被强制退出登录。原因是没有设置 `SESSION_SECRET` 时，登录用的签名密钥每次启动都随机生成，旧的登录凭证随之失效；本仓库的 `deploy/docker-compose.yml` 以前也没有传 `SESSION_SECRET`。现在新增开关「重启或更新后保持用户登录」，**默认开**：第一次启动时生成一把随机密钥（32 字节）保存在数据库里，之后每次启动都用这一把，重启和更新不再让用户退出登录。
+
+**位置：** 系统设置 → 身份验证 → 基本身份验证 → 「重启或更新后保持用户登录」（第一项），只有 root 能看到和修改。**改动在下次重启时生效**（保存后当前运行不变），开关下方会提示下次重启会发生什么。
+
+| 情况 | 下次重启时 |
+|---|---|
+| 开着（默认），没有设置 `SESSION_SECRET` | 用户保持登录 |
+| 关着 | 所有用户都会被退出登录，之后每次重启都会；同时删除数据库里保存的密钥，以后再打开会换一把新密钥（打开后的第一次重启还会退出一次） |
+| 设置了 `SESSION_SECRET` | 以 `SESSION_SECRET` 为准：只要它不变，用户保持登录。开关变灰，显示「由环境变量 SESSION_SECRET 固定，此开关不生效」；数据库里保存的密钥会被删除 |
+
+**升级说明：**
+- **第一次升级到这个版本时，所有用户还会被退出一次**（旧版本的随机密钥没有保存下来，没法沿用），之后的重启和更新不再退出。
+- 数据库新增 `server_secrets` 表（启动时自动创建，只有一行 `session_secret`），没有其他结构变化。多节点时先升级主节点（只有主节点建表）。
+- `deploy/docker-compose.yml` 现在透传 `SESSION_SECRET`（`deploy/.env` 里不写或留空就是没设置）。不用 `SESSION_SECRET`（默认）时服务器上的旧 compose 文件照常能用；要用它时，先按下面「设置或更换 `SESSION_SECRET`」在服务器的 compose 文件里加上那一行。原来在别处给容器设置过 `SESSION_SECRET` 的，把同一个值写进 `deploy/.env`，否则切换后所有用户要重新登录一次。
+- 没有设置 `CRYPTO_SECRET` 时，加密密钥跟随登录签名密钥，所以开关开着时，发给 OpenAI 的用户安全标识（第十八节）和任务结果下载链接在重启后也保持不变。审计里的「输入内容指纹」（第十九节）例外：指纹对应的常常是输错位置的密码，密钥不能和指纹放在同一个数据库里，所以不用这把密钥；没有设置 `CRYPTO_SECRET` 和 `SESSION_SECRET` 时，指纹密钥照旧每次启动随机生成，重启前后的指纹对不上。
+
+**想让所有人立即退出登录（例如怀疑登录被盗用）：**
+- 只退出一次、之后照常保持登录：删除保存的密钥再重启，启动时会生成一把新的。三种数据库都是同一句：`DELETE FROM server_secrets WHERE name = 'session_secret';`，然后 `docker compose restart new-api`（多节点要重启所有节点）。
+- 设置了 `SESSION_SECRET` 的：在 `deploy/.env` 里换一个新值，再执行 `docker compose up -d`。不能用 `docker compose restart`，它不会读新值（见下面「设置或更换 `SESSION_SECRET`」）。
+- 关掉开关再重启也会让所有人退出，但之后每次重启都会退出，直到重新打开（重新打开后的第一次重启还会再退出一次）。
+
+没有设置 `CRYPTO_SECRET` 时，加密密钥就是登录签名密钥，所以上面三种做法都会同时换掉加密密钥：之前发出的任务结果（视频、图片）下载链接失效（返回 404，客户端要重新查询任务拿新链接），发给 OpenAI 的用户安全标识也全部改变（第十八节）；开关关着时每次重启都是这样（和以前一样）。想让换登录密钥不影响这两样，事先在 `deploy/.env` 里设置一次 `CRYPTO_SECRET`（第十八节），再执行 `docker compose up -d`（compose 文件里要有 `CRYPTO_SECRET` 那一行，见下面「设置或更换 `SESSION_SECRET`」第 1 条）；第一次设置时这两样也会变一次，之后就不再跟着登录密钥变。
+
+这三种做法都只让网页登录失效：用户创建的「访问令牌」和 `sk-` 令牌照常能用，改密码也不会让「访问令牌」失效。怀疑账号被盗用时，还要在这个账号里检查并删除可疑的「访问令牌」和 `sk-` 令牌（管理员也可以先禁用这个用户），并看看有没有多出来的管理员。
+
+**设置或更换 `SESSION_SECRET`：**
+1. 服务器上的 compose 文件里，`new-api` 的 `environment` 下要有 `- SESSION_SECRET=${SESSION_SECRET:-}` 这一行。按第三节只执行 `docker compose pull` 更新的服务器上还是旧文件，没有这一行，`.env` 里的值传不进容器，也没有任何提示：手动加上这一行。不要把整份文件换成仓库里的 `deploy/docker-compose.yml`：服务器上的这份可能按第二十节第 4 条改过（`stop_grace_period`、`SHUTDOWN_TIMEOUT_SECONDS`、日志上限、`TRUSTED_PROXIES` 等），整份覆盖会把这些改动丢掉。用 `git clone` 部署、没改过这个文件的，也可以在仓库目录里 `git pull`。要设置 `CRYPTO_SECRET` 的也一样，文件里要有 `- CRYPTO_SECRET=${CRYPTO_SECRET:-}`（2026-11-20 之前复制的 compose 文件里没有）。
+2. 改好 `deploy/.env` 后执行 `docker compose up -d`，它会用新的 `.env` 重建容器（多节点要在每个节点上都做）。`docker compose restart` 不会重新读取 `.env`，容器里还是旧值，而且没有任何提示。
+3. 确认生效：`docker compose logs new-api | grep SESSION_SECRET` 能看到 `SESSION_SECRET is set`（中文日志「已设置 SESSION_SECRET」）；设置页的开关变灰，显示「由环境变量 SESSION_SECRET 固定，此开关不生效」。换了新值时，之前登录的浏览器都要重新登录（可以事先在另一个浏览器里登录一个账号，换完后刷新它来确认）。
+
+**安全提示：** 开关开着、又没有设置 `SESSION_SECRET` 时，登录签名密钥保存在数据库里。拿到数据库副本或备份的人，可以冒充当时已登录（30 天内登录、还没有退出）的任何用户，包括 root，直接进入控制台。开了两步验证也挡不住：两步验证的密钥明文存在同一个数据库里，这个人能算出验证码，通过查看渠道密钥、创建访问令牌这类操作前的二次验证（访问令牌在退出登录后仍然有效）。没有设置 `CRYPTO_SECRET` 时，加密密钥也是这把密钥，所以这个人还能伪造任务结果（视频、图片）的下载链接；Redis 里登录会话和用户缓存的防篡改校验也用这把密钥：拿到数据库副本、又能改写 Redis 的人，可以伪造缓存，冒充任何用户，包括当时没有登录的 root（本仓库 compose 里的 Redis 没有对外端口）。设置一次 `CRYPTO_SECRET`（第十八节）后，下载链接和这个校验都不再用这把密钥。审计里的「输入内容指纹」不用这把密钥，拿到数据库副本也没法核对（第十九节）。数据库里本来就有渠道密钥和用户的 `sk-` 令牌，备份本来就要和数据库同样保护（不要放在公开的地方，存放和传输时加密）。新建密钥时写入的值也在数据库自己的日志里：MySQL 8 默认开着的 binlog、PostgreSQL 的 WAL（包括归档）里都有，要和备份一样保护。不想把这把密钥放进数据库，就在 `deploy/.env` 里设置 `SESSION_SECRET`（`openssl rand -hex 32` 生成，设好后不要再改；第一次设置会让所有用户退出一次），步骤和确认方法见上面「设置或更换 `SESSION_SECRET`」：只改 `.env` 再 `docker compose restart` 不会生效。备份可能泄露时，按上面的办法换一把新密钥。这把密钥不会出现在 new-api 的日志、接口（包括 `GET /api/option`）、审计和多节点的设置同步里；设置页只显示它来自哪里（环境变量、数据库或随机）。
+
+**多节点：** 所有节点连同一个数据库时，自动共用数据库里的这一把密钥，在一个节点登录后换到其他节点也有效（以前没设 `SESSION_SECRET` 的多节点部署做不到）；几个节点同时第一次启动也只会生成一把。也可以给所有节点设置相同的 `SESSION_SECRET`，但不要一部分节点设置、一部分不设置。改了开关之后要把所有节点都重启。
+
+**启动时读写数据库失败：** 服务照常启动，这次用随机密钥（和以前一样：之前登录的用户要重新登录，这次启动后登录的用户在下次重启后也要再登录一次）。日志里有一行 `keep users signed in after restarts: could not load the login signing key (…)`（`DEFAULT_LANGUAGE=zh-CN` 时是「重启或更新后保持用户登录：无法读取或保存登录签名密钥（…）…」）。这一行写在错误输出里，行首和其他系统日志一样是 `[SYS]`，没有 ERROR 字样，要按上面这段文字搜；括号里只有数据库的错误码，例如表还没建好时是 `mysql error 1146`、`postgres error SQLSTATE 42P01` 或 `sqlite error 1`。设置页的开关下方提示「本次启动没有使用保存的密钥」。数据库恢复后再重启一次即可。日志里不会打印密钥。
+
+**回滚：** 旧版本不认识这个开关和 `server_secrets` 表，表留在库里没有影响。没有设置 `SESSION_SECRET` 时，回滚那一次和旧版本之后的每次重启都会让所有用户退出登录；设置了 `SESSION_SECRET` 时（服务器的 compose 文件里已有那一行，回滚只改 `NEW_API_TAG`），旧版本也用它，回滚和之后的重启都不会让用户退出。没有设置 `SESSION_SECRET` 时，之后再升级回来会继续用表里原来那把密钥：回滚之前登录、还没过期也没退出的会话会恢复有效；不希望这样，就在升级回来之前执行上面的 `DELETE`。从备份恢复数据库也是这样：备份时还有效的会话（登录后 30 天内、当时还没有退出）会和备份里的密钥一起回来（设置了 `SESSION_SECRET` 时，只要它没变也一样），备份之后做过的退出登录和吊销都会丢失。因为安全问题恢复备份时，恢复后按上面「想让所有人立即退出登录」的办法换一把新密钥。
+
+**排查：** 重启后用户还是被退出：
+1. 是不是第一次升级到这个版本（会退出一次）。
+2. 看开关下方的提示：「已保存为关闭」→ 打开并保存，下次重启后生效；「由环境变量 SESSION_SECRET 固定」→ 确认每次启动 `deploy/.env` 里的 `SESSION_SECRET` 都没变；「本次启动没有使用保存的密钥」→ 在启动日志里找 `could not load the login signing key`（中文日志「无法读取或保存登录签名密钥」）那一行，看括号里的数据库错误码。
+3. 启动日志：`docker compose logs new-api | grep -iE 'signing key|SESSION_SECRET'`（中文日志搜「登录签名密钥」或 `SESSION_SECRET`）。正常时是 `using the login signing key kept in the database`（「使用数据库里保存的登录签名密钥」），第一次是 `saved a new login signing key in the database`。
+4. 查数据库里有没有这一行（只查这两列，不要查 `value`，也不要把它贴到任何地方）：`SELECT name, created_at FROM server_secrets;`。日志说密钥无效（`the kept login signing key is invalid`）时，执行上面的 `DELETE` 再重启。
+5. 多节点：所有节点都已升级并重启；`SESSION_SECRET` 要么都设成同一个值，要么都不设。

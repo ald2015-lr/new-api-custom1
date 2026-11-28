@@ -42,11 +42,12 @@ func newAuditTypedValue(typed string, maxRunes int, matchesAccount bool) auditTy
 }
 
 // auditIdentifierFingerprint returns the first 8 hex characters of the
-// HMAC-SHA256 of a trimmed typed value, keyed with CryptoSecret: the same
-// value gives the same fingerprint while the secret stays the same, and
-// without the secret the fingerprint tells nothing about the value.
+// HMAC-SHA256 of a trimmed typed value, keyed with
+// common.AuditFingerprintSecret(), which is never stored in the database: the
+// same value gives the same fingerprint while the key stays the same, and
+// without the key the fingerprint tells nothing about the value.
 func auditIdentifierFingerprint(trimmed string) string {
-	return common.GenerateHMACWithKey([]byte("audit-identifier-v1:"+common.CryptoSecret), trimmed)[:8]
+	return common.GenerateHMACWithKey([]byte("audit-identifier-v1:"+common.AuditFingerprintSecret()), trimmed)[:8]
 }
 
 // apply stores the value under key in params and, when masked, its length

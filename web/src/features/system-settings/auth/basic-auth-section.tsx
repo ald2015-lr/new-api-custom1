@@ -43,8 +43,10 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useResetForm } from '../hooks/use-reset-form'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { KeepLoginField } from './keep-login-field'
 
 const basicAuthSchema = z.object({
+  KeepLoginAcrossRestartEnabled: z.boolean(),
   PasswordLoginEnabled: z.boolean(),
   PasswordRegisterEnabled: z.boolean(),
   EmailVerificationEnabled: z.boolean(),
@@ -59,9 +61,14 @@ type BasicAuthFormValues = z.infer<typeof basicAuthSchema>
 
 type BasicAuthSectionProps = {
   defaultValues: BasicAuthFormValues
+  /** KeepLoginAcrossRestartSource from GET /api/option; never saved */
+  keepLoginSource: string
 }
 
-export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
+export function BasicAuthSection({
+  defaultValues,
+  keepLoginSource,
+}: BasicAuthSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
 
@@ -115,6 +122,19 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
             onSave={form.handleSubmit(onSubmit)}
             isSaving={updateOption.isPending}
           />
+          <FormField
+            control={form.control}
+            name='KeepLoginAcrossRestartEnabled'
+            render={({ field }) => (
+              <KeepLoginField
+                checked={field.value}
+                onCheckedChange={field.onChange}
+                saved={defaultValues.KeepLoginAcrossRestartEnabled}
+                source={keepLoginSource}
+              />
+            )}
+          />
+
           <FormField
             control={form.control}
             name='PasswordLoginEnabled'

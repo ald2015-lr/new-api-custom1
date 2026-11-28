@@ -62,6 +62,8 @@ func InitOptionMap() {
 	common.OptionMap["LoginLockoutEnabled"] = strconv.FormatBool(common.LoginLockoutEnabled)
 	common.OptionMap["LoginLockoutMaxFailures"] = strconv.Itoa(common.LoginLockoutMaxFailures)
 	common.OptionMap["LoginLockoutMinutes"] = strconv.Itoa(common.LoginLockoutMinutes)
+	// Read at start by InitSessionSecret; the map only shows the saved value.
+	common.OptionMap[KeepLoginAcrossRestartOptionKey] = "true"
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
@@ -301,6 +303,12 @@ func validateOptionValue(key string, value string) error {
 	}
 	if key == "ResendKeyConfigured" {
 		return common.NewMessage("Resend key configuration status is read-only")
+	}
+	if key == KeepLoginAcrossRestartOptionKey && value != "true" && value != "false" {
+		return common.NewMessage("Value must be true or false")
+	}
+	if key == KeepLoginAcrossRestartSourceOptionKey {
+		return common.NewMessage("The source of the login signing key is read-only")
 	}
 	if key == operation_setting.ToolPriceOptionKey {
 		return operation_setting.ValidateToolPricesJSON(value)

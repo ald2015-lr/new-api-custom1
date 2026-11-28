@@ -57,9 +57,11 @@ func InitEnv() {
 			log.Fatal(LogText("Please set SESSION_SECRET to a random string."))
 		} else {
 			SessionSecret = ss
+			SessionSecretSource = SessionSecretSourceEnv
 		}
 	}
-	if os.Getenv("CRYPTO_SECRET") != "" {
+	CryptoSecretFromEnv = os.Getenv("CRYPTO_SECRET") != ""
+	if CryptoSecretFromEnv {
 		CryptoSecret = os.Getenv("CRYPTO_SECRET")
 	} else {
 		CryptoSecret = SessionSecret
