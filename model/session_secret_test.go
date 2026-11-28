@@ -238,13 +238,11 @@ func TestLoadOrCreateSessionSecretGivesConcurrentFirstStartsOneKey(t *testing.T)
 	begin := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := range starts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-begin
 			secret, created, err := loadOrCreateSessionSecret(nodes[i%len(nodes)])
 			results[i] = result{secret: secret, created: created, err: err}
-		}()
+		})
 	}
 	close(begin)
 	wg.Wait()
