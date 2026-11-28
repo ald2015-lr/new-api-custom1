@@ -33,6 +33,8 @@ services:
       # 基本身份验证 → 重启或更新后保持用户登录」决定：默认开，密钥保存在数据库里，
       # 重启和更新不会让用户退出登录。设置后以它为准，那个开关不再起作用。
       # 生成：openssl rand -hex 32；设置或改动它会让所有用户退出登录一次，设好后不要再改。
+      # 改了 .env 里的它或 CRYPTO_SECRET 之后要执行 docker compose up -d（重建容器），
+      # docker compose restart 不会重新读取 .env，容器里还是旧值。
       - SESSION_SECRET=${SESSION_SECRET:-}
       # 加密密钥：在 .env 里设一个长随机串（openssl rand -hex 32）后不要再改。
       # 留空时沿用登录签名密钥（SESSION_SECRET，没设时用数据库里保存的那把），
